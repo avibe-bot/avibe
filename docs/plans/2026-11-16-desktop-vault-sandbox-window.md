@@ -63,21 +63,24 @@ the sandbox unmodified.
    an older retained release or the origin's root loads too, as in a browser
    tab. Pinning the release stays the Workbench's check before it navigates.
 3. **When it is displayed.** The native window is created ordered out. When a
-   sandbox document commits it comes on screen with a transparent webview. It
-   cannot become key, and clicks pass through it to whatever is under it. Its
+   sandbox document commits it comes on screen with a transparent webview. Its
    content is revealed by the first presentation update WebKit delivers after
-   that commit, so the empty window stays until the sandbox's first paint. If
-   anything but a sandbox document commits, the window is closed. If it has
+   that commit, so the empty window stays until the sandbox's first paint. At
+   that moment it is ordered in front of the app's other windows and made key.
+   If anything but a sandbox document commits, the window is closed. If it has
    displayed nothing 60 seconds after it was created, it is closed.
-4. **When it may appear.** Only while the app is active and the opener's window
-   is visible, on the active Space and not minimized. Not within 2 seconds of
-   the app becoming active or of that window coming back on screen, whatever
-   caused either: a window whose sandbox document commits in that time waits,
-   and is judged when the time is over. Only one per main window at a time, and
-   not within 0.75 seconds of another leaving the screen. A window that may not
-   appear is closed, never kept for later. The first two conditions are asked
-   again when the presentation update arrives, before the reveal. Its content
-   size is clamped to 360-900 by 400-1000 points.
+4. **When it comes on screen, and when it takes input.** It comes on screen
+   only if, when its first sandbox document commits, the app is active, the
+   opener's window is visible, on the active Space and not minimized, and no
+   other sandbox window of that opener is on screen. Otherwise it is closed,
+   never kept for later. A window on screen takes clicks and keys only while
+   the app is active and the window is visible, and that has held without a
+   break for 0.75 seconds the first time the card is seen and 2 seconds every
+   later time, and never sooner than 2 seconds after the user last arrived
+   (the app became active, or the opener's window came back from hidden,
+   minimized or another Space). Until then input is dropped at the window's
+   event entry and is not passed to what is underneath. Its content size is
+   clamped to 360-900 by 400-1000 points.
 5. **What it holds.** A new, empty `WKUserContentController` and default
    `WKPreferences` of its own with element fullscreen, picture in picture and
    video presentation modes off. Before the webview is returned to WebKit, the
@@ -129,7 +132,7 @@ tested. The page is destroyed one turn of the main run loop after the window
 closes, so that the shell does not depend on what WebKit does after one of its
 own callbacks returns.
 
-### Why a window needs the user's attention
+### Why being displayed is not taking input
 
 On macOS WebKit's default lets scripts open windows without a user gesture. A
 browser requires one. Changing that default would also change every link the
@@ -138,38 +141,55 @@ origin can make the sandbox's real window appear, showing the card of a real
 pending request, at a moment it chooses. It cannot put content of its own into
 the card, because the window and the iframe speak only to documents of the
 sandbox origin, and a confirmation still needs the user's click on a truthful
-card. What it could do without rule 4 is choose when and where real cards
-appear: over a hidden main window, several at once, in the place of a card the
-user has just confirmed, or in front of what the user is doing in another app
-after pulling Avibe forward.
+card.
 
-Rule 4 takes those choices away:
+The bad outcome is not a window appearing. It is a click or a key reaching
+Confirm on a card that has not just been displayed to a user who is present.
+Rules about when a window may appear do not prevent that, for two reasons
+found in review. The sandbox arms Confirm half a second after it builds the
+card, with no condition on visibility, and a hidden page's timers run; so a
+card held back and then shown takes a confirming click in its first visible
+frame. And once a card is on screen nothing was judged again: a card left on
+screen was live the moment the user returned or the app was pulled forward.
 
-- **Active app and visible main window.** A card never appears while the user
-  is elsewhere.
-- **Two seconds after an arrival.** The app can be brought forward without the
-  user choosing it: a Workbench page can ask for the main window or open an app
-  window, another app can open an `avibe:` link, an Agent can launch the app.
-  So "the app is active" is believed only after two seconds, counted from the
-  system's own notification, not from any of those commands. The window waits
-  instead of being refused, because the ordinary case is a user who clicks a
-  notification, lands in Avibe and approves at once. If a passkey sheet makes
-  the app resign active, the wait starts again when the sheet closes.
-- **One at a time, and 0.75 seconds after one closes.** Longer than the default
-  double-click interval of half a second, so a click aimed at the window that
-  just closed meets nothing; shorter than a person needs to return to the
-  Workbench, approve another request and have its release verified and loaded.
-  With the sandbox's own half-second delay before Confirm is armed, a card in
-  another window cannot be confirmed sooner than 1.25 seconds after the first
-  one's window closed.
+So there is one rule, about input, and it is the fourth above. It is checked
+for each event at the one place every mouse, scroll and key event for a window
+passes (`sendEvent:`, and `performKeyEquivalent:` for keys with Command).
+"Visible" is AppKit's own occlusion state for the window, so minimizing, hiding
+the app, a Space change, display sleep and being fully covered are one signal
+and not a list of causes. The app can be brought forward without the user
+choosing it (a page asking for the main window or opening an app window, an
+`avibe:` link from another app, an Agent launching the app), so an arrival
+counts from the system's notification, not from any of those commands, and it
+counts even if the card did not exist yet.
 
-What remains. The opener may navigate the window that is on screen to another
-sandbox document, as in a browser, so a second card can follow the first in the
-same window with only the sandbox's own arming delay between them. And a card
-can still appear without a gesture while the user is in the app; a user who
-does not notice a new window for half a second can click into it. The complete
-answer belongs to the sandbox (arming Confirm only after its document has been
-focused and visible for the arming time) and is not part of this change.
+The intervals: 0.75 seconds at first sight is longer than the default
+double-click interval, so a click begun on something else never lands on a
+card that appeared in its place. Two seconds after an arrival gives a user who
+has just come to the app, or been brought there, time to see where they are.
+
+Clicks in the interval are dropped, not passed through. The card is on screen;
+a click on its Confirm that fell through would land on whatever the Workbench
+has at that spot, which the page chooses and which can be a real control. The
+card is in front and key from the moment it is displayed, so that the shell
+never moves or keys a window at the moment it turns live, which would itself
+be a cue a page could time. Keys are dropped at the same entry, so being key
+early costs nothing.
+
+Not covered, by decision or by nature: a second card navigated into the same
+visible window (the sandbox's own arming applies, as in a browser); a present
+user who confirms without reading; a card displayed while nobody is at the Mac,
+which is live when they return unless the display slept; the main window
+merely raised from behind another window of the app, which is not an arrival
+(the first 0.75 seconds cover it); partial covering, since a window counts as
+visible when any part shows; menu commands and system input panels (Paste, the
+emoji picker, dictation), which reach a key window and cannot confirm;
+Computer Use and other accessibility-driven actions, as in a browser; drag and
+drop.
+
+The complete answer to the missing gesture still belongs to the sandbox
+(arming Confirm only after its document has been focused and visible for the
+arming time) and is not part of this change.
 
 ### Why the URL schemes are guarded
 
@@ -226,6 +246,11 @@ the sandbox's window goes to the browser with every other link.
   key handlers.
 - **Revealing on the commit, on load finished, or after a delay.** The first is
   what the probe disproved; the others are timing.
+- **Holding a window off screen until the user has been there for a while.**
+  Built once and removed: the page runs and arms while it waits, so the card
+  is confirmable in its first visible frame.
+- **Refusing a window shortly after another closed.** Replaced by the input
+  rule, which protects the same click without refusing the window.
 
 ## Verification
 
@@ -245,23 +270,31 @@ the sandbox's window goes to the browser with every other link.
     seconds: the probe reads back what the window's views draw, from the moment
     it is on screen, and no sample may have that colour. A page that never
     paints stays empty and without input and is closed at the deadline. For
-    rule 4: a second window while one is on screen, a window pointed at the
-    sandbox the moment another closes, and a window opened while the main
-    window is hidden are each closed without ever being on screen. A window
-    asked for right after the main window comes back, or right after the app
-    comes forward, is on screen no sooner than two seconds later and is then
-    shown. A window still empty when the user goes to another app is closed
-    when its page is ready, not revealed.
+    rule 4: a second window while one is on screen, and a window opened while
+    the main window is hidden, are each closed without ever being on screen.
+    For input, the test sandbox page arms itself half a second after it starts
+    running and logs every click and key it receives, and the probe delivers
+    clicks, a Return key and a Command key to the window every 30 ms. No
+    input may be logged before 0.75 seconds after a card is first displayed
+    (with a page that was armed long before it could paint); before 2 seconds
+    after the card comes back with the main window, is uncovered by another
+    window of the app, or the user returns from another app or un-hides the
+    app; or before 2 seconds after an arrival for a card asked for at once.
+    Clicks must be logged afterwards, so the check cannot pass by never
+    delivering. A card displayed while another window of the app is in front
+    is the app's frontmost window and key, and neither changes when it starts
+    to take input. A Space change and display sleep cannot be produced on a
+    runner; for those the claim rests on AppKit's documentation of the
+    occlusion state.
   - **App not active.** A sandbox window is closed instead of appearing. This
     run takes no keyboard focus.
   - **The shell's own install** on the unsigned test executable: no marker and
     no window.
-- Each of these rules was also removed once by hand to see the probe fail: the
+- These rules were also removed once by hand to see the probe fail: the
   opener's content controller kept, no URL scheme guard, reveal on the commit,
-  no interval after a close, two windows on screen, a window over a hidden main
-  window, no wait after the main window comes back. The second check before the
-  reveal was not tried this way: the run that exercises it needs the app
-  activated.
+  two windows on screen, a window over a hidden main window. The input rule
+  was not tried this way: its cases need the app activated, which is done only
+  in CI.
 - The two calls in `build_main_window` that connect the module to the main
   window have no automated check. Removing the install leaves the browser
   hand-off; removing the navigation hook leaves a sandbox window open across a

@@ -26,29 +26,39 @@
 //! - **Never the opener's pixels.** The Workbench origin also serves
 //!   Agent-authored Show Pages, and an opener can draw in the `about:blank` it
 //!   reserved. The native window is created ordered out. When a sandbox
-//!   document commits it comes on screen empty: its webview is transparent, it
-//!   cannot become key, and it ignores clicks, which pass to whatever is under
-//!   it. WebKit goes on displaying the previous document's layers until the
-//!   new one has something to show, so the webview is revealed only by the
-//!   first presentation update WebKit delivers after that commit, which
-//!   carries the sandbox document's layers. The empty window stays until
-//!   then, at most [`RESERVE_DEADLINE`]. From the reveal on the document is
-//!   cross-origin to the opener and can only be replaced by another sandbox
-//!   document. A child that commits anything else is closed; one that has
-//!   displayed nothing within the deadline is closed too.
-//! - **Not without the user's attention.** WebKit on macOS lets scripts open
-//!   windows without a user gesture, which a browser would require, so a page
-//!   of the Workbench origin can make the sandbox's real window, with a real
-//!   pending request's card, appear at a moment it chooses. It cannot put
-//!   content of its own into the card. The shell bounds the moment: a child is
-//!   on screen only while this app is active and the opener's window is on
-//!   screen; not within [`SETTLE_AFTER_ARRIVAL`] of the app becoming active or
-//!   that window coming back, whatever caused either (it waits); only one at a
-//!   time; and not within [`QUIET_AFTER_CLOSE`] of another leaving the screen.
-//!   The same is asked again before the reveal. A child that may not appear is
-//!   closed, never kept for later. Its size is clamped. The title names the
-//!   allowed host and ignores the page's own title, but it is not proof of
-//!   identity: other native windows of this app can carry any title.
+//!   document commits it comes on screen empty: its webview is transparent.
+//!   WebKit goes on displaying the previous document's layers until the new
+//!   one has something to show, so the webview is revealed only by the first
+//!   presentation update WebKit delivers after that commit, which carries the
+//!   sandbox document's layers. The empty window stays until then, at most
+//!   [`RESERVE_DEADLINE`]. From then on the document is cross-origin to the
+//!   opener and can only be replaced by another sandbox document. A child that
+//!   commits anything else is closed; one that has displayed nothing within
+//!   the deadline is closed too.
+//! - **No input before the user has seen the card.** WebKit on macOS lets
+//!   scripts open windows without a user gesture, which a browser would
+//!   require, so a page of the Workbench origin can make the sandbox's real
+//!   window, with a real pending request's card, appear at a moment it
+//!   chooses. It cannot put content of its own into the card. And the sandbox
+//!   arms its Confirm half a second after it builds the card, whether or not
+//!   the card is on screen. So being displayed is not the same as taking
+//!   input. A sandbox window takes clicks and keys only while this app is the
+//!   active one and the window is visible, and that has held without a break
+//!   for [`LIVE_AFTER_FIRST_SIGHT`] the first time the card is seen and
+//!   [`LIVE_AFTER_RETURN`] every later time, and never sooner than
+//!   [`LIVE_AFTER_RETURN`] after the user last arrived: the app became the
+//!   active one, or the opener's window came back from hidden, minimized or
+//!   another Space. Until then every click and key for the window is dropped
+//!   where the window receives it; it is not passed to what is underneath.
+//!   The card is displayed the whole time, in front of this app's other
+//!   windows and with the keyboard, and nothing about the window changes on
+//!   screen when it starts to take input.
+//! - **Not where the user is not.** A child whose first sandbox document
+//!   commits while this app is not the active one, or while the opener's
+//!   window is not on screen, or while another child of that opener is on
+//!   screen, is closed, never kept for later. Its size is clamped. The title
+//!   names the allowed host and ignores the page's own title, but it is not
+//!   proof of identity: other native windows of this app can carry any title.
 //! - **Nothing of the shell inside it.** It gets a `WKUserContentController` of
 //!   its own with no scripts and no message handler, so nothing wry registered
 //!   reaches it and closing it removes nothing from the opener, and default
@@ -93,9 +103,10 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, NSObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDidBecomeActiveNotification, NSAutoresizingMaskOptions, NSBackingStoreType, NSView,
-    NSWindow, NSWindowDelegate, NSWindowDidChangeOcclusionStateNotification, NSWindowDidDeminiaturizeNotification,
-    NSWindowDidMiniaturizeNotification, NSWindowOrderingMode, NSWindowStyleMask,
+    NSApplication, NSApplicationDidBecomeActiveNotification, NSAutoresizingMaskOptions, NSBackingStoreType, NSEvent,
+    NSEventType, NSView, NSWindow, NSWindowDelegate, NSWindowDidChangeOcclusionStateNotification,
+    NSWindowDidDeminiaturizeNotification, NSWindowDidMiniaturizeNotification, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_foundation::{
@@ -138,18 +149,17 @@ const RESERVE_DEADLINE: Duration = Duration::from_secs(60);
 /// The flows open one window at a time; this bounds what the main webview's
 /// pages can hold, hidden ones included.
 const MAX_CHILDREN: usize = 4;
-/// After a child leaves the screen, no other appears for this long. Longer than
-/// the default double-click interval (half a second), so a click meant for the
-/// window that just closed never meets a new one in its place; shorter than a
-/// person needs to go back to the Workbench, approve another request and have
-/// its sandbox release verified and loaded.
-const QUIET_AFTER_CLOSE: Duration = Duration::from_millis(750);
-/// After this app becomes the active one, or the opener's window comes back
-/// from hidden or minimized, no child is on screen for this long. Whatever
-/// brought the app forward (a notification the user clicked, a link, a page
-/// asking for the window), the user gets time to see where they are before a
-/// card can appear. A child whose document commits meanwhile waits.
-const SETTLE_AFTER_ARRIVAL: Duration = Duration::from_secs(2);
+/// How long a card must have been in front of the user, without interruption,
+/// before its window takes a click or a key: the first time it is seen, and
+/// every time the user comes back to it. The first is longer than the default
+/// double-click interval (half a second), so a click begun on something else
+/// never lands on a card that has just appeared in its place. The second gives
+/// a user who has just arrived, or been brought, time to see where they are.
+/// The sandbox arms its own Confirm half a second after it builds the card,
+/// whether or not the card is on screen, so these are what make sure the card
+/// was seen first.
+const LIVE_AFTER_FIRST_SIGHT: Duration = Duration::from_millis(750);
+const LIVE_AFTER_RETURN: Duration = Duration::from_secs(2);
 /// The size of a child's content, whatever the opener asks for.
 const DEFAULT_SIZE: (f64, f64) = (520.0, 760.0);
 const LEAST_SIZE: (f64, f64) = (360.0, 400.0);
@@ -255,56 +265,69 @@ fn commit_outcome(origin: &Origin, url: Option<&Url>, committed: bool) -> Commit
     }
 }
 
-/// What decides whether a child whose sandbox document has committed may be
-/// on screen. WebKit lets scripts open windows without a user gesture, so these
-/// stand in for the attention a browser would demand.
+/// What decides whether a child whose first sandbox document has just committed
+/// comes on screen. A child that does not is closed, never kept for later.
 #[derive(Clone, Copy, Debug)]
 struct Attention {
     /// The user is in this app.
     app_active: bool,
-    /// How long ago this app last became the active one.
-    since_app_active: Option<Duration>,
     /// The opener's window is on screen: visible, on the active Space, not
     /// minimized.
     opener_on_screen: bool,
-    /// How long ago the opener's window last came back on screen.
-    since_opener_on_screen: Option<Duration>,
     /// Another child of this opener is on screen.
     sibling_on_screen: bool,
-    /// How long ago a child of this opener last left the screen.
-    since_sibling_left: Option<Duration>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Appearance {
-    Now,
-    /// Not yet: ask again after this long.
-    After(Duration),
-    /// The child is closed, never kept for a later moment.
-    Never,
+fn may_appear(attention: Attention) -> bool {
+    attention.app_active && attention.opener_on_screen && !attention.sibling_on_screen
 }
 
-fn appearance(attention: Attention) -> Appearance {
-    if !attention.app_active || !attention.opener_on_screen {
-        return Appearance::Never;
-    }
-    let arrived = [attention.since_app_active, attention.since_opener_on_screen]
-        .into_iter()
-        .flatten()
-        .min();
-    if let Some(remaining) = arrived.and_then(|since| SETTLE_AFTER_ARRIVAL.checked_sub(since)) {
-        if !remaining.is_zero() {
-            return Appearance::After(remaining);
-        }
-    }
-    if attention.sibling_on_screen
-        || attention
-            .since_sibling_left
-            .is_some_and(|since| since < QUIET_AFTER_CLOSE)
-    {
-        return Appearance::Never;
-    }
-    Appearance::Now
+/// How long until a displayed window takes clicks and keys: `Some(ZERO)` when
+/// it does now, `None` when the card is not in front of the user at all.
+///
+/// `seen_for` is how long the card has been displayed, in a visible window, in
+/// the active app, without interruption; `None` when it is not at this moment.
+/// `first_sight` is whether that is the first such period. `arrived_for` is
+/// how long ago the user last arrived: this app became the active one, or the
+/// opener's window came back on screen, whether or not the card existed then.
+///
+/// WebKit lets a page open the sandbox's window without a user gesture and at a
+/// moment it chooses, and the sandbox's own delay before Confirm runs whether
+/// or not anyone can see the card. This is what stands in for the gesture: no
+/// click and no key reaches a card the user has not had in front of them for
+/// the interval.
+fn input_wait(seen_for: Option<Duration>, first_sight: bool, arrived_for: Option<Duration>) -> Option<Duration> {
+    let seen_for = seen_for?;
+    let needed = if first_sight {
+        LIVE_AFTER_FIRST_SIGHT
+    } else {
+        LIVE_AFTER_RETURN
+    };
+    let since_sight = needed.saturating_sub(seen_for);
+    let since_arrival = arrived_for.map_or(Duration::ZERO, |arrived_for| {
+        LIVE_AFTER_RETURN.saturating_sub(arrived_for)
+    });
+    Some(since_sight.max(since_arrival))
+}
+
+/// Whether an event is input that a window not yet live must not receive.
+/// Clicks, scrolls, gestures and keys are; what AppKit sends a window about
+/// itself is not. An event type this list does not know counts as input.
+fn is_input(kind: NSEventType) -> bool {
+    ![
+        NSEventType::AppKitDefined,
+        NSEventType::SystemDefined,
+        NSEventType::ApplicationDefined,
+        NSEventType::Periodic,
+        NSEventType::CursorUpdate,
+        NSEventType::MouseEntered,
+        NSEventType::MouseExited,
+    ]
+    .contains(&kind)
+}
+
+fn is_key(kind: NSEventType) -> bool {
+    [NSEventType::KeyDown, NSEventType::KeyUp, NSEventType::FlagsChanged].contains(&kind)
 }
 
 /// The content size of a child for the size its opener asked for.
@@ -396,8 +419,7 @@ pub(crate) fn install_with(window: &WebviewWindow, policy: Policy) {
         let Some(window) = webview.window() else {
             return;
         };
-        let observers = observe_arrivals(key, &window);
-        let on_screen = is_on_screen(&window);
+        let observers = observe_arrivals(&window);
         STATE.with_borrow_mut(|state| {
             state.policy.get_or_insert(policy);
             state
@@ -408,9 +430,6 @@ pub(crate) fn install_with(window: &WebviewWindow, policy: Policy) {
                 webview: Weak::from_retained(&webview),
                 window: Weak::from_retained(&window),
                 app: app.clone(),
-                on_screen,
-                on_screen_since: None,
-                child_left_screen: None,
                 observers,
             });
         });
@@ -476,20 +495,68 @@ fn is_on_screen(window: &NSWindow) -> bool {
     window.isVisible() && window.isOnActiveSpace() && !window.isMiniaturized()
 }
 
+fn app_is_active(mtm: MainThreadMarker) -> bool {
+    NSApplication::sharedApplication(mtm).isActive()
+}
+
 type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 
-/// Records the two arrivals [`SETTLE_AFTER_ARRIVAL`] counts from: this app
-/// becoming the active one, whatever caused it, and the opener's window coming
-/// back on screen. Returns the window's observers, which end with the opener.
-fn observe_arrivals(opener: usize, window: &NSWindow) -> Vec<Observer> {
+/// When the user last arrived, and what it is told by. Kept apart from `STATE`
+/// because a sandbox window reads it while it handles an event.
+#[derive(Default)]
+struct Arrivals {
+    /// The latest of: this app became the active one; an opener's window came
+    /// back on screen from hidden, minimized or another Space.
+    last: Option<Instant>,
+    /// Each opener's window, by address, and whether it was on screen when
+    /// last looked at.
+    main_windows: Vec<(usize, bool)>,
+    app_observer: Option<Observer>,
+}
+
+thread_local! {
+    static ARRIVALS: RefCell<Arrivals> = RefCell::new(Arrivals::default());
+}
+
+/// How long ago the user last arrived.
+fn arrived_for() -> Option<Duration> {
+    ARRIVALS.with_borrow(|arrivals| arrivals.last.map(|last| last.elapsed()))
+}
+
+/// Records whether an opener's window is on screen. AppKit reports some of
+/// these changes late, so whoever needs the answer also passes what it sees
+/// through here: a window found on screen that was last seen off it has, at
+/// the latest, come back now.
+fn note_main_window(window: &NSWindow) {
+    let key = window as *const NSWindow as usize;
+    let on_screen = is_on_screen(window);
+    ARRIVALS.with_borrow_mut(|arrivals| {
+        let known = arrivals.main_windows.iter_mut().find(|(known, _)| *known == key);
+        let was_on_screen = match known {
+            Some((_, was)) => std::mem::replace(was, on_screen),
+            None => {
+                arrivals.main_windows.push((key, on_screen));
+                // Its history is unknown; it has not been seen to come back.
+                on_screen
+            }
+        };
+        if on_screen && !was_on_screen {
+            arrivals.last = Some(Instant::now());
+        }
+    });
+}
+
+/// Notes the two kinds of arrival: this app becoming the active one, however
+/// that came about, and the opener's window coming back on screen. Returns the
+/// window's observers, which end with the opener.
+fn observe_arrivals(window: &Retained<NSWindow>) -> Vec<Observer> {
     let center = NSNotificationCenter::defaultCenter();
-    let watching_app = STATE.with_borrow(|state| state.app_observer.is_some());
-    if !watching_app {
+    if ARRIVALS.with_borrow(|arrivals| arrivals.app_observer.is_none()) {
         let became_active = RcBlock::new(|_: NonNull<NSNotification>| {
-            STATE.with_borrow_mut(|state| state.app_active_since = Some(Instant::now()));
+            ARRIVALS.with_borrow_mut(|arrivals| arrivals.last = Some(Instant::now()));
         });
-        // SAFETY: Main thread; the block is called on the posting thread,
-        // which for AppKit's notifications is the main thread.
+        // SAFETY: Main thread; AppKit posts this notification on the main
+        // thread, where the block then runs.
         let observer = unsafe {
             center.addObserverForName_object_queue_usingBlock(
                 Some(NSApplicationDidBecomeActiveNotification),
@@ -499,8 +566,10 @@ fn observe_arrivals(opener: usize, window: &NSWindow) -> Vec<Observer> {
             )
         };
         // Kept for the life of the process.
-        STATE.with_borrow_mut(|state| state.app_observer = Some(observer));
+        ARRIVALS.with_borrow_mut(|arrivals| arrivals.app_observer = Some(observer));
     }
+    note_main_window(window);
+    let watched = Weak::from_retained(window);
     // SAFETY: As above; the statics are AppKit's notification names.
     unsafe {
         [
@@ -510,39 +579,17 @@ fn observe_arrivals(opener: usize, window: &NSWindow) -> Vec<Observer> {
         ]
         .into_iter()
         .map(|name| {
-            let changed = RcBlock::new(move |_: NonNull<NSNotification>| opener_window_changed(opener));
+            let watched = watched.clone();
+            let changed = RcBlock::new(move |_: NonNull<NSNotification>| {
+                if let Some(window) = watched.load() {
+                    note_main_window(&window);
+                }
+            });
+            let window: &AnyObject = window.as_ref();
             center.addObserverForName_object_queue_usingBlock(Some(name), Some(window), None, &changed)
         })
         .collect()
     }
-}
-
-/// The opener's window was shown, hidden, minimized, restored or moved between
-/// Spaces: note the moment it comes back on screen.
-fn opener_window_changed(key: usize) {
-    let window = STATE.with_borrow(|state| {
-        state
-            .openers
-            .iter()
-            .find(|opener| opener.key == key)
-            .and_then(|opener| opener.window.load())
-    });
-    note_opener_on_screen(key, window.is_some_and(|window| is_on_screen(&window)));
-}
-
-/// Records whether the opener's window is on screen, and returns how long ago
-/// it last came back. AppKit reports some of these changes late, so every
-/// decision about a child also passes what it sees through here: a window found
-/// on screen that was last seen off it has, at the latest, come back now.
-fn note_opener_on_screen(key: usize, on_screen: bool) -> Option<Duration> {
-    STATE.with_borrow_mut(|state| {
-        let opener = state.openers.iter_mut().find(|opener| opener.key == key)?;
-        if on_screen && !opener.on_screen {
-            opener.on_screen_since = Some(Instant::now());
-        }
-        opener.on_screen = on_screen;
-        opener.on_screen_since.map(|since| since.elapsed())
-    })
 }
 
 fn close_children_of(opener: usize) {
@@ -566,12 +613,6 @@ struct Opener {
     webview: Weak<WKWebView>,
     window: Weak<NSWindow>,
     app: AppHandle,
-    /// Whether its window was on screen when last looked at, and when it last
-    /// came back.
-    on_screen: bool,
-    on_screen_since: Option<Instant>,
-    /// When a child of this opener last left the screen.
-    child_left_screen: Option<Instant>,
     observers: Vec<Observer>,
 }
 
@@ -585,9 +626,9 @@ struct Child {
     /// A sandbox document has committed. Before that the main frame may hold
     /// the reserved blank page; after it, only sandbox documents.
     committed: bool,
-    /// The native window is on screen. Its webview stays transparent, and the
-    /// window takes neither clicks nor keys, until the sandbox document has
-    /// been presented.
+    /// The native window is on screen: empty until the sandbox document has
+    /// been presented, then displayed. Whether it takes input is the window's
+    /// own matter; see `SandboxWindow`.
     on_screen: bool,
 }
 
@@ -597,9 +638,6 @@ struct State {
     openers: Vec<Opener>,
     children: Vec<Child>,
     next_id: u64,
-    /// When this app last became the active one, and what tells us.
-    app_active_since: Option<Instant>,
-    app_observer: Option<Observer>,
 }
 
 thread_local! {
@@ -617,12 +655,18 @@ define_class!(
 
 struct WindowFields {
     /// The sandbox document has been presented; see `appear` and `reveal`.
-    revealed: Cell<bool>,
+    displayed: Cell<bool>,
+    /// When the current unbroken period began in which the card is displayed,
+    /// the window visible and this app active. `None` outside such a period.
+    seen_since: Cell<Option<Instant>>,
+    /// Such a period has ended before, so the user is coming back to the card.
+    seen_before: Cell<bool>,
 }
 
 define_class!(
-    /// A child's window. Until its page is displayed it cannot take the
-    /// keyboard, so no key can reach a page the user cannot see.
+    /// A child's window. It is the one place where input for the card is
+    /// admitted or dropped: every mouse, scroll and key event for a window
+    /// passes its `sendEvent:`, and key equivalents its `performKeyEquivalent:`.
     #[unsafe(super(NSWindow))]
     #[thread_kind = MainThreadOnly]
     #[name = "AvibeVaultSandboxWindow"]
@@ -630,17 +674,93 @@ define_class!(
     struct SandboxWindow;
 
     impl SandboxWindow {
+        #[unsafe(method(sendEvent:))]
+        fn send_event(&self, event: &NSEvent) {
+            if self.admits(event) {
+                // SAFETY: The superclass implementation, with its argument.
+                let _: () = unsafe { msg_send![super(self), sendEvent: event] };
+            }
+        }
+
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            // SAFETY: The superclass implementation, with its argument.
+            self.is_live() && unsafe { msg_send![super(self), performKeyEquivalent: event] }
+        }
+
+        /// A displayed card may have the keyboard before it takes input:
+        /// keys are dropped at `sendEvent:` like clicks. So nothing about the
+        /// window changes on screen at the moment it turns live.
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key(&self) -> bool {
-            self.ivars().revealed.get()
+            self.ivars().displayed.get()
         }
 
         #[unsafe(method(canBecomeMainWindow))]
         fn can_become_main(&self) -> bool {
-            self.ivars().revealed.get()
+            self.ivars().displayed.get()
         }
     }
 );
+
+impl SandboxWindow {
+    /// Brings the record of whether the user has the card in front of them up
+    /// to this moment, and returns how long until the window takes input.
+    /// Called for every event, so a change the window was not told about in
+    /// time can only make the wait longer: a period found to have begun is
+    /// counted from now.
+    fn input_wait(&self) -> Option<Duration> {
+        let fields = self.ivars();
+        if let Some(main_window) = self.parentWindow() {
+            note_main_window(&main_window);
+        }
+        let seen = fields.displayed.get()
+            && self.occlusionState().contains(NSWindowOcclusionState::Visible)
+            && MainThreadMarker::new().is_some_and(app_is_active);
+        match (seen, fields.seen_since.get()) {
+            (true, None) => fields.seen_since.set(Some(Instant::now())),
+            (false, Some(_)) => {
+                fields.seen_since.set(None);
+                fields.seen_before.set(true);
+            }
+            _ => {}
+        }
+        input_wait(
+            fields.seen_since.get().map(|since| since.elapsed()),
+            !fields.seen_before.get(),
+            arrived_for(),
+        )
+    }
+
+    fn is_live(&self) -> bool {
+        self.input_wait() == Some(Duration::ZERO)
+    }
+
+    /// Whether an event is delivered. A window that is not live, whether still
+    /// empty or displayed, drops every key, and every click, scroll and
+    /// gesture on its content. It does not pass them to what is under it
+    /// either: a click aimed at the card must not land on something else. The
+    /// title bar keeps working, so the window can be moved or closed.
+    fn admits(&self, event: &NSEvent) -> bool {
+        let kind = event.r#type();
+        if !is_input(kind) || self.is_live() {
+            return true;
+        }
+        if is_key(kind) {
+            return false;
+        }
+        let Some(content) = self.contentView() else {
+            return false;
+        };
+        let at = event.locationInWindow();
+        let content = content.frame();
+        let inside = at.x >= content.origin.x
+            && at.x < content.origin.x + content.size.width
+            && at.y >= content.origin.y
+            && at.y < content.origin.y + content.size.height;
+        !inside
+    }
+}
 
 struct ChildFields {
     id: u64,
@@ -760,6 +880,24 @@ define_class!(
         fn will_close(&self, _notification: &NSNotification) {
             close(self.ivars().id, true);
         }
+
+        /// The window was covered, uncovered, minimized, restored, hidden with
+        /// the app, moved to another Space, or the display slept or woke. All
+        /// of them end or begin a period in which the user can see the card.
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn occlusion_changed(&self, _notification: &NSNotification) {
+            let id = self.ivars().id;
+            let window = STATE.with_borrow(|state| {
+                state
+                    .children
+                    .iter()
+                    .find(|child| child.id == id)
+                    .map(|child| child.window.clone())
+            });
+            if let Some(window) = window {
+                window.input_wait();
+            }
+        }
     }
 );
 
@@ -807,49 +945,31 @@ fn committed(id: u64, url: Option<&Url>) {
 
 /// What the user's attention is on, for one child. `None` when the child or its
 /// opener is gone.
-fn attention(id: u64, mtm: MainThreadMarker) -> Option<(Attention, Retained<NSWindow>, AppHandle)> {
-    let (key, opener, sibling_on_screen, since_app_active, since_sibling_left, app) = STATE.with_borrow(|state| {
+fn attention(id: u64, mtm: MainThreadMarker) -> Option<(Attention, Retained<NSWindow>)> {
+    let (opener, sibling_on_screen) = STATE.with_borrow(|state| {
         let child = state.children.iter().find(|child| child.id == id)?;
         let opener = state.openers.iter().find(|opener| opener.key == child.opener)?;
         let sibling_on_screen = state
             .children
             .iter()
             .any(|other| other.opener == child.opener && other.id != id && other.on_screen);
-        Some((
-            opener.key,
-            opener.window.load()?,
-            sibling_on_screen,
-            state.app_active_since.map(|since| since.elapsed()),
-            opener.child_left_screen.map(|left| left.elapsed()),
-            opener.app.clone(),
-        ))
+        Some((opener.window.load()?, sibling_on_screen))
     })?;
-    let opener_on_screen = is_on_screen(&opener);
+    note_main_window(&opener);
     let attention = Attention {
-        app_active: NSApplication::sharedApplication(mtm).isActive(),
-        since_app_active,
-        opener_on_screen,
-        since_opener_on_screen: note_opener_on_screen(key, opener_on_screen),
+        app_active: app_is_active(mtm),
+        opener_on_screen: is_on_screen(&opener),
         sibling_on_screen,
-        since_sibling_left,
     };
-    Some((attention, opener, app))
+    Some((attention, opener))
 }
 
-/// Calls `step(id)` on the main thread after `wait`.
-fn later(app: AppHandle, wait: Duration, id: u64, step: fn(u64)) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(wait).await;
-        let _ = app.run_on_main_thread(move || step(id));
-    });
-}
-
-/// Puts a child whose sandbox document has committed on screen over its
-/// opener's window, waits when the user has only just arrived, or closes it
-/// when it may not appear.
+/// Puts a child whose first sandbox document has committed on screen over its
+/// opener's window, or closes it when the user is not there or another child
+/// is on screen.
 ///
-/// What comes on screen is the window with a transparent webview. It ignores
-/// clicks, which pass to whatever is under it, and cannot become key. WebKit
+/// What comes on screen is the window with a transparent webview. It cannot
+/// become key and takes no input; clicks on it go nowhere. WebKit
 /// keeps displaying the previous document's layers until the new one has
 /// something to show, and the previous document here is a blank page its
 /// opener could draw in. The webview is revealed by the first presentation
@@ -870,76 +990,52 @@ fn appear(id: u64) {
     let Some((window, webview)) = waiting else {
         return;
     };
-    let Some((attention, parent, app)) = attention(id, mtm) else {
+    let Some((_, parent)) = attention(id, mtm).filter(|(attention, _)| may_appear(*attention)) else {
         close(id, false);
         return;
     };
-    match appearance(attention) {
-        Appearance::Never => close(id, false),
-        Appearance::After(wait) => later(app, wait, id, appear),
-        Appearance::Now => {
-            STATE.with_borrow_mut(|state| {
-                if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
-                    child.on_screen = true;
-                }
-            });
-            let over = parent.frame();
-            let size = window.frame().size;
-            window.setFrameOrigin(NSPoint::new(
-                over.origin.x + (over.size.width - size.width) / 2.0,
-                over.origin.y + (over.size.height - size.height) / 2.0,
-            ));
-            // Attaching orders the window in above its parent.
-            // SAFETY: Both windows are live and distinct; the child is
-            // detached again before it closes.
-            unsafe { parent.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
-            let presented = RcBlock::new(move || reveal(id));
-            // SAFETY: `adopt` checked that the webview class has this method,
-            // which takes one block and calls it on the main thread.
-            let _: () = unsafe { msg_send![&*webview, _doAfterNextPresentationUpdate: &*presented] };
+    STATE.with_borrow_mut(|state| {
+        if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
+            child.on_screen = true;
         }
-    }
+    });
+    let over = parent.frame();
+    let size = window.frame().size;
+    window.setFrameOrigin(NSPoint::new(
+        over.origin.x + (over.size.width - size.width) / 2.0,
+        over.origin.y + (over.size.height - size.height) / 2.0,
+    ));
+    // Attaching orders the window in above its parent.
+    // SAFETY: Both windows are live and distinct; the child is detached again
+    // before it closes.
+    unsafe { parent.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
+    let presented = RcBlock::new(move || reveal(id));
+    // SAFETY: `adopt` checked that the webview class has this method, which
+    // takes one block and calls it on the main thread.
+    let _: () = unsafe { msg_send![&*webview, _doAfterNextPresentationUpdate: &*presented] };
 }
 
-/// The sandbox document is what the webview now displays. If the user is still
-/// here, show it and give the window the keyboard, which a passkey ceremony
-/// needs; if they have only just come back, wait; if they left, close it.
+/// The sandbox document is what the webview now displays: show it, in front of
+/// this app's other windows and with the keyboard, which a passkey ceremony
+/// needs. The window does not take input yet. From here on that is decided
+/// event by event, by how long the user has had the card in front of them, and
+/// nothing about the window changes on screen when it does.
 fn reveal(id: u64) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let veiled = STATE.with_borrow(|state| {
-        state
-            .children
-            .iter()
-            .find(|child| child.id == id)
-            .filter(|child| child.committed && child.on_screen && !child.window.ivars().revealed.get())
-            .map(|child| (child.window.clone(), child.webview.clone()))
+    let found = STATE.with_borrow(|state| {
+        let child = state.children.iter().find(|child| child.id == id)?;
+        (child.committed && child.on_screen && !child.window.ivars().displayed.get())
+            .then(|| (child.window.clone(), child.webview.clone()))
     });
-    let Some((window, webview)) = veiled else {
+    let Some((window, webview)) = found else {
         return;
     };
-    let Some((attention, _, app)) = attention(id, mtm) else {
-        close(id, false);
-        return;
-    };
-    // This child is the one on screen; the rules about others do not apply.
-    let attention = Attention {
-        sibling_on_screen: false,
-        since_sibling_left: None,
-        ..attention
-    };
-    match appearance(attention) {
-        Appearance::Never => close(id, false),
-        Appearance::After(wait) => later(app, wait, id, reveal),
-        Appearance::Now => {
-            window.ivars().revealed.set(true);
-            webview.setAlphaValue(1.0);
-            window.setIgnoresMouseEvents(false);
-            window.makeKeyAndOrderFront(None);
-            window.makeFirstResponder(Some(&webview));
-        }
-    }
+    window.ivars().displayed.set(true);
+    webview.setAlphaValue(1.0);
+    // The ordinary order-front: behind the active app's windows if this app
+    // is not the active one.
+    window.makeKeyAndOrderFront(None);
+    window.makeFirstResponder(Some(&webview));
+    window.input_wait();
 }
 
 /// Ends a child. Its opener can no longer reach it and the native window
@@ -949,22 +1045,13 @@ fn reveal(id: u64) {
 fn close(id: u64, window_closing: bool) {
     let child = STATE.with_borrow_mut(|state| {
         let index = state.children.iter().position(|child| child.id == id)?;
-        let child = state.children.remove(index);
-        if child.on_screen {
-            if let Some(opener) = state.openers.iter_mut().find(|opener| opener.key == child.opener) {
-                opener.child_left_screen = Some(Instant::now());
-            }
-        }
-        Some(child)
+        Some(state.children.remove(index))
     });
     let Some(child) = child else {
         return;
     };
-    // SAFETY: Main thread; every object is live and owned by `child`.
-    unsafe {
-        child.webview.setNavigationDelegate(None);
-        child.webview.setUIDelegate(None);
-    }
+    // The webview keeps its delegate until the page is destroyed. The child is
+    // out of the registry, so from here the delegate refuses every navigation.
     child.window.setDelegate(None);
     let was_key = child.window.isKeyWindow();
     let parent = child.window.parentWindow();
@@ -1149,7 +1236,9 @@ fn open_child(
         }
         let window: Retained<SandboxWindow> = msg_send![
             super(SandboxWindow::alloc(mtm).set_ivars(WindowFields {
-                revealed: Cell::new(false),
+                displayed: Cell::new(false),
+                seen_since: Cell::new(None),
+                seen_before: Cell::new(false),
             })),
             initWithContentRect: frame,
             styleMask: NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable,
@@ -1165,12 +1254,11 @@ fn open_child(
     // title that is ignored; it is not proof of what the window is.
     window.setTitle(&NSString::from_str(&policy.origin.title()));
     // Until the sandbox document has been presented, the webview draws
-    // nothing and the window passes clicks through. See `appear`.
+    // nothing. See `appear`.
     webview.setAlphaValue(0.0);
     webview.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
-    window.setIgnoresMouseEvents(true);
     let content = NSView::initWithFrame(mtm.alloc(), webview.frame());
     content.addSubview(&webview);
     window.setContentView(Some(&content));
@@ -1204,7 +1292,7 @@ fn open_child(
                 state
                     .children
                     .iter()
-                    .any(|child| child.id == id && !child.window.ivars().revealed.get())
+                    .any(|child| child.id == id && !child.window.ivars().displayed.get())
             });
             if waiting {
                 close(id, false);
@@ -1539,109 +1627,99 @@ mod tests {
     fn a_child_appears_only_with_the_users_attention_and_alone() {
         let attentive = Attention {
             app_active: true,
-            since_app_active: None,
             opener_on_screen: true,
-            since_opener_on_screen: None,
             sibling_on_screen: false,
-            since_sibling_left: None,
         };
-        assert_eq!(appearance(attentive), Appearance::Now);
+        assert!(may_appear(attentive));
         // The user is in another app, or the Workbench is hidden, minimized or
-        // on another Space: closed, however long ago they were here.
-        for elsewhere in [
-            Attention {
-                app_active: false,
-                ..attentive
-            },
-            Attention {
-                opener_on_screen: false,
-                ..attentive
-            },
-            Attention {
-                app_active: false,
-                since_app_active: Some(Duration::from_millis(100)),
-                ..attentive
-            },
-        ] {
-            assert_eq!(appearance(elsewhere), Appearance::Never, "{elsewhere:?}");
-        }
-        // One sandbox window at a time, and not in the place of one that just
-        // closed.
-        assert_eq!(
-            appearance(Attention {
-                sibling_on_screen: true,
-                ..attentive
-            }),
-            Appearance::Never
-        );
-        for (since, expected) in [
-            (Duration::ZERO, Appearance::Never),
-            (Duration::from_millis(749), Appearance::Never),
-            (Duration::from_millis(750), Appearance::Now),
-            (Duration::from_secs(60), Appearance::Now),
+        // on another Space.
+        assert!(!may_appear(Attention {
+            app_active: false,
+            ..attentive
+        }));
+        assert!(!may_appear(Attention {
+            opener_on_screen: false,
+            ..attentive
+        }));
+        // One sandbox window at a time.
+        assert!(!may_appear(Attention {
+            sibling_on_screen: true,
+            ..attentive
+        }));
+    }
+
+    #[test]
+    fn a_card_takes_input_only_after_the_user_has_had_it_in_front_of_them() {
+        let ms = Duration::from_millis;
+        let live = Some(Duration::ZERO);
+        // (seen for, first sight, arrived how long ago) -> wait
+        for (seen_for, first_sight, arrived_for, expected) in [
+            // Not displayed, covered, minimized, or the user is in another
+            // app: no input, however long the card was seen before.
+            (None, true, None, None),
+            (None, false, Some(ms(60_000)), None),
+            // First sight: three quarters of a second on screen.
+            (Some(ms(0)), true, None, Some(ms(750))),
+            (Some(ms(500)), true, None, Some(ms(250))),
+            (Some(ms(749)), true, None, Some(ms(1))),
+            (Some(ms(750)), true, None, live),
+            (Some(ms(60_000)), true, Some(ms(60_000)), live),
+            // The user comes back to a card: two seconds.
+            (Some(ms(0)), false, None, Some(ms(2000))),
+            (Some(ms(750)), false, None, Some(ms(1250))),
+            (Some(ms(1999)), false, None, Some(ms(1))),
+            (Some(ms(2000)), false, None, live),
+            // The user arrived less than two seconds ago (the app came
+            // forward, or the main window came back), whether or not the card
+            // existed then: the later of the two moments decides.
+            (Some(ms(750)), true, Some(ms(800)), Some(ms(1200))),
+            (Some(ms(100)), true, Some(ms(1900)), Some(ms(650))),
+            (Some(ms(5000)), true, Some(ms(0)), Some(ms(2000))),
+            (Some(ms(5000)), false, Some(ms(1500)), Some(ms(500))),
+            (Some(ms(2000)), false, Some(ms(2000)), live),
         ] {
             assert_eq!(
-                appearance(Attention {
-                    since_sibling_left: Some(since),
-                    ..attentive
-                }),
+                input_wait(seen_for, first_sight, arrived_for),
                 expected,
-                "{since:?}"
+                "seen for {seen_for:?}, first sight {first_sight}, arrived {arrived_for:?} ago"
             );
         }
     }
 
     #[test]
-    fn a_child_waits_while_the_user_has_only_just_arrived() {
-        let attentive = Attention {
-            app_active: true,
-            since_app_active: None,
-            opener_on_screen: true,
-            since_opener_on_screen: None,
-            sibling_on_screen: false,
-            since_sibling_left: None,
-        };
-        let ms = Duration::from_millis;
-        // The app became active, or its window came back: wait out the rest.
-        for (since_app_active, since_opener_on_screen, expected) in [
-            (Some(ms(0)), None, Appearance::After(ms(2000))),
-            (Some(ms(500)), None, Appearance::After(ms(1500))),
-            (None, Some(ms(1999)), Appearance::After(ms(1))),
-            (Some(ms(2000)), None, Appearance::Now),
-            (Some(ms(60_000)), Some(ms(60_000)), Appearance::Now),
-            // The more recent arrival counts.
-            (Some(ms(60_000)), Some(ms(300)), Appearance::After(ms(1700))),
-            (Some(ms(300)), Some(ms(60_000)), Appearance::After(ms(1700))),
+    fn a_window_that_is_not_live_gets_only_what_appkit_tells_it_about_itself() {
+        for input in [
+            NSEventType::LeftMouseDown,
+            NSEventType::LeftMouseUp,
+            NSEventType::RightMouseDown,
+            NSEventType::OtherMouseDown,
+            NSEventType::LeftMouseDragged,
+            NSEventType::MouseMoved,
+            NSEventType::ScrollWheel,
+            NSEventType::KeyDown,
+            NSEventType::KeyUp,
+            NSEventType::FlagsChanged,
+            NSEventType::Gesture,
+            NSEventType::Magnify,
+            NSEventType::Pressure,
+            // A kind of event this code has never heard of.
+            NSEventType(999),
         ] {
-            assert_eq!(
-                appearance(Attention {
-                    since_app_active,
-                    since_opener_on_screen,
-                    ..attentive
-                }),
-                expected,
-                "{since_app_active:?} {since_opener_on_screen:?}"
-            );
+            assert!(is_input(input), "{input:?}");
         }
-        // Waiting comes first: the other rules are judged when it is over.
-        assert_eq!(
-            appearance(Attention {
-                since_app_active: Some(ms(100)),
-                sibling_on_screen: true,
-                since_sibling_left: Some(ms(0)),
-                ..attentive
-            }),
-            Appearance::After(ms(1900))
-        );
-        // A user who left is not waited for.
-        assert_eq!(
-            appearance(Attention {
-                app_active: false,
-                since_opener_on_screen: Some(ms(100)),
-                ..attentive
-            }),
-            Appearance::Never
-        );
+        for own in [
+            NSEventType::AppKitDefined,
+            NSEventType::SystemDefined,
+            NSEventType::ApplicationDefined,
+            NSEventType::Periodic,
+            NSEventType::CursorUpdate,
+            NSEventType::MouseEntered,
+            NSEventType::MouseExited,
+        ] {
+            assert!(!is_input(own), "{own:?}");
+        }
+        assert!(is_key(NSEventType::KeyDown) && is_key(NSEventType::KeyUp) && is_key(NSEventType::FlagsChanged));
+        assert!(!is_key(NSEventType::LeftMouseDown));
     }
 
     #[test]

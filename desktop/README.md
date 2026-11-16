@@ -189,27 +189,47 @@ rules are stated at the top of that file. In short:
 - **Never the opener's pixels.** The Workbench origin also serves Show Pages,
   and an opener can draw in the blank page it reserved. The native window stays
   off screen until a sandbox document has committed in it. It then appears
-  empty: it cannot take the keyboard, and clicks pass through it to whatever
-  is underneath. Its content is revealed only by the first presentation update
+  empty, and its content is revealed only by the first presentation update
   WebKit delivers after that commit; until then WebKit would still be
   displaying the previous page. The empty window stays until the sandbox's
   first paint. A window that has displayed no sandbox document 60 seconds
   after it was created is closed.
-- **Not without the user's attention.** On macOS WebKit lets scripts open
-  windows without a user gesture, which a browser would require. So a page of
-  the Workbench origin can make the sandbox's real window, showing a real
-  pending request, appear at a moment it chooses; it cannot put content of its
-  own into that window. The shell bounds the moment. A sandbox window is on
-  screen only while Avibe is the active app and the main window is visible, on
-  the current Space and not minimized. It waits until two seconds after Avibe
-  became the active app or the main window came back, whatever caused that.
-  Only one is on screen at a time, and none appears within 0.75 seconds of
-  another closing. The same is checked again before the content is revealed.
-  A window that may not appear is closed, never shown later. Its size is
+- **No input before the user has seen the card.** On macOS WebKit lets scripts
+  open windows without a user gesture, which a browser would require. So a
+  page of the Workbench origin can make the sandbox's real window, showing a
+  real pending request, appear at a moment it chooses; it cannot put content
+  of its own into that window. The sandbox arms its Confirm half a second
+  after it builds the card, whether or not the card is on screen. So a
+  displayed window does not yet take input. It takes clicks and keys only
+  while Avibe is the active app and the window is visible, and that has held
+  without a break for 0.75 seconds the first time the card is seen and 2
+  seconds every later time, and never sooner than 2 seconds after the user
+  last arrived: Avibe became the active app, or the main window came back from
+  hidden, minimized or another Space. Until then every click and key for the
+  window is dropped where the window receives it; none is passed to what is
+  underneath. The card is displayed the whole time, in front of Avibe's other
+  windows and with the keyboard, and nothing changes on screen when it starts
+  to take input. There is no visual cue; a user who clicks too early clicks
+  again.
+- **Not where the user is not.** A sandbox window comes on screen only while
+  Avibe is the active app and the main window is visible, on the current Space
+  and not minimized, and only one at a time. A window that may not appear when
+  its sandbox document is ready is closed, never shown later. Its size is
   clamped to between 360 x 400 and 900 x 1000 points. The main webview's pages
   can hold at most four windows, hidden ones included. The title bar shows the
   host and ignores the page's title, but it is not proof of what a window is:
   the Workbench can open other native windows with any title.
+- **What the input rule does not cover.** A second card navigated into the
+  same visible window (the sandbox's own arming applies, as in a browser). A
+  present user who confirms without reading. A card displayed while nobody is
+  at the Mac is live when they return, unless the display slept: "present"
+  means active app and visible window, not eyes. The main window merely raised
+  from behind another Avibe window is not an arrival; the first 0.75 seconds
+  cover a card shown then. A window counts as visible when any part of it
+  shows. Menu commands and system input panels (Paste, the emoji picker,
+  dictation) still reach a key window; none can confirm. Computer Use and
+  other accessibility-driven actions do not pass the window's event entry, as
+  in a browser. Drag and drop onto the window is neither click nor key.
 - **Nothing of the shell inside it.** The window has an empty
   `WKUserContentController`: no init script, no marker, no `ipc` message
   handler, and closing it removes nothing from the main window. It has default
@@ -260,8 +280,10 @@ Until that is understood, macOS 15 to 25 keep the browser hand-off.
 The pure rules are unit-tested in the module. The behavior is checked with
 real WebKit windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs
 on macOS 26. The probe plays the Workbench and the sandbox from two loopback
-origins with a disposable data store, and reads back what a window's own views
-draw to check that an opener's page is never displayed. It compiles the
+origins with a disposable data store. It reads back what a window's own views
+draw to check that an opener's page is never displayed, and it delivers clicks
+and keys to the window through the application's own event dispatch to check
+that none reaches a card before the interval is over. It compiles the
 module's source file into itself, so the library exports nothing for it, and
 enters one step below the signature check, which no test executable can pass.
 It has three runs: with the app active (windows appear); with the app not

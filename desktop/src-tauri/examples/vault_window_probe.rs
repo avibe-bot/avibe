@@ -163,6 +163,25 @@ addEventListener('message', (event) => {
 <link rel="stylesheet" href="/never.css"><body>"#;
     const STUCK_HOLD: Duration = Duration::from_secs(8);
 
+    /// A sandbox page that behaves as the sandbox's card does where it matters
+    /// here: it arms itself half a second after it starts running, whether or
+    /// not anyone can see it. It logs every click and key it receives and
+    /// reports the log when its opener asks. With `#slow` it cannot paint
+    /// until the server releases its stylesheet, two seconds later.
+    const CARD_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>card</title>
+<script>
+const log = { case: 'card-log', loadedAt: Date.now(), armedAt: null, clicks: [], keys: [], commands: [] };
+setTimeout(() => { log.armedAt = Date.now(); }, 500);
+addEventListener('click', () => log.clicks.push(Date.now()), true);
+addEventListener('keydown', (event) => { (event.metaKey ? log.commands : log.keys).push(Date.now()); event.preventDefault(); }, true);
+addEventListener('keyup', (event) => event.preventDefault(), true);
+addEventListener('message', (event) => {
+  if (event.data === 'log') fetch('/report', { method: 'POST', body: JSON.stringify(log) });
+});
+if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slow.css">');
+</script>
+<body style="margin:0"><button style="position:fixed;inset:0;width:100%;height:100%">Confirm</button>"#;
+
     /// A sandbox page that reports nothing, for windows the shell must close.
     const QUIET_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>quiet</title><p>sandbox</p>"#;
 
@@ -174,8 +193,14 @@ addEventListener('message', (event) => {
     struct Seen {
         /// The native window is on screen.
         visible: bool,
-        /// Its webview is drawn and it takes clicks.
+        /// Its webview is drawn.
         revealed: bool,
+        /// Clicks on it would fall through to what is underneath.
+        passes_clicks: bool,
+        /// AppKit says no part of it can be seen.
+        occluded: bool,
+        /// Its window number.
+        number: isize,
         key: bool,
         attached: bool,
         title: String,
@@ -193,7 +218,7 @@ addEventListener('message', (event) => {
     impl Seen {
         /// On screen and showing its page.
         fn shown(&self) -> bool {
-            self.visible && self.revealed
+            self.visible && self.revealed && !self.passes_clicks
         }
     }
 
@@ -384,11 +409,11 @@ addEventListener('message', (event) => {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
-            self.let_the_quiet_interval_pass();
 
             // A page keeps a window in reserve and points it at the sandbox
-            // the moment the one on screen closes, so that a click meant for
-            // the first would land on the second. The second is closed.
+            // the moment the one on screen closes. The second window appears;
+            // what protects a click meant for the first is that no window
+            // takes input when it has only just appeared (see "input" below).
             self.eval(&format!(
                 "probe.windows.first = window.open('{sandbox}/window#case=first'); probe.windows.next = window.open('about:blank')"
             ));
@@ -399,12 +424,11 @@ addEventListener('message', (event) => {
             self.eval(&format!(
                 "probe.windows.first.close(); probe.windows.next.location.replace('{sandbox}/quiet')"
             ));
-            self.wait_children("the first window to leave the screen", |children| {
-                children.iter().all(|child| !child.visible)
+            self.wait_children("the window in reserve to take the first one's place", |children| {
+                children.len() == 1 && children[0].shown() && children[0].url.ends_with("/quiet")
             });
-            self.never_on_screen("a window in the place of one that just closed", "next", 0);
-            // After the interval a window appears again.
-            self.let_the_quiet_interval_pass();
+            self.eval("probe.windows.next.close()");
+            self.wait_children("the second window to close", |children| children.is_empty());
 
             // The sandbox iframe opens its own window. The request comes from a
             // message handler, without a user gesture: on macOS WebKit lets
@@ -426,7 +450,6 @@ addEventListener('message', (event) => {
             self.close_child_as_the_user();
             self.report("frame-saw-closed");
             assert!(self.children().is_empty());
-            self.let_the_quiet_interval_pass();
 
             self.a_redirect_never_shows();
 
@@ -460,7 +483,6 @@ addEventListener('message', (event) => {
             assert_eq!(ready["handler"], "object", "{ready}");
             self.report("frame-ready");
             assert!(self.children().is_empty(), "a reload closes the children");
-            self.let_the_quiet_interval_pass();
 
             // What the opener drew in the reserved page is never displayed, not
             // even between the sandbox document's commit and its first paint.
@@ -515,7 +537,6 @@ addEventListener('message', (event) => {
             assert!(painted.len() == 1 && painted[0].shown(), "{painted:?}");
             self.eval("probe.windows.painted.close()");
             self.wait_children("the painted window to close", |children| children.is_empty());
-            self.let_the_quiet_interval_pass();
 
             // A sandbox page that never paints: the window stays empty, takes
             // neither clicks nor keys, never shows what the opener drew, and is
@@ -537,8 +558,8 @@ addEventListener('message', (event) => {
                     break;
                 }
                 assert!(
-                    !children[0].revealed && !children[0].key,
-                    "a page that was never displayed took input: {children:?}"
+                    !children[0].revealed && !children[0].key && !children[0].passes_clicks,
+                    "an empty window is key, or lets clicks through: {children:?}"
                 );
                 if let Some(colours) = self.child_pixels() {
                     samples += 1;
@@ -553,7 +574,6 @@ addEventListener('message', (event) => {
             self.eval("probe.report({ case: 'stuck-closed', closed: probe.windows.stuck.closed })");
             let stuck = self.report("stuck-closed");
             assert_eq!(stuck["closed"], true, "{stuck}");
-            self.let_the_quiet_interval_pass();
 
             // While the main window is hidden, nothing appears; the window is
             // closed, not kept for later.
@@ -561,87 +581,12 @@ addEventListener('message', (event) => {
             self.eval(&format!("probe.windows.unseen = window.open('{sandbox}/quiet')"));
             self.never_on_screen("a sandbox window over a hidden main window", "unseen", 0);
 
-            // When the main window comes back, the user has only just arrived:
-            // a window asked for at once waits two seconds, and then appears.
-            let back = Instant::now();
             self.main.show().unwrap();
             if self.focus {
                 self.activate();
             }
-            self.eval(&format!(
-                "probe.windows.returned = window.open('{sandbox}/window#case=returned')"
-            ));
-            self.appears_no_sooner_than_the_settle_interval("after the main window came back", back);
-            self.a_window_opened_by_the_workbench_loaded("returned");
-            self.eval("probe.windows.returned.close()");
-            self.wait_children("the returned window to close", |children| children.is_empty());
-            self.let_the_quiet_interval_pass();
 
-            if self.focus {
-                // The same when the app itself comes forward, whatever brought
-                // it: here it is hidden and activated again.
-                self.on_main(|mtm| NSApplication::sharedApplication(mtm).hide(None));
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
-                    assert!(Instant::now() < deadline, "the app did not leave the front");
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                let forward = Instant::now();
-                self.activate();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while !self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
-                    assert!(Instant::now() < deadline, "the app did not come forward");
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                self.eval(&format!(
-                    "probe.windows.forward = window.open('{sandbox}/window#case=forward')"
-                ));
-                self.appears_no_sooner_than_the_settle_interval("after the app came forward", forward);
-                self.a_window_opened_by_the_workbench_loaded("forward");
-                self.eval("probe.windows.forward.close()");
-                self.wait_children("the forward window to close", |children| children.is_empty());
-                self.let_the_quiet_interval_pass();
-            }
-
-            // The user leaves while a window is still empty: when the sandbox
-            // page is ready the window is closed, not revealed. With focus the
-            // user goes to another app and the windows stay where they are.
-            self.eval(&format!("probe.windows.left = window.open('{sandbox}/slow-window')"));
-            self.wait_children("the window to come on screen, still empty", |children| {
-                children.len() == 1 && children[0].visible && !children[0].revealed
-            });
-            if self.focus && self.go_to_another_app() {
-                println!("vault window probe: left for another app while a window was still empty");
-            } else {
-                // Without focus, or where the system would not hand the front
-                // to another app, the probe can only hide the main window.
-                println!("vault window probe: hid the main window while a window was still empty");
-                self.hide_the_main_window();
-            }
-            let started = Instant::now();
-            loop {
-                let children = self.children();
-                if children.is_empty() {
-                    break;
-                }
-                assert!(
-                    !children[0].revealed && !children[0].key,
-                    "a window was revealed after the user left: {children:?}"
-                );
-                assert!(
-                    started.elapsed() < Duration::from_secs(12),
-                    "the window was not closed: {children:?}"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            self.eval("probe.report({ case: 'left-closed', closed: probe.windows.left.closed })");
-            let left = self.report("left-closed");
-            assert_eq!(left["closed"], true, "{left}");
-            self.arrived("style-released");
-            self.main.show().unwrap();
-            if self.focus {
-                self.activate();
-            }
+            self.a_card_takes_no_input_until_it_has_been_seen();
 
             self.other_requests_keep_their_handler();
             self.reservations_are_bounded();
@@ -661,7 +606,6 @@ addEventListener('message', (event) => {
                     self.wait_children("the closed main window to take its children along", |children| {
                         children.is_empty()
                     });
-                    self.let_the_quiet_interval_pass();
                 }
             }
             self.the_main_window_takes_its_children_along();
@@ -670,7 +614,7 @@ addEventListener('message', (event) => {
                 "vault window probe (app active{}): marker scope, hidden reservation, reveal only after the \
                  sandbox document is presented, opener link, empty content controller and own preferences, \
                  URL scheme guard, navigation refusals, one window at a time, quiet interval, hidden main \
-                 window, waiting after an arrival, leaving before the reveal, size bounds, close paths, \
+                 window, no input before a card has been seen, size bounds, close paths, \
                  deadline, cap, reload and main-window teardown passed",
                 if self.focus { ", with focus" } else { "" }
             );
@@ -847,35 +791,322 @@ addEventListener('message', (event) => {
             }
         }
 
-        /// The one child, asked for right after the user arrived at `arrived`
-        /// (taken before the arrival), is on screen no sooner than the shell's
-        /// two seconds later, and then is shown: deferred, not refused.
-        fn appears_no_sooner_than_the_settle_interval(&mut self, what: &str, arrived: Instant) {
-            loop {
+        /// No click and no key reaches a card the user has not had in front
+        /// of them: for 0.75 s when it first appears, and for 2 s whenever
+        /// they come back to it or the app comes forward.
+        ///
+        /// The card page arms itself half a second after it starts running, as
+        /// the sandbox's Confirm does, and logs every click and key it gets.
+        /// Clicks and a Return key are delivered to the window the whole time,
+        /// through this application's own event dispatch.
+        fn a_card_takes_no_input_until_it_has_been_seen(&mut self) {
+            let sandbox = format!("http://localhost:{}", self.port);
+            let input = self.start_input();
+
+            // First sight. The page runs, and arms, two seconds before it can
+            // paint: when the card is displayed it would take a confirming
+            // click at once, were the window to deliver one.
+            self.eval(&format!("probe.windows.card = window.open('{sandbox}/card#slow')"));
+            let mut before = now_ms();
+            let displayed_after = loop {
                 let children = self.children();
-                let waited = arrived.elapsed();
-                if children.iter().any(|child| child.visible) {
-                    assert!(
-                        waited >= Duration::from_secs(2),
-                        "a window appeared {waited:?} {what}: {children:?}"
-                    );
-                    break;
+                if children.len() == 1 && children[0].shown() {
+                    break before;
                 }
-                assert!(
-                    children.len() == 1 || waited < Duration::from_secs(1),
-                    "the window was refused, not deferred, {what}: {children:?}"
-                );
-                assert!(waited < Duration::from_secs(15), "no window appeared {what}");
-                std::thread::sleep(Duration::from_millis(30));
+                before = now_ms();
+                assert!(self.child_windows() <= 1, "{children:?}");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let displayed_by = now_ms();
+            self.arrived("style-released");
+            std::thread::sleep(Duration::from_millis(2500));
+            let log = self.card_log();
+            assert!(
+                log.armed_at < displayed_by,
+                "the card was to be armed before it was displayed: {log:?}, displayed by {displayed_by}"
+            );
+            log.nothing_before("first sight", displayed_after + 750.0);
+            log.something_after("first sight", displayed_after + 750.0);
+            let shown = self.children();
+            assert!(shown.len() == 1 && shown[0].shown(), "{shown:?}");
+            if self.focus {
+                assert!(shown[0].key, "a live card has the keyboard: {shown:?}");
             }
-            self.wait_children("the deferred window to be shown", |children| {
+
+            // The main window, and the card with it, goes away and comes back
+            // while the app stays where it is: two seconds from the return.
+            self.hide_the_main_window();
+            self.wait_children("the card to go with the main window", |children| {
+                children.len() == 1 && !children[0].visible
+            });
+            let gone = now_ms();
+            std::thread::sleep(Duration::from_millis(500));
+            let back = now_ms();
+            self.main.show().unwrap();
+            self.wait_children("the card to come back with the main window", |children| {
+                children.len() == 1 && children[0].visible
+            });
+            std::thread::sleep(Duration::from_millis(3500));
+            let log = self.card_log();
+            log.nothing_between("the card came back with the main window", gone, back + 2000.0);
+            log.something_after("the card came back with the main window", back + 2000.0);
+
+            // Another window of the app covers the card completely and goes
+            // away again: the same two seconds, from AppKit's own word on
+            // whether the card can be seen.
+            let cover = self.another_window_of_the_app();
+            let card = self.children()[0].number;
+            self.on_main({
+                let cover = cover.clone();
+                move |mtm| {
+                    let card = child_windows(mtm).into_iter().next().expect("the card");
+                    let cover = ns_window(&cover);
+                    cover.setFrame_display(card.frame(), true);
+                    cover.orderFront(None);
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let covered = loop {
+                let children = self.children();
+                if children[0].occluded {
+                    break true;
+                }
+                if Instant::now() > deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            if covered {
+                let covered = now_ms();
+                std::thread::sleep(Duration::from_millis(500));
+                let back = now_ms();
+                cover.hide().unwrap();
+                self.wait_children("the card to be uncovered", |children| !children[0].occluded);
+                std::thread::sleep(Duration::from_millis(3500));
+                let log = self.card_log();
+                log.nothing_between("the card was uncovered", covered, back + 2000.0);
+                log.something_after("the card was uncovered", back + 2000.0);
+                println!("vault window probe: input after the card was fully covered and uncovered checked");
+            } else {
+                cover.hide().unwrap();
+                std::thread::sleep(Duration::from_millis(2500));
+                println!(
+                    "vault window probe: AppKit did not report the covered card as hidden; full covering not checked"
+                );
+            }
+            assert_eq!(self.children()[0].number, card);
+
+            if self.focus {
+                // The user goes to another app and returns.
+                if self.go_to_another_app() {
+                    let left = now_ms();
+                    std::thread::sleep(Duration::from_millis(500));
+                    let back = now_ms();
+                    self.activate();
+                    self.wait_until_active();
+                    std::thread::sleep(Duration::from_millis(3500));
+                    let log = self.card_log();
+                    log.nothing_between("the user returned from another app", left, back + 2000.0);
+                    log.something_after("the user returned from another app", back + 2000.0);
+                    println!("vault window probe: input after returning from another app checked");
+                } else {
+                    println!(
+                        "vault window probe: the system kept this app in front; returning from another app not checked"
+                    );
+                }
+
+                // The app is hidden and comes forward again.
+                let hidden = self.hide_the_app();
+                std::thread::sleep(Duration::from_millis(500));
+                let back = now_ms();
+                self.activate();
+                self.wait_until_active();
+                std::thread::sleep(Duration::from_millis(3500));
+                let log = self.card_log();
+                log.nothing_between("the app came forward again", hidden, back + 2000.0);
+                log.something_after("the app came forward again", back + 2000.0);
+            }
+            let commands = self.card_log().commands.len();
+            println!("vault window probe: {commands} command-key events reached the live card");
+            self.eval("probe.windows.card.close()");
+            self.wait_children("the card to close", |children| children.is_empty());
+
+            // The main window comes back and a card is asked for at once: it
+            // is displayed at once, and takes input two seconds after the
+            // main window came back, not 0.75 s after it appeared.
+            self.hide_the_main_window();
+            std::thread::sleep(Duration::from_millis(300));
+            let back = now_ms();
+            self.main.show().unwrap();
+            self.a_card_asked_for_on_arrival("the main window came back", back);
+
+            if self.focus {
+                // The same when the app itself comes forward.
+                self.hide_the_app();
+                let forward = now_ms();
+                self.activate();
+                self.wait_until_active();
+                self.a_card_asked_for_on_arrival("the app came forward", forward);
+            }
+            input.stop();
+
+            // A card is displayed in front of the app's other windows and with
+            // the keyboard, and nothing moves or changes hands when it starts
+            // to take input.
+            cover.show().unwrap();
+            self.on_main({
+                let cover = cover.clone();
+                move |_| ns_window(&cover).makeKeyAndOrderFront(None)
+            });
+            let in_front = self.windows_front_to_back();
+            self.eval(&format!("probe.windows.card = window.open('{sandbox}/card')"));
+            let shown = self.wait_children("a card with another window in front", |children| {
                 children.len() == 1 && children[0].shown()
             });
+            let (order, key) = (self.windows_front_to_back(), self.key_window());
+            assert_ne!(in_front.first(), Some(&shown[0].number));
+            assert_eq!(
+                order.first(),
+                Some(&shown[0].number),
+                "the displayed card is not the app's frontmost window: {order:?}"
+            );
+            if self.focus {
+                assert_eq!(
+                    key,
+                    Some(shown[0].number),
+                    "the displayed card does not have the keyboard"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(1500));
+            assert_eq!(
+                (self.windows_front_to_back(), self.key_window()),
+                (order, key),
+                "windows moved or the keyboard changed hands when the card began to take input"
+            );
+            self.eval("probe.windows.card.close()");
+            self.wait_children("the card to close", |children| children.is_empty());
+            cover.destroy().unwrap();
         }
 
-        /// Longer than the shell's quiet interval after a window leaves the screen.
-        fn let_the_quiet_interval_pass(&self) {
-            std::thread::sleep(Duration::from_millis(1000));
+        /// A card asked for right after the user arrived (`arrived` is taken
+        /// before the arrival) is displayed at once and takes input no sooner
+        /// than two seconds after the arrival.
+        fn a_card_asked_for_on_arrival(&mut self, what: &str, arrived: f64) {
+            self.eval(&format!(
+                "probe.windows.card = window.open('http://localhost:{}/card')",
+                self.port
+            ));
+            self.wait_children("the card asked for on arrival", |children| {
+                children.len() == 1 && children[0].shown()
+            });
+            let displayed = now_ms();
+            assert!(
+                displayed < arrived + 1500.0,
+                "{what}: the card was held back {} ms",
+                displayed - arrived
+            );
+            std::thread::sleep(Duration::from_millis(3500));
+            let log = self.card_log();
+            log.nothing_before(what, arrived + 2000.0);
+            log.something_after(what, arrived + 2000.0);
+            self.eval("probe.windows.card.close()");
+            self.wait_children("the card to close", |children| children.is_empty());
+        }
+
+        /// Hides the app, as Command-H does; returns when it had left the front.
+        fn hide_the_app(&self) -> f64 {
+            self.on_main(|mtm| NSApplication::sharedApplication(mtm).hide(None));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
+                assert!(Instant::now() < deadline, "the app did not leave the front");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            now_ms()
+        }
+
+        /// A plain second window of this app, as a native app window is.
+        fn another_window_of_the_app(&self) -> WebviewWindow {
+            WebviewWindowBuilder::new(&self.app, "other", WebviewUrl::External("about:blank".parse().unwrap()))
+                .title("another window")
+                .visible(false)
+                .incognito(true)
+                .build()
+                .unwrap()
+        }
+
+        /// The numbers of this app's windows that are on screen, front to back.
+        fn windows_front_to_back(&self) -> Vec<isize> {
+            self.on_main(|mtm| {
+                let app = NSApplication::sharedApplication(mtm);
+                // SAFETY: Main thread; AppKit's list of this app's windows.
+                let windows: Retained<objc2_foundation::NSArray<NSWindow>> =
+                    unsafe { objc2::msg_send![&*app, orderedWindows] };
+                windows
+                    .iter()
+                    .filter(|window| window.isVisible())
+                    .map(|window| window.windowNumber())
+                    .collect()
+            })
+        }
+
+        fn key_window(&self) -> Option<isize> {
+            self.on_main(|mtm| {
+                NSApplication::sharedApplication(mtm)
+                    .keyWindow()
+                    .map(|window| window.windowNumber())
+            })
+        }
+
+        fn wait_until_active(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
+                assert!(Instant::now() < deadline, "the app did not come forward");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        /// What the card page has received so far, on the page's own clock,
+        /// which is this machine's.
+        fn card_log(&mut self) -> CardLog {
+            self.eval("probe.windows.card.postMessage('log', '*')");
+            let log = self.report("card-log");
+            let times = |key: &str| -> Vec<f64> {
+                log[key]
+                    .as_array()
+                    .expect("a list of times")
+                    .iter()
+                    .map(|time| time.as_f64().expect("a time"))
+                    .collect()
+            };
+            CardLog {
+                armed_at: log["armedAt"].as_f64().expect("the card armed itself"),
+                clicks: times("clicks"),
+                keys: times("keys"),
+                commands: times("commands"),
+            }
+        }
+
+        /// Delivers a click on the middle of the child window's content and a
+        /// Return key to that window every 30 ms, until stopped. The events are
+        /// made for the probe's own window and handed to its own application
+        /// object, the way AppKit hands on what the system sends it; nothing
+        /// is posted to the system.
+        fn start_input(&self) -> InputStream {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stopped = stop.clone();
+            let app = self.app.clone();
+            let thread = std::thread::spawn(move || {
+                while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = app.run_on_main_thread(|| {
+                        let mtm = MainThreadMarker::new().expect("main thread");
+                        if let Some(window) = child_windows(mtm).into_iter().find(|window| window.isVisible()) {
+                            deliver_input(mtm, &window);
+                        }
+                    });
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+            });
+            InputStream { stop, thread }
         }
 
         /// A sandbox address that redirects elsewhere never shows anything, and
@@ -1090,7 +1321,12 @@ addEventListener('message', (event) => {
                             let size = window.contentRectForFrameRect(window.frame()).size;
                             Some(Seen {
                                 visible: window.isVisible(),
-                                revealed: view.alphaValue() == 1.0 && !window.ignoresMouseEvents(),
+                                revealed: view.alphaValue() == 1.0,
+                                passes_clicks: window.ignoresMouseEvents(),
+                                occluded: !window
+                                    .occlusionState()
+                                    .contains(objc2_app_kit::NSWindowOcclusionState::Visible),
+                                number: window.windowNumber(),
                                 key: window.isKeyWindow(),
                                 attached: window
                                     .parentWindow()
@@ -1149,6 +1385,150 @@ addEventListener('message', (event) => {
         fn child_windows(&self) -> usize {
             self.on_main(|mtm| child_windows(mtm).len())
         }
+    }
+
+    fn now_ms() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after 1970")
+            .as_secs_f64()
+            * 1000.0
+    }
+
+    struct InputStream {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl InputStream {
+        fn stop(self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.thread.join().expect("the input thread ended");
+        }
+    }
+
+    /// When the card armed itself, and when it received each click and key.
+    #[derive(Debug)]
+    struct CardLog {
+        armed_at: f64,
+        clicks: Vec<f64>,
+        keys: Vec<f64>,
+        /// Keys pressed with Command, which reach a window another way.
+        commands: Vec<f64>,
+    }
+
+    impl CardLog {
+        fn received(&self) -> impl Iterator<Item = f64> + '_ {
+            self.clicks.iter().chain(&self.keys).chain(&self.commands).copied()
+        }
+
+        fn nothing_before(&self, what: &str, time: f64) {
+            self.nothing_between(what, 0.0, time);
+        }
+
+        fn nothing_between(&self, what: &str, from: f64, until: f64) {
+            let early: Vec<f64> = self
+                .received()
+                .filter(|at| *at > from && *at < until)
+                .map(|at| at - until)
+                .collect();
+            assert!(
+                early.is_empty(),
+                "{what}: the card received input before it could (ms relative to the earliest allowed moment): {early:?}"
+            );
+        }
+
+        /// The stream was really being delivered: without this, "nothing
+        /// arrived early" could mean that nothing ever arrives.
+        fn something_after(&self, what: &str, time: f64) {
+            assert!(
+                self.clicks.iter().any(|at| *at >= time),
+                "{what}: no click reached the card afterwards: {self:?}"
+            );
+        }
+    }
+
+    /// One click and one Return key for `window`, handed to the application.
+    fn deliver_input(mtm: MainThreadMarker, window: &NSWindow) {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        use objc2_foundation::{ns_string, NSPoint, NSString};
+        let Some(content) = window.contentView() else {
+            return;
+        };
+        let frame = content.frame();
+        let at = NSPoint::new(
+            frame.origin.x + frame.size.width / 2.0,
+            frame.origin.y + frame.size.height / 2.0,
+        );
+        let number = window.windowNumber();
+        let nothing: Option<&AnyObject> = None;
+        let app = NSApplication::sharedApplication(mtm);
+        // SAFETY: Main thread. The two class methods are AppKit's own event
+        // constructors, called with the argument types their selectors declare.
+        unsafe {
+            let uptime: f64 = objc2::msg_send![&*objc2_foundation::NSProcessInfo::processInfo(), systemUptime];
+            for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
+                let event: Option<Retained<NSEvent>> = objc2::msg_send![
+                    objc2::class!(NSEvent),
+                    mouseEventWithType: kind,
+                    location: at,
+                    modifierFlags: NSEventModifierFlags::empty(),
+                    timestamp: uptime,
+                    windowNumber: number,
+                    context: nothing,
+                    eventNumber: 0isize,
+                    clickCount: 1isize,
+                    pressure: 1.0f32
+                ];
+                let event = event.expect("a mouse event");
+                let _: () = objc2::msg_send![&*app, sendEvent: &*event];
+            }
+            for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+                let key: &NSString = ns_string!("\r");
+                let event: Option<Retained<NSEvent>> = objc2::msg_send![
+                    objc2::class!(NSEvent),
+                    keyEventWithType: kind,
+                    location: at,
+                    modifierFlags: NSEventModifierFlags::empty(),
+                    timestamp: uptime,
+                    windowNumber: number,
+                    context: nothing,
+                    characters: key,
+                    charactersIgnoringModifiers: key,
+                    isARepeat: false,
+                    keyCode: 36u16
+                ];
+                let event = event.expect("a key event");
+                // A key goes to the window it is made for, not to whichever
+                // window of the app has the keyboard.
+                let _: () = objc2::msg_send![window, sendEvent: &*event];
+            }
+            // A key with Command is offered to a window as a key equivalent
+            // before it is sent as an event.
+            let key: &NSString = ns_string!("j");
+            let event: Option<Retained<NSEvent>> = objc2::msg_send![
+                objc2::class!(NSEvent),
+                keyEventWithType: NSEventType::KeyDown,
+                location: at,
+                modifierFlags: NSEventModifierFlags::Command,
+                timestamp: uptime,
+                windowNumber: number,
+                context: nothing,
+                characters: key,
+                charactersIgnoringModifiers: key,
+                isARepeat: false,
+                keyCode: 38u16
+            ];
+            let event = event.expect("a command-key event");
+            let _: bool = objc2::msg_send![window, performKeyEquivalent: &*event];
+        }
+    }
+
+    /// The native window of a window Tauri built.
+    fn ns_window(window: &WebviewWindow) -> Retained<NSWindow> {
+        // SAFETY: Tauri hands out its live NSWindow; this is the main thread.
+        unsafe { Retained::retain(window.ns_window().expect("a native window").cast::<NSWindow>()) }
+            .expect("a native window")
     }
 
     fn is_magenta((red, green, blue): (u8, u8, u8)) -> bool {
@@ -1338,6 +1718,7 @@ addEventListener('message', (event) => {
                 "/slow-window" => page(SLOW_PAGE),
                 "/stuck-window" => page(STUCK_PAGE),
                 "/quiet" => page(QUIET_PAGE),
+                "/card" => page(CARD_PAGE),
                 "/workbench" => page(&WORKBENCH_PAGE.replace("PORT", &port.to_string())),
                 "/frame" => page(FRAME_PAGE),
                 "/window" => page(&WINDOW_PAGE.replace("PORT", &port.to_string())),
