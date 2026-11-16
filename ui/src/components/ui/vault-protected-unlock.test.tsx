@@ -25,7 +25,7 @@ function lockedVault(status: 'needs-setup' | 'locked'): Vault {
     sealValue: forbidden,
     signProtectedRequest: forbidden,
     approveProtectedRelease: forbidden,
-    revealProtectedValue: forbidden,
+    revealProtectedSecret: forbidden,
     afterCreated: forbidden,
     lock: forbidden,
     lockAndResetForPolicyChange: forbidden,

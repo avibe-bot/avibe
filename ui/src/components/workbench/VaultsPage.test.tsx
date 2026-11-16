@@ -766,10 +766,12 @@ describe('VaultsPage protected reveal', () => {
     ));
     await openMenu();
     await vi.waitFor(() => expect(showValue().disabled).toBe(false));
-    stubBlankPopup();
+    const popup = stubBlankPopup();
     fireEvent.click(showValue());
     await vi.waitFor(() => expect(showToast).toHaveBeenCalled());
     expect(revealProtectedSecret).not.toHaveBeenCalled();
+    // The window the click reserved is closed again, empty.
+    await vi.waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
   });
 
   it('a link naming one field (older handoff) opens View secret for the whole secret', async () => {

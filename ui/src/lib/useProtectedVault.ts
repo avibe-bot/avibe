@@ -734,28 +734,6 @@ export function useProtectedVault() {
   );
 
   /**
-   * Reveal a protected static value inside the sandbox frame. Plaintext is displayed (and, on the
-   * sandbox-side explicit action, copied) entirely within the sandbox — it is never returned to
-   * the parent. R2: an in-sandbox confirm while unlocked, a passkey while locked or under Strict.
-   */
-  const revealProtectedValue = useCallback(
-    async (
-      material: ProtectedUnlockMaterial,
-      context: VaultSignedOperationContext,
-      authorizationWindow?: string,
-    ): Promise<{ completed: boolean }> => {
-      assertDurableSetupReady();
-      const sandbox = await getVaultSandboxClient();
-      try {
-        return await sandbox.reveal({ material, context }, authorizationWindow);
-      } finally {
-        void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
-      }
-    },
-    [syncProtectedOperationStatus],
-  );
-
-  /**
    * Show a protected static secret's fields in the secure window: one approval, then every field as
    * its own row (hidden until shown) with Copy, all inside the sandbox. One field keeps the original
    * single-record request; several go as `items` (a sandbox build that lists them).
@@ -822,7 +800,6 @@ export function useProtectedVault() {
     sealHdWallet,
     signProtectedRequest,
     approveProtectedRelease,
-    revealProtectedValue,
     revealProtectedSecret,
     afterCreated,
     lock,

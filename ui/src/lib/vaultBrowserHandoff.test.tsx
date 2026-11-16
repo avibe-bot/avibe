@@ -48,7 +48,6 @@ const vault = vi.hoisted(() => ({
   sealValue: vi.fn(),
   approveProtectedRelease: vi.fn(),
   signProtectedRequest: vi.fn(),
-  revealProtectedValue: vi.fn(),
   revealProtectedSecret: vi.fn(),
 }));
 
@@ -287,7 +286,7 @@ const cases: Array<{
   },
 ];
 
-const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue, vault.revealProtectedSecret];
+const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedSecret];
 const expectNoProtectedOperations = () => {
   for (const ceremony of ceremonies) expect(ceremony).not.toHaveBeenCalled();
   expect(api.fulfillVaultAccessRequest).not.toHaveBeenCalled();
