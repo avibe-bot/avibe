@@ -81,7 +81,7 @@ def no_custody(monkeypatch, request):
 
 
 @pytest.mark.parametrize("case", range(5))
-def test_create_builds_exact_projection_and_taproot_only_public_choices(case):
+def test_create_builds_exact_projection_and_reviewed_pin_public_choices(case):
     value = payload(case)
     result = api.create_vault_secret(value)["secret"]
     row = stored()
@@ -92,11 +92,9 @@ def test_create_builds_exact_projection_and_taproot_only_public_choices(case):
                                     for i, item in enumerate(value["accounts"])]
     assert len(meta["hd_accounts"]) == 20 and all(len(item) == 10 for item in meta["hd_accounts"])
     assert result["per_use_sign"] and not result["access_grantable"]
-    assert result["accounts"][0]["bitcoin_address_types"] == ["p2tr"]
+    assert result["accounts"][0]["bitcoin_address_types"] == ["p2pkh", "p2wpkh", "p2tr"]
     assert result["accounts"][0]["always_ask"] is True
-    assert "btc_legacy" not in result["accounts"][0] and "btc_segwit" not in result["accounts"][0]
-    assert {key: result["accounts"][0][key] for key in ("eth", "btc_taproot", "solana")} == {
-        key: value["expected_account0"][key] for key in ("eth", "btc_taproot", "solana")}
+    assert {key: result["accounts"][0][key] for key in value["expected_account0"]} == value["expected_account0"]
 
 
 def expected_reconciliation(value, secret_id):
@@ -1076,11 +1074,11 @@ def test_fresh_hd_create_establishes_one_shared_root_and_factor_atomically():
 
 @pytest.mark.parametrize("address_type", ["p2pkh", "p2wpkh"])
 @pytest.mark.parametrize("entrypoint", ["sign", "request", "storage", "cli"])
-def test_ordinary_bitcoin_merge_does_not_enable_hd_new_types(address_type, entrypoint, capfd):
-    """Keep both merged owners: ordinary DER is not protected-HD capability.
+def test_new_bitcoin_context_cannot_use_an_unrelated_purpose_point(address_type, entrypoint, capfd):
+    """Admission never makes an unrelated scalar's typed context valid for HD.
 
-    The existing three-chain positive/completion/rollback tests exercise the HD
-    owner; this seam must refuse before any request, custody discovery or use.
+    This context signs under the public scalar7 oracle, not this wallet's P44 or
+    P84 point. Reject before a request, custody discovery or use is recorded.
     """
     from tests.test_vault_bitcoin_ecdsa_context import _case
 
@@ -1091,7 +1089,7 @@ def test_ordinary_bitcoin_merge_does_not_enable_hd_new_types(address_type, entry
                "digest": context["digest"], "signing_context": context}
     if entrypoint == "storage":
         with api._vault_engine().begin() as conn:
-            with pytest.raises(vault_service.InvalidSigningContextError, match="only explicit p2tr"):
+            with pytest.raises(vault_service.InvalidSigningContextError, match="script does not match the selected signing key"):
                 vault_service.create_sign_request(conn, signing["name"], scheme=signing["scheme"],
                     digest=context["digest"], signing_context=context, derivation=selection)
     elif entrypoint == "cli":
@@ -1099,9 +1097,9 @@ def test_ordinary_bitcoin_merge_does_not_enable_hd_new_types(address_type, entry
             "--account", "1", "--address-type", address_type, "--digest", context["digest"],
             "--signing-context-json", json.dumps(context)])
         assert cli.cmd_vault_sign(args) != 0
-        assert "only explicit p2tr" in capfd.readouterr().err
+        assert "script does not match the selected signing key" in capfd.readouterr().err
     else:
-        with pytest.raises(api.VaultApiError, match="only explicit p2tr"):
+        with pytest.raises(api.VaultApiError, match="script does not match the selected signing key"):
             (api.vault_sign if entrypoint == "sign" else api.request_vault_sign)(signing)
     assert rows(vault_requests) == [] and stored()["use_count"] == 0
     assert not any(item["event"] == "signed" for item in rows(vault_audit))

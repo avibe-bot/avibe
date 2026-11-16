@@ -2745,6 +2745,22 @@ def sign_audit_delivery(scheme: str, *, digest: str | None, message_hex: str | N
     }
 
 
+def protected_hd_bitcoin_return_scripts(
+    row: dict[str, Any], derivation: dict[str, Any] | None,
+) -> set[bytes] | None:
+    """Project returns only after the owning full-table and enabled-index check."""
+    if row.get("signer_kind") != vault_hd.SIGNER_KIND or row.get("protection") != "protected":
+        return None
+    try:
+        selection = vault_protected_hd.selection(derivation)
+        if selection["chain"] != "bitcoin" or selection["address_type"] == "p2tr":
+            return None
+        account = vault_protected_hd.selected_account(row["name"], _row_sealed(row), _public_meta(row.get("public_meta")), selection)
+        return set(vault_bitcoin.hd_account_return_scripts(account).values())
+    except ValueError as exc:
+        raise InvalidHdWalletError(str(exc)) from exc
+
+
 def validate_bitcoin_signing_context(
     signing_context: Any,
     *,
@@ -2752,6 +2768,7 @@ def validate_bitcoin_signing_context(
     scheme: str,
     signing_key: Any,
     protected: bool = False,
+    return_scripts: set[bytes] | None = None,
 ) -> None:
     """One preflight for typed Bitcoin, including headless and persisted callers.
 
@@ -2765,7 +2782,7 @@ def validate_bitcoin_signing_context(
                 raise ProtectedBitcoinTypeMismatchError("new Bitcoin contexts require ecdsa-secp256k1-der")
             vault_bitcoin.validate_ecdsa_context(
                 signing_context, expected_digest=digest,
-                public_key=require_compressed_signing_public_key(signing_key),
+                public_key=require_compressed_signing_public_key(signing_key), return_scripts=return_scripts,
             )
         except vault_bitcoin.BitcoinTypeMismatchError as exc:
             raise ProtectedBitcoinTypeMismatchError(str(exc)) from exc
@@ -2828,16 +2845,20 @@ def _capture_protected_bitcoin_identity(
         raise InvalidSigningContextError("protected Bitcoin request is missing its typed signing context")
     if row.get("kind") != "keypair" or row.get("protection") != "protected":
         raise InvalidSigningContextError("new Bitcoin typed contexts require a protected signing key")
-    if signer != "local":
-        # Extend the owning protected-HD implementation only once it is on the
-        # default branch. No parallel seed/table/selection implementation here.
-        raise ProtectedBitcoinUnsupportedError("protected HD Bitcoin type support is not available in this build")
-    if derivation is not None:
-        raise ProtectedBitcoinTypeMismatchError("ordinary Bitcoin requests must not have HD selectors")
+    if signer == vault_hd.SIGNER_KIND:
+        validate_new_bitcoin_selection(row, signing_context, scheme=vault_bitcoin.ECDSA_SCHEME, derivation=derivation)
+    elif signer == "local":
+        if derivation is not None:
+            raise ProtectedBitcoinTypeMismatchError("ordinary Bitcoin requests must not have HD selectors")
+    else:
+        raise ProtectedBitcoinUnsupportedError("unsupported protected Bitcoin signer")
     support = vault_sandbox_release.current_support()
-    if support is None or signing_context.get("addressType") not in support.ordinary_input_types:
+    if support is None:
         raise ProtectedBitcoinUnsupportedError("the trusted sandbox pin does not support this protected Bitcoin type")
-    point = require_compressed_signing_public_key(_row_signing_public_key(row))
+    types = support.hd_input_types if signer == vault_hd.SIGNER_KIND else support.ordinary_input_types
+    if signing_context.get("addressType") not in types:
+        raise ProtectedBitcoinUnsupportedError("the trusted sandbox pin does not support this protected Bitcoin type")
+    point = require_compressed_signing_public_key(_row_signing_public_key(row, derivation=derivation))
     envelope = {key: row.get(key) for key in ("ciphertext", "nonce", "wrap_meta")}
     if not all(type(value) is str and value for value in envelope.values()):
         raise InvalidRequestError("protected Bitcoin requires a complete stored envelope")
@@ -2891,7 +2912,8 @@ def _require_current_protected_bitcoin_identity(
         raise InvalidRequestError("protected Bitcoin saved signing identity changed")
     validate_bitcoin_signing_context(
         delivery.get("signing_context"), digest=delivery.get("digest"), scheme=delivery.get("scheme"),
-        signing_key=_row_signing_public_key(current), protected=True,
+        signing_key=_row_signing_public_key(current, derivation=delivery.get("derivation")), protected=True,
+        return_scripts=protected_hd_bitcoin_return_scripts(current, delivery.get("derivation")),
     )
     operation = delivery.get("operation_context")
     if operation is not None or require_release:
@@ -2900,6 +2922,7 @@ def _require_current_protected_bitcoin_identity(
             "publicKey": captured_key["public_key"], "signingContext": delivery.get("signing_context"),
             "signingKey": captured_key,
             "sandboxCohort": {key: delivery["bitcoin_cohort"][key] for key in ("buildHash", "manifestHash")},
+            **({"derivation": delivery.get("derivation")} if current.get("signer_kind") == vault_hd.SIGNER_KIND else {}),
         }
         if type(operation) is not dict or operation.get("release") != expected_release or operation.get("requestId") != request_row["id"] or operation.get("purpose") != "sign" or type(operation.get("v")) is not int or operation["v"] != 2:
             raise InvalidRequestError("protected Bitcoin release does not match its initial signing capture")
@@ -2928,6 +2951,8 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
                     "name": name, "scheme": scheme, "publicKey": signing_key["public_key"],
                     "derivation": selection, "signingKey": delivery["signing_key"], "signingContext": context,
                     **({"messageHex": delivery.get("message_hex")} if scheme == vault_solana.SCHEME else {"digest": delivery.get("digest")}),
+                    **({"sandboxCohort": {key: delivery["bitcoin_cohort"][key] for key in ("buildHash", "manifestHash")}}
+                       if _is_new_bitcoin_delivery(delivery) else {}),
                 }
                 if (not isinstance(operation, dict) or operation.get("purpose") != "sign"
                         or operation.get("release") != expected_release):
@@ -2951,6 +2976,7 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
         return
     validate_bitcoin_signing_context(
         context, digest=delivery.get("digest"), scheme=scheme, signing_key=signing_key, protected=protected,
+        return_scripts=protected_hd_bitcoin_return_scripts(row, selection) if vault_bitcoin.needs_ecdsa_preflight(context) else None,
     )
 
 
@@ -5994,6 +6020,7 @@ def _create_sign_request(
     validate_bitcoin_signing_context(
         signing_context, digest=digest, scheme=scheme, signing_key=signing_key,
         protected=row.get("protection") == "protected",
+        return_scripts=protected_hd_bitcoin_return_scripts(row, derivation) if vault_bitcoin.needs_ecdsa_preflight(signing_context) else None,
     )
     if isinstance(signing_context, dict) and signing_context.get("kind") not in {
         vault_bitcoin.BITCOIN_CONTEXT_KIND, vault_solana.CONTEXT_KIND, "avault-agent-operation",
@@ -6336,6 +6363,7 @@ def _complete_sign_request(
             validated = vault_bitcoin.validate_ecdsa_context(
                 delivery_payload["signing_context"], expected_digest=delivery_payload["digest"],
                 public_key=delivery_payload["signing_key"]["public_key"],
+                return_scripts=protected_hd_bitcoin_return_scripts(secret, derivation),
             )
             signature = vault_bitcoin.verify_ecdsa_result(validated, signature).signature
         except vault_bitcoin.BitcoinContextError as exc:
