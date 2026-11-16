@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
 import { isDesktopShell } from '@/lib/desktopShell';
 import { isApplePlatform } from '@/lib/platform';
+import { askVoiceConsent } from '@/lib/voiceConsent';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { BotAvatar } from '../ui/bot-avatar';
@@ -106,6 +107,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
         {(outcome === 'no-sound' || outcome === 'mic-busy' || outcome === 'no-device' || outcome === 'mic-failed') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
         {(outcome === 'denied' || failed) && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
         {outcome === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
+        {outcome === 'voice-off' && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
           {failed ? (
             <>
@@ -145,9 +147,20 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
                   <span className="text-muted">{t('voice.tapToType', { name: bot.name })}</span>
                 </>
               )}
+              {outcome === 'voice-off' && (
+                <>
+                  <span className="font-semibold text-foreground">{t('voice.consent.offTitle')}</span>
+                  <span className="text-muted">{t('voice.consent.offBody')}</span>
+                </>
+              )}
             </>
           )}
         </div>
+        {outcome === 'voice-off' && !failed && (
+          <button type="button" onClick={() => { dismiss(); askVoiceConsent(); }} className="-my-3 flex min-h-11 shrink-0 items-center self-center px-1.5 text-xs font-semibold text-mint-ink">
+            {t('voice.consent.turnOn')}
+          </button>
+        )}
         {outcome === 'sent' && !failed && (
           <button type="button" onClick={() => { dismiss(); onView(); }} className="-my-3 flex min-h-11 shrink-0 items-center gap-0.5 self-center px-1.5 text-xs font-semibold text-mint-ink">
             {t('voice.view')}

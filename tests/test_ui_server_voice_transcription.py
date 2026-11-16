@@ -391,3 +391,60 @@ def test_asr_transcribe_preserves_dictation_and_protocol_errors(monkeypatch):
     response = client.post("/api/asr/transcribe", json=payload, headers=csrf_headers(client))
     assert response.status_code == 502
     assert response.get_json() == {"error": "transcription_failed"}
+
+
+def _paired_asr(monkeypatch):
+    monkeypatch.setattr(
+        "core.services.settings.load_config",
+        lambda: SimpleNamespace(
+            audio_asr=AudioAsrConfig(enabled=True),
+            remote_access=RemoteAccessConfig(
+                vibe_cloud=VibeCloudRemoteAccessConfig(
+                    enabled=True,
+                    backend_url="https://avibe.bot",
+                    instance_id="instance",
+                    instance_secret="secret",
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(AudioAsrService, "is_available", lambda _self: True)
+
+
+def test_voice_consent_is_asked_answered_and_enforced_per_account(monkeypatch):
+    """Voice input sends speech to a third-party AI service: the status reports this
+    account's answer, the answer is saved per account, and the relay transcribes only
+    after a yes to the current disclosure (core/voice_consent.py)."""
+    from core.chat_discovery import set_state_meta
+    from core.voice_consent import VOICE_DISCLOSURE_REVISION, consent_key, set_voice_consent
+
+    _paired_asr(monkeypatch)
+    sent: list[object] = []
+
+    async def transcribe(_self, attachment, **_kwargs):
+        sent.append(attachment)
+        return {"text": "hi", "cleanup": "success"}
+
+    monkeypatch.setattr(AudioAsrService, "transcribe_voice_segment", transcribe)
+    client = app.test_client()
+    body = {"name": "voice.webm", "mime": "audio/webm", "data": base64.b64encode(b"audio").decode()}
+
+    # An answer to an older disclosure, or another account's yes, does not count.
+    set_state_meta(consent_key("local"), {"voice": {"choice": "granted", "revision": VOICE_DISCLOSURE_REVISION - 1}})
+    set_voice_consent("remote:someone-else", "granted")
+    assert client.get("/api/asr/status").get_json()["consent"] is None
+    response = client.post("/api/asr/transcribe", json=body, headers=csrf_headers(client))
+    assert response.status_code == 403
+    assert response.get_json() == {"ok": False, "error": "voice_consent_required"}
+
+    response = client.put("/api/asr/consent", json={"choice": "declined"}, headers=csrf_headers(client))
+    assert response.get_json() == {"ok": True, "consent": "declined"}
+    assert client.get("/api/asr/status").get_json()["consent"] == "declined"
+    assert client.post("/api/asr/transcribe", json=body, headers=csrf_headers(client)).status_code == 403
+    assert sent == []
+
+    assert client.put("/api/asr/consent", json={"choice": "yes"}, headers=csrf_headers(client)).status_code == 400
+    client.put("/api/asr/consent", json={"choice": "granted"}, headers=csrf_headers(client))
+    response = client.post("/api/asr/transcribe", json=body, headers=csrf_headers(client))
+    assert response.status_code == 200
+    assert len(sent) == 1

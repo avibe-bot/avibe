@@ -154,6 +154,7 @@
   "POST /api/web-push/status": "viewer",
   "POST /api/web-push/subscriptions": "viewer",
   "POST /api/web-push/test": "viewer",
+  "PUT /api/asr/consent": "editor",
   "PUT /api/dock/order": "editor",
   "PUT /api/files/write": "editor",
   "PUT /api/home/preferences": "viewer",

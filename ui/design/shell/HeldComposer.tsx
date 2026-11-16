@@ -119,18 +119,6 @@ export function TextPressLayer() {
   );
 }
 
-/** A note above the composer, where `ComposerHoldCard` puts the note a press leaves, for a note
- *  a proposal draws (kit). */
-export function ComposerNoteLayer({ children }: { children: ReactNode }) {
-  return (
-    <div className="pointer-events-none absolute inset-0 z-50 flex flex-col justify-end">
-      <ComposerSlot>
-        <div className="absolute inset-x-0 bottom-full z-50 mb-3 flex flex-col items-center">{children}</div>
-      </ComposerSlot>
-    </div>
-  );
-}
-
 /** A phone's edit menu over the composer, as the system draws it on a long press. */
 export function SystemEditMenu({ items }: { items: string[] }) {
   return (

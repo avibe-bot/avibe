@@ -4669,7 +4669,8 @@
     "desktopManagedUpdateMemberHint": "Update this host in the Avibe desktop app on the computer running Avibe.",
     "desktopRemoteUpdateLocalRequest": "An update to {{target}} was requested remotely. Install it now or ignore this request.",
     "desktopRemoteUpdateIgnore": "Ignore this request",
-    "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
+    "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}",
+    "audioTranscriptionDisclosure": "When on, voice messages from chat apps go to a third-party AI speech service to be turned into text. avibe.bot doesn't keep the recordings."
   },
   "doctor": {
     "title": "System Status",
@@ -7298,7 +7299,8 @@
       "stop": "Stop voice input",
       "startFailed": "Couldn't use the microphone. Check microphone access in system settings, or type instead.",
       "empty": "No speech was heard. Try again, or type instead.",
-      "failed": "Couldn't turn that into text. Try again, or type instead."
+      "failed": "Couldn't turn that into text. Try again, or type instead.",
+      "consentOff": "Voice input is off. Turn it on in Settings › General."
     },
     "keyboard": {
       "open": "Type a message",
@@ -7429,6 +7431,21 @@
       "lost": "The recording couldn't be saved on this device.",
       "insert": "Put in the draft",
       "truncated": "The end of the recording wasn't saved on this device; this is the part that was."
+    },
+    "consent": {
+      "title": "Turn on voice input?",
+      "body": "What you say goes to a third-party AI service to be turned into text, with a little of the current conversation for accuracy.",
+      "learnMore": "Learn more",
+      "details": "They pass through avibe.bot to Alibaba Cloud Model Studio (Singapore), which transcribes the recording, and a model on the same platform tidies the text. avibe.bot keeps neither. You can change this anytime in Settings › General.",
+      "privacyPolicy": "Privacy policy",
+      "allow": "Allow",
+      "deny": "Don't allow",
+      "saveFailed": "Couldn't save your choice. Try again.",
+      "offTitle": "Voice input is off",
+      "offBody": "Type instead, or turn it on in Settings › General.",
+      "turnOn": "Turn on",
+      "settingTitle": "Voice input",
+      "settingDescription": "A third-party AI speech service turns what you say into text; avibe.bot doesn't keep your recordings. Applies to your account on this Avibe."
     }
   },
   "mcpHub": {

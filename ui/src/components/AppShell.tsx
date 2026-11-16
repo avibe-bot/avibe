@@ -22,6 +22,7 @@ import { VersionBadge } from './VersionBadge';
 import { RunningStatus, SidebarStatusRow } from './SidebarStatusRow';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { BotProfileDialogHost } from './workbench/bots/BotProfileDialog';
+import { VoiceConsentHost } from './voice/VoiceConsent';
 import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
@@ -697,6 +698,10 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
       <RouteSurfaceActivityBoundary active={!settingsOpen}>
         <BotProfileDialogHost />
       </RouteSurfaceActivityBoundary>
+
+      {/* Voice input's question (ui/design: composer/voice-consent/*): put up by any voice
+          control, and by Settings › General, so it stays live over Settings too. */}
+      <VoiceConsentHost />
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}

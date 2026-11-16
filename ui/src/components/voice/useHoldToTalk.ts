@@ -19,6 +19,7 @@ import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voi
 import { isVoiceCaptureActive, prewarmVoiceCapture, type VoiceCaptureState } from '../../lib/voiceRecording';
 import { emitVoiceTelemetry, type VoiceTelemetryEvent, type VoiceTelemetryOutcome } from '../../lib/voiceTelemetry';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
+import { gateVoicePress, noteVoiceStatus, voiceConsentForPress } from '../../lib/voiceConsent';
 
 // Press and hold to talk (ui/design: mobile/main-bot-voice/*, composer/hold-*): one gesture
 // and one take, from the press to the sent message. A press that reaches `holdMs` opens the
@@ -42,8 +43,9 @@ export type HoldInterruptReason = 'dropped' | 'failed' | 'system' | 'send-failed
 /** How the last press ended, for the surface's toast or note. `kept`: cancelled while its words
  *  were finalized, and its recording kept on the device for the pending voice items. `too-short`:
  *  nothing said (a slip, or silence). `no-sound`: the microphone delivered no sound at all.
- *  `mic-busy`: the system, or another app, held the microphone. */
-export type HoldOutcome = 'sent' | 'cancelled' | 'kept' | 'too-short' | 'no-sound' | 'mic-busy' | 'no-device' | 'mic-failed' | 'asking' | 'denied' | 'unavailable';
+ *  `mic-busy`: the system, or another app, held the microphone. `voice-off`: this account said no
+ *  to voice input (lib/voiceConsent); the note says how to turn it on. */
+export type HoldOutcome = 'sent' | 'cancelled' | 'kept' | 'too-short' | 'no-sound' | 'mic-busy' | 'no-device' | 'mic-failed' | 'asking' | 'denied' | 'unavailable' | 'voice-off';
 
 export type HoldGesture = {
   /** How long a press is held before the microphone opens. */
@@ -154,6 +156,7 @@ const TELEMETRY_OUTCOME: Record<HoldOutcome, VoiceTelemetryOutcome> = {
   asking: 'asking',
   denied: 'denied',
   unavailable: 'unavailable',
+  'voice-off': 'unavailable',
 };
 
 /** How a hold ended, for the reliability log (`dictation_finalized`, entry `hold`), with what its
@@ -316,7 +319,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         availableRef.current = ok;
         setAvailable(ok);
         maxFileBytes.current = typeof data?.max_file_bytes === 'number' && data.max_file_bytes > 0 ? Math.floor(data.max_file_bytes) : null;
-        if (ok) primeCloudToken();
+        noteVoiceStatus(data);
+        if (ok && voiceConsentForPress() === 'granted') primeCloudToken();
       })
       .catch(() => {
         if (!alive) return;
@@ -545,6 +549,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setProgress(1);
     if (availableRef.current === false) {
       end('unavailable');
+      return;
+    }
+    // Voice goes to a third-party AI service: nothing is recorded before this account said yes
+    // (ui/design: composer/voice-consent/*). The question takes this press, as the system's
+    // microphone question does.
+    const consent = gateVoicePress();
+    if (consent !== 'granted') {
+      end(consent === 'declined' ? 'voice-off' : null);
       return;
     }
     const permission = await permissionState();

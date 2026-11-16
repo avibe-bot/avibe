@@ -94,6 +94,7 @@ import type {
 import { DeferredMentionEditor } from './deferredMentionEditor';
 import type { MentionReference } from '../../lib/mentions';
 import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
+import { askVoiceConsent, noteVoiceStatus, voiceConsentForPress } from '../../lib/voiceConsent';
 
 export type ComposerAttachment = {
   localId: string;
@@ -778,9 +779,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         if (available) setVoiceSlotHeld(true);
         setAsrMaxFileBytes(maxFileBytes);
         statusRead.remember({ available, maxFileBytes });
+        noteVoiceStatus(data);
         // Prewarm the cloud token so the first recording uploads straight to
         // avibe.bot with no mint latency (no-op when the cloud is unavailable).
-        if (available) primeCloudToken();
+        // The instance mints none before this account allowed voice input.
+        if (available && voiceConsentForPress() === 'granted') primeCloudToken();
       })
       .catch(() => {});
     return () => {
@@ -1276,6 +1279,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       || recordingStartRef.current
       || voiceSessionsById.has(voiceKey)
     ) {
+      return;
+    }
+    // Voice goes to a third-party AI service: the mic button and ⌥Z ask until this account
+    // said yes, and record nothing meanwhile (ui/design: composer/voice-consent/*).
+    if (voiceConsentForPress() !== 'granted') {
+      askVoiceConsent();
       return;
     }
     const insertion = capturedInsertion ?? captureVoiceInsertion();
