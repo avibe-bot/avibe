@@ -2695,13 +2695,6 @@ pub fn run() {
                     if instance_client::is_main_view(webview.app_handle(), webview.label()) && payload.event() == tauri::webview::PageLoadEvent::Finished {
                         main_document_finished(webview);
                     }
-                    if webview.label() == update_popover::UPDATE_POPOVER
-                        && payload.event() == tauri::webview::PageLoadEvent::Finished
-                    {
-                        if let Some(window) = webview.app_handle().get_webview_window(update_popover::UPDATE_POPOVER) {
-                            update_popover::page_loaded(&window);
-                        }
-                    }
                 })
                 .on_navigation(|webview, url| {
                     if webview.label() == pet::PET_WINDOW {

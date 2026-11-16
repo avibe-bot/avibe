@@ -58,11 +58,18 @@ struct PresentationQueue {
     link: Option<(u64, DeepLinkReturn)>,
     logout: Option<LogoutReceipt>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PresentationSource {
     window: u64,
     document: u64,
     label: String,
     url: String,
+}
+/// An already admitted presentation, retained through off-handler popup work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PopupPresentation {
+    intent: PresentationIntent,
+    source: PresentationSource,
 }
 struct LogoutReceipt {
     result: DirectResult,
@@ -242,7 +249,14 @@ impl PresentationQueue {
     fn can_start(&self, intent: PresentationIntent, label: &str, url: &Url) -> bool {
         self.pending == Some(intent) && (self.source.is_none() || self.source_matches(label, url))
     }
+    fn popup_is_current(&self, presentation: &PopupPresentation) -> bool {
+        self.sequence == presentation.intent.id
+            && self.window == presentation.source.window
+            && self.document == presentation.source.document
+    }
     fn cancel(&mut self) {
+        // Also retire a completed presentation whose popup is still loading.
+        self.sequence += 1;
         self.pending = None;
         self.guard = None;
         self.approval = None;
@@ -839,13 +853,20 @@ pub async fn desktop_client_request(
     request: ClientRequest,
 ) -> Result<ClientReply, String> {
     let client = app.try_state::<Client>().ok_or("desktop_client_unavailable")?;
-    // The update popup is its own window, limited to its page and to this computer's updater.
-    let trusted = if window.label() == crate::update_popover::UPDATE_POPOVER {
-        crate::update_popover::is_page(&window, &client.view.bundle) && crate::update_popover::allows(&request.action)
-    } else {
-        trusted_page(&client, &window)
-    };
-    if !trusted {
+    // Popup requests never enter the Account receipt/return owner. Keep the
+    // original native receiver across GetState's credential-I/O suspension;
+    // a new popup with the same label is a different receiver.
+    if window.label() == crate::update_popover::UPDATE_POPOVER {
+        let receipt = crate::update_popover::admit(&window, &client.view.bundle, &request.action)
+            .ok_or("untrusted_desktop_caller")?;
+        let reply = client.coordinator.request(request).await;
+        return if crate::update_popover::still_current(&window, &client.view.bundle, &receipt) {
+            Ok(reply)
+        } else {
+            Err("untrusted_desktop_caller".into())
+        };
+    }
+    if !trusted_page(&client, &window) {
         return Err("untrusted_desktop_caller".into());
     }
     let coordinator = client.coordinator.clone();
@@ -1129,12 +1150,6 @@ fn present_owned(
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    // While the main window shows another computer, this computer's update panel
-    // opens as a popup over it instead of replacing the page (ui/design:
-    // chrome/remote-update-popup). Nothing navigates, so no guard is needed.
-    if view == "updates" && !local_selected(app) {
-        return crate::update_popover::open(app, &client.view.bundle, client.view.script(true, None));
-    }
     if account_url(&client.view.bundle, view, locale).is_none() {
         return false;
     }
@@ -1257,7 +1272,28 @@ fn apply_presentation(app: &AppHandle) {
     if account_receiver && !trusted_page(&client, &window) {
         return;
     }
-    if intent.guarded {
+    let remote_popup = intent.view == "updates" && !client.coordinator.state().connection.committed.is_local();
+    if remote_popup {
+        let Some(receiver) = route.as_ref() else { return };
+        if !popup_source_allowed(&client, &window, receiver) {
+            return;
+        }
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if !queue.can_start(intent, window.label(), receiver) {
+            return;
+        }
+        if queue.source.is_none() {
+            queue.source = Some(PresentationSource {
+                window: queue.window,
+                document: queue.document,
+                label: window.label().into(),
+                url: receiver.to_string(),
+            });
+        }
+    }
+    // A remote Runtime is retained unchanged. An Account document still owns
+    // recovery material and must approve even when its retained target is remote.
+    if intent.guarded && (account_receiver || !remote_popup) {
         let Some(receiver) = route else { return };
         let committed_receipt = client.coordinator.committed_view_generation();
         let allowed = {
@@ -1345,6 +1381,31 @@ fn apply_presentation(app: &AppHandle) {
             if native.presentation.lock().expect("presentation").account && !trusted_page(&client, &receiver) {
                 return Err(ClientError::new("stale_generation"));
             }
+            if intent.view == "updates" && !client.coordinator.state().connection.committed.is_local() {
+                if !popup_source_allowed(&client, &receiver, &current) {
+                    return Err(ClientError::new("stale_generation"));
+                }
+                let presentation = {
+                    let queue = client.presentations.lock().expect("presentation intent");
+                    if !queue.can_start(intent, receiver.label(), &current) {
+                        return Err(ClientError::new("stale_generation"));
+                    }
+                    PopupPresentation {
+                        intent,
+                        source: PresentationSource {
+                            window: queue.window,
+                            document: queue.document,
+                            label: receiver.label().into(),
+                            url: current.to_string(),
+                        },
+                    }
+                };
+                return if crate::update_popover::open(&app, &native.bundle, native.script(true, None), presentation) {
+                    Ok(())
+                } else {
+                    Err(failure("update popup unavailable"))
+                };
+            }
             let continuation = {
                 let mut queue = client.presentations.lock().expect("presentation intent");
                 if !queue.can_start(intent, receiver.label(), &current) {
@@ -1421,6 +1482,60 @@ fn apply_presentation(app: &AppHandle) {
         native.changed(&client.coordinator.state());
     });
 }
+// Deferred popup construction and showing share the existing window serializer.
+// This does not grant command authority; popup IPC checks its actual receiver.
+pub(crate) async fn popup_window_lock(app: &AppHandle) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let windows = app.try_state::<Client>()?.view.windows.clone();
+    Some(windows.lock_owned().await)
+}
+
+fn popup_source_allowed(client: &Client, receiver: &Webview, current: &Url) -> bool {
+    // trusted_page may ask the event loop for a URL. Never hold presentation or
+    // queue locks across that getter; the event loop also needs those locks.
+    let account = trusted_page(client, receiver);
+    let state = client.view.presentation.lock().expect("presentation");
+    if state.state.connection.committed.is_local() || (state.account && !account) {
+        return false;
+    }
+    let local = client.view.local_origin.lock().expect("local origin");
+    presentation_source_allowed(
+        &state,
+        &client.view.bundle,
+        local.as_ref(),
+        client.coordinator.committed_view_generation(),
+        MAIN_WINDOW,
+        current,
+    )
+}
+
+/// Called with the window serializer held, immediately before a deferred action.
+/// Completion may clear pending, but cannot renew this immutable source receipt.
+pub(crate) fn popup_presentation_current(app: &AppHandle, presentation: &PopupPresentation) -> bool {
+    let Some(client) = app.try_state::<Client>() else {
+        return false;
+    };
+    if client
+        .coordinator
+        .presentation_epoch(presentation.intent.owner)
+        .is_err()
+    {
+        return false;
+    }
+    {
+        let queue = client.presentations.lock().expect("presentation intent");
+        if !queue.popup_is_current(presentation) {
+            return false;
+        }
+    }
+    let Some(receiver) = active_webview(app) else {
+        return false;
+    };
+    receiver.label() == presentation.source.label
+        && receiver
+            .url()
+            .is_ok_and(|url| url.as_str() == presentation.source.url && popup_source_allowed(&client, &receiver, &url))
+}
+
 /// The callback reports actual guarded-event delivery, not merely native eval submission.
 /// A compatible page cancels the event before it performs (or awaits) its own guarded
 /// navigation. An older page that does not know the event leaves it unconsumed and
@@ -2244,7 +2359,7 @@ mod tests {
     /// `NativeView::desktop_update` uses; main's account-page test is passed in.
     #[test]
     fn the_update_popup_may_drive_the_updater_while_main_shows_another_computer() {
-        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        use tauri::{WebviewBuilder, WebviewUrl, WebviewWindowBuilder, WindowBuilder};
 
         let app = tauri::test::mock_app();
         let bundle = Url::parse("tauri://localhost/").unwrap();
@@ -2254,11 +2369,21 @@ mod tests {
                 .unwrap()
         };
         let account_page = || {
-            app.get_webview(MAIN_WINDOW)
+            app.get_webview("main-runtime-1")
                 .is_some_and(|window| window.url().is_ok_and(|url| account_view(&url, &bundle).is_some()))
         };
         // Main shows another computer's page and no popup is open: refused.
-        window(MAIN_WINDOW, "https://studio.avibe.bot/");
+        let physical = WindowBuilder::new(&app, MAIN_WINDOW).build().unwrap();
+        physical
+            .add_child(
+                WebviewBuilder::new(
+                    "main-runtime-1",
+                    WebviewUrl::External("https://studio.avibe.bot/".parse().unwrap()),
+                ),
+                tauri::LogicalPosition::new(0.0, 0.0),
+                tauri::LogicalSize::new(880.0, 600.0),
+            )
+            .unwrap();
         assert!(!updater_caller(app.handle(), &bundle, account_page));
         // The popup on its own page: admitted.
         let popover = window(
@@ -2271,6 +2396,43 @@ mod tests {
             .navigate(Url::parse("tauri://localhost/account/index.html?view=account").unwrap())
             .unwrap();
         assert!(!updater_caller(app.handle(), &bundle, account_page));
+    }
+
+    // A popup completes the presentation without replacing main. Its deferred
+    // build/show must still lose authority on a newer material action, click,
+    // document or physical window; pending alone cannot fence that interval.
+    #[test]
+    fn completed_popup_sources_retire_on_cancel_or_replacement() {
+        for replacement in ["cancel", "presentation", "document", "window"] {
+            let mut queue = PresentationQueue::default();
+            let url: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+            let physical = queue.window_created();
+            queue.document_started(physical, &url);
+            queue.enqueue("updates", 4, false, None);
+            let intent = queue.current(4).unwrap();
+            let presentation = PopupPresentation {
+                intent,
+                source: PresentationSource {
+                    window: queue.window,
+                    document: queue.document,
+                    label: "main-account-2".into(),
+                    url: url.to_string(),
+                },
+            };
+            queue.complete(intent.id);
+            assert!(queue.pending.is_none());
+            assert!(queue.popup_is_current(&presentation));
+            match replacement {
+                "cancel" => queue.cancel(),
+                "presentation" => queue.enqueue("account", 4, true, None),
+                "document" => queue.document_started(physical, &url),
+                "window" => {
+                    queue.window_created();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!queue.popup_is_current(&presentation), "{replacement}");
+        }
     }
 
     #[test]
