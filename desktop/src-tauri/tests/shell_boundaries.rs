@@ -1242,6 +1242,29 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
 }
 
 #[test]
+fn remote_auxiliary_controls_remain_without_a_limitation_menu() {
+    let source = shipping_source("src/lib.rs");
+    assert!(
+        !source.contains("instance-auxiliary-limitation") && !source.contains("auxiliaryIncomplete"),
+        "native menus must not present the retired remote auxiliary notice"
+    );
+    for locale in ["en", "zh"] {
+        let catalog = read_json(crate_dir().join(format!("../../ui/src/i18n/{locale}.json")));
+        assert!(catalog["desktopClient"].get("auxiliaryIncomplete").is_none());
+    }
+    let refresh = source
+        .split("fn refresh_native_controls(")
+        .nth(1)
+        .expect("native control refresh")
+        .split("\n}\n")
+        .next()
+        .expect("refresh body");
+    assert!(refresh.contains("let local = instance_client::local_selected(&handle);"));
+    assert!(refresh.contains("menus.notifications.set_enabled(local)"));
+    assert!(refresh.contains("pet::set_native_available(&handle, local)"));
+}
+
+#[test]
 fn computer_use_menu_constructor_keeps_enabled_and_checked_in_their_slots() {
     let source = shipping_source("src/lib.rs");
     assert!(source
