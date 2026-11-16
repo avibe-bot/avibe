@@ -1,6 +1,7 @@
 import Combine
 import Network
 import UIKit
+import UserNotifications
 import WebKit
 import XCTest
 @testable import Avibe
@@ -1335,6 +1336,7 @@ final class DirectPathAppTests: XCTestCase {
     /// The fault exists only with a transport; the launch after it has none.
     @MainActor
     func testListenerFaultFallsBackToPublicPathOnNextLaunchWithNotificationsOn() async throws {
+        try await requireAHostWithoutNotificationPermission()
         try assertSocketScanSeesListeners()
         let notifications = try NotificationsOn()
         var listening: Set<ListeningSocket> = []
@@ -1424,6 +1426,7 @@ final class DirectPathAppTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
+        try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         let app = try await makeApp(
             directTransport: directTransport,
@@ -1447,7 +1450,7 @@ final class DirectPathAppTests: XCTestCase {
                 line: line
             )
         }
-        XCTAssertGreaterThanOrEqual(notifications.tokensDelivered, 1, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(notifications.providerPatches.arrivals, 1, file: file, line: line)
     }
 
     @MainActor
@@ -1456,6 +1459,7 @@ final class DirectPathAppTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
+        try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         let app = try await makeApp(
             directTransport: directTransport,
@@ -1498,6 +1502,26 @@ final class DirectPathAppTests: XCTestCase {
             file: file,
             line: line
         )
+    }
+
+    /// The notifications-on checks deliver each open's device token
+    /// themselves. On a test host where the App may show alerts, the App's
+    /// real `refreshAPNsRegistration` would also register with APNs, whose
+    /// token reaches every push coordinator at an arbitrary time. Fail
+    /// rather than skip, so the checks cannot go quiet.
+    @MainActor
+    private func requireAHostWithoutNotificationPermission() async throws {
+        let status = await UNUserNotificationCenter.current()
+            .notificationSettings().authorizationStatus
+        switch status {
+        case .notDetermined, .denied:
+            return
+        default:
+            XCTFail(
+                "The notifications-on checks need a test host without notification permission; erase the simulator."
+            )
+            throw DirectTestTimeout()
+        }
     }
 
     /// A launch made with `launchesWithInstanceOneSelected` or
@@ -3401,7 +3425,9 @@ private final class FaultMarkerSpy: DirectFaultMarkerStoring {
 /// resume is answered with a device token, as APNs answers
 /// `registerForRemoteNotifications` (the App delegate hands it to the push
 /// coordinator's `didRegister`). The App's own push coordinator then sends
-/// the provider update, which `providerPatches` holds in flight.
+/// the provider update, which `providerPatches` holds in flight. The App's
+/// real authorization read still runs; the tests require a host without
+/// notification permission, so it never registers with APNs itself.
 @MainActor
 private final class NotificationsOn {
     let keychain = InMemoryPushKeychainStore()

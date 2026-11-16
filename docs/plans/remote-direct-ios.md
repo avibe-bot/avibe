@@ -179,7 +179,7 @@ A **selection** is one opened runtime, between the App's `openRuntime` and `stop
 - the instance authority;
 - the rendezvous generation.
 
-A transport report counts only for the selection it was made for, and is dropped after that selection ends. Before direct is authorized, the controller checks the lease with `MobileSessionCoordinator.isCurrentRuntime`. The App's open path (route preparation, the release of a held open, and WebView registration) asks `keepsSelectedRuntime` instead, so it stands across a selection-keeping request such as the push update an open starts; only direct authorization asks `isCurrentRuntime`. Within a selection, a rendezvous generation that a newer one replaced is never accepted again.
+A transport report counts only for the selection it was made for, and is dropped after that selection ends. Before direct is authorized, the controller checks the lease with `MobileSessionCoordinator.isCurrentRuntime`. The App's open path (route preparation, the release of a held open, and WebView registration) asks `keepsSelectedRuntime` instead, so it stands across a selection-keeping request such as the push update an open starts; the start of an open and direct authorization ask `isCurrentRuntime`. Within a selection, a rendezvous generation that a newer one replaced is never accepted again.
 
 **Every relay records its backend, its selection, and the path generation it was opened on.** The path generation advances on each event below.
 
