@@ -24,14 +24,126 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DIAG_BUILD_RUN: ""
-  DIAG_BUILD_ARTIFACT: ""
+  BUILD_REF: fix/desktop-first-start-not-responding
   RELEASE_BASE: https://dl.avibe.bot/releases/v3.2.6
   MAC_ASSET: Avibe_3.2.6_aarch64-apple-darwin.dmg
   MAC_SUMS: Avibe_3.2.6_aarch64-apple-darwin.SHA256SUMS
 
 jobs:
+  build:
+    # An unsigned, ad-hoc signed aarch64 build of the fix branch, the way
+    # desktop-package builds a manual (non-release) package, without any
+    # environment, secret, signing identity or updater key.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'diag/desktop-first-start' &&
+      github.event.pull_request.base.ref == 'master'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      TARGET: aarch64-apple-darwin
+      DESKTOP_VERSION: 0.0.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ env.BUILD_REF }}
+          persist-credentials: false
+      - name: Pinned Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          git log -1 --format='%H %s' | tee build-head.txt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Resolve build cache identity
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          fingerprint() { python -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'; }
+          echo "rustc=$(rustc -vV | fingerprint)" >> "$GITHUB_OUTPUT"
+          echo "apple=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-build-version; } | fingerprint)" >> "$GITHUB_OUTPUT"
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target/release/.fingerprint
+            desktop/target/release/build
+            desktop/target/release/deps
+          key: ${{ runner.os }}-aarch64-apple-darwin-desktop-package-${{ steps.toolchain.outputs.rustc }}-default-target-${{ steps.toolchain.outputs.apple }}-${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
+      - name: Discard an inexact Rust cache match
+        if: steps.rust-cache.outputs.cache-hit != 'true' && steps.rust-cache.outputs.cache-matched-key != ''
+        run: rm -rf desktop/target/release/.fingerprint desktop/target/release/build desktop/target/release/deps
+      - name: Build Workbench
+        working-directory: ui
+        run: npm ci && npm run build
+      - name: Build bootstrap UI
+        working-directory: desktop
+        run: npm ci && npm run build
+      - name: Prepare package version, updater disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/desktop_release.py prepare --version "$DESKTOP_VERSION" --tag "" --source-sha "" \
+            --config desktop/tauri.release.conf.json --env-file "$GITHUB_ENV" --target "$TARGET"
+          python scripts/desktop_updater.py configure --config desktop/tauri.release.conf.json --env-file "$GITHUB_ENV"
+      - name: Build verified private Runtime
+        run: python desktop/scripts/build-runtime-bundle.py --target "$TARGET"
+      - name: Install pinned driver validation dependency
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --only-binary=:all: "PyYAML==6.0.3"
+      - name: Restore prepared Cua Driver
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            desktop/src-tauri/binaries/cua-driver-aarch64-apple-darwin
+            desktop/src-tauri/binaries/cua-driver-aarch64-apple-darwin.provenance.json
+          key: cua-driver-aarch64-apple-darwin-${{ steps.toolchain.outputs.apple }}-default-target-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
+      - name: Prepare pinned Cua Driver sidecar
+        run: python desktop/scripts/prepare-cua-driver.py --target "$TARGET" --reuse-verified
+      - name: Build the app
+        working-directory: desktop
+        run: >
+          npm run tauri -- build --bundles app --features bundled-runtime
+          --config tauri.release.conf.json -- --locked
+      - name: Ad-hoc sign and pack
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/macos/Avibe.app"
+          codesign --force --sign - --preserve-metadata=identifier,entitlements,flags,runtime "$app/Contents/Helpers/cua-driver"
+          codesign --force --sign - --preserve-metadata=identifier,entitlements,flags,runtime "$app"
+          codesign --verify --deep --strict "$app"
+          mkdir -p "$RUNNER_TEMP/out"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/out/Avibe.app.zip"
+          cp ../build-head.txt "$RUNNER_TEMP/out/"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: diag-build
+          path: ${{ runner.temp }}/out/
+          retention-days: 1
+
   mac:
+    needs: build
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'diag/desktop-first-start' &&
@@ -65,34 +177,19 @@ jobs:
           defaults read -g AppleLanguages || true
           sw_vers; sysctl -n hw.ncpu hw.memsize
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: diag-build
+          path: ${{ runner.temp }}/diag/build
       - name: Get the build under test
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           W="$RUNNER_TEMP/diag"
           cd "$W"
-          if [ -n "$DIAG_BUILD_RUN" ]; then
-            gh run download "$DIAG_BUILD_RUN" --repo "$GITHUB_REPOSITORY" --name "$DIAG_BUILD_ARTIFACT" --dir build
-            find build -maxdepth 4 | head -50
-            dmg="$(find build -name '*.dmg' | head -1)"
-            app_src=""
-            if [ -n "$dmg" ]; then
-              mount="$(hdiutil attach -nobrowse "$dmg" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)"
-              app_src="$(find "$mount" -maxdepth 1 -name '*.app' | head -1)"
-            else
-              app_src="$(find build -name '*.app' -maxdepth 4 | head -1)"
-            fi
-            echo "build: run $DIAG_BUILD_RUN artifact $DIAG_BUILD_ARTIFACT" > "$W/logs/build.txt"
-          else
-            curl --fail --location --retry 3 --output "$MAC_ASSET" "$RELEASE_BASE/$MAC_ASSET"
-            curl --fail --location --retry 3 --output SHA256SUMS "$RELEASE_BASE/$MAC_SUMS"
-            grep "  $MAC_ASSET\$" SHA256SUMS | shasum -a 256 -c -
-            mount="$(hdiutil attach -nobrowse "$MAC_ASSET" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)"
-            app_src="$(find "$mount" -maxdepth 1 -name '*.app' | head -1)"
-            echo "build: released 3.2.6, $MAC_ASSET" > "$W/logs/build.txt"
-          fi
+          ditto -x -k build/Avibe.app.zip build
+          app_src="build/Avibe.app"
+          echo "build: unsigned aarch64 of $BUILD_REF, $(cat build/build-head.txt)" > "$W/logs/build.txt"
           test -n "$app_src"
           ditto "$app_src" /Applications/Avibe.app
           xattr -dr com.apple.quarantine /Applications/Avibe.app 2>/dev/null || true
