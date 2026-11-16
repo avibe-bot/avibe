@@ -774,3 +774,10 @@ it.each(['version-1', 'version-2'])('adopts current labels at %s while preservin
   expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe('keep-default-draft');
   expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('keep-this-draft');
 });
+
+it('protected: an empty new field row says nothing until something else changes', () => {
+  renderEditor(protectedLogin);
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  expect(screen.queryByText(en.vaults.fields.nameRequired)).toBeNull();
+  expect(lastState().dirty).toBe(false);
+});

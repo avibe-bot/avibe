@@ -30,3 +30,11 @@ describe('parseSecureWindowSeal', () => {
     expect(() => parseSecureWindowSeal(asked, reply)).toThrow();
   });
 });
+
+describe('parseSecureWindowSeal in edit mode', () => {
+  it('refuses an answer that saves nothing: the window keeps Save disabled until something is typed', () => {
+    const optional: SecureWindowSealField[] = [{ record: 'LOGIN', label: 'password', required: false }];
+    expect(() => parseSecureWindowSeal(optional, { fields: [{ record: 'LOGIN', generated: false }], establishingVmk: false }, 'edit')).toThrow();
+    expect(parseSecureWindowSeal(optional, { fields: [{ record: 'LOGIN', envelope, generated: false }], establishingVmk: false }, 'edit').fields[0].envelope).toEqual(envelope);
+  });
+});

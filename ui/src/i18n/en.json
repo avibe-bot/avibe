@@ -6460,7 +6460,7 @@
         "closed": "The secure window was closed; nothing was saved. You can try again.",
         "timeout": "The secure window wasn't finished within 5 minutes; nothing was saved. Try again.",
         "blocked": "The browser blocked the secure window. Allow pop-ups for this site and try again.",
-        "reset": "The protected vault was locked by you or reset meanwhile; nothing was saved.",
+        "reset": "The protected vault was locked, reset or taken over by another action meanwhile; nothing was saved.",
         "changeValues": "Change values in the secure window"
       }
     },

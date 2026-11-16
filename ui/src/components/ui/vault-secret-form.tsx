@@ -1671,6 +1671,8 @@ export const VaultSecretForm: React.FC<{
               onClick={() => {
                 setProtection(key);
                 if (plainAdd) rememberAddTier(key);
+                // A Protected value is typed only in the secure window: drop one typed on Standard.
+                if (!isKeypair && key === 'protected') clearStaticValue();
                 // A protected seed-phrase wallet's words are typed only in the sandbox window: drop any
                 // the page holds for a standard one.
                 if (isHd && key === 'protected') resetHd();

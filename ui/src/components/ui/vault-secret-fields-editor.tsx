@@ -154,6 +154,7 @@ export function VaultSecretFieldsEditor({
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
   // Protected: values are changed only in the secure window, opened by Save when asked for here.
   const [changeValues, setChangeValues] = useState(false);
+  const windowFlowRef = useRef(false);
   const fields = vaultFieldNames(current);
   const defaultField = vaultDefaultField(current);
   const isProtected = current.protection === 'protected';
@@ -317,7 +318,8 @@ export function VaultSecretFieldsEditor({
         }
       }
     } catch (err) {
-      const windowMessage = secureWindowFailure(t, err);
+      // Only a failure of the secure window this Save opened reads as one.
+      const windowMessage = windowFlowRef.current ? secureWindowFailure(t, err) : null;
       if (windowMessage !== null) {
         if (windowMessage) setError(windowMessage);
       } else if (hasErrorCode(err, 'secret_conflict')) {
@@ -377,6 +379,7 @@ export function VaultSecretFieldsEditor({
         return false;
       }
     }
+    windowFlowRef.current = secureWindow !== null;
     let windowUsed = false;
     // The default field as the user saw it: its draft follows the default, any other draft must
     // stay an extra field (if another write made it the default meanwhile, that is a conflict).
@@ -470,6 +473,7 @@ export function VaultSecretFieldsEditor({
     } finally {
       captured.clear();
       secureWindow?.close();
+      windowFlowRef.current = false;
     }
   };
 
@@ -636,7 +640,7 @@ export function VaultSecretFieldsEditor({
             // An empty new row is skipped by Save only while nothing else changed; then its blank
             // name is no error, and leaving it says nothing (and moves nothing). Once it blocks Save
             // (it has a value, or other changes make it count), the error shows at once, not on blur.
-            issue={newIssue === 'nameRequired' && !newValue && !dirty && !isProtected ? null : newIssue}
+            issue={newIssue === 'nameRequired' && !newValue && !dirty ? null : newIssue}
             disabled={fieldMutationLocked}
           />
         )}

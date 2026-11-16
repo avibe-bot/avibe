@@ -841,6 +841,8 @@ it.each([
   ['authorization_window_closed', en.vaults.dialog.window.closed],
   ['authorization_cancelled', en.vaults.dialog.window.cancelled],
   ['authorization_window_timeout', en.vaults.dialog.window.timeout],
+  // The page stopped waiting first (the window's answer was lost): still nothing saved.
+  ['sandbox_request_timeout', en.vaults.dialog.window.timeout],
 ])('protected: a secure window that ends with %s saves nothing and says so', async (code, message) => {
   const { VaultSandboxError } = await import('@/lib/vaultSandboxClient');
   vault.sealSecretInWindow.mockRejectedValueOnce(new VaultSandboxError(code, 'x', true));
@@ -862,4 +864,12 @@ it('protected: a blocked secure window opens nothing and says how to allow it', 
   expect(await screen.findByText(en.vaults.dialog.window.blocked)).toBeTruthy();
   expect(vault.sealSecretInWindow).not.toHaveBeenCalled();
   sandbox.windowBlocked = false;
+});
+
+it('drops a value typed on Standard when the secret switches to Protected: no value lingers on the page', async () => {
+  render(form(<VaultSecretForm fixedName="TOKEN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  fireEvent.change(screen.getByPlaceholderText(en.vaults.dialog.valuePlaceholder), { target: { value: 'public-test-draft' } });
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${en.vaults.dialog.protectedProtection}`) }));
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${en.vaults.dialog.standardProtection}`) }));
+  expect((screen.getByPlaceholderText(en.vaults.dialog.valuePlaceholder) as HTMLInputElement).value).toBe('');
 });

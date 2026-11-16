@@ -186,6 +186,8 @@ export type VaultSandboxSealResult = {
   addresses?: SigningAddresses;
 };
 
+const SECURE_WINDOW_SEAL_TIMEOUT_MS = 305_000;
+
 /** One value a person types in the secure window (contract "seal a whole Protected secret with values
  *  typed in the secure window" v1.1). `record` is the record name it is sealed under; `label` is the
  *  field's name as shown; a field that is not `required` may be left empty, which keeps its value. */
@@ -201,7 +203,7 @@ const isRecordLike = (value: unknown): value is Record<string, unknown> =>
 
 /** Checks the window's answer against what was asked: the same records in the same order, an
  *  envelope for every required field, and nothing else trusted. */
-export function parseSecureWindowSeal(fields: readonly SecureWindowSealField[], reply: unknown): SecureWindowSealResult {
+export function parseSecureWindowSeal(fields: readonly SecureWindowSealField[], reply: unknown, mode: 'create' | 'edit' = 'create'): SecureWindowSealResult {
   const bad = (message: string) => new VaultSandboxError('invalid_response', message);
   if (!isRecordLike(reply) || !Array.isArray(reply.fields) || typeof reply.establishingVmk !== 'boolean') {
     throw bad('secure-window seal returned an unexpected result');
@@ -227,6 +229,8 @@ export function parseSecureWindowSeal(fields: readonly SecureWindowSealField[], 
       generated: entry.generated,
     };
   });
+  // The window saves an edit only once something was typed (contract v1.1): an empty answer is not one.
+  if (mode === 'edit' && !out.some((field) => field.envelope)) throw bad('secure-window seal returned no value for an edit');
   return { fields: out, establishingVmk: reply.establishingVmk };
 }
 
@@ -1031,11 +1035,12 @@ export class VaultSandboxClient {
     authorizationWindow: string,
   ): Promise<SecureWindowSealResult> {
     const reply = await this.request<unknown>('seal', { kind: 'static', inputMode: 'secure-window', ...payload }, {
-      timeoutMs: INTERACTIVE_TIMEOUT_MS,
+      // The window's own 5-minute limit plus a short grace, so its own timeout answer normally wins.
+      timeoutMs: SECURE_WINDOW_SEAL_TIMEOUT_MS,
       interactive: true,
       authorizationWindow,
     });
-    return parseSecureWindowSeal(payload.fields, reply);
+    return parseSecureWindowSeal(payload.fields, reply, payload.mode);
   }
 
   /** Whether the pinned build offers an optional operation (from its `ready` capabilities). */

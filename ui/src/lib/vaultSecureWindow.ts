@@ -12,7 +12,9 @@ export function secureWindowFailure(t: TFunction, err: unknown): string | null {
   switch (code) {
     case 'authorization_cancelled': return t('vaults.dialog.window.cancelled');
     case 'authorization_window_closed': return t('vaults.dialog.window.closed');
-    case 'authorization_window_timeout': return t('vaults.dialog.window.timeout');
+    case 'authorization_window_timeout':
+    // The page stopped waiting (the window's answer was lost): no record came back, nothing was saved.
+    case 'sandbox_request_timeout': return t('vaults.dialog.window.timeout');
     case 'authorization_popup_blocked': return t('vaults.dialog.window.blocked');
     case 'vault_operation_aborted':
     case 'sandbox_reset': return t('vaults.dialog.window.reset');
