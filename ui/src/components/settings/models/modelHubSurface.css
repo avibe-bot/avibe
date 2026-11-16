@@ -46,7 +46,6 @@
   --model-hub-wash-channel: 255 255 255;
   --model-hub-wash-03: rgb(var(--model-hub-wash-channel) / 1.2%);
   --model-hub-wash-05: rgb(var(--model-hub-wash-channel) / 2%);
-  --model-hub-wash-06: rgb(var(--model-hub-wash-channel) / 2.4%);
   --model-hub-wash-08: rgb(var(--model-hub-wash-channel) / 3.1%);
   --model-hub-wash-0a: rgb(var(--model-hub-wash-channel) / 3.9%);
   --model-hub-wash-0f: rgb(var(--model-hub-wash-channel) / 5.9%);

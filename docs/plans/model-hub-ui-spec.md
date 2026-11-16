@@ -350,7 +350,7 @@ half named in its Missing cell has an owner.
 | G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** | a way to retire a *discovered* model from the drawn inventory; ~~a place to remember that it was retired~~ | `DELETE /api/models/sources/<source_id>/models/<model_id>` now persists `models[].retired: true` for a discovered row instead of deleting it. `source.schema.json` keeps that row readable, never supplying, and refresh never revives it; §4.5 applies the same exact-hop and last-supplier guards. §1.6 registers that representation as the ordinary row chrome with muted ink and the existing tag component. Frame 06 still draws removal only for manual entries, so no registered control invokes the discovered-row route; only that producer half remains live instead of treating wire reachability as a UI consumer. |
 | G-9 | Default membership guard | Existing exact-plan fields | Sources PUT and compatibility reorder compare effective plans. Pure reorder needs no guard; membership removal may require an exact-plan wire confirmation. Default routing Save performs that handshake once without a second user confirmation (§1.3). |
 | G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one — **registered against the runtime install contract** | ~~a server-side install state, and the route that enters it~~ nothing | `POST /api/models/runtime/install` is the idempotent producer. `RuntimeDependency.status.health: installing` survives reload, successful verification settles at `not_started`, and failure settles at `not_installed` with the closed `status.error_key`. §1.0 and §1.9 consume that one machine; any mounted surface observing durable `installing` owns the derived 2s status loop, while a held initiating sequence only decides whether settlement lands at Not started or continues through Starting. Unmount stops the loop; reload owns G-10's first read and restores no intent. |
-| G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field and uses the same set for mode dispatch, rows and the count pill. Source presence is evaluated first so an empty installed set cannot hide retained Sources; only `sources == []` + the empty set enters No backend found. |
+| G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field and uses the same set for mode dispatch, rows and the count pill. Source presence is evaluated first so an empty installed set cannot hide retained Sources; only `sources == []` + the empty set enters No backend found. *(Superseded 2026-11-17: §1.8 removed.)* |
 | G-12 | 01 upstream card and 06 header, `needs_action` — **registered by frame 12** | ~~the control that replaces a dead credential~~ nothing | §1.11 registers the two repair producers drawn on the source cards: 更换 Key sends the credential-replacement flow to `PUT /api/models/sources/<id>/credential`, and 重新授权 starts `POST /api/models/sources/<id>/reauth`. §1.1 and §1.6 cite that owner instead of pointing at each other. Kept as a registered row so the former absence and its closing frame remain auditable |
 | G-13 | Default routing save | Complete default order and guard plan | One Save applies defaults and their inherited-route impact, automatically echoing one exact server plan if needed. Sources PUT preserves manual arrays and returns authoritative AgentSupply. A changed plan or failed save retains the draft; an ambiguous outcome is read back before another write. |
 | G-14 | 08 adopt-gateway confirm, `effects.1` — **registered against the mode transaction** | ~~the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source~~ nothing | A qualifying `direct` → `hub` mode `PATCH` now atomically adopts the recognized CLI login as the first singleton `native_cli` Source and returns the updated `AgentSupply`; an absent or unrecognized login or an existing native Source creates and reorders nothing, and repeats create no duplicate. §1.9's consequence pair states both branches and never treats `cli_present` as recognition evidence; its M5 handoff rereads Sources before the committed result lands because the response cannot carry the possibly created Source. |
@@ -1019,8 +1019,8 @@ state exit; held intent never bypasses the evidence column.
 | §1.7 | Exhausted | The head is unavailable and **no** candidate remains | F5 | `gateway.supply.none` | Any candidate recovers → Takeover or Nominal |
 | §1.7 | Multiple takeovers | More than one backend was rerouted | F5 | `takeover.pill` | Each backend recovers independently |
 | §1.7 | Loading / Empty / Unreachable | As §1.0 | As §1.0 | — | As §1.0 |
-| §1.8 | Ready (first run) | `installedAgents` is nonempty, every member is in 直连, and no source exists | F5 | `direct.card.current`, `direct.card.current.sub`, `direct.pill.direct`, `direct.backend.claude.detail`, `direct.backend.codex.detail`, `direct.backend.opencode.detail`, `direct.benefits.title`, `direct.benefits.1` … `direct.note.perBackend`, `shell.allDirect` | 切换到网关 on a row → 10's confirm for that backend; a source added or an installed backend switched → 01 |
-| §1.8 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this is that same first paint seen from the direct home: the runtime status failing or reading `down` → Unreachable, `GET /api/models/sources` failing → Sources unread, per-backend supply failing → Partial. Neither page read may be dropped into Unreachable, whose entry is a runtime-status reading: this frame needs the source list to tell *Ready (first run)* from *Retained sources*, and needs the supply read to derive `installedAgents`, so a read that failed is what has to be said `[derived]` D-34 | — | Payload arrives → Retained sources when any Source exists, even with `installedAgents` empty; otherwise No backend found when `installedAgents` is empty, Ready (first run) when every nonempty member is direct, or 01 when any installed member is on Hub. These are exactly §1.8's branch rules below |
+| §1.8 | Ready (first run) | `installedAgents` is nonempty, every member is in 直连, and no source exists | F5 | `direct.card.current`, `direct.card.current.sub`, `direct.pill.direct`, `direct.backend.claude.detail`, `direct.backend.codex.detail`, `direct.backend.opencode.detail`, `direct.benefits.title`, `direct.benefits.1` … `direct.note.perBackend`, `shell.allDirect` | 切换到网关 on a row → 10's confirm for that backend; a source added or an installed backend switched → 01 *(Superseded 2026-11-17: §1.8 removed.)* |
+| §1.8 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this is that same first paint seen from the direct home: the runtime status failing or reading `down` → Unreachable, `GET /api/models/sources` failing → Sources unread, per-backend supply failing → Partial. Neither page read may be dropped into Unreachable, whose entry is a runtime-status reading: this frame needs the source list to tell *Ready (first run)* from *Retained sources*, and needs the supply read to derive `installedAgents`, so a read that failed is what has to be said `[derived]` D-34 | — | Payload arrives → Retained sources when any Source exists, even with `installedAgents` empty; otherwise No backend found when `installedAgents` is empty, Ready (first run) when every nonempty member is direct, or 01 when any installed member is on Hub. These are exactly §1.8's branch rules below *(Superseded 2026-11-17: §1.8 removed.)* |
 | §1.8 | No backend found | No Source exists **and** `installedAgents` is empty: every `AgentSupply.cli_present` is false `[contract]` | F5 | `direct.empty.title`, `direct.empty.body`, `direct.empty.install` | **Install a backend CLI and reload.** Neither card renders and the pill is absent; a Source appearing selects 01, while an installed Agent appearing re-dispatches the no-Source page by mode. Hidden persisted modes cannot suppress this zero-installed branch |
 | §1.8 | Retained sources | At least one Source exists, regardless of whether `installedAgents` is empty, all direct or contains a Hub member — reachable through `adopt.undo.3` and retained storage `[contract]` | F5 | — | The page is 01: render the upstream module and exactly the zero or more groups in `installedAgents`. An empty installed set renders zero groups and is never quantified or described as “all direct.” This frame stays absent until the last Source is removed, when the no-Source branch is evaluated |
 | §1.9 | Default | 切换到网关 pressed on a backend row | F5 | `adopt.title` … `adopt.undo.3`, `adopt.confirm`, `adopt.cancel` | 取消 → dismiss unchanged; 切换到网关 → Committing |
@@ -1080,7 +1080,7 @@ a different key.
 
 | Slot | Filled with | Absent when | Interpolated by |
 | --- | --- | --- | --- |
-| `{{count}}` | A cardinality. The i18next plural family on the key picks the form; the number is never written into the singular text by hand. | Always present | `addKey.pull.result`, `gateway.moreModels`, `gateway.modelCount`, `guard.count`, `shell.allDirect`, `sourceDetail.refetch.removed`, `sourceDetail.summary`, `takeover.pill`, `upstream.count` |
+| `{{count}}` | A cardinality. The i18next plural family on the key picks the form; the number is never written into the singular text by hand. | Always present | `addKey.pull.result`, `gateway.moreModels`, `gateway.modelCount`, `guard.count`, `shell.allDirect`, `sourceDetail.refetch.removed`, `sourceDetail.summary`, `takeover.pill`, `upstream.count` (`shell.allDirect` removed 2026-11-17) |
 | `{{backend}}` | The backend's product name — Claude Code, Codex, opencode — never the internal id. | Always present | `adopt.subtitle`, `adopt.title`, `adopt.undo.2`, `adopt.undo.3`, `guard.gap.subject`, `order.title`, `upstream.state.supplyingNative` |
 | `{{vendor}}` | The upstream vendor's product name, as the user chose it. | Always present | `addSub.title`, `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `adopt.effects.1` |
 | `{{host}}` | The source's host, as entered, without scheme or path. | **Absent when the source has no entered host** `[contract]`: `base_url` is `api_key`-kind only, null there means the vendor's official endpoint, and a subscription may not carry one at all. §1.6 states what the one string that interpolates it renders instead. | `sourceDetail.summary` |
@@ -1374,7 +1374,7 @@ independent of this runtime status.
 
 | `RuntimeDependency.status.health` `[contract]` | Pill | Recovery |
 | --- | --- | --- |
-| `ok` | `shell.running` (or the all-direct summary) | none |
+| `ok` | `shell.running` (or the all-direct summary) | none *(Superseded 2026-11-17: §1.8 removed.)* |
 | `degraded` | `shell.degraded` | none; the engine is still running |
 | `down` | `shell.unavailable` when enabled, otherwise `shell.stopped` | Retry starts the engine |
 | `not_started` | `shell.unavailable` when enabled, otherwise `shell.notStarted` | Retry starts the engine |
@@ -1418,13 +1418,13 @@ about the string. So each count-bearing key needs one of the same two shapes the
 rule asks for below — a **branch guarantee** that its surface is unreachable at zero, or
 a **zero-case string** that says the true thing instead — and the section that renders
 the key is where that shape is chosen, since only that section knows what zero means
-there. §1.8 takes the guarantee for `shell.allDirect` (no installed backend, no pill),
+there. §1.8 took the guarantee for `shell.allDirect` (removed 2026-11-17) (no installed backend, no pill),
 §1.6 takes the second shape for `sourceDetail.summary` (an empty inventory gets
 `empty` / `emptyNeverFetched`, not 「0 个型号」), §1.5 the second shape for
 `addKey.pull.result` (a pull that reached the source and found nothing gets
 `addKey.pull.empty`, not 「拉到 0 个型号」).
 
-The count-bearing keys in this file are `shell.allDirect`, `upstream.count`,
+The count-bearing keys in this file are `shell.allDirect`, `upstream.count`, (`shell.allDirect` removed 2026-11-17, §1.8)
 `gateway.modelCount`, `gateway.moreModels`, `addKey.pull.result`, `guard.count`,
 `sourceDetail.summary`, `sourceDetail.refetch.removed` and `takeover.pill` — nine, all
 under `models.hub.*`;
@@ -1482,8 +1482,8 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `shell.degraded` `[derived]` | 网关降级运行 | Gateway running degraded |
 | `shell.notStarted` `[derived]` | 模型网关尚未就绪 | Gateway not ready |
 | `shell.notInstalled` `[derived]` | 网关组件未安装 | Gateway component not installed |
-| `shell.allDirect_one` `[frame]` | {{count}} 个后端都在直连 | The only backend is direct |
-| `shell.allDirect_other` `[frame]` | {{count}} 个后端都在直连 | All {{count}} backends are direct |
+| `shell.allDirect_one` `[frame]` | {{count}} 个后端都在直连 | The only backend is direct *(removed 2026-11-17)* |
+| `shell.allDirect_other` `[frame]` | {{count}} 个后端都在直连 | All {{count}} backends are direct *(removed 2026-11-17)* |
 | `shell.starting` `[derived]` | 正在启动… | Starting… |
 | `shell.unsupported` `[derived]` | 这个平台还没有网关组件 | No gateway component for this platform yet |
 | `shell.closed.off.title` `[frame]` | 模型网关尚未就绪 | Model gateway is not ready |
@@ -1842,6 +1842,10 @@ pass.
 ---
 
 ### 1.1 Frame 01 `pWQfB` — Overview (upstream + gateway)
+
+*Amendment 2026-11-17:* this is the only body of the 供应商与路由 tab; Frame 09 is removed
+(§1.8). An installed CLI backend switched off in Settings › Backends is drawn here as the
+folded off row the §1.8 amendment of 2026-11-16 describes.
 
 **The question it answers:** *where do my tokens come from, and who is using
 which one right now?* Read left to right it is one sentence: these sources exist →
@@ -4493,8 +4497,12 @@ condition needs every listed backend in 直连, but the server lists one row per
 always on the gateway: the default supply is `mode="hub"`, loading rejects any other mode
 (`model_hub.agents.vibey.mode must be hub`), and a config written before Vibey existed
 gets a hub Vibey added on load (`ModelHubConfig.__post_init__`). Only fixtures that left
-Vibey out ever drew it. The rest of this section is kept as history; the switched-off row
-and the per-backend 「交给模型网关管理」 live on the gateway cards (§1.1).
+Vibey out ever drew it. The rest of this section is kept as history, except the
+2026-11-16 switched-off amendment below, which stays in force for the gateway cards
+(§1.1); the per-backend 「交给模型网关管理」 is the gateway card's own. Every other place in
+this file that names the home, `direct.*` copy other than `direct.action.refreshAgents`,
+or `shell.allDirect` / `shell.allOff` (G-11, the §1.8 state rows, the `{{count}}` list, the
+`ok` pill row, the §1.0 copy table) is superseded by this amendment.
 
 **The question it answers:** *nothing here is on a gateway and there are no sources —
 what is this page, and why would I want one?* It is the same page as 01, in the state
