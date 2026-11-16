@@ -248,12 +248,9 @@ final class AppModel: ObservableObject {
         _ controller: WebViewController,
         for runtime: MobileRuntimeContext
     ) {
-        // The view makes its WebView right after the open, while the push
-        // update that open started may already be running: that request
-        // keeps the selection, so it does not abandon the browser.
         guard
             route == .browser(runtime),
-            sessionCoordinator.keepsSelectedRuntime(runtime)
+            sessionCoordinator.isCurrentRuntime(runtime)
         else {
             recordRuntimeReleaseBarrier(
                 controller.invalidateForAccountTransition()
