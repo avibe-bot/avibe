@@ -268,6 +268,11 @@ there rather than expanding this index.
   panel shows) keeps its catalog key, and the CLI renders its English entry
 - frontend user-facing strings must go through `ui/src/i18n/en.json` and `ui/src/i18n/zh.json`
 - never hardcode user-visible display text in handlers, platform adapters, or React components
+- user-visible copy must not expose internal stages, roadmaps, or unfinished
+  state (Phase 1, MVP, coming soon, not supported yet, still being built);
+  state a real limitation as a fact the user can act on, or show nothing.
+  `tests/test_user_copy_unfinished_state.py` guards every shipped catalog;
+  a legitimate match needs an explicit `ALLOWED` entry with its reason
 
 ### Python and Module Conventions
 
