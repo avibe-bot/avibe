@@ -3650,7 +3650,7 @@ def _attach_signed_sign_operation_context(
             if new_bitcoin:
                 vault_service.validate_sign_request(
                     conn, request_id, name=persisted_name, scheme=persisted_scheme,
-                    digest=persisted_digest, signing_context=signing_context,
+                    digest=persisted_digest, signing_context=signing_context, derivation=delivery.get("derivation"),
                 )
                 release["signingKey"] = delivery["signing_key"]
                 release["sandboxCohort"] = {key: delivery["bitcoin_cohort"][key] for key in ("buildHash", "manifestHash")}
@@ -6126,7 +6126,7 @@ def vault_sign(payload: dict) -> dict:
     Standard-tier local keypairs are relayed to ``avault sign``. Protected-tier keypairs
     are browser-signed; the daemon accepts and audits the public signature object only.
     """
-    from storage import vault_crypto, vault_service
+    from storage import vault_bitcoin, vault_crypto, vault_service
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
@@ -6202,6 +6202,9 @@ def vault_sign(payload: dict) -> dict:
             )
             vault_service.validate_bitcoin_signing_context(
                 signing_context, digest=digest, scheme=scheme, signing_key=signing_public_key,
+                return_scripts=vault_service.protected_hd_bitcoin_return_scripts(
+                    vault_service.require_secret_access(conn, name), derivation,
+                ) if vault_bitcoin.needs_ecdsa_preflight(signing_context) else None,
             )
             if scheme == "schnorr-secp256k1-bip341-keypath":
                 vault_service.require_compressed_signing_public_key(signing_public_key)
@@ -6260,12 +6263,13 @@ def vault_sign(payload: dict) -> dict:
                             status=409,
                         )
                     if vault_service._is_new_bitcoin_delivery(delivery):
-                        from storage import vault_bitcoin
-
                         try:
                             reviewed = vault_bitcoin.validate_ecdsa_context(
                                 persisted_context, expected_digest=persisted_digest,
                                 public_key=delivery["signing_key"]["public_key"],
+                                return_scripts=vault_service.protected_hd_bitcoin_return_scripts(
+                                    vault_service.require_secret_access(conn, name), derivation,
+                                ),
                             )
                             signature = vault_bitcoin.verify_ecdsa_result(reviewed, signature).signature
                         except vault_bitcoin.BitcoinContextError as exc:
@@ -6301,6 +6305,9 @@ def vault_sign(payload: dict) -> dict:
                         "secret_name": request.get("secret_name"),
                     }
                     protected_response = {"ok": True, "signature": signature, "request": request}
+                    result_fields = _hd_bitcoin_signing_result_fields(delivery.get("derivation"), delivery.get("signing_key"))
+                    if result_fields:
+                        protected_response.update(derivation=delivery["derivation"], **result_fields)
             else:
                 if ed25519_unavailable is not None:
                     raise _vault_api_error_from_avault(ed25519_unavailable, prefix="avault sign failed")
