@@ -293,6 +293,9 @@ async def test_failover_strips_opaque_history_for_another_origin_or_source(tmp_p
                     **hop["request_headers"],
                     "anthropic-beta": "fixture-beta",
                     "User-Agent": "fixture-agent",
+                    # A non-OpenCode caller cannot opt into session forwarding,
+                    # even when the same request is reused for a fallback.
+                    "X-Session-Id": "ses_must_not_leave_vibey_ingress",
                 },
                 json={**common, **signed},
             ) as response:

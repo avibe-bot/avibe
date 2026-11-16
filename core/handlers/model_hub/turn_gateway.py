@@ -49,7 +49,7 @@ from .provenance import (
 from .hosted_admission import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, PIN_UNAVAILABLE_CODE
 from .hosted_images import IMAGE_CALL_MAX_BYTES
 from .hosted_turn import IMAGE_TOOL, TurnHostedTools
-from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
+from .request import ModelHubRequest, forwarded_caller_headers
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
 from .stream_wire import (
@@ -1238,8 +1238,9 @@ class ModelHubTurnGateway:
             return outcome
 
         try:
+            forwarded = forwarded_caller_headers(backend)
             caller_headers = {
-                name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS
+                name.lower(): value for name, value in request.headers.items() if name.lower() in forwarded
             }
             if backend == "opencode" and protocol == "openai_chat":
                 translation = translate_opencode_tool_names(payload)

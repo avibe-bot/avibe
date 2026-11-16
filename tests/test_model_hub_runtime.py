@@ -1719,6 +1719,36 @@ def test_a_claude_model_is_registered_with_the_thinking_it_takes_upstream(tmp_pa
     }
 
 
+def test_opencode_go_source_forwards_the_client_session_header_only(tmp_path: Path) -> None:
+    """OpenCode Go needs ``x-opencode-session``; copy OpenCode's per-session id, and only for that provider."""
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    go_ref = store.store_api_key("go-secret-value", base_url="https://opencode.ai/inference/go/openai/v1")
+    other_ref = store.store_api_key("other-secret-value", base_url="https://api.example.test/v1")
+    lookalike_ref = store.store_api_key("look-secret-value", base_url="https://opencode.ai.evil.test/inference/go/v1")
+    zen_ref = store.store_api_key("zen-secret-value", base_url="https://opencode.ai/zen/v1")
+    store.sync_sources([
+        _binding(go_ref, source_id="src_gosource01", base_url="https://opencode.ai/inference/go/openai/v1"),
+        _binding(other_ref, source_id="src_othersrc01"),
+        _binding(lookalike_ref, source_id="src_lookalike1", base_url="https://opencode.ai.evil.test/inference/go/v1"),
+        _binding(zen_ref, source_id="src_zensource1", base_url="https://opencode.ai/zen/v1"),
+    ])
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir, runtime_secrets=runtime_secrets,
+        sources=store.list_sources(), state_store=store,
+    )
+    entries = {
+        entry["base-url"]: entry for entry in yaml.safe_load(config_path.read_text())["openai-compatibility"]
+    }
+    # A ``$`` value is copied from the client's request per call: the id is the client's, never fixed here.
+    assert entries["https://opencode.ai/inference/go/openai/v1"]["headers"] == {
+        "x-opencode-session": "$X-Session-Id"
+    }
+    for url in ("https://api.example.test/v1", "https://opencode.ai.evil.test/inference/go/v1", "https://opencode.ai/zen/v1"):
+        assert "headers" not in entries[url]
+
+
 def test_config_generation_is_private_and_never_logs_secrets(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -5866,6 +5896,95 @@ def test_engine_client_sends_the_caller_user_agent_instead_of_its_own() -> None:
     assert received["anthropic-beta"] == "interleaved-thinking"
     assert received["authorization"] == "Bearer gateway-token"
     assert "x-api-key" not in received
+
+
+@pytest.mark.parametrize(("protocol", "vendor", "base_url", "allowed"), [
+    pytest.param("openai_chat", "custom", "https://opencode.ai/inference/go/openai/v1", True, id="go"),
+    pytest.param("openai_chat", "custom", "https://www.opencode.ai/inference/go/v1", True, id="go-www"),
+    pytest.param("openai_chat", "custom", "https://OPENCODE.AI/inference/go", True, id="go-root"),
+    pytest.param("openai_chat", "custom", "https://api.example.test/v1", False, id="custom-chat"),
+    pytest.param("anthropic", "anthropic", "https://api.anthropic.com", False, id="anthropic"),
+    pytest.param("openai_responses", "codex", "https://api.openai.com/v1", False, id="codex-responses"),
+    pytest.param("google", "google", "https://generativelanguage.googleapis.com", False, id="google"),
+    pytest.param("anthropic", "custom", "https://opencode.ai/inference/go/anthropic", False, id="go-anthropic"),
+    pytest.param("openai_responses", "custom", "https://opencode.ai/inference/go/openai/v1", False, id="go-responses"),
+    pytest.param("google", "custom", "https://opencode.ai/inference/go/google", False, id="go-google"),
+    pytest.param("openai_chat", "custom", "https://opencode.ai/zen/v1", False, id="zen"),
+    pytest.param("openai_chat", "custom", "https://opencode.ai.evil.test/inference/go/v1", False, id="lookalike-host"),
+    pytest.param("openai_chat", "custom", "https://opencode.ai/inference/gopher/v1", False, id="lookalike-path"),
+    pytest.param("openai_chat", "openai", None, False, id="official-default"),
+    pytest.param("openai_chat", "custom", None, False, id="no-endpoint"),
+])
+@pytest.mark.parametrize("session_id", [None, "ses_opencode_sentinel"])
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
+def test_engine_client_session_header_follows_each_selected_source(protocol, vendor, base_url, allowed, session_id, stream):
+    """The engine must not interpret OpenCode's ID on any non-Go attempt.
+
+    YAML-only tests miss CPA's built-in session handling. Capture real engine-bound
+    HTTP while reusing one request across Go/non-Go/retry attempts; neither stripping
+    shared metadata nor gating on the caller's model alias protects both directions.
+    """
+    from aiohttp import web
+
+    async def run() -> None:
+        received = []
+
+        async def respond(request: web.Request) -> web.Response:
+            received.append((dict(request.headers), await request.json()))
+            # A terminal response avoids mocking either upstream protocol translation
+            # or stream framing: this test owns only the engine's incoming request.
+            return web.json_response({"error": {"type": "invalid_request_error", "message": "fixture"}}, status=400)
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", respond)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            go = SourceRecord(
+                source_id="src_gofixture1", vendor="custom", protocol="openai_chat",
+                base_url="https://opencode.ai/inference/go/openai/v1", credential_ref="cred_gofixture1",
+                allowed_origins=(), model_ids=("model-a",), prefix="source-go",
+            )
+            candidate = SourceRecord(
+                source_id="src_otherfixture1", vendor=vendor, protocol=protocol, base_url=base_url,
+                credential_ref="cred_otherfixture1", allowed_origins=(), model_ids=("model-a",), prefix="source-other",
+            )
+            payload = {
+                "model": "opencode-go-alias",
+                "messages": [
+                    {"role": "system", "content": "Keep this prompt prefix unchanged."},
+                    {"role": "user", "content": "Reply OK."},
+                ],
+            }
+            headers = {"User-Agent": "opencode/fixture"}
+            if session_id is not None:
+                headers["X-Session-Id"] = session_id
+            request = ModelHubRequest(payload, protocol="openai_chat", headers=headers)
+            original = json.loads(json.dumps(payload))
+            client = EngineClient(EngineConnection(
+                base_url=f"http://127.0.0.1:{runner.addresses[0][1]}",
+                management_key="fixture-management", gateway_token="fixture-gateway",
+            ))
+            # One metadata object covers both directions and a repeat of each source.
+            for selected, forwards in ((go, True), (candidate, allowed), (go, True), (candidate, allowed)):
+                handle = await client.invoke(
+                    selected, "model-a", request, stream=stream,
+                    request_protocol=request.protocol, request_headers=request.headers,
+                )
+                await handle.outcome()
+                wire_headers, body = received[-1]
+                wire_headers = {key.lower(): value for key, value in wire_headers.items()}
+                assert wire_headers.get("x-session-id") == (session_id if forwards else None)
+                assert wire_headers["user-agent"] == "opencode/fixture"
+                assert body == {**original, "model": f"{selected.prefix}/model-a", "stream": stream}
+                assert request == original
+                assert request.headers == headers
+            assert len(received) == 4
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
 
 
 def test_adapter_restores_source_projection_when_reload_fails(tmp_path: Path) -> None:
@@ -11209,3 +11328,14 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
             assert not client.patches
 
     asyncio.run(run())
+
+
+def test_session_header_reaches_the_engine_only_for_opencode() -> None:
+    """OpenCode's ``X-Session-Id`` crosses to the engine for OpenCode alone; Claude and Codex keep the old set."""
+    from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS, forwarded_caller_headers
+
+    assert "x-session-id" in forwarded_caller_headers("opencode")
+    assert forwarded_caller_headers("opencode") >= FORWARDED_CALLER_HEADERS
+    for backend in ("claude", "codex", "vibey"):
+        assert forwarded_caller_headers(backend) == FORWARDED_CALLER_HEADERS
+    assert "x-session-id" not in FORWARDED_CALLER_HEADERS
