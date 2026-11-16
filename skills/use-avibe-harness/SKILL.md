@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.3.1
+version: 0.3.2
 ---
 
 # Use Avibe Harness
@@ -29,9 +29,9 @@ A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and 
 | Continue an existing Session | `vibe agent run --session-id <id> --message ...` |
 | Branch from this Session's context | `vibe agent run --fork-self --message ...` |
 | Bring a Session to the user | `vibe session update --session-id <id> --visible` |
-| Time trigger | `vibe task add --cron "<expr>" --message "..."` (or `--at "<ISO-8601>"`) |
-| Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell "<cmd>"` |
-| External signal | `vibe watch add --name "<label>" --message "<what to do>" -- <cmd>` |
+| Time trigger | `vibe task add --cron "<expr>" --message '...'` (or `--at "<ISO-8601>"`) |
+| Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell '<cmd>'` |
+| External signal | `vibe watch add --name '<label>' --message '<what to do>' -- <cmd>` |
 | Live runs, Watches, Tasks, anomalies | `vibe harness status` |
 | History | `vibe runs list`, `vibe runs show <run-id>`, `vibe data query` |
 | Recurring specialist role | `vibe agent create` or `vibe agent update`, plus Tasks, Watches, or runs |
@@ -44,7 +44,7 @@ Dispatch inputs name how to report. If the recipient is idle without writing bac
 Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation or receipt, does not re-arm a pair, and closes a reverse pair. It rejects `--sync` and forks/new Sessions; it does not change delivery. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
 
 ### Tasks and Watches
-Tasks and Watches created from an Agent shell report to this Session by default. Write cron weekdays as names (`0 9 * * mon-fri`); numeric weekdays are rejected. A command Task is silent on success and sends a failure notice naming the exit code; `--on-failure agent --message "..."` hands each failure to an Agent instead.
+Tasks and Watches created from an Agent shell report to this Session by default. Write cron weekdays as names (`0 9 * * mon-fri`); numeric weekdays are rejected. A command Task is silent on success and sends a failure notice naming the exit code; `--on-failure agent --message '...'` hands each failure to an Agent instead.
 
 Watch waiter contract: exit `0` only for one new reportable event, a retry code (default `75`) while still waiting, and `64` with `avibe-watch: no-event` on stderr for a quiet cycle with no Agent Run, which retires a once Watch and re-arms a forever one. A forever Watch needs a durable cursor, state transition, or cooldown so a condition that persists is not reported again; Avibe pauses a Watch that reports six events within 60 seconds.
 

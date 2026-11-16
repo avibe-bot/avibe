@@ -47,7 +47,10 @@
       },
       "local": {
         "name": "小明的 Mac",
-        "remote_access": "off"
+        "remote_access": "off",
+        "instance_id": null,
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -63,7 +66,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     }
   },
   "stale": {
@@ -114,7 +118,10 @@
       },
       "local": {
         "name": "小明的 Mac",
-        "remote_access": "off"
+        "remote_access": "off",
+        "instance_id": null,
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -130,7 +137,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "error": {
       "code": "stale_generation"
@@ -184,7 +192,10 @@
       },
       "local": {
         "name": "小明的 Mac",
-        "remote_access": "off"
+        "remote_access": "off",
+        "instance_id": null,
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -200,7 +211,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "error": {
       "code": "pairing_redeem_pending",
@@ -245,7 +257,10 @@
       },
       "local": {
         "name": "小明的 Mac",
-        "remote_access": "off"
+        "remote_access": "off",
+        "instance_id": null,
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -261,7 +276,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "result": {
       "type": "totp_enrollment",
@@ -318,7 +334,10 @@
       },
       "local": {
         "name": "小明的 Mac",
-        "remote_access": "off"
+        "remote_access": "off",
+        "instance_id": null,
+        "remote_access_url": null,
+        "slug": null
       },
       "desktop": {
         "version": "0.1.0",
@@ -334,7 +353,8 @@
         }
       },
       "consent": null,
-      "remote_auxiliary": "local"
+      "remote_auxiliary": "local",
+      "current_instance": null
     },
     "result": {
       "type": "totp_enrolled",
@@ -349,6 +369,82 @@
         "fixture-recovery-1",
         "fixture-recovery-2"
       ]
+    }
+  },
+  "sign_out_intent": {
+    "version": 1,
+    "request_id": "admitted-signout-state",
+    "ok": true,
+    "state": {
+      "version": 1,
+      "revision": 1,
+      "generation": 1,
+      "account": {
+        "status": "signed_in",
+        "identity": {
+          "id": "account-xiaoming",
+          "email": "xiaoming@example.test"
+        },
+        "email": "xiaoming@example.test",
+        "gate": null,
+        "methods": []
+      },
+      "connection": {
+        "status": "local",
+        "committed": {
+          "kind": "local",
+          "name": "小明的 Mac",
+          "instance_id": null
+        },
+        "pending": null
+      },
+      "enrollment": {
+        "status": "unknown",
+        "instance_id": null,
+        "error_code": null
+      },
+      "catalog": {
+        "status": "ready",
+        "instances": [
+          {
+            "id": "studio-1",
+            "name": "工作室 Studio",
+            "host": "studio.avibe.bot",
+            "url": "https://studio.avibe.bot",
+            "relationship": "shared",
+            "owner_email": "owner@example.test",
+            "available": true
+          }
+        ]
+      },
+      "local": {
+        "name": "小明的 Mac",
+        "remote_access": "off",
+        "instance_id": null,
+        "remote_access_url": null,
+        "slug": null
+      },
+      "desktop": {
+        "version": "0.1.0",
+        "update": {
+          "phase": "idle",
+          "latest": null,
+          "channel": "stable",
+          "prereleases": false,
+          "skippedVersion": null,
+          "interactive": false,
+          "remoteInstallAllowed": false,
+          "remoteRequest": null
+        }
+      },
+      "consent": null,
+      "remote_auxiliary": "local",
+      "current_instance": null
+    },
+    "result": {
+      "type": "sign_out_intent",
+      "intent_id": "synthetic-one-use-intent",
+      "generation": 1
     }
   }
 }

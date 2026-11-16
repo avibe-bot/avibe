@@ -137,6 +137,38 @@ describe('ShowPageVoiceHost', () => {
     }));
   });
 
+  // ui/design: composer/voice-consent/*
+  it('records nothing for a page until the reader allowed voice input', async () => {
+    const events: ShowPageVoiceEvent[] = [];
+    const createSession = vi.fn();
+    const host = new ShowPageVoiceHost({
+      post: (event) => events.push(event),
+      availability: async () => ({ available: true, maxFileBytes: null }),
+      allowed: () => false,
+      createSession,
+    });
+
+    host.handle({
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'start',
+      requestId: 'voice-1',
+      before: '',
+      after: '',
+    });
+    await vi.waitFor(() => expect(events).toContainEqual({
+      type: ANNOTATION_VOICE_EVENT_MESSAGE,
+      kind: 'error',
+      requestId: 'voice-1',
+      code: 'unavailable',
+      retryable: false,
+    }));
+    expect(createSession).not.toHaveBeenCalled();
+    // The microphone is free for the next owner.
+    const next = claimVoiceCapture(() => undefined);
+    expect(next.isCurrent()).toBe(true);
+    next.release();
+  });
+
   it('cancels microphone startup while availability is still pending', async () => {
     const events: ShowPageVoiceEvent[] = [];
     const availability = deferred<{ available: boolean; maxFileBytes: null }>();

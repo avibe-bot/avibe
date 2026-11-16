@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { VersionBadge } from '../components/VersionBadge';
 import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 import { DesktopAccountRowView } from './DesktopAccountRowView';
@@ -10,11 +10,9 @@ import { useDesktopClientProjection, usePresentDesktopClient } from './useDeskto
 export function DesktopAccountRow() {
   const state = useDesktopClientProjection();
   const present = usePresentDesktopClient();
-  const [panel, setPanel] = useState<'account' | null>(null);
   const remote = state?.connection.committed.kind === 'remote';
   useEffect(() => {
     const open = (event: Event) => {
-      setPanel(null);
       // Local Workbench retains VersionBadge's original updater event handler.
       // Remote pages have presentation URLs only, never privileged update IPC.
       if (!remote) return;
@@ -26,8 +24,5 @@ export function DesktopAccountRow() {
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, open);
   }, [remote, present]);
   if (!state) return null;
-  const open = (view: Parameters<typeof present>[0]) => { setPanel(null); present(view); };
-  return <DesktopAccountRowView state={state} menuOpen={panel === 'account'}
-    onMenuOpenChange={(value) => setPanel(value ? 'account' : null)}
-    onPresent={open} localUpdater={<VersionBadge openUpward />} />;
+  return <DesktopAccountRowView state={state} onPresent={present} localUpdater={<VersionBadge openUpward />} />;
 }

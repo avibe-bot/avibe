@@ -81,15 +81,19 @@ def validate_presentation_lifecycle(library: str, fixture: str) -> dict:
     if "focus_or_restore_main_window" in presenter + delivery:
         raise RuntimeError("Deferred update presentation must not own focus")
     focus = section("fn focus_or_restore_main_window(", "\nfn main_document_finished(")
-    ordered(focus, ["let created = app.get_webview_window(MAIN_WINDOW).is_none();",
-                    "let Some(window) = ensure_main_window(app) else {", "window.unminimize();",
+    ordered(focus, ["let created = app.get_window(MAIN_WINDOW).is_none();",
+                    "let Some(window) = ensure_main_window(app) else {", "window.window().unminimize();",
+                    "window.window().show();",
                     "window.show();", "window.set_focus();", "if created {"])
     ensure = section("fn ensure_main_window(", "\nfn build_main_window(")
-    ordered(ensure, ["if let Some(window) = app.get_webview_window(MAIN_WINDOW) {",
-                     "return Some(window);", "build_main_window(app, None, false, None)"])
+    ordered(ensure, ["if app.get_window(MAIN_WINDOW).is_some() {",
+                     "return instance_client::active_webview(app);",
+                     "build_main_window(app, None, false, None).map(|window| window.as_ref().clone())"])
     ordered(fixture, [".plugin(tauri_plugin_global_shortcut::Builder::new()",
                       'app.manage(pet::Pet::new(data.join("pet.json")));',
                       "let coordinator = instance_client::attach(",
+                      "let document_window = instance_client::window_created(app.handle()).unwrap();",
+                      "instance_client::document_started(view.app_handle(), document_window, payload.url());",
                       ".visible(false).build()?;",
                       'assert!(instance_client::present(app.handle(), "updates"));',
                       "super::focus_or_restore_main_window(app.handle());",

@@ -42,6 +42,13 @@ and Web resizing cannot both run.
 - Microphone capture is granted only to the configured instance main frame.
   Authentication, external, and arbitrary subframes receive neither microphone
   access nor a native bridge.
+- That main frame gets the microphone only when its page carries
+  `<meta name="avibe-voice-consent" content="1">`: such a page asks each
+  account before voice input sends speech to a third-party AI service, and the
+  App adds no question of its own. A Workbench page without it (an instance
+  older than that question) is refused with a native alert saying to update the
+  instance. Any other page, such as a Show Page opened on its own under
+  `/show/` or `/p/`, is refused without that alert.
 - Google and GitHub authorization are intercepted with an email-code
   explanation. GitHub's are the `/login/oauth/` pages on `github.com` whose
   `redirect_uri` returns to an authentication origin, that is avibe.bot's own
@@ -268,6 +275,30 @@ Unknown methods never expand the native surface.
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
 origin and its navigation test in the same change.
+
+## App Shortcuts
+
+`AppShortcuts.swift` holds the App's one `AppShortcutsProvider`. It offers
+"Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") to Siri, Spotlight, the
+Shortcuts app, and Settings > Action Button > Shortcut. Its intent,
+`OpenMainBotIntent`, runs in the App's own process with the App in front
+(`openAppWhenRun`, and `supportedModes` `.foreground(.immediate)` from
+iOS 26). It hands `/chat/ses_main?from=notification` to
+`AppModel.openSelectedInstance(path:)`, which opens the selected instance the
+way a notification tap does: the instance opens again, and its page receives
+the path through `push.opened` once it loads. A request that arrives before
+the scene or the bootstrap is ready waits for them, and only the latest
+waits. Signed out, with no instance selected, or with the selected instance
+unavailable, the App stays on the screen it shows anyway, with no prompt.
+
+The main Bot's conversation is the Web UI's `/chat/ses_main`; the Owner's
+Workbench creates `ses_main` on first use. Only the Owner has Bots: for
+anyone else the server answers 404, and `from=notification` makes the Web UI
+open the Inbox instead of an error. The shortcut adds no entitlement,
+capability, extension, or Info.plist key. Its title and Siri phrases are
+localized in `Localizable.xcstrings` and `AppShortcuts.xcstrings`. Xcode
+extracts the metadata the system reads into `Metadata.appintents` in the
+App bundle, and an XCTest checks it there.
 
 ## Remote direct path (inactive)
 

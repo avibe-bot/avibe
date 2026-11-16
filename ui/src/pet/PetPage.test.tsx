@@ -1574,14 +1574,14 @@ describe('desktop mini v2 interaction contract', () => {
   // A tapped (not held) hotkey opens the text input once voice status is known.
   const tapHotkey = () => { summon('listen'); summon('release'); };
 
-  async function withVoiceEnv(asrAvailable: () => boolean, dictation: unknown, body: () => Promise<void>) {
+  async function withVoiceEnv(asrAvailable: () => boolean, dictation: unknown, body: () => Promise<void>, status: () => Record<string, unknown> = () => ({})) {
     vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: dictation }));
     const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
     const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
     try {
       Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
-      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: asrAvailable() }) })));
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: asrAvailable(), ...status() }) })));
       vi.resetModules();
       ({ PetPage } = await import('./PetPage'));
       await body();
@@ -1661,6 +1661,31 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
+
+  // ui/design: composer/voice-consent/*: the mini window opens no microphone without this
+  // account's yes, whether it was refused before or taken back since in Avibe's window.
+  it.each(['declined here', 'taken back elsewhere'] as const)('records nothing and says where to turn voice on when %s', async (when) => {
+    const created = vi.fn();
+    class Dictation {
+      constructor() { created(); }
+      done = new Promise<string>(() => {});
+      start = async () => {};
+      finish = () => {}; abort = () => {}; landed = () => {}; detach = () => {};
+    }
+    let consent = when === 'declined here' ? 'declined' : 'granted';
+    await withVoiceEnv(() => true, Dictation, async () => {
+      mainSession('S'); render(<PetPage />); tapHotkey();
+      const mic = await screen.findByLabelText('pet.voice.open');
+      if (when === 'taken back elsewhere') {
+        await waitFor(async () => expect((await import('@/lib/voiceConsent')).knownVoiceConsent()).toBe('granted'));
+        consent = 'declined';
+        (await import('@/lib/voiceConsent')).noteVoiceStatus({ available: true, consent });
+      }
+      await userEvent.click(mic);
+      expect(await screen.findByText('pet.voice.consentOff')).toBeTruthy();
+      expect(created).not.toHaveBeenCalled();
+    }, () => ({ consent }));
+  });
 
   it('clears a previous ASR-available cache when the authorization epoch changes', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();

@@ -16,6 +16,7 @@ import {
   voiceRecordingFileName,
   VoiceTranscriptionError,
 } from './voiceTranscription';
+import { noteVoiceStatus } from './voiceConsent';
 
 const audioBlob = () => new Blob(['audio'], { type: 'audio/mp4; codecs=mp4a.40.2' });
 /** The form an attempt sends, built for a token with these capabilities. */
@@ -27,6 +28,25 @@ const formOf = (init: AvibeFetchRequestInit | undefined, capabilities: readonly 
 };
 
 describe('voice transcription', () => {
+  // ui/design: composer/voice-consent/*. Every send passes here, a retry or a kept take included.
+  it('sends nothing, cloud or relay, while this account has not allowed voice input', async () => {
+    const cloudFetch = vi.fn(async () => Response.json({ text: 'hello' }));
+    const localFetch = vi.fn(async () => Response.json({ text: 'hello' }));
+    try {
+      for (const consent of ['declined', null]) {
+        noteVoiceStatus({ available: true, consent });
+        await expect(transcribeVoiceBlob(audioBlob(), { cloudFetch, localFetch, telemetry: vi.fn() }))
+          .rejects.toMatchObject({ code: 'unavailable' });
+      }
+      expect(cloudFetch).not.toHaveBeenCalled();
+      expect(localFetch).not.toHaveBeenCalled();
+      noteVoiceStatus({ available: true, consent: 'granted' });
+      await expect(transcribeVoiceBlob(audioBlob(), { cloudFetch, localFetch, telemetry: vi.fn() })).resolves.toBe('hello');
+    } finally {
+      noteVoiceStatus({ available: true });
+    }
+  });
+
   it('reserves the complete upstream budget on the compatibility path', () => {
     const compatibilityRequestBudget = (
       VOICE_TRANSCRIPTION_TIMEOUT_MS

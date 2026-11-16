@@ -4,9 +4,16 @@
 //! window over the main one, from the bundled account page. The remote page only
 //! asks for it, so it never reaches this computer's installer.
 use avibe_runtime_host::instance_client::protocol::ClientAction;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Manager, PhysicalPosition, Webview, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
+
+use crate::instance_client::PopupPresentation;
 use url::Url;
 
 pub(crate) const UPDATE_POPOVER: &str = "update-popover";
@@ -27,8 +34,10 @@ pub(crate) fn page_url(bundle: &Url) -> Option<Url> {
     Some(url)
 }
 
-pub(crate) fn is_page<R: tauri::Runtime>(window: &WebviewWindow<R>, bundle: &Url) -> bool {
-    window.label() == UPDATE_POPOVER && window.url().ok().is_some_and(|url| Some(url) == page_url(bundle))
+pub(crate) fn is_page<R: tauri::Runtime>(window: &Webview<R>, bundle: &Url) -> bool {
+    window.label() == UPDATE_POPOVER
+        && window.window().label() == UPDATE_POPOVER
+        && window.url().ok().is_some_and(|url| Some(url) == page_url(bundle))
 }
 
 /// What the popup may ask of the desktop client: its state and this computer's
@@ -41,17 +50,85 @@ pub(crate) fn navigation_allowed(url: &Url, bundle: &Url) -> bool {
     Some(url.clone()) == page_url(bundle)
 }
 
-/// A popup being built or loading, so a second click waits for it instead of
-/// building another or replacing it. Cleared once its page loads or it is gone.
+#[derive(Clone)]
+struct Request {
+    initialization: String,
+    presentation: PopupPresentation,
+}
+
+// A native-only resource attached to this Webview's own resource table. Tauri
+// Webview equality compares labels; the Arc distinguishes a same-label rebuild.
+// The document counter also fences a GetState suspended across an exact-URL reload.
+struct Popup {
+    resource: OnceLock<tauri::ResourceId>,
+    document: AtomicU64,
+}
+impl tauri::Resource for Popup {}
+impl Popup {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            resource: OnceLock::new(),
+            document: AtomicU64::new(0),
+        })
+    }
+    fn bind<R: tauri::Runtime>(self: &Arc<Self>, view: &Webview<R>) {
+        self.resource
+            .get_or_init(|| view.resources_table().add_arc(self.clone()));
+    }
+    fn owns<R: tauri::Runtime>(self: &Arc<Self>, view: &Webview<R>) -> bool {
+        self.resource.get().is_some_and(|rid| {
+            view.resources_table()
+                .get::<Self>(*rid)
+                .is_ok_and(|stored| Arc::ptr_eq(&stored, self))
+        })
+    }
+}
+
+pub(crate) struct Receipt {
+    popup: Arc<Popup>,
+    document: u64,
+}
+
+/// The existing single opening/rebuild slot also owns the exact popup receiver.
 struct Opening {
     since: Option<Instant>,
-    /// The page state to rebuild with once a stuck window is actually destroyed.
-    rebuild: Option<String>,
+    rebuild: Option<Request>,
+    current: Option<Arc<Popup>>,
+    request: Option<Request>,
+}
+impl Opening {
+    fn request(&self, popup: &Arc<Popup>) -> Option<Request> {
+        self.owns(popup).then(|| self.request.clone()).flatten()
+    }
+    fn owns(&self, popup: &Arc<Popup>) -> bool {
+        self.current.as_ref().is_some_and(|current| Arc::ptr_eq(current, popup))
+    }
 }
 static OPENING: Mutex<Opening> = Mutex::new(Opening {
     since: None,
     rebuild: None,
+    current: None,
+    request: None,
 });
+
+/// Admission uses the invoking Webview, never the existence of another popup.
+pub(crate) fn admit<R: tauri::Runtime>(view: &Webview<R>, bundle: &Url, action: &ClientAction) -> Option<Receipt> {
+    if !allows(action) || !is_page(view, bundle) {
+        return None;
+    }
+    let popup = opening().current.clone()?;
+    let document = popup.document.load(Ordering::SeqCst);
+    let receipt = Receipt { popup, document };
+    still_current(view, bundle, &receipt).then_some(receipt)
+}
+
+pub(crate) fn still_current<R: tauri::Runtime>(view: &Webview<R>, bundle: &Url, receipt: &Receipt) -> bool {
+    is_page(view, bundle)
+        && receipt.popup.owns(view)
+        && receipt.popup.document.load(Ordering::SeqCst) == receipt.document
+        && opening().owns(&receipt.popup)
+}
+
 /// How long a popup may take to build and load (a cold WebView2 can be slow)
 /// before a click treats it as stuck and replaces it.
 const LOAD_DEADLINE: Duration = Duration::from_secs(15);
@@ -90,62 +167,101 @@ const TRANSPARENT: &str = "(()=>{const s=document.createElement('style');s.textC
 /// Show the popup over the main window, or bring an open one forward. Called from
 /// navigation and menu handlers: the window is built off the handler's own thread,
 /// since building one inside them deadlocks on Windows.
-pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
-    if app.get_webview_window(crate::MAIN_WINDOW).is_none() || page_url(bundle).is_none() {
+pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String, presentation: PopupPresentation) -> bool {
+    if app.get_window(crate::MAIN_WINDOW).is_none()
+        || page_url(bundle).is_none()
+        || !crate::instance_client::popup_presentation_current(app, &presentation)
+    {
         return false;
     }
     let window = app.get_webview_window(UPDATE_POPOVER);
-    // Never call a window getter under OPENING: off the main thread it waits for
-    // the event loop, which may itself be waiting for OPENING (page_loaded, Destroyed).
+    // Never call a window getter under OPENING: the event loop may need it too.
     let visible = window.as_ref().map(|window| window.is_visible().unwrap_or(false));
-    // Decide and record under the lock, act after releasing it: destroying a
-    // window may run its Destroyed handler, which takes the lock too.
-    let (next, initialization) = {
+    let request = Request {
+        initialization,
+        presentation,
+    };
+    let (next, popup) = {
         let mut opening = opening();
         let next = step(visible, opening.since.map(|since| since.elapsed()));
-        if matches!(next, Step::Replace | Step::Build) {
-            opening.since = Some(Instant::now());
+        match next {
+            Step::Build => {
+                opening.since = Some(Instant::now());
+                opening.current = Some(Popup::new());
+                opening.request = Some(request);
+            }
+            Step::Replace => {
+                opening.since = Some(Instant::now());
+                opening.rebuild = Some(request);
+            }
+            Step::Wait | Step::Focus => {
+                // A second explicitly admitted click can use the same loading
+                // slot. It supplies its own immutable source receipt; delayed
+                // work never captures fresh authority from the main document.
+                if opening.current.is_none() {
+                    return false;
+                }
+                opening.request = Some(request);
+            }
         }
-        if next == Step::Replace {
-            // Built for the new window once the stuck one is gone.
-            opening.rebuild = Some(initialization);
-            (next, None)
-        } else {
-            (next, Some(initialization))
-        }
+        (next, opening.current.clone())
     };
-    match (next, window, initialization) {
-        (Step::Focus, Some(window), _) => window.set_focus().is_ok(),
-        // Never shown and past its deadline: its page is stuck. Destroying it
-        // completes on the event loop; its Destroyed event builds the new one.
+    match (next, window, popup) {
+        (Step::Focus, Some(window), Some(popup)) => {
+            popup.owns(window.as_ref()) && is_page(window.as_ref(), bundle) && window.set_focus().is_ok()
+        }
         (Step::Replace, Some(window), _) => {
             let _ = window.destroy();
             true
         }
-        (Step::Build, _, Some(initialization)) => {
-            spawn_build(app, bundle, initialization);
+        (Step::Build, _, Some(popup)) => {
+            spawn_build(app, bundle, popup);
             true
         }
         _ => true,
     }
 }
 
-fn spawn_build(app: &AppHandle, bundle: &Url, initialization: String) {
+fn retire(app: &AppHandle, bundle: &Url, popup: &Arc<Popup>) {
+    let replacement = {
+        let mut opening = opening();
+        if !opening.owns(popup) {
+            return;
+        }
+        opening.request = opening.rebuild.take();
+        opening.current = opening.request.as_ref().map(|_| Popup::new());
+        opening.since = opening.current.as_ref().map(|_| Instant::now());
+        opening.current.clone()
+    };
+    if let Some(replacement) = replacement {
+        spawn_build(app, bundle, replacement);
+    }
+}
+
+fn spawn_build(app: &AppHandle, bundle: &Url, popup: Arc<Popup>) {
     let app = app.clone();
     let bundle = bundle.clone();
     tauri::async_runtime::spawn(async move {
-        if !build(&app, &bundle, initialization) {
-            opening().since = None;
+        let Some(_windows) = crate::instance_client::popup_window_lock(&app).await else {
+            return;
+        };
+        let Some(request) = opening().request(&popup) else {
+            return;
+        };
+        if !crate::instance_client::popup_presentation_current(&app, &request.presentation)
+            || !build(&app, &bundle, popup.clone(), request.initialization)
+        {
+            retire(&app, &bundle, &popup);
         }
     });
 }
 
 /// Builds the popup, hidden until its page loads. False when nothing was built.
-fn build(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
+fn build(app: &AppHandle, bundle: &Url, popup: Arc<Popup>, initialization: String) -> bool {
     if app.get_webview_window(UPDATE_POPOVER).is_some() {
         return false;
     }
-    let (Some(main), Some(url)) = (app.get_webview_window(crate::MAIN_WINDOW), page_url(bundle)) else {
+    let (Some(main), Some(url)) = (app.get_window(crate::MAIN_WINDOW), page_url(bundle)) else {
         return false;
     };
     let (Ok(origin), Ok(size), Ok(scale)) = (main.inner_position(), main.inner_size(), main.scale_factor()) else {
@@ -156,7 +272,25 @@ fn build(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
     let origin = origin.to_logical::<f64>(scale);
     let height = size.height as f64 / scale;
     let (x, y) = (origin.x + LEFT, origin.y + height - BOTTOM - HEIGHT);
+    let loading = popup.clone();
+    let loading_bundle = bundle.clone();
     let builder = WebviewWindowBuilder::new(app, UPDATE_POPOVER, WebviewUrl::External(url))
+        .on_page_load(move |window, payload| {
+            if !opening().owns(&loading) {
+                return;
+            }
+            loading.bind(window.as_ref());
+            match payload.event() {
+                tauri::webview::PageLoadEvent::Started => {
+                    loading.document.fetch_add(1, Ordering::SeqCst);
+                }
+                tauri::webview::PageLoadEvent::Finished => {
+                    if navigation_allowed(payload.url(), &loading_bundle) {
+                        page_loaded(window, loading_bundle.clone(), loading.clone());
+                    }
+                }
+            }
+        })
         .initialization_script(TRANSPARENT)
         .initialization_script(initialization)
         // The panel's release-notes link opens in the system browser, as in the main window.
@@ -171,17 +305,45 @@ fn build(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
         .maximizable(false)
         .minimizable(false)
         .skip_taskbar(true)
-        // Shown once its page has loaded (lib.rs on_page_load), so nothing half-drawn appears.
+        // The build-owned callback shows only this receiver after its page loads.
         .visible(false)
         .focused(true);
-    let Ok(builder) = builder.parent(&main) else {
-        return false;
+    // Match WebviewWindowBuilder::parent semantics for a physical A5 Window.
+    // Windows uses an owner, not a WS_CHILD parent relationship.
+    #[cfg(target_os = "windows")]
+    let builder = match main.hwnd() {
+        Ok(parent) => builder.owner_raw(parent),
+        Err(_) => return false,
+    };
+    #[cfg(target_os = "macos")]
+    let builder = match main.ns_window() {
+        Ok(parent) => builder.parent_raw(parent),
+        Err(_) => return false,
+    };
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    let builder = match main.gtk_window() {
+        Ok(parent) => builder.transient_for_raw(&parent),
+        Err(_) => return false,
     };
     #[cfg(target_os = "macos")]
     let builder = builder.accept_first_mouse(true);
     let Ok(window) = builder.build() else {
         return false;
     };
+    // macOS parent attachment orders a child above its parent even when the
+    // builder requested visible(false). Keep the actual receiver hidden while
+    // construction owns the serializer; only the fenced Finished may reveal it.
+    if window.hide().is_err() {
+        let _ = window.destroy();
+        return false;
+    }
+    popup.bind(window.as_ref());
     // macOS places windows in one space of points, which the logical position
     // above already is. Windows places them on one physical desktop, where the
     // popup's own scale may not be the main window's yet: use main's pixels.
@@ -200,28 +362,37 @@ fn build(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
             let _ = closing.close();
         }
         // Gone, so its label is free: build the replacement a click asked for, if any.
-        WindowEvent::Destroyed => {
-            let mut opening = opening();
-            match opening.rebuild.take() {
-                Some(initialization) => {
-                    opening.since = Some(Instant::now());
-                    spawn_build(&rebuilding.0, &rebuilding.1, initialization);
-                }
-                None => opening.since = None,
-            }
-        }
+        WindowEvent::Destroyed => retire(&rebuilding.0, &rebuilding.1, &popup),
         _ => {}
     });
     true
 }
 
-/// The popup's page has loaded: show it, focused, as a click on the version does.
-pub(crate) fn page_loaded(window: &WebviewWindow) {
-    if window.label() == UPDATE_POPOVER {
+/// A Finished event carries its build identity, not a fresh lookup by label.
+fn page_loaded(window: WebviewWindow, bundle: Url, popup: Arc<Popup>) {
+    let receipt = Receipt {
+        document: popup.document.load(Ordering::SeqCst),
+        popup,
+    };
+    tauri::async_runtime::spawn(async move {
+        let app = window.app_handle();
+        let Some(_windows) = crate::instance_client::popup_window_lock(app).await else {
+            return;
+        };
+        if !still_current(window.as_ref(), &bundle, &receipt) {
+            return;
+        }
+        let Some(request) = opening().request(&receipt.popup) else {
+            return;
+        };
+        if !crate::instance_client::popup_presentation_current(app, &request.presentation) {
+            let _ = window.destroy();
+            return;
+        }
         opening().since = None;
         let _ = window.show();
         let _ = window.set_focus();
-    }
+    });
 }
 
 /// Deliver a state change to an open popup that still shows its page.
@@ -230,7 +401,7 @@ pub(crate) fn publish(app: &AppHandle, bundle: &Url, script: impl FnOnce(&Url) -
         return;
     };
     if let Ok(url) = window.url() {
-        if is_page(&window, bundle) {
+        if is_page(window.as_ref(), bundle) {
             let _ = window.eval(script(&url));
         }
     }
@@ -239,6 +410,61 @@ pub(crate) fn publish(app: &AppHandle, bundle: &Url, script: impl FnOnce(&Url) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The old exact-URL check cannot distinguish two native Webviews reusing
+    // the label. Exercise real Tauri resource tables plus the production receipt
+    // pre/postchecks; real close/rebuild/GetState execution belongs to the probe.
+    #[test]
+    fn popup_receipts_bind_the_actual_webview_and_document() {
+        let first_app = tauri::test::mock_app();
+        let next_app = tauri::test::mock_app();
+        let bundle: Url = "tauri://localhost/".parse().unwrap();
+        let window = |app: &tauri::App<tauri::test::MockRuntime>, label: &str, url: Url| {
+            WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
+                .build()
+                .unwrap()
+        };
+        let first = window(&first_app, UPDATE_POPOVER, page_url(&bundle).unwrap());
+        let next = window(&next_app, UPDATE_POPOVER, page_url(&bundle).unwrap());
+        // Tauri equality alone would admit the successor.
+        assert!(first.as_ref() == next.as_ref());
+        let original = Popup::new();
+        original.bind(first.as_ref());
+        opening().current = Some(original.clone());
+        let receipt = admit(first.as_ref(), &bundle, &ClientAction::GetState).unwrap();
+        assert!(still_current(first.as_ref(), &bundle, &receipt));
+        assert!(!still_current(next.as_ref(), &bundle, &receipt));
+        assert!(admit(next.as_ref(), &bundle, &ClientAction::GetState).is_none());
+        for action in [
+            ClientAction::SignOut {
+                intent_id: Some("foreign".into()),
+            },
+            ClientAction::Cancel,
+        ] {
+            assert!(admit(first.as_ref(), &bundle, &action).is_none());
+        }
+        for (label, url) in [
+            ("main-account-1", page_url(&bundle).unwrap()),
+            ("main-runtime-1", "https://remote.example.test/".parse().unwrap()),
+            ("main-runtime-candidate", page_url(&bundle).unwrap()),
+        ] {
+            let foreign = window(&first_app, label, url);
+            assert!(admit(foreign.as_ref(), &bundle, &ClientAction::GetState).is_none());
+        }
+        original.document.fetch_add(1, Ordering::SeqCst);
+        assert!(!still_current(first.as_ref(), &bundle, &receipt));
+        let fresh = admit(first.as_ref(), &bundle, &ClientAction::GetState).unwrap();
+        assert!(still_current(first.as_ref(), &bundle, &fresh));
+        let successor = Popup::new();
+        successor.bind(next.as_ref());
+        opening().current = Some(successor);
+        assert!(!still_current(first.as_ref(), &bundle, &fresh));
+        assert!(admit(first.as_ref(), &bundle, &ClientAction::GetState).is_none());
+        let next_receipt = admit(next.as_ref(), &bundle, &ClientAction::GetState).unwrap();
+        assert!(still_current(next.as_ref(), &bundle, &next_receipt));
+        opening().current = None;
+        assert!(!still_current(next.as_ref(), &bundle, &next_receipt));
+    }
 
     #[test]
     fn the_popup_shows_only_its_own_bundled_page() {
@@ -289,7 +515,7 @@ mod tests {
             assert!(allows(&action), "{action:?}");
         }
         for action in [
-            ClientAction::SignOut,
+            ClientAction::SignOut { intent_id: None },
             ClientAction::ReturnLocal,
             ClientAction::RefreshInstances,
             ClientAction::SelectInstance {

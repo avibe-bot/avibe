@@ -2114,7 +2114,7 @@ def _show_mark_examples_text() -> str:
         a value produced by @avibe/show-sdk's mark helpers.
 
         Examples:
-          vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message "Review this summary."
+          vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message 'Review this summary.'
           vibe show mark summary --session-id sesk8m4q2p7x --scope default --message-file ./comment.txt
         """
     )

@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		100000000000000000000001 /* AvibeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* AvibeApp.swift */; };
 		100000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* AppModel.swift */; };
+		1000000000000000000000E8 /* AppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E8 /* AppShortcuts.swift */; };
+		1000000000000000000000E9 /* AppShortcuts.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E9 /* AppShortcuts.xcstrings */; };
 		1000000000000000000000F0 /* DirectConnectListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F0 /* DirectConnectListener.swift */; };
 		1000000000000000000000F1 /* DirectPathController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F1 /* DirectPathController.swift */; };
 		1000000000000000000000F2 /* DirectTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F2 /* DirectTransport.swift */; };
@@ -158,6 +160,8 @@
 		200000000000000000000007 /* WebViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewController.swift; sourceTree = "<group>"; };
 		200000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		200000000000000000000009 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		2000000000000000000000E8 /* AppShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShortcuts.swift; sourceTree = "<group>"; };
+		2000000000000000000000E9 /* AppShortcuts.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = AppShortcuts.xcstrings; sourceTree = "<group>"; };
 		20000000000000000000000A /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
 		20000000000000000000000B /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		20000000000000000000000C /* NavigationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicyTests.swift; sourceTree = "<group>"; };
@@ -298,6 +302,7 @@
 			children = (
 				200000000000000000000001 /* AvibeApp.swift */,
 				200000000000000000000002 /* AppModel.swift */,
+				2000000000000000000000E8 /* AppShortcuts.swift */,
 				200000000000000000000019 /* Avibe.entitlements */,
 				2000000000000000000000F0 /* DirectConnectListener.swift */,
 				2000000000000000000000F1 /* DirectPathController.swift */,
@@ -336,6 +341,7 @@
 		700000000000000000000003 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				2000000000000000000000E9 /* AppShortcuts.xcstrings */,
 				20000000000000000000000F /* Assets.xcassets */,
 				200000000000000000000015 /* MobileApp */,
 				200000000000000000000008 /* Info.plist */,
@@ -612,6 +618,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1000000000000000000000E9 /* AppShortcuts.xcstrings in Resources */,
 				10000000000000000000000C /* Assets.xcassets in Resources */,
 				100000000000000000000009 /* InfoPlist.xcstrings in Resources */,
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
@@ -786,6 +793,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000002 /* AppModel.swift in Sources */,
+				1000000000000000000000E8 /* AppShortcuts.swift in Sources */,
 				100000000000000000000001 /* AvibeApp.swift in Sources */,
 				1000000000000000000000F0 /* DirectConnectListener.swift in Sources */,
 				1000000000000000000000F1 /* DirectPathController.swift in Sources */,

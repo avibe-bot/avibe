@@ -1,3 +1,4 @@
+import { refreshVoiceConsent } from '../lib/voiceConsent';
 import type { PolicyDowngradeContext } from '../lib/vaultPolicyWire';
 import type { UpdateControlRequest, UpdateSnapshot } from '../components/update/types';
 export type {
@@ -3121,6 +3122,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const announceStreamGap = () => {
     noteLocalStoreStreamGap();
     if (remoteReaderRef.current) void readAuthSession({ quiet: true }).catch(() => undefined);
+    // A voice answer changed while the stream was away (``voice.consent.updated``) is read again.
+    void refreshVoiceConsent();
     dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
   };
 
@@ -3451,6 +3454,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onAny?.(envelope);
         handlers.onNotificationPreferencesChanged?.();
       });
+    });
+    // This account's voice answer changed in another tab or on another device (lib/voiceConsent).
+    source.addEventListener('voice.consent.updated', () => {
+      void refreshVoiceConsent();
     });
     source.addEventListener('remote.authorization', (e: MessageEvent) => {
       try {

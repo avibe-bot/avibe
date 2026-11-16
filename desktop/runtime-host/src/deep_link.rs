@@ -164,6 +164,21 @@ impl DeepLinks {
         Some(ticket)
     }
 
+    /// A presentation approval belongs to one delivery, even when its successor
+    /// has the same URL. Lifecycle may advance separately from this action owner.
+    pub fn owns_local_return(&self, ticket: &DeepLinkReturn) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(pending, &ticket.delivery))
+            && self.action_owner.is_none_or(|owner| owner == ticket.action_owner)
+            && self.local_return.as_ref().is_some_and(|current| {
+                current.in_flight
+                    && Arc::ptr_eq(&current.ticket.delivery, &ticket.delivery)
+                    && current.ticket.expected_generation == ticket.expected_generation
+                    && current.ticket.action_owner == ticket.action_owner
+            })
+    }
+
     pub fn finish_local_return(&mut self, ticket: &DeepLinkReturn, accepted_owner: Option<u64>) {
         let Some(current) = self
             .local_return
@@ -255,6 +270,33 @@ impl DeepLinks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_return_approval_is_bound_to_exact_delivery_and_ticket() {
+        let mut links = DeepLinks::default();
+        links.receive_owned(["avibe://settings"], Some(4));
+        let first = links.claim_local_return(12, 4).unwrap();
+        assert!(links.owns_local_return(&first));
+        for (generation, owner) in [(13, 4), (12, 5)] {
+            let mut forged = first.clone();
+            forged.expected_generation = generation;
+            forged.action_owner = owner;
+            assert!(!links.owns_local_return(&forged));
+        }
+        // The same URL delivered again is another action, not approval of the old one.
+        links.receive_owned(["avibe://settings"], Some(4));
+        assert!(!links.owns_local_return(&first));
+        links.finish_local_return(&first, None);
+        let second = links.claim_local_return(13, 4).unwrap();
+        assert!(links.owns_local_return(&second));
+        links.finish_local_return(&first, None);
+        assert!(links.owns_local_return(&second));
+        links.finish_local_return(&second, None);
+        assert!(!links.owns_local_return(&second));
+        assert!(links.claim_local_return(13, 4).is_none());
+        links.receive_owned(["avibe://settings"], Some(5));
+        assert!(links.claim_local_return(14, 5).is_some());
+    }
 
     const MAPPINGS: &[(&str, &str)] = &[
         ("avibe://session/ses.A_b-9", "/chat/ses.A_b-9"),

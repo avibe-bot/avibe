@@ -601,7 +601,11 @@ visibility, and routes are not restored. An absent or corrupt store uses the
 centered 1200×800 default.
 
 On macOS the main window uses an overlay title bar with a hidden title. The
-traffic lights are centered in the 28px top row. The complete chat toolbar sits
+traffic lights use Tauri's `(12, 16)` inset. With the pinned Tao implementation,
+an isolated AppKit measurement at 2× scale places the 14pt controls at top 7pt,
+centered in the existing 28px top row, at both default and minimum window sizes.
+The configured y value is a title-bar container inset, not the button center.
+The complete chat toolbar sits
 beside them, with the same 1080px content width and responsive gutters as the web
 toolbar, transcript and composer. Back, title editing, agent/model/effort selection,
 Visualize and sharing keep their existing handlers and state. There is no extra

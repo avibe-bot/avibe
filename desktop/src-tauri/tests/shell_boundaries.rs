@@ -183,7 +183,11 @@ fn the_shell_enables_only_its_declared_capabilities() {
         serde_json::json!(["allow-desktop-client-request", "core:window:allow-close"])
     );
     let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
-    assert_eq!(account["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert!(
+        account.get("windows").is_none(),
+        "account authority must not match the physical main window"
+    );
+    assert_eq!(account["webviews"], serde_json::json!(["main-account-*"]));
     assert_eq!(account["local"], true);
     assert!(account.get("remote").is_none());
     assert_eq!(
@@ -694,8 +698,12 @@ fn installation_help_is_a_fixed_bootstrap_only_destination() {
         "the install action must use the product installation guide"
     );
     assert!(
-        source.contains("fn open_install_docs(window: WebviewWindow)"),
+        source.contains("fn open_install_docs(window: Webview)"),
         "the command must accept no URL or protocol argument from the WebView"
+    );
+    assert!(
+        source.contains("instance_client::is_current_runtime(window) && is_bootstrap_page_url(&url)"),
+        "bootstrap commands must check both the invoking role and its bundled page"
     );
 }
 
@@ -881,21 +889,25 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
         "the main window must be built by ensure_main_window, not auto-created"
     );
     let source = shipping_source("src/lib.rs");
-    let builder = source
-        .split("fn build_main_window(")
-        .nth(1)
-        .expect("main window builder")
-        .split("\n}\n")
-        .next()
-        .expect("builder body");
-    assert!(
-        builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
-        "the main window must register the new-window handler"
-    );
+    for name in ["fn build_main_window(", "fn build_main_child("] {
+        let builder = source
+            .split(name)
+            .nth(1)
+            .expect("main window or child builder")
+            .split("\n}\n")
+            .next()
+            .expect("builder body");
+        assert!(
+            builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
+            "{name} must register the new-window handler"
+        );
+    }
     let setup = &source[source.find(".setup(|app|").expect("shell setup")..];
     assert!(setup.contains("ensure_main_window(app.handle())"));
     assert!(source.contains("build_main_window(app, None, false, None)"));
-    assert!(shipping_source("src/instance_client.rs").contains("crate::build_main_window("));
+    let instance_client = shipping_source("src/instance_client.rs");
+    assert!(instance_client.contains("crate::build_main_child("));
+    assert!(instance_client.contains(".on_new_window(|url, _| crate::handle_new_window_request(url))"));
     let handler = source
         .split("fn handle_new_window_request(")
         .nth(1)
@@ -908,7 +920,7 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
     // The one in-app window, the Vault sandbox's on macOS, is not wry's.
     for forbidden in ["NewWindowResponse::Allow", "NewWindowResponse::Create"] {
         assert!(
-            !source.contains(forbidden),
+            !source.contains(forbidden) && !instance_client.contains(forbidden),
             "wry must never build the page a second webview, found {forbidden:?}"
         );
     }
@@ -979,6 +991,17 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(builder.contains(".initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)"));
     assert!(builder.contains(".initialization_script(DESKTOP_NOTIFICATIONS_MARKER)"));
     assert!(builder.contains(".initialization_script(window_return::DESKTOP_FOCUS_MARKER)"));
+    let child_builder = source
+        .split("fn build_main_child(")
+        .nth(1)
+        .expect("Runtime child builder")
+        .split("\n}\n")
+        .next()
+        .expect("child builder body");
+    assert!(
+        child_builder.contains(".initialization_script(window_return::DESKTOP_FOCUS_MARKER)"),
+        "a promoted Runtime must advertise the same focus command as the initial Workbench"
+    );
     assert!(shipping_source("src/window_return.rs").contains(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_FOCUS__', { value: true })"
     ));
@@ -1028,7 +1051,7 @@ fn the_macos_overlay_title_bar_keeps_its_layout_and_defaults_to_no_inset() {
     assert_eq!(window["titleBarStyle"], "Overlay");
     assert_eq!(window["hiddenTitle"], true);
     assert_eq!(window["trafficLightPosition"]["x"], 12);
-    assert_eq!(window["trafficLightPosition"]["y"], 24);
+    assert_eq!(window["trafficLightPosition"]["y"], 16);
     // Bootstrap management and window gestures have separate capability grants.
     assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
     let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
@@ -1057,7 +1080,7 @@ fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
 fn a_dropped_retry_is_reported_to_the_bootstrap_page() {
     let source = shipping_source("src/lib.rs");
     for required in [
-        "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String>",
+        "fn bootstrap_retry(window: Webview, app: AppHandle) -> Result<bool, String>",
         "Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))",
         "fn spawn_bootstrap(app: AppHandle, trigger: BootstrapTrigger) -> bool",
         "return false",
@@ -1231,6 +1254,38 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
 }
 
 #[test]
+fn remote_auxiliary_menu_uses_plain_copy_and_preserves_availability_controls() {
+    let source = shipping_source("src/lib.rs");
+    assert!(
+        source.contains("instance_client::native_copy(\"auxiliaryIncomplete\")")
+            && source.contains("MenuItem::with_id(app, \"instance-auxiliary-limitation\", label, false, None::<&str>)"),
+        "the native limitation item must consume the shared localized copy without becoming an action"
+    );
+    for (locale, expected) in [
+        ("en", "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them."),
+        ("zh", "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。"),
+    ] {
+        let catalog = read_json(crate_dir().join(format!("../../ui/src/i18n/{locale}.json")));
+        let note = catalog["desktopClient"]["auxiliaryIncomplete"].as_str().expect("remote limitation copy");
+        assert_eq!(note, expected);
+        assert!(!note.contains("Phase 1") && !note.contains("第一阶段"));
+    }
+    let refresh = source
+        .split("fn refresh_native_controls(")
+        .nth(1)
+        .expect("native control refresh")
+        .split("\n}\n")
+        .next()
+        .expect("refresh body");
+    assert!(refresh.contains("let local = instance_client::local_selected(&handle);"));
+    assert!(refresh.contains("menus.notifications.set_enabled(local)"));
+    assert!(refresh.contains("pet::set_native_available(&handle, local)"));
+    assert!(refresh.contains("menus.auxiliary_visible.swap(!local, Ordering::SeqCst) == local"));
+    assert!(refresh.contains("if local {\n                    let _ = menus.tray.remove(note);"));
+    assert!(refresh.contains("} else {\n                    let _ = menus.tray.append(note);"));
+}
+
+#[test]
 fn computer_use_menu_constructor_keeps_enabled_and_checked_in_their_slots() {
     let source = shipping_source("src/lib.rs");
     assert!(source
@@ -1278,7 +1333,7 @@ fn settings_open_in_the_shown_workbench_and_only_while_one_is_shown() {
         .next()
         .expect("page-load hook body");
     assert!(page_load
-        .contains("webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished"));
+        .contains("instance_client::is_main_view(webview.app_handle(), webview.label()) && payload.event() == tauri::webview::PageLoadEvent::Finished"));
     assert!(
         page_load.contains("main_document_finished(webview);")
             && body("main_document_finished").contains("refresh_native_controls(webview.app_handle(), None);"),
@@ -1746,9 +1801,26 @@ fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() 
         .split("\n}\n")
         .next()
         .expect("focus command body");
-    assert!(command.contains("pub fn focus_main_window(window: WebviewWindow) -> Result<(), String>"));
-    assert!(command.contains("if !crate::pet::is_workbench(&window)"));
-    for forbidden in ["navigate", "eval(", "emit", "get_webview_window"] {
+    assert!(command.contains("pub fn focus_main_window(webview: Webview) -> Result<(), String>"));
+    let admission = command
+        .find("if !crate::pet::is_workbench(&webview)")
+        .expect("actual caller admission");
+    let physical = command
+        .find("let window = webview.window();")
+        .expect("caller's physical parent");
+    let focus = command
+        .find("window.is_focused()")
+        .expect("physical window focus observation");
+    assert!(admission < physical && physical < focus);
+    for forbidden in [
+        "navigate",
+        "eval(",
+        "emit",
+        "get_webview_window",
+        "get_window",
+        "ensure_main_window",
+        "focus_or_restore_main_window",
+    ] {
         assert!(!command.contains(forbidden), "the focus command must not {forbidden}");
     }
 }

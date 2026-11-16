@@ -22,7 +22,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{UserAttentionType, WebviewWindow};
+use tauri::{UserAttentionType, Webview};
 
 /// Tells the Workbench that this shell answers `focus_main_window`. Older
 /// shells lack it, so the page never calls a command they do not have.
@@ -61,10 +61,11 @@ fn plan(focused: bool, last: Option<Instant>, now: Instant) -> Plan {
 }
 
 #[tauri::command]
-pub fn focus_main_window(window: WebviewWindow) -> Result<(), String> {
-    if !crate::pet::is_workbench(&window) {
+pub fn focus_main_window(webview: Webview) -> Result<(), String> {
+    if !crate::pet::is_workbench(&webview) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
     }
+    let window = webview.window();
     let focused = window.is_focused().unwrap_or(false);
     {
         let mut last = LAST_ACTIVATION

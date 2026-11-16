@@ -12,6 +12,7 @@ import { FileCard } from '@/components/ui/file-card';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
+import { beginVoiceConsentRead, noteVoiceStatus, voiceSendAllowed } from '@/lib/voiceConsent';
 import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { readMessageAttachments } from '@/lib/messageAttachments';
@@ -1350,7 +1351,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
 }
 
 function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; keepTarget: string | null; onOpenComposer: (text?: string) => void; onCaptureEnd: () => void }) {
-  const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number }>({ epoch, enabled, available: false, checked: false });
+  const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number; allowed?: boolean }>({ epoch, enabled, available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
   // Stop has been requested; capture and cleanup still run until `done`.
@@ -1366,16 +1367,25 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
   // unfocused, so this read does not wait for activation. Status is keyed to
   // this bind/epoch: a previous available result cannot start a capture on
   // the next one. Settings changes take effect on that next epoch.
+  const readAsr = useCallback((alive: () => boolean) => {
+    const consentRead = beginVoiceConsentRead();
+    void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
+      if (!alive() || !epoch.isCurrent()) return;
+      if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
+      // Whether this account allowed voice input (lib/voiceConsent): a status without the field
+      // comes from an instance that asks nothing.
+      else {
+        noteVoiceStatus(value, consentRead);
+        setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes, allowed: !('consent' in value) || value.consent === 'granted' });
+      }
+    }).catch(() => { if (alive() && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });
+  }, [enabled, epoch]);
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
-    void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
-      if (!alive || !epoch.isCurrent()) return;
-      if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
-      else setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes });
-    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });
+    readAsr(() => alive);
     return () => { alive = false; };
-  }, [enabled, epoch]);
+  }, [enabled, readAsr]);
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
     if (!capture) return;
@@ -1406,6 +1416,16 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
   }, [onCaptureEnd]);
   const start = useCallback(() => {
     if (!epoch.isCurrent() || !available || captureRef.current) return;
+    // Voice goes to a third-party AI service: the mini window records nothing before this
+    // account said yes, and says where to turn it on (the question is asked in Avibe's window).
+    // A "no" given since in Avibe's window or on another device reaches this window's store
+    // through the event stream (lib/voiceConsent).
+    if (!asrForEpoch.allowed || !voiceSendAllowed()) {
+      setError('consentOff');
+      // The answer may have changed in Avibe's window since this surface read it.
+      readAsr(() => true);
+      return;
+    }
     const before = draft;
     const capture: Capture = {
       // Kept on the device until its words reach the pet's draft; a take that cannot be
@@ -1459,7 +1479,7 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
     }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });
-  }, [asrForEpoch.maxFileBytes, available, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd]);
+  }, [asrForEpoch.maxFileBytes, asrForEpoch.allowed, available, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd, readAsr]);
   const cancel = useCallback(() => stop(false), [stop]);
   const clearError = useCallback(() => setError(null), []);
   // The pet's surface changing under a take is not the reader discarding it: what was said is
@@ -1492,7 +1512,7 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
   };
 }
 
-type VoiceFailure = 'startFailed' | 'empty' | 'failed';
+type VoiceFailure = 'startFailed' | 'empty' | 'failed' | 'consentOff';
 
 // Anything that is not a transcription error comes from getting the
 // microphone itself (permission denied, no input device, capture setup).

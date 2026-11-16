@@ -94,6 +94,7 @@ import type {
 import { DeferredMentionEditor } from './deferredMentionEditor';
 import type { MentionReference } from '../../lib/mentions';
 import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
+import { askVoiceConsent, beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
 
 export type ComposerAttachment = {
   localId: string;
@@ -763,6 +764,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     void prewarmVoiceCapture().catch(() => undefined);
     let alive = true;
     const statusRead = beginVoiceStatusRead();
+    const consentRead = beginVoiceConsentRead();
     apiFetch('/api/asr/status')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -778,9 +780,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         if (available) setVoiceSlotHeld(true);
         setAsrMaxFileBytes(maxFileBytes);
         statusRead.remember({ available, maxFileBytes });
+        noteVoiceStatus(data, consentRead);
         // Prewarm the cloud token so the first recording uploads straight to
         // avibe.bot with no mint latency (no-op when the cloud is unavailable).
-        if (available) primeCloudToken();
+        // The instance mints none before this account allowed voice input.
+        if (available && voiceConsentForPress() === 'granted') primeCloudToken();
       })
       .catch(() => {});
     return () => {
@@ -1286,6 +1290,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       };
     }
     const context = resolveVoiceContext(readVoiceContext?.());
+    // Voice goes to a third-party AI service: the mic button and ⌥Z ask until this account
+    // said yes, and record nothing meanwhile. The draft's caret and the
+    // conversation are taken first, as they were when the press came (ui/design: composer/voice-consent/*).
+    const consent = await resolveVoicePress();
+    if (consent !== 'granted') {
+      if (consent === 'declined') askVoiceConsent();
+      return;
+    }
+    if (recordingStartRef.current || voiceSessionsById.has(voiceKey)) return;
     // Start compiling the capture graph in parallel with the permission and
     // lock steps. The microphone is still requested only by getUserMedia below.
     void prewarmVoiceCapture().catch(() => undefined);

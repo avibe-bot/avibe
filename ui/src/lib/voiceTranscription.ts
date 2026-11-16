@@ -7,6 +7,7 @@ import {
   type AvibeFetchRequestInit,
 } from './avibeFetch';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
+import { VOICE_CONSENT_REQUIRED_EVENT, voiceSendAllowed } from './voiceConsent';
 import {
   emitVoiceTelemetry,
   type VoiceTelemetryEvent,
@@ -403,6 +404,11 @@ const transcribeLocally = async (
       }),
       signal,
     });
+    if (response.status === 403 && typeof window !== 'undefined') {
+      const body = (await response.clone().json().catch(() => null)) as { error?: unknown } | null;
+      // This account has not allowed voice input (any more): read the answer again.
+      if (body?.error === 'voice_consent_required') window.dispatchEvent(new Event(VOICE_CONSENT_REQUIRED_EVENT));
+    }
     return await responsePayload(response);
   } catch (error) {
     throw normalizeTranscriptionError(error, signal);
@@ -414,6 +420,9 @@ const requestVoiceServer = async (
   dependencies: VoiceTranscriptionDependencies = {},
   metadata?: VoiceRequestMetadata,
 ): Promise<VoiceServerResponse> => {
+  // Every take, a retry or a kept one included, is sent only while this account allows voice
+  // input (lib/voiceConsent): a yes taken back here or on another device stops it.
+  if (!voiceSendAllowed()) throw new VoiceTranscriptionError('unavailable');
   const cloudFetch = dependencies.cloudFetch ?? avibeFetch;
   const localFetch = dependencies.localFetch ?? apiFetch;
   const timeoutMs = dependencies.timeoutMs ?? (

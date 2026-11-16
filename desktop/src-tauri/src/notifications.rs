@@ -10,7 +10,7 @@ use avibe_runtime_host::notifications::{
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, Webview};
 
 use crate::{native_catalog_for_locales, pet, updater, MAIN_WINDOW};
 
@@ -204,7 +204,7 @@ impl NotificationSink for NativeSink {
     }
 
     fn gate(&self) -> NotificationGate {
-        let window = self.app.get_webview_window(MAIN_WINDOW);
+        let window = self.app.get_window(MAIN_WINDOW);
         NotificationGate {
             enabled: self.enabled.load(Ordering::SeqCst)
                 && self.generation.load(Ordering::SeqCst) == self.observed_generation
@@ -315,7 +315,7 @@ fn badge_count(total: u64) -> Option<i64> {
 }
 
 fn paint_badge(app: &AppHandle, total: u64) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+    if let Some(window) = app.get_window(MAIN_WINDOW) {
         let _ = window.set_badge_count(badge_count(total));
     }
 }
@@ -330,7 +330,7 @@ pub fn clear_badge(app: &AppHandle) {
     let _ = app.run_on_main_thread(move || paint_badge(&handle, 0));
 }
 
-fn dispatch(window: &WebviewWindow, enabled: bool) {
+fn dispatch(window: &Webview, enabled: bool) {
     let script = format!(
         "window.dispatchEvent(new CustomEvent({}, {{ detail: {} }}));",
         serde_json::to_string(SETTINGS_EVENT).expect("event name JSON"),
@@ -340,8 +340,16 @@ fn dispatch(window: &WebviewWindow, enabled: bool) {
 }
 
 fn notify_workbench(app: &AppHandle, enabled: bool) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW).filter(pet::is_workbench) {
+    if let Some(window) = crate::instance_client::active_webview(app).filter(pet::is_workbench) {
         dispatch(&window, enabled);
+    }
+}
+
+/// A retained local settings page does not remount after account closure.
+/// Replay the current preference only after its existing admission is restored.
+pub(crate) fn reconcile(app: &AppHandle) {
+    if let Some(notifications) = app.try_state::<Notifications>() {
+        notify_workbench(app, notifications.enabled());
     }
 }
 
@@ -375,7 +383,7 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
     Ok(saved)
 }
 
-fn ensure_workbench(window: &WebviewWindow) -> Result<(), String> {
+fn ensure_workbench(window: &Webview) -> Result<(), String> {
     if pet::is_workbench(window) {
         Ok(())
     } else {
@@ -384,13 +392,13 @@ fn ensure_workbench(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn desktop_notifications_state(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {
+pub fn desktop_notifications_state(window: Webview, app: AppHandle) -> Result<bool, String> {
     ensure_workbench(&window)?;
     Ok(app.state::<Notifications>().enabled())
 }
 
 #[tauri::command]
-pub fn desktop_notifications_set_enabled(window: WebviewWindow, app: AppHandle, enabled: bool) -> Result<bool, String> {
+pub fn desktop_notifications_set_enabled(window: Webview, app: AppHandle, enabled: bool) -> Result<bool, String> {
     ensure_workbench(&window)?;
     set_enabled(&app, enabled)
 }

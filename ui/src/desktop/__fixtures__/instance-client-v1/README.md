@@ -1,10 +1,10 @@
-# Frozen native protocol fixture provenance
+# Native protocol fixture provenance
 
-Exact bytes copied from `avibe-bot/avibe` commit
-`d0d1ba4b5933837d9f8fb1803eead654b2d14566`, directory
-`desktop/contracts/instance-client-v1/`, supplied by S1 through Lead.
-All values are synthetic. Native owns these shapes; discrepancies return to Lead.
-This temporary consumer copy keeps U1 independent of unmerged S1 implementation.
+The JSON files mirror `desktop/contracts/instance-client-v1/` byte for byte,
+including the accepted rc19 A4 local identity, password and direct logout
+receipt additions and A5 nullable local slug/full-only current-instance
+metadata. All values are synthetic. Native owns these shapes;
+changes are coordinated with the product consumer.
 Transport fixtures remain native/backend-owned and are not browser input.
 
 The tests consume these objects through the actual account hook and components.

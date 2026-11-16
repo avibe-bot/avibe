@@ -24,7 +24,7 @@ use std::{
 };
 use tauri::{
     menu::{CheckMenuItem, MenuItem},
-    AppHandle, Emitter, Manager, WebviewWindow,
+    AppHandle, Emitter, Manager, Webview,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
@@ -768,7 +768,7 @@ fn emit_state(app: &AppHandle) {
     let _ = app.emit_to(super::MAIN_WINDOW, STATE_EVENT, state_snapshot(app));
 }
 
-fn ensure_workbench(window: &WebviewWindow) -> Result<(), String> {
+fn ensure_workbench(window: &Webview) -> Result<(), String> {
     if super::pet::is_workbench(window) {
         Ok(())
     } else {
@@ -777,8 +777,7 @@ fn ensure_workbench(window: &WebviewWindow) -> Result<(), String> {
 }
 
 fn workbench_ready(app: &AppHandle) -> bool {
-    app.get_webview_window("main")
-        .is_some_and(|window| super::pet::is_workbench(&window))
+    crate::instance_client::active_webview(app).is_some_and(|window| super::pet::is_workbench(&window))
 }
 
 fn apply_available(state: &mut State, manifest: Manifest) {
@@ -1199,20 +1198,20 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
 }
 
 #[tauri::command]
-pub fn desktop_update_state(window: WebviewWindow, app: AppHandle) -> Result<DesktopUpdateState, String> {
+pub fn desktop_update_state(window: Webview, app: AppHandle) -> Result<DesktopUpdateState, String> {
     ensure_workbench(&window)?;
     Ok(state_snapshot(&app))
 }
 
 #[tauri::command]
-pub fn desktop_update_check(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+pub fn desktop_update_check(window: Webview, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
     check_with_presentation(app, true, CheckPresentation::Workbench)
 }
 
 /// The Workbench's pre-release switch: the same channel as the menu item.
 #[tauri::command]
-pub fn desktop_update_prereleases_set(window: WebviewWindow, app: AppHandle, enabled: bool) -> Result<bool, String> {
+pub fn desktop_update_prereleases_set(window: Webview, app: AppHandle, enabled: bool) -> Result<bool, String> {
     ensure_workbench(&window)?;
     set_channel(&app, Channel::of(enabled))?;
     check_with_presentation(app, true, CheckPresentation::Workbench)?;
@@ -1220,7 +1219,7 @@ pub fn desktop_update_prereleases_set(window: WebviewWindow, app: AppHandle, ena
 }
 
 #[tauri::command]
-pub fn desktop_update_auto_update_set(window: WebviewWindow, app: AppHandle, enabled: bool) -> Result<bool, String> {
+pub fn desktop_update_auto_update_set(window: Webview, app: AppHandle, enabled: bool) -> Result<bool, String> {
     ensure_workbench(&window)?;
     set_auto_update(&app, enabled)
 }
@@ -1275,7 +1274,7 @@ fn claim_explicit_install(
 }
 
 #[tauri::command]
-pub fn desktop_update_install(window: WebviewWindow, app: AppHandle, target_version: String) -> Result<(), String> {
+pub fn desktop_update_install(window: Webview, app: AppHandle, target_version: String) -> Result<(), String> {
     ensure_workbench(&window)?;
     let generation = crate::instance_client::epoch(&app);
     explicit_install(app, &target_version, generation)
@@ -1296,7 +1295,7 @@ fn explicit_install(app: AppHandle, target_version: &str, generation: Option<u64
 }
 
 #[tauri::command]
-pub fn desktop_update_skip(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+pub fn desktop_update_skip(window: Webview, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
     let version = {
         let updater = app.state::<Updater>();
@@ -1325,7 +1324,7 @@ pub fn desktop_update_skip(window: WebviewWindow, app: AppHandle) -> Result<(), 
 }
 
 #[tauri::command]
-pub fn desktop_update_remote_decline(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+pub fn desktop_update_remote_decline(window: Webview, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
     let request = {
         let updater = app.state::<Updater>();

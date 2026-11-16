@@ -1,7 +1,10 @@
 //! Archived-assembly-only updater harness; never declared by the shipped lib.
 //! Derived from instance_client_probe + fixture_shell, without account/backend
 //! fixtures. Production panel commands, scheduler, verifier and installer run.
-use super::*;
+use super::{
+    instance_client, notifications, pet, updater, BootstrapLog, DeepLinks, PendingDesktopUpdateOpen, Shell,
+    ACTIVITY_MONITOR, MAIN_WINDOW,
+};
 use async_trait::async_trait;
 use avibe_runtime_host::{
     instance_client::{
@@ -10,7 +13,8 @@ use avibe_runtime_host::{
         storage::{ConnectionStore, Credentials},
         transport::{Epoch, Request, Response, Transport},
     },
-    HealthProbe, LaunchError, Presence, ResolvedRuntimeLauncher, RuntimeHostSettings, RuntimeLauncher,
+    HealthProbe, LaunchError, LoopbackOrigin, Presence, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings,
+    RuntimeLauncher,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -18,11 +22,11 @@ use std::{
     collections::HashMap,
     io::Write,
     path::PathBuf,
-    sync::OnceLock,
+    sync::{atomic::Ordering, Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tauri::utils::config::AppDirectoriesOverride;
-use tauri::{Listener, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
 #[derive(Clone, Deserialize)]
@@ -141,7 +145,7 @@ impl Passkeys for NoPasskey {
 
 #[tauri::command]
 async fn desktop_client_request(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     app: AppHandle,
     request: ClientRequest,
 ) -> Result<ClientReply, String> {
@@ -247,8 +251,8 @@ pub fn run() {
                 })
             })
             .on_page_load(|view, payload| {
-                if view.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
-                    instance_client::page_loaded(view.app_handle());
+                if instance_client::is_main_view(view.app_handle(), view.label()) && payload.event() == tauri::webview::PageLoadEvent::Finished {
+                    super::main_document_finished(view);
                     emit(json!({"event":"loaded", "url":payload.url().as_str()}));
                 }
             }).build())
@@ -282,7 +286,13 @@ pub fn run() {
             coordinator.local_origin(Some(local));
             let mut window = app.config().app.windows[0].clone();
             window.url = WebviewUrl::External(bundle);
+            let document_window = instance_client::window_created(app.handle()).unwrap();
             WebviewWindowBuilder::from_config(app, &window)?
+                .on_page_load(move |view, payload| {
+                    if payload.event() == tauri::webview::PageLoadEvent::Started {
+                        instance_client::document_started(view.app_handle(), document_window, payload.url());
+                    }
+                })
                 .initialization_script("localStorage.setItem('i18nextLng', 'en');")
                 .initialization_script(instance_client::initial_script(app.handle()).unwrap())
                 .visible(false).build()?;
@@ -306,9 +316,9 @@ pub fn run() {
                         let Ok(command) = serde_json::from_str::<Value>(line) else { continue };
                         if command["pid"].as_u64() != Some(std::process::id() as u64) { continue; }
                         match command["action"].as_str().unwrap() {
-                            "eval" => handle.get_webview_window(MAIN_WINDOW).unwrap().eval(command["script"].as_str().unwrap()).unwrap(),
+                            "eval" => instance_client::active_webview(&handle).unwrap().eval(command["script"].as_str().unwrap()).unwrap(),
                             "state" => emit(json!({"event":"state", "state":coordinator.state(),
-                                "visible":handle.get_webview_window(MAIN_WINDOW).is_some_and(|window| window.is_visible().unwrap_or(false))})),
+                                "visible":handle.get_window(MAIN_WINDOW).is_some_and(|window| window.is_visible().unwrap_or(false))})),
                             "stop" => { super::exit_shell(&handle); return; },
                             _ => panic!("unsupported fixture command"),
                         }

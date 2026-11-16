@@ -25,7 +25,8 @@ use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::{
-    AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, Webview, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use url::Url;
@@ -255,10 +256,10 @@ fn settings_state(pet: &Pet) -> PetSettingsState {
 }
 
 fn dispatch_settings(app: &AppHandle, state: &PetSettingsState) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW).filter(crate::pet::is_workbench) else {
+    let Some(window) = crate::instance_client::active_webview(app).filter(crate::pet::is_workbench) else {
         return;
     };
-    dispatch(
+    dispatch_view(
         &window,
         SETTINGS_EVENT,
         &serde_json::to_value(state).expect("pet settings are serializable"),
@@ -710,6 +711,9 @@ fn deliver_summon(app: &AppHandle, window: Option<WebviewWindow>, intent: PetInt
 }
 
 fn dispatch(window: &WebviewWindow, event: &str, detail: &serde_json::Value) {
+    dispatch_view(window.as_ref(), event, detail);
+}
+fn dispatch_view(window: &Webview, event: &str, detail: &serde_json::Value) {
     let script = format!(
         "window.dispatchEvent(new CustomEvent({}, {{ detail: {} }}));",
         serde_json::to_string(event).expect("event name JSON"),
@@ -953,21 +957,21 @@ fn is_pet_caller(label: &str, built_for: Option<&LoopbackOrigin>, url: &Url) -> 
 }
 
 /// The Workbench in `main`, on the Runtime the shell navigated it to.
-pub(crate) fn is_workbench(window: &WebviewWindow) -> bool {
+pub(crate) fn is_workbench(window: &Webview) -> bool {
     let Some(shell) = window.try_state::<Shell>() else {
         return false;
     };
     let active = lock(&shell.active_origin).clone();
-    window
-        .url()
-        .is_ok_and(|url| is_workbench_caller(window.label(), active.as_ref(), &url))
+    window.url().is_ok_and(|url| {
+        crate::instance_client::is_current_runtime(window) && is_workbench_caller(MAIN_WINDOW, active.as_ref(), &url)
+    })
 }
 
 fn is_workbench_caller(label: &str, active: Option<&LoopbackOrigin>, url: &Url) -> bool {
     label == MAIN_WINDOW && active.is_some_and(|origin| origin.matches_url_origin(url))
 }
 
-fn ensure_workbench_page(window: &WebviewWindow) -> Result<(), String> {
+fn ensure_workbench_page(window: &Webview) -> Result<(), String> {
     if is_workbench(window) {
         Ok(())
     } else {
@@ -976,13 +980,13 @@ fn ensure_workbench_page(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn pet_settings(window: WebviewWindow) -> Result<PetSettingsState, String> {
+pub fn pet_settings(window: Webview) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     Ok(settings_state(&window.state::<Pet>()))
 }
 
 #[tauri::command]
-pub fn pet_set_enabled(window: WebviewWindow, enabled: bool) -> Result<PetSettingsState, String> {
+pub fn pet_set_enabled(window: Webview, enabled: bool) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     set_enabled(window.app_handle(), enabled)?;
     Ok(settings_state(&window.state::<Pet>()))
@@ -990,7 +994,7 @@ pub fn pet_set_enabled(window: WebviewWindow, enabled: bool) -> Result<PetSettin
 
 #[tauri::command]
 pub fn pet_set_shortcut(
-    window: WebviewWindow,
+    window: Webview,
     target: PetShortcutTarget,
     shortcut: String,
 ) -> Result<PetSettingsState, String> {
@@ -1111,7 +1115,7 @@ fn save_shortcuts(
 }
 
 #[tauri::command]
-pub fn pet_reset_shortcuts(window: WebviewWindow) -> Result<PetSettingsState, String> {
+pub fn pet_reset_shortcuts(window: Webview) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     let app = window.app_handle();
     let before = settings_state(&app.state::<Pet>());
@@ -1123,7 +1127,7 @@ pub fn pet_reset_shortcuts(window: WebviewWindow) -> Result<PetSettingsState, St
 }
 
 #[tauri::command]
-pub fn pet_set_voice_mode(window: WebviewWindow, mode: VoiceMode) -> Result<PetSettingsState, String> {
+pub fn pet_set_voice_mode(window: Webview, mode: VoiceMode) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     let app = window.app_handle();
     let pet = app.state::<Pet>();
@@ -1524,10 +1528,14 @@ pub struct BindResult {
 /// Binds the pet to a session: the pet's switcher, and the Workbench's
 /// "Show in pet", which also brings the pet forward.
 #[tauri::command]
-pub fn pet_bind(window: WebviewWindow, session_id: String) -> Result<BindResult, String> {
+pub fn pet_bind(window: Webview, session_id: String) -> Result<BindResult, String> {
     let from_workbench = is_workbench(&window);
     if !from_workbench {
-        ensure_pet_page(&window)?;
+        let pet = window.state::<Pet>();
+        let url = window.url().map_err(|_| UNAVAILABLE.to_owned())?;
+        if !is_pet_caller(window.label(), lock(&pet.window_origin).as_ref(), &url) {
+            return Err(UNAVAILABLE.to_owned());
+        }
     }
     if !valid_session_id(&session_id) {
         return Err("Not a session id.".to_owned());

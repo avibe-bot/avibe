@@ -704,7 +704,7 @@ impl RuntimeState {
         }
         let visible = self
             .app
-            .get_webview_window("main")
+            .get_window(crate::MAIN_WINDOW)
             .is_some_and(|window| window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true));
         let directive =
             self.lifecycle

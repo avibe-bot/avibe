@@ -2243,7 +2243,49 @@ extension WebViewController: WKUIDelegate {
         let allowed = frame.isMainFrame
             && type == .microphone
             && webOrigin(for: origin) == instanceOrigin
-        decisionHandler(allowed ? .grant : .deny)
+        guard allowed else {
+            decisionHandler(.deny)
+            return
+        }
+        // Voice input sends speech to a third-party AI service. A page that asks
+        // each account first carries the consent marker; an older one gets no
+        // microphone and is told to update (VoiceConsentMarker).
+        webView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak webView] result, error in
+            guard let self, let webView, self.acceptsRuntimeCallback(from: webView) else {
+                decisionHandler(.deny)
+                return
+            }
+            switch error == nil ? VoiceConsentMarker(result: result) : .other {
+            case .marked:
+                decisionHandler(.grant)
+            case .unmarkedWorkbench:
+                decisionHandler(.deny)
+                self.presentVoiceUpdateRequired(for: webView)
+            case .other:
+                decisionHandler(.deny)
+            }
+        }
+    }
+
+    private func presentVoiceUpdateRequired(for webView: WKWebView) {
+        let alert = UIAlertController(
+            title: String(localized: "voice.update_required.title"),
+            message: String(localized: "voice.update_required.message"),
+            preferredStyle: .alert
+        )
+        // Tracked like the page's own alerts, so it goes with its WebView and a
+        // download that finished meanwhile is presented after it.
+        let identifier = registerDialog(for: webView, alert: alert, cancel: {})
+        alert.addAction(
+            UIAlertAction(title: String(localized: "common.ok"), style: .default) { [weak self] _ in
+                self?.resolveDialog(identifier, completion: {})
+            }
+        )
+        guard let presenter = dialogPresenter(for: webView) else {
+            resolveDialog(identifier, completion: {})
+            return
+        }
+        presenter.present(alert, animated: true)
     }
 
     func webView(

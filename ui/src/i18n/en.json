@@ -4661,7 +4661,8 @@
     "desktopManagedUpdateMemberHint": "Update this host in the Avibe desktop app on the computer running Avibe.",
     "desktopRemoteUpdateLocalRequest": "An update to {{target}} was requested remotely. Install it now or ignore this request.",
     "desktopRemoteUpdateIgnore": "Ignore this request",
-    "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
+    "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}",
+    "audioTranscriptionDisclosure": "When on, voice messages from chat apps go to a third-party AI speech service to be turned into text. avibe.bot doesn't keep the recordings."
   },
   "doctor": {
     "title": "System Status",
@@ -6244,12 +6245,10 @@
       "strictHelp": "Ask for your passkey on every approval and reveal — not just an in-sandbox confirmation. Signing always asks regardless. Turning this on re-locks the vault so it takes effect right away."
     },
     "reveal": {
-      "show": "Show value",
-      "copy": "Copy value",
-      "showInBrowser": "Show in browser",
-      "browserFallback": "Showing this value didn't work in the app, so choose Show in browser from its menu.",
+      "view": "View secret",
+      "viewInBrowser": "View in browser",
+      "browserFallback": "Showing this secret didn't work in the app, so choose View in browser from its menu.",
       "errors": {
-        "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
         "unavailable": "Reveal isn't available for this secret yet."
       }
@@ -6294,7 +6293,6 @@
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
       "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
       "replacePlaceholder": "Saved · type to replace",
-      "revealField": "Field to reveal",
       "nameRequired": "Enter a field name",
       "nameInvalid": "Use lowercase letters, digits, and underscores, starting with a letter",
       "nameTaken": "There's already a {{field}} field",
@@ -6333,12 +6331,12 @@
       "maybeLater": "Maybe later",
       "unlockWithPasskey": "Unlock with passkey",
       "unlockPasskeyCaption": "Face ID · Touch ID · security key",
-      "factorNote": "Your passkey proof never leaves the browser — the machine alone can't decrypt this",
+      "factorNote": "Only your passkey can unlock this; the machine alone can't decrypt it",
       "cancel": "Cancel",
       "passkeyUnrecoverableWarning": "This passkey is the only key. Lose it and the protected secrets can't be recovered — there is no backup.",
       "passkeyAck": "I understand: if I lose this passkey, these secrets can't be recovered.",
       "unlockUnavailableHere": "Use a compatible browser. On the computer running Avibe, open Vaults from localhost or 127.0.0.1; on other devices, use your HTTPS avibe.bot address. LAN HTTP addresses (such as 192.168.x.x) are not supported.",
-      "browserNote": "Passkeys don't work in the desktop app. Continue in your browser, on this same Avibe, and fill in this secret there.",
+      "browserNote": "This version of the desktop app can't use your passkey directly. Continue in your browser, on this same Avibe, and fill in this secret there.",
       "browserFallbackNote": "The passkey step didn't work in the app, so continue in your browser, on this same Avibe, and fill in this secret there.",
       "openInBrowser": "Open in browser",
       "errors": {
@@ -6527,9 +6525,9 @@
       "close": "Close",
       "ttlMinutes": "{{count}} min",
       "ttlHours": "{{count}} h",
-      "accessNote": "Unlocked in your browser — the secret's value is never shown to the AI or the chat.",
-      "signNote": "The private key never leaves your browser — only the signature is returned.",
-      "browserNote": "This needs your passkey, which the desktop app can't use. Review and approve it in your browser.",
+      "accessNote": "Unlocked in the secure window. The value is never shown to the AI or in chat.",
+      "signNote": "The private key is used only inside the secure window. Avibe receives only the signature.",
+      "browserNote": "This version of the desktop app can't use your passkey directly. Review and approve in your browser.",
       "browserFallbackNote": "The passkey step didn't work in the app, so review and approve this in your browser.",
       "continueInBrowser": "Continue in browser",
       "errors": {
@@ -7292,7 +7290,8 @@
       "stop": "Stop voice input",
       "startFailed": "Couldn't use the microphone. Check microphone access in system settings, or type instead.",
       "empty": "No speech was heard. Try again, or type instead.",
-      "failed": "Couldn't turn that into text. Try again, or type instead."
+      "failed": "Couldn't turn that into text. Try again, or type instead.",
+      "consentOff": "Voice input is off. Turn it on in Settings › General."
     },
     "keyboard": {
       "open": "Type a message",
@@ -7423,6 +7422,21 @@
       "lost": "The recording couldn't be saved on this device.",
       "insert": "Put in the draft",
       "truncated": "The end of the recording wasn't saved on this device; this is the part that was."
+    },
+    "consent": {
+      "title": "Turn on voice input?",
+      "body": "What you say goes to a third-party AI service to be turned into text, with a little of the current conversation for accuracy.",
+      "learnMore": "Learn more",
+      "details": "They pass through avibe.bot to Alibaba Cloud Model Studio (Singapore), which transcribes the recording, and a model on the same platform tidies the text. avibe.bot keeps neither. You can change this anytime in Settings › General.",
+      "privacyPolicy": "Privacy policy",
+      "allow": "Allow",
+      "deny": "Don't allow",
+      "saveFailed": "Couldn't save your choice. Try again.",
+      "offTitle": "Voice input is off",
+      "offBody": "Type instead, or turn it on in Settings › General.",
+      "turnOn": "Turn on",
+      "settingTitle": "Voice input",
+      "settingDescription": "A third-party AI speech service turns what you say into text; avibe.bot doesn't keep your recordings. Applies to your account on this Avibe."
     }
   },
   "mcpHub": {
@@ -7576,7 +7590,7 @@
     "switchInstance": "Switch instance",
     "localRemoteAccess": "Remote access to this Mac",
     "auxiliaryIncomplete": "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them.",
-    "signOut": "Sign out",
+    "signOut": "Sign out on this device",
     "signOutBody": "Sign out on this Desktop and return to this Mac. Registration, remote access preferences and running tasks are kept.",
     "localVersion": "Local Desktop version {{version}}",
     "continueLocal": "Continue on this Mac",
@@ -7605,13 +7619,13 @@
     "useAuthenticator": "Use an authenticator",
     "loginHero": "Your Avibe,\nconnected from here.",
     "loginHeroBody": "One account for your computers and the instances shared with you.",
-    "checkInbox": "Check your inbox",
-    "loginTitle": "Sign in or create an account",
+    "checkInbox": "Check your inbox.",
+    "loginTitle": "Start with an email.",
     "codeSent": "A code was sent to {{email}}",
-    "loginBody": "Use your avibe.bot account. New emails create an account automatically.",
+    "loginBody": "Sign in or sign up for your avibe.bot account.",
     "emailCode": "6-digit code",
     "email": "Email",
-    "codeHelp": "Enter the code from your email.",
+    "codeHelp": "Enter the 6-digit code from your email. You can paste it here.",
     "verifySignIn": "Verify and sign in",
     "sendCode": "Send verification code",
     "changeEmail": "Change email",
@@ -7626,7 +7640,7 @@
     "allow": "Allow and connect",
     "deny": "Decline",
     "connectingTo": "Connecting to {{name}}",
-    "unreachable": "{{name}} is unreachable",
+    "unreachable": "Can’t reach {{name}} right now",
     "switchBody": "Verifying your account and instance. Tasks on this Mac keep running.",
     "offlineBody": "The remote computer may be offline, or the network was interrupted. Updates are paused.",
     "localStillAvailable": "Avibe on this Mac is still available. Returning will not stop tasks on the remote instance.",
@@ -7640,7 +7654,7 @@
     "transferSteps": "Ask the current owner to sign in to the avibe.bot console and use the existing ownership transfer flow for this instance. After the transfer completes, sign in again here. Desktop does not replace the current owner.",
     "keepLink": "Keep link · use locally",
     "reviewChange": "Review account change",
-    "otherInstances": "View other instances",
+    "otherInstances": "Other instances",
     "signedIn": "Signed in",
     "registeringBody": "Registering this Mac, then enabling remote access…",
     "remoteAccessTitle": "Remote access",
@@ -7671,9 +7685,43 @@
       "bridge": "The Desktop connection is unavailable. Retry or return to your workspace.",
       "request": "This step could not be completed. Check your connection and try again.",
       "code": "Invalid or expired code. Try again or resend.",
-      "upgrade": "This instance needs an Avibe update before Desktop can connect. You can still use this Mac."
+      "upgrade": "This instance needs to upgrade Avibe before you can open it. Upgrade it on that computer, then retry.",
+      "credentials": "The email or password is incorrect. Try again or use an email code.",
+      "rateLimit": "Too many attempts. Wait a moment, then try again."
     },
-    "localStatus": "{{name}} · {{status}}"
+    "localStatus": "{{name}} · {{status}}",
+    "newEmailHelp": "New email addresses are registered automatically. No password needed.",
+    "noCode": "Didn’t receive a code?",
+    "password": "Password",
+    "passwordSignIn": "Sign in",
+    "usePassword": "Use password instead",
+    "useEmailCode": "Use an email code",
+    "forgotPassword": "Forgot password?",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
+    "passwordHelp": "Sign in with an email code, then set or reset your password in Account security at avibe.bot.",
+    "opening": "Opening…",
+    "offlineInstructions": "Open Avibe on that computer and connect it to the internet, then refresh this list.",
+    "signingOut": "Signing out…",
+    "signOutReturn": "Return to Workbench to continue.",
+    "instancesTitle": "Instances",
+    "currentlyUsing": "Currently using",
+    "accountTitle": "Account",
+    "currentAccount": "Currently signed in",
+    "addInstance": "Add instance",
+    "thisDevice": "This computer",
+    "sharedBy": "Shared by {{owner}}",
+    "addGuide": {
+      "body": "Add another computer or server to the same account, then return here to refresh the list.",
+      "computerTitle": "On another computer",
+      "computerBody": "Install Avibe Desktop and sign in with the same account. Complete account verification and local registration on that computer.",
+      "serverTitle": "On a server or command-line installation",
+      "serverBody": "Install Avibe using the installation guide, complete setup, then run this command on that server:",
+      "pairingBody": "Follow the guided pairing flow with the same avibe.bot account. Keep the pairing key on that server; do not enter it here.",
+      "installGuide": "Open installation guide",
+      "done": "Return and refresh",
+      "command": "vibe remote"
+    }
   },
   "update": {
     "row": {
