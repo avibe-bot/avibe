@@ -775,37 +775,13 @@ final class DirectPathAppTests: XCTestCase {
     // the control plane until the open's WebView has registered.
     //
     // `RootViewStandIn` makes and registers the runtime's WebView the way
-    // the root view does. With `.nextUpdate` it does so on the main queue
-    // right after the route changes, as SwiftUI's next update does, which
-    // is before the provider update starts. With `.afterTheProviderUpdate`
-    // it waits until that update is in flight first.
+    // the root view does: on the main actor right after the route changes,
+    // as SwiftUI's next update does, which is before the provider update
+    // starts. (A WebView that registers while the update is already in
+    // flight is still refused on this App; #3834 changes that.)
 
     @MainActor
     func testColdStartRestoresLastInstanceWithNotificationsOn() async throws {
-        try await assertColdStartRestoresInstanceOne(registration: .nextUpdate)
-    }
-
-    @MainActor
-    func testTenConsecutiveSwitchesOpenWithNotificationsOn() async throws {
-        try await assertTenSwitchesOpen(registration: .nextUpdate)
-    }
-
-    @MainActor
-    func testColdStartRestoresLastInstanceWhenItsProviderUpdateIsInFlightAtRegistration() async throws {
-        try await assertColdStartRestoresInstanceOne(registration: .afterTheProviderUpdate)
-    }
-
-    @MainActor
-    func testTenConsecutiveSwitchesOpenWhenEachProviderUpdateIsInFlightAtRegistration() async throws {
-        try await assertTenSwitchesOpen(registration: .afterTheProviderUpdate)
-    }
-
-    @MainActor
-    private func assertColdStartRestoresInstanceOne(
-        registration: RootViewStandIn.Registration,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
         try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         var root: RootViewStandIn?
@@ -814,14 +790,10 @@ final class DirectPathAppTests: XCTestCase {
             launchesWithInstanceOneSelected: true,
             notifications: notifications,
             whenTheAppExists: { app in
-                root = RootViewStandIn(
-                    app: app,
-                    notifications: notifications,
-                    registration: registration
-                )
+                root = RootViewStandIn(app: app)
             }
         )
-        let view = try XCTUnwrap(root, file: file, line: line)
+        let view = try XCTUnwrap(root)
         try await waitForTheBootstrap(of: app)
         try await assertOpens(
             "instance-1",
@@ -830,29 +802,19 @@ final class DirectPathAppTests: XCTestCase {
             notifications: notifications,
             afterArrivals: 0,
             // The restore may have registered while the bootstrap was awaited.
-            afterRegistrations: 0,
-            file: file,
-            line: line
+            afterRegistrations: 0
         ) {}
     }
 
     @MainActor
-    private func assertTenSwitchesOpen(
-        registration: RootViewStandIn.Registration,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) async throws {
+    func testTenConsecutiveSwitchesOpenWithNotificationsOn() async throws {
         try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         let app = try await makeApp(
             directTransport: nil,
             notifications: notifications
         )
-        let root = RootViewStandIn(
-            app: app,
-            notifications: notifications,
-            registration: registration
-        )
+        let root = RootViewStandIn(app: app)
         for index in 0..<10 {
             let instanceID = index.isMultiple(of: 2) ? "instance-1" : "instance-2"
             try await assertOpens(
@@ -861,19 +823,12 @@ final class DirectPathAppTests: XCTestCase {
                 root: root,
                 notifications: notifications,
                 afterArrivals: notifications.providerPatches.arrivals,
-                step: "switch \(index + 1)",
-                file: file,
-                line: line
+                step: "switch \(index + 1)"
             ) {
                 _ = try app.mobileSessionCoordinator.selectInstance(id: instanceID)
             }
         }
-        XCTAssertGreaterThanOrEqual(
-            notifications.providerPatches.arrivals,
-            10,
-            file: file,
-            line: line
-        )
+        XCTAssertGreaterThanOrEqual(notifications.providerPatches.arrivals, 10)
     }
 
     /// Runs `open`, then checks the open of `instanceID` end to end: its
@@ -3019,17 +2974,10 @@ private final class ProviderPatchGate: @unchecked Sendable {
 }
 
 /// Makes and registers each shown runtime's WebView controller, as the
-/// root view does, and records what it made.
+/// root view does in SwiftUI's next update after the route changes, and
+/// records what it made.
 @MainActor
 private final class RootViewStandIn {
-    enum Registration {
-        /// On the main actor right after the route changes: SwiftUI's next
-        /// update.
-        case nextUpdate
-        /// Only once the open's provider update is in flight.
-        case afterTheProviderUpdate
-    }
-
     struct Made {
         let runtime: MobileRuntimeContext
         let controller: WebViewController
@@ -3040,38 +2988,21 @@ private final class RootViewStandIn {
     private(set) var registrations: [Made] = []
     private var subscription: AnyCancellable?
 
-    init(
-        app: AppModel,
-        notifications: NotificationsOn,
-        registration: Registration
-    ) {
+    init(app: AppModel) {
         subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
             guard let self, let app, case .browser(let runtime) = route else {
                 return
             }
-            let arrivals = notifications.providerPatches.arrivals
-            switch registration {
-            case .nextUpdate:
-                // Queued behind the jobs the open has queued so far; the
-                // provider update needs two more hops after those.
-                Task { @MainActor in
-                    self.register(runtime, in: app)
-                }
-            case .afterTheProviderUpdate:
-                Task { @MainActor in
-                    while notifications.providerPatches.arrivals <= arrivals {
-                        try? await Task.sleep(for: .milliseconds(10))
-                    }
-                    self.register(runtime, in: app)
-                }
+            // Queued behind the jobs the open has queued so far; the
+            // provider update needs two more hops after those.
+            Task { @MainActor in
+                self.register(runtime, in: app)
             }
         }
     }
 
     private func register(_ runtime: MobileRuntimeContext, in app: AppModel) {
-        guard
-            let origin = WebOrigin(url: runtime.instance.url)
-        else {
+        guard let origin = WebOrigin(url: runtime.instance.url) else {
             return
         }
         let controller = WebViewController(
