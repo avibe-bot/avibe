@@ -542,10 +542,11 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
   });
 });
 
-// An approval, reveal or turn-off whose reserved window closed (the user closed it, or the app
-// declined to show it) ends a few seconds later instead of after the frame's 30-second pairing
-// timeout. A signature never does: its context is the request's own, so a dropped late signature
-// would leave a request this page can no longer sign.
+// An approval or turn-off whose reserved window closed (the user closed it, or the app declined to
+// show it) ends a few seconds later instead of after the frame's 30-second pairing timeout. Neither
+// shows anything or waits on the user once its window has confirmed. A reveal does (the value is on
+// screen until the user is done), and a signature's context is the request's own, so neither of
+// those ever ends early.
 describe('VaultSandboxClient request whose reserved window closed', () => {
   async function pending(op: string) {
     vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
@@ -561,11 +562,16 @@ describe('VaultSandboxClient request whose reserved window closed', () => {
     const popup = stubBlankPopup();
     const authorization = openVaultAuthorizationWindow()!;
     const settled = vi.fn();
-    const result = instance.request(op, {}, { interactive: true, authorizationWindow: authorization.id });
+    // The interactive deadline the client gives these steps.
+    const result = instance.request(op, {}, { interactive: true, authorizationWindow: authorization.id, timeoutMs: 5 * 60_000 });
     result.then((value) => settled({ value }), (error: unknown) => settled({ error }));
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
     const id = (postMessage.mock.calls[0][0] as { id: string }).id;
-    return { instance, popup, settled, answer: (value: unknown) => instance.pending.get(id)?.resolve(value) };
+    vi.spyOn(instance, 'startSurfaceRefresh').mockImplementation(() => undefined);
+    // The sandbox's own events, as it posts them to this page.
+    const sandboxEvent = (event: 'ui.show' | 'ui.hide') =>
+      (instance as unknown as { handleEvent: (message: { event: string }) => void }).handleEvent({ event });
+    return { instance, popup, settled, sandboxEvent, answer: (value: unknown) => instance.pending.get(id)?.resolve(value) };
   }
 
   afterEach(() => {
@@ -585,14 +591,53 @@ describe('VaultSandboxClient request whose reserved window closed', () => {
     expect(step.settled).toHaveBeenCalledTimes(1);
   });
 
-  // The sandbox window closes itself after a confirmed step, just before its answer arrives.
-  it('keeps the answer of a confirmed step whose window closed itself', async () => {
-    const step = await pending('reveal');
+  // The sandbox window closes itself after a confirmed approval, just before its answer arrives.
+  it('keeps the answer of an approval whose window closed itself', async () => {
+    const step = await pending('approveRelease');
     step.popup.closed = true;
     await vi.advanceTimersByTimeAsync(1_000);
-    step.answer({ completed: true });
+    step.answer({ blindBoxes: [{}] });
     await vi.advanceTimersByTimeAsync(5_000);
     expect(step.settled).toHaveBeenCalledTimes(1);
+    expect(step.settled).toHaveBeenCalledWith({ value: { blindBoxes: [{}] } });
+  });
+
+  // A frame that asks for its slot after the window closed (an approval that must confirm again
+  // after the vault locked mid-step) is waiting on the user, so the step is not over.
+  it('never ends an approval while the frame shows something', async () => {
+    const step = await pending('approveRelease');
+    step.popup.closed = true;
+    step.sandboxEvent('ui.show');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(step.settled).not.toHaveBeenCalled();
+    expect(step.instance.modalVisible).toBe(true);
+  });
+
+  // The sandbox's own order for a reveal it shows in this page's frame: the window confirms and
+  // closes itself, the frame shows the value, and the answer comes after the user's Done.
+  it('never ends a reveal whose value is on screen in the frame', async () => {
+    const step = await pending('reveal');
+    step.popup.closed = true;
+    step.sandboxEvent('ui.show');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(step.settled).not.toHaveBeenCalled();
+    expect(step.instance.modalVisible).toBe(true);
+    step.sandboxEvent('ui.hide');
+    step.answer({ completed: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(step.settled).toHaveBeenCalledWith({ value: { completed: true } });
+  });
+
+  // A sandbox that shows the value in the secure window itself keeps that window open while it is
+  // shown and answers after the user closes it, with nothing in the frame.
+  it('never ends a reveal whose value is on screen in its window, nor after the user closed it', async () => {
+    const step = await pending('reveal');
+    await vi.advanceTimersByTimeAsync(60_000);
+    step.popup.closed = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(step.settled).not.toHaveBeenCalled();
+    step.answer({ completed: true });
+    await vi.advanceTimersByTimeAsync(0);
     expect(step.settled).toHaveBeenCalledWith({ value: { completed: true } });
   });
 

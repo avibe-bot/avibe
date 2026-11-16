@@ -97,12 +97,16 @@ function cancelMayBeFailure(op: VaultSandboxOp, reserved: ReservedWindow | undef
 }
 
 // Steps that end early once their reserved window has closed and no answer came within the grace,
-// instead of waiting out the frame's 30-second pairing timeout. Dropping a late answer is safe for
-// these: their signed contexts are minted per attempt, so a retry starts clean. A signature is not
-// one of them: its context is the request's own and the sandbox records it as used when it signs,
-// so dropping a late signature would leave a request this page can no longer sign. Nor is a
-// seed-phrase wallet, whose late answer may follow words the user has already written down.
-const ENDS_WITH_ITS_WINDOW: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>(['approveRelease', 'reveal', POLICY_DOWNGRADE_OP]);
+// instead of waiting out the frame's 30-second pairing timeout. Each of these finishes as soon as
+// its window confirms (the sandbox then only computes and answers, nothing more on screen or from
+// the user), and dropping a late answer is safe: their signed contexts are minted per attempt, so
+// a retry starts clean.
+// - A reveal is not one of them: after its window confirms, the value is shown (in the frame, or in
+//   that window kept open), and the answer comes only after the user is done with it.
+// - Nor a signature: its context is the request's own and the sandbox records it as used when it
+//   signs, so dropping a late signature would leave a request this page can no longer sign.
+// - Nor a seed-phrase wallet, whose late answer may follow words the user has already written down.
+const ENDS_WITH_ITS_WINDOW: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>(['approveRelease', POLICY_DOWNGRADE_OP]);
 // The sandbox window closes itself after a confirmed step, just before its answer reaches this page.
 const WINDOW_CLOSED_GRACE_MS = 3_000;
 const WINDOW_CLOSED_POLL_MS = 250;
@@ -867,7 +871,9 @@ export class VaultSandboxClient {
       if (grace !== null || !authorization.windowClosed()) return;
       grace = window.setTimeout(() => {
         const pending = this.pending.get(id);
-        if (!pending) return;
+        // The frame asked for its slot (`ui.show`): the sandbox is showing something or waiting on
+        // the user there, so this step is not over and is never cut short.
+        if (!pending || this.modalVisible) return;
         window.clearTimeout(pending.timer);
         this.pending.delete(id);
         this.interactiveRequests.delete(id);
