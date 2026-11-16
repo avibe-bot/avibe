@@ -19,11 +19,9 @@ const setup = ['role=radio[name="{t:vaults.dialog.kindKeypair}"]', 'role=radio[n
 const expand = [...setup, 'role=button[name^="{t:vaults.hd.passphrase.title}"]'];
 const add = () => <VaultSecretDialog open onOpenChange={noop} onCreated={noop} />;
 const show = ['button:has(svg.lucide-eye)'];
-// Leaving the second box: into it, then back to the first (the screenshot's own clicks; no logic here).
-const leaveAgain = ['input[aria-label="{t:vaults.hd.passphrase.again}"]', 'input[aria-label="{t:vaults.hd.passphrase.label}"]'];
-const typed = (value: string, again: string) => () => (
+const typed = (value: string, again: string, left = false) => () => (
   <div className="flex min-w-0 flex-col gap-4">
-    <HdCreatePassphrase value={value} confirm={again} onChange={noop} onConfirmChange={noop} />
+    <HdCreatePassphrase value={value} confirm={again} confirmLeft={left} onChange={noop} onConfirmChange={noop} onConfirmLeftChange={noop} />
   </div>
 );
 const backup = () => (
@@ -46,7 +44,7 @@ const designFrames = frames([
   { name: 'setup-expanded-phone', title: '新建 · 完整弹窗 · 手机 · 展开', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: expand, render: consolePage(<><VaultsPage />{add()}</>) },
   { name: 'typed-first', title: 'Passphrase 区块 · 只填了第一栏：第二栏空着不判断', width: 800, height: 520, status: 'shipped', fixtures, render: alone(T, typed('correct horse battery', '')()) },
   { name: 'typed-partial', title: 'Passphrase 区块 · 第二栏还在输入（比第一栏短）：不判断', width: 800, height: 520, status: 'shipped', fixtures, render: alone(T, typed('correct horse battery', 'correct horse')()) },
-  { name: 'typed-mismatch', title: 'Passphrase 区块 · 离开第二栏后不一致，「生成助记词」不可点', width: 800, height: 520, status: 'shipped', fixtures, click: leaveAgain, render: alone(T, typed('correct horse battery', 'correct horse batery')()) },
+  { name: 'typed-mismatch', title: 'Passphrase 区块 · 离开第二栏后不一致，「生成助记词」不可点', width: 800, height: 520, status: 'shipped', fixtures, render: alone(T, typed('correct horse battery', 'correct horse batery', true)()) },
   { name: 'typed-match', title: 'Passphrase 区块 · 两次一致（单独画，帧里不能打字）', width: 800, height: 520, status: 'shipped', fixtures, render: alone(T, typed('correct horse battery', 'correct horse battery')()) },
   { name: 'backup', title: '抄下助记词 · 提醒 Passphrase 另外记下', width: 800, height: 1000, status: 'shipped', fixtures, click: show, render: alone(T, backup()) },
   { name: 'done', title: '完成 · 恢复需要词 + 一字不差的 Passphrase（替换原来的灰字）', width: 800, height: 1100, status: 'shipped', fixtures, render: alone(T, done()) },

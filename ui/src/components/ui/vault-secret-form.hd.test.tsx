@@ -577,13 +577,21 @@ it('judges the passphrase\'s second box only once it is done: same length as the
   fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${hd.passphrase.title.replace(/[()]/g, '\\$&')}`) }));
   const [first, again] = [screen.getByLabelText(hd.passphrase.label), screen.getByLabelText(hd.passphrase.again)];
   fireEvent.change(first, { target: { value: 'orange' } });
-  // An empty second box is never judged, even after leaving it.
+  // An empty second box is never judged, even after leaving it; Create, disabled, says what is left.
+  const reason = en.vaults.dialog.createNeedsPassphraseAgain;
   fireEvent.blur(again);
   expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
   expect(screen.getByText(hd.passphrase.hint)).toBeTruthy();
+  expect(screen.getByText(reason)).toBeTruthy();
   fireEvent.focus(again);
   fireEvent.change(again, { target: { value: 'ora' } });
   expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
+  expect(screen.getByText(reason)).toBeTruthy();
+  // Enter while still shorter: done with it, so the field says it differs (and the reason gives way).
+  fireEvent.keyDown(again, { key: 'Enter' });
+  expect(screen.getByText(hd.passphrase.mismatch)).toBeTruthy();
+  expect(screen.queryByText(reason)).toBeNull();
+  fireEvent.focus(again);
   // As long as the first and different: said at once.
   fireEvent.change(again, { target: { value: 'orangf' } });
   expect(screen.getByText(hd.passphrase.mismatch)).toBeTruthy();
@@ -592,4 +600,16 @@ it('judges the passphrase\'s second box only once it is done: same length as the
   fireEvent.change(again, { target: { value: 'orange' } });
   expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
   expect(screen.getByText(hd.passphrase.match)).toBeTruthy();
+  expect(screen.queryByText(reason)).toBeNull();
+  expect((screen.getByRole('button', { name: hd.generateCta }) as HTMLButtonElement).disabled).toBe(false);
+  // Emptied again: no longer judged, even though it was left before.
+  fireEvent.blur(again);
+  fireEvent.change(again, { target: { value: '' } });
+  fireEvent.change(again, { target: { value: 'or' } });
+  expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
+  expect(screen.getByText(reason)).toBeTruthy();
+  // Show/hide on the second box counts as leaving it.
+  const toggles = screen.getAllByRole('button', { name: en.vaults.dialog.showValue });
+  fireEvent.click(toggles[toggles.length - 1]);
+  expect(screen.getByText(hd.passphrase.mismatch)).toBeTruthy();
 });
