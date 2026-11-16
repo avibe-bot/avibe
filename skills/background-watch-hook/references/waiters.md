@@ -64,8 +64,8 @@ Generic shape:
 
 ```bash
 vibe watch add \
-  --message "<what the next Agent Run should do>" \
-  --name "<optional label>" \
+  --message '<what the next Agent Run should do>' \
+  --name '<optional label>' \
   -- \
   <waiter command ...>
 ```

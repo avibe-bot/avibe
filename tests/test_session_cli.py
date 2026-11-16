@@ -1148,7 +1148,9 @@ def test_web_title_prompt_defaults_to_current_session():
     title_prompt = out[out.index("## Session Title") :]
     assert "## Session Title" in out
     # One call: the CLI keeps a deliberate title, so no `vibe session get` first.
-    assert '`vibe session update --title "<short title>" --if-untitled`' in title_prompt
+    # Single quotes: the shell must not expand `$`, backticks or `!` in a generated title.
+    assert "`vibe session update --title '<short title>' --if-untitled`" in title_prompt
+    assert '--title "' not in title_prompt
     assert "vibe session get" not in title_prompt
     assert "sesweb" not in title_prompt
     assert "keeps a title the user or an Agent already set" in out
