@@ -147,8 +147,8 @@ it.each([1, 2])('AUTH-SETUP-171 preserves direct recovery material only in the c
 // Feedback.2 merges ownership sections but must preserve native recency/server order.
 it('shows the current shared instance once, followed by native-ordered other instances and the local escape', async () => {
   const instance = states.signed_in.catalog.instances[0];
-  const row = (id: string, relationship: 'owner' | 'shared') => ({ ...instance, id, name: id.toUpperCase(), relationship });
-  const state = { ...states.signed_in,
+  const row = (id: string, relationship: 'owner' | 'shared') => ({ ...instance, id, name: id.toUpperCase(), relationship, host: `${id}.avibe.bot`, url: `https://${id}.avibe.bot` });
+  const state = { ...states.signed_in, current_instance: row('zeta', 'shared'),
     connection: { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'ZETA', instance_id: 'zeta', canonical_origin: 'https://zeta.avibe.bot' } },
     catalog: { status: 'ready', instances: [row('zeta', 'shared'), row('beta', 'owner'), row('gamma', 'shared'), row('alpha', 'owner')] },
   };
@@ -502,6 +502,41 @@ it('a failed instance becoming offline removes its retry action without losing t
 // A5 metadata is display-only: native sends a validated snapshot when the
 // current shared target disappears from a later catalog, and clears it on
 // account/target changes. It must never become a selectable catalog entry.
+it.each([null, undefined, 'validated'] as const)('current attribution uses only native proof despite a conflicting catalog (%s)', async (proof) => {
+  const trusted = { ...states.signed_in.catalog.instances[0], relationship: 'shared', owner_email: 'verified-owner@example.test', available: true };
+  const conflicting = { ...trusted, name: 'Unvalidated name', url: 'https://wrong-origin.example.test', host: 'wrong-origin.example.test',
+    relationship: 'owner', owner_email: 'wrong-owner@example.test', available: false };
+  const state = { ...states.signed_in, current_instance: proof === 'validated' ? trusted : proof,
+    connection: { status: 'remote_connected', pending: null,
+      committed: { kind: 'remote', name: 'Committed name', instance_id: trusted.id, canonical_origin: trusted.url } },
+    catalog: { status: 'ready', instances: [conflicting] } };
+  const invoke = mount(state, (request) => ({ ...replies.success, state, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  const current = screen.getByRole('region', { name: 'Currently using' });
+  expect(within(current).getByText('Committed name')).toBeTruthy();
+  expect(current.textContent).not.toContain('wrong-origin');
+  expect(current.textContent).not.toContain('wrong-owner');
+  expect(current.querySelector(`[data-instance-icon="${proof === 'validated' ? 'shared' : 'unknown'}"]`)).toBeTruthy();
+  expect(within(current).getByRole('button').hasAttribute('disabled')).toBe(false);
+  if (proof === 'validated') expect(within(current).getByText(/verified-owner/)).toBeTruthy();
+  else expect(within(current).getByText(trusted.url)).toBeTruthy();
+  expect(screen.getByRole('region', { name: 'Other instances' }).querySelector(`[data-instance-id="${trusted.id}"]`)).toBeNull();
+  const cleared = { ...state, generation: state.generation + 1, revision: state.revision + 1, current_instance: null,
+    account: { ...state.account, identity: { id: 'new-account', email: 'new@example.test' } } };
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: cleared }));
+  expect(current.querySelector('[data-instance-icon="unknown"]')).toBeTruthy();
+  expect(current.textContent).not.toMatch(/verified-owner|wrong-origin|wrong-owner/);
+  fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...cleared, generation: cleared.generation + 1,
+    connection: { status: 'remote_unreachable', pending: null, committed: { kind: 'remote', name: 'New target', instance_id: 'new-target', canonical_origin: 'https://new-target.example.test' } },
+    catalog: { status: 'ready', instances: [{ ...conflicting, id: 'new-target' }] },
+  } }));
+  expect(within(current).getByText('New target')).toBeTruthy();
+  expect(within(current).getByText('https://new-target.example.test')).toBeTruthy();
+  expect(current.querySelector('[data-instance-icon="unknown"]')).toBeTruthy();
+  expect(within(current).getByRole('button').hasAttribute('disabled')).toBe(true);
+  expect(invoke).toHaveBeenCalledOnce();
+});
+
 it.each(['available', 'offline', 'unreachable'])('keeps omitted current shared metadata display-only (%s)', async (status) => {
   const offline = status !== 'available';
   const item = { ...states.signed_in.catalog.instances[0], relationship: 'shared', owner_email: 'owner@example.test', available: status !== 'offline' };
@@ -562,11 +597,12 @@ it('does not auto-cancel a restored signed-in state or a later successful broadc
   expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
 });
 
-it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tunnel_unavailable', 'paired_error'])(
-  'acknowledges recovery codes before any eligible return (%s)', async (status) => {
+it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tunnel_unavailable', 'paired_error', 'new_owner']
+  .flatMap((status) => ['back', 'escape'].map((exit) => ({ status, exit }))))(
+  'acknowledges recovery codes before any eligible return ($status/$exit)', async ({ status, exit }) => {
     window.history.replaceState(null, '', '/account/index.html?view=account');
     const completed = { ...states.signed_in, enrollment: { ...states.signed_in.enrollment,
-      status: status === 'paired_error' ? 'paired_this_account' : status,
+      status: status === 'paired_error' || status === 'new_owner' ? 'paired_this_account' : status,
       error_code: status === 'paired_error' || status === 'failed' ? 'persistence_failed' : null } };
     const invoke = mount(states.enroll, (request) => {
       const reply = request.action.type === 'begin_totp_enrollment' ? replies.totp_enrollment
@@ -581,6 +617,21 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
     fireEvent.click(screen.getByRole('button', { name: 'Verify and enable' }));
     expect(await screen.findByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
     expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'cancel')).toBe(false);
+    if (exit === 'back') fireEvent.click(screen.getByRole('button', { name: 'Back to Workbench' }));
+    else fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.getByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
+    expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'cancel')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Back to Workbench' }).hasAttribute('disabled')).toBe(true);
+    if (status === 'new_owner') {
+      fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: {
+        ...completed, generation: completed.generation + 1, revision: completed.revision + 1,
+        account: { ...completed.account, status: 'signed_out', identity: null },
+      } }));
+      expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull();
+      expect(screen.getByRole('button', { name: 'Back to Workbench' }).hasAttribute('disabled')).toBe(false);
+      expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'cancel')).toBe(false);
+      return;
+    }
     fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
     await waitFor(() => expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull());
     const cancels = invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel');

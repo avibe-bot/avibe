@@ -29,7 +29,8 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   const { t } = useTranslation();
   const current = state.connection.committed;
   const currentRemote = current.kind === 'remote';
-  const currentItem = currentRemote ? state.catalog.instances.find((item) => item.id === current.instance_id) ?? state.current_instance ?? null : null;
+  // Native validates account, ID and origin; a raw catalog match cannot replace that proof.
+  const currentItem = currentRemote ? state.current_instance ?? null : null;
   const unreachable = state.connection.status === 'remote_unreachable';
   const blocked = busy || !!pendingId;
   const localItem = localInstanceId ? state.catalog.instances.find((item) => item.id === localInstanceId) : null;

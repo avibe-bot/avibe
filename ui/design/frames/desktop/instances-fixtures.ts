@@ -127,7 +127,10 @@ export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwit
   if (fixture.state === 'list-error') state.catalog.status = 'error';
   const target = { kind: 'remote' as const, name: 'Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' };
   if (fixture.state === 'switching') state.connection = { ...state.connection, status: 'switching', pending: target };
-  if (fixture.state === 'offline') state.connection = { status: 'remote_unreachable', committed: target, pending: null };
+  if (fixture.state === 'offline') {
+    state.connection = { status: 'remote_unreachable', committed: target, pending: null };
+    state.current_instance = state.catalog.instances.find((item) => item.id === target.instance_id) ?? null;
+  }
   if (fixture.state === 'current-shared') {
     state.current_instance = state.catalog.instances.find((item) => item.id === 'team') ?? null;
     state.catalog.instances = state.catalog.instances.filter((item) => item.id !== 'team');

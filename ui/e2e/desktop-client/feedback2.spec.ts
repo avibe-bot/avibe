@@ -19,6 +19,7 @@ for (const [lang, theme, width, height] of [['en', 'light', 880, 600], ['en', 'd
     state.catalog.instances[1].name = 'Shared design and engineering workstation · 跨时区产品研发团队';
     state.catalog.instances.push({ ...state.catalog.instances[1], id: 'offline-team', available: false, name: 'Offline shared lab', host: 'a-long-shared-workstation-domain-app.avibe.bot' });
     state.connection = { status: 'remote_connected', committed: { kind: 'remote', name: state.catalog.instances[1].name, instance_id: 'team', canonical_origin: state.catalog.instances[1].url }, pending: null };
+    state.current_instance = { ...state.catalog.instances[1] };
     const requests = await installBridge(page, state, { signOutError: 'cleanup_error' });
     await page.goto(`${ACCOUNT}?view=instances&theme=${theme}`);
     const current = page.getByRole('region', { name: lang === 'en' ? 'Currently using' : '正在使用' });

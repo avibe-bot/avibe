@@ -126,6 +126,7 @@ export function AccountApp() {
   const epoch = useRef(0);
   const requestBusy = useRef(false);
   const direct = material && material.generation === state?.generation ? material.result : null;
+  const awaitingRecoveryAcknowledgement = direct?.type === 'totp_enrolled' && !!direct.recoveryCodes?.length;
   const [inputGeneration, setInputGeneration] = useState(state?.generation);
   if (inputGeneration !== state?.generation) {
     setInputGeneration(state?.generation);
@@ -168,7 +169,9 @@ export function AccountApp() {
       setBusy(false);
     }
   }, [send, state?.generation, state?.consent?.instance_id]);
-  const leave = (type: 'cancel' | 'return_local' | 'sign_out') => {
+  const leave = useCallback((type: 'cancel' | 'return_local' | 'sign_out', recoveryAcknowledged = false) => {
+    // Only the saved-codes action acknowledges; native invalidation remains independent.
+    if (awaitingRecoveryAcknowledgement && !recoveryAcknowledged) return;
     epoch.current += 1;
     setMaterial(null);
     setCode('');
@@ -176,23 +179,18 @@ export function AccountApp() {
     setSelection(null);
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
-  };
+  }, [awaitingRecoveryAcknowledgement, send]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       event.preventDefault();
       // The popup has no account flow to cancel: Escape closes it, as it closes a popover.
       if (popover) { closeUpdatePopover(); return; }
-      epoch.current += 1;
-      setMaterial(null);
-      setCode('');
-      setPassword('');
-      setSelection(null);
-      void send({ type: 'cancel' });
+      leave('cancel');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [send, popover]);
+  }, [leave, popover]);
   useEffect(() => {
     if (popover || !signOutIntent || signOutIntent.generation !== state?.generation || attemptedSignOutIntents.has(signOutIntent.intent_id)) return;
     // Like the hook's initial native read, defer dispatch until this effect is
@@ -210,7 +208,10 @@ export function AccountApp() {
     return () => { active = false; };
   }, [signOutIntent, state?.generation, send, popover]);
   const localButton = <Button variant="ghost" onClick={() => leave('return_local')}>{t('desktopClient.continueLocal')}</Button>;
-  const instances = () => { setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' }); };
+  const instances = () => {
+    if (awaitingRecoveryAcknowledgement) return;
+    setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
+  };
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
   const displayedError = error ?? (view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
   const errorMessage = displayedError ? explainError(displayedError) : null;
@@ -248,7 +249,7 @@ export function AccountApp() {
   } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" disabled={busy} onClick={() => {
       setMaterial(null);
-      if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel');
+      if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
       else setView('account');
     }}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
   } else if (state.account.status === 'second_factor_required') {
@@ -300,7 +301,7 @@ export function AccountApp() {
   }
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
-    <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>
+    <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" disabled={awaitingRecoveryAcknowledgement} onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
   </div>;
 }

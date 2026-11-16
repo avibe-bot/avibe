@@ -99,7 +99,8 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
   }
 }
 
-test('AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transient', async ({ page }, info) => {
+for (const persistenceError of [false, true]) test(`AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transient (persistenceError=${persistenceError})`, async ({ page }, info) => {
+  await page.setViewportSize({ width: 880, height: 600 });
   await isolateAccount(page); await language(page, 'en');
   const state = clientState();
   state.account = { ...state.account, status: 'second_factor_required', gate: 'enroll' };
@@ -112,10 +113,22 @@ test('AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transien
   await page.getByLabel('Authenticator code', { exact: true }).fill('654321');
   await page.getByRole('button', { name: 'Verify and enable' }).click();
   await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible();
+  if (persistenceError) {
+    state.enrollment.error_code = 'persistence_failed'; state.revision += 1;
+    await page.evaluate((snapshot) => window.dispatchEvent(new CustomEvent('avibe:desktop-client-state', { detail: snapshot })), state);
+    await expect(page.getByRole('alert')).toBeVisible();
+  }
+  await expect(page.getByRole('button', { name: 'Back to Workbench' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(page.getByText('fixture-recovery-one')).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: info.outputPath('recovery-codes.png') });
   expect(requests.some((request) => request.action.type === 'cancel')).toBe(false);
   await page.getByRole('button', { name: 'I have saved these codes' }).click();
-  await expect.poll(() => requests.at(-1)?.action.type).toBe('cancel');
+  if (persistenceError) {
+    await expect(page.locator('[data-account-details]')).toBeVisible();
+    await expect(page.getByRole('alert')).toBeVisible();
+    expect(requests.filter((request) => request.action.type === 'cancel')).toHaveLength(0);
+  } else await expect.poll(() => requests.filter((request) => request.action.type === 'cancel').length).toBe(1);
   expect(state.connection.committed.kind).toBe('remote');
   await expect(page.getByText('fixture-recovery-one')).toHaveCount(0);
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('fixture-recovery');
