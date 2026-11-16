@@ -30,6 +30,20 @@ function isNoSubscription(error: unknown): boolean {
   return status === 404 && code === 'no_subscription';
 }
 
+/**
+ * Whether a failed enable was the person refusing notifications, which says
+ * nothing went wrong. In the App, its push status is `unavailable` only while
+ * notifications are not allowed for it; in a browser, enabling throws
+ * `permission_denied` when the prompt is refused or dismissed.
+ */
+async function permissionWasRefused(error: unknown): Promise<boolean> {
+  if (hasNativeCapability('push')) {
+    return (await nativePushStatus())?.state === 'unavailable';
+  }
+  if (error instanceof Error && error.message === 'permission_denied') return true;
+  return typeof Notification !== 'undefined' && Notification.permission === 'denied';
+}
+
 export const WebPushControl: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -94,8 +108,13 @@ export const WebPushControl: React.FC = () => {
       await enableWebPush(api);
       setDisableFeedback(null);
       await refresh();
-    } catch {
-      await refresh();
+    } catch (error) {
+      const result = await refresh();
+      // Still off, and not by the person's choice: say so rather than only
+      // turning the switch back.
+      if (result.status === 'disabled' && !(await permissionWasRefused(error))) {
+        showToast(t('workbench.inbox.notifications.enableFailed'), 'error');
+      }
     } finally {
       setBusy(false);
     }
