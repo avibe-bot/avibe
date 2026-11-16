@@ -60,7 +60,8 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await expect(page.locator('[data-version-trigger] button')).toBeFocused();
       await page.locator('[data-account-trigger]').click();
       await expect(page.locator('[data-instance-menu]')).toContainText('max@example.test');
-      await expect(page.locator('[data-instance-menu]')).toContainText(lang === 'en' ? 'Phase 1' : '第一阶段');
+      // What a remote computer lacks, in plain words, only in the instance menu.
+      await expect(page.locator('[data-instance-menu]')).toContainText(lang === 'en' ? 'Desktop Mini and system notifications are off' : '桌面迷你窗和系统通知暂时关闭');
       await expect(popup).toHaveCount(0);
       await expect(page.locator('[data-update-menu]')).toHaveCount(0);
       await expect(page.locator('[data-instance-menu]')).toHaveCSS('opacity', '1');

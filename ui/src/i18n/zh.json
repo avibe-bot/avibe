@@ -7572,7 +7572,7 @@
     "accountService": "avibe.bot",
     "switchInstance": "切换实例",
     "localRemoteAccess": "本机远程访问",
-    "auxiliaryIncomplete": "第一阶段暂不支持远程实例的 Mini 和原生通知。返回本机后可继续使用。",
+    "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
     "signOut": "退出账号",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
     "localVersion": "本机 Desktop 版本 {{version}}",
