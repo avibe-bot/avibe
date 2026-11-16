@@ -71,6 +71,9 @@ enum RuntimeNavigationStage: Equatable {
     case started
     case committed
     case finished
+    case handedOff
+    case cancelled
+    case restarting
     case failed
 }
 
@@ -99,6 +102,10 @@ struct RuntimeOpenAttempt: Equatable {
     var remainingAutomaticBudget: Duration
     var automaticStartedAt: Duration?
     var deadline: Duration?
+    /// A paused authentication/restart budget may resume. A handoff or
+    /// terminal outcome has ended automatic timing even if its loading layer
+    /// remains visible until the user cancels or a later document arrives.
+    var canResumeAutomaticBudget: Bool
     var isTakingLong: Bool
 
     /// Native-only v1 has no product-ready signal. `documentLoaded` therefore
@@ -688,6 +695,7 @@ final class AppModel: ObservableObject {
             remainingAutomaticBudget: runtimeOpenBudget,
             automaticStartedAt: now,
             deadline: now + runtimeOpenBudget,
+            canResumeAutomaticBudget: true,
             isTakingLong: false
         )
         runtimeOpenAttempt = attempt
@@ -708,6 +716,7 @@ final class AppModel: ObservableObject {
 
     private func pauseRuntimeOpenBudget(
         phase: RuntimeOpenPhase,
+        canResume: Bool,
         attemptID: Int
     ) {
         guard var attempt = runtimeOpenAttempt, attempt.id == attemptID else {
@@ -719,6 +728,7 @@ final class AppModel: ObservableObject {
         )
         attempt.automaticStartedAt = nil
         attempt.deadline = nil
+        attempt.canResumeAutomaticBudget = canResume
         attempt.phase = phase
         runtimeOpenAttempt = attempt
         cancelRuntimeOpenTimers()
@@ -727,6 +737,9 @@ final class AppModel: ObservableObject {
     @discardableResult
     private func resumeRuntimeOpenBudget(attemptID: Int) -> Bool {
         guard var attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return false
+        }
+        guard attempt.canResumeAutomaticBudget else {
             return false
         }
         guard attempt.automaticStartedAt == nil else {
@@ -752,7 +765,11 @@ final class AppModel: ObservableObject {
         phase: RuntimeOpenPhase,
         attemptID: Int
     ) {
-        pauseRuntimeOpenBudget(phase: phase, attemptID: attemptID)
+        pauseRuntimeOpenBudget(
+            phase: phase,
+            canResume: false,
+            attemptID: attemptID
+        )
     }
 
     private func terminateRuntimeOpen(
@@ -856,7 +873,8 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
-            if attempt.phase == .awaitingUser,
+            if attempt.automaticStartedAt == nil,
+               attempt.canResumeAutomaticBudget,
                !resumeRuntimeOpenBudget(attemptID: attemptID)
             {
                 return
@@ -888,6 +906,7 @@ final class AppModel: ObservableObject {
             if isAuthenticationDestination(event.destination) {
                 pauseRuntimeOpenBudget(
                     phase: .awaitingUser,
+                    canResume: attempt.canResumeAutomaticBudget,
                     attemptID: attemptID
                 )
             } else {
@@ -897,6 +916,40 @@ final class AppModel: ObservableObject {
                 )
                 didFinishRuntimeLoading()
             }
+        case .handedOff:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            pauseRuntimeOpenBudget(
+                phase: attempt.phase,
+                canResume: false,
+                attemptID: attemptID
+            )
+        case .cancelled:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            finishRuntimeOpenAutomaticBudget(
+                phase: .failed,
+                attemptID: attemptID
+            )
+        case .restarting:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            if attempt.automaticStartedAt == nil,
+               attempt.canResumeAutomaticBudget,
+               !resumeRuntimeOpenBudget(attemptID: attemptID)
+            {
+                return
+            }
+            setRuntimeOpenPhase(.connecting, attemptID: attemptID)
         case .failed:
             guard attempt.phase != .failed else {
                 return
