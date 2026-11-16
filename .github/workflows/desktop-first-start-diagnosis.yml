@@ -244,6 +244,28 @@ jobs:
           app.run()
           SWIFT
           swiftc -O -o "$W/probe" "$W/probe.swift" && "$W/probe" | tee "$W/logs/webkit-probe.txt"
+          # The same probe inside an app bundle that, like Avibe, declares only
+          # an English development region and no zh localization.
+          mkdir -p "$W/Probe.app/Contents/MacOS"
+          cp "$W/probe" "$W/Probe.app/Contents/MacOS/probe"
+          cat > "$W/Probe.app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleIdentifier</key><string>bot.avibe.languageprobe</string>
+          <key>CFBundleExecutable</key><string>probe</string>
+          <key>CFBundleDevelopmentRegion</key><string>English</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          </dict></plist>
+          PLIST
+          "$W/Probe.app/Contents/MacOS/probe" | tee "$W/logs/webkit-probe-bundled.txt"
+          plutil -p /Applications/Avibe.app/Contents/Info.plist > "$W/logs/avibe-info-plist.txt" || true
+          ls /Applications/Avibe.app/Contents/Resources | head -50 > "$W/logs/avibe-resources.txt" || true
+          # What the Workbench stored for its language (i18next caches its detection).
+          find "$HOME/Library/WebKit" "$HOME/Library/Caches" -path '*avibe*' -name '*.sqlite3' 2>/dev/null | while read -r db; do
+            echo "== $db"; sqlite3 "$db" "select key, cast(value as text), hex(value) from ItemTable" 2>&1 | head -20
+          done > "$W/logs/webkit-localstorage.txt"
+          find "$HOME/Library/WebKit" -maxdepth 6 -path '*avibe*' 2>/dev/null | head -60 >> "$W/logs/webkit-localstorage.txt"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
