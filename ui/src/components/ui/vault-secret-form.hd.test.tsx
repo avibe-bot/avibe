@@ -437,8 +437,14 @@ it('creates a wallet with a passphrase typed twice: the sealed seed uses it, it 
   fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${hd.passphrase.title.replace(/[()]/g, '\\$&')}`) }));
   const [first, again] = [screen.getByLabelText(hd.passphrase.label), screen.getByLabelText(hd.passphrase.again)];
   fireEvent.change(first, { target: { value: pass } });
+  // The second box is not judged while empty or while still shorter than the first.
+  expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
+  expect(screen.queryByText(hd.passphrase.match)).toBeNull();
   fireEvent.change(again, { target: { value: pass.trim() } });
-  // Two different entries: no words yet.
+  expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
+  expect((screen.getByRole('button', { name: hd.generateCta }) as HTMLButtonElement).disabled).toBe(true);
+  // Left with something different: now it says so.
+  fireEvent.blur(again);
   expect(screen.getByText(hd.passphrase.mismatch)).toBeTruthy();
   expect((screen.getByRole('button', { name: hd.generateCta }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.change(again, { target: { value: pass } });
@@ -564,4 +570,26 @@ it('an import whose name was taken keeps the pasted words, and says which tier h
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: hd.importCta })); });
   expect(await screen.findByText(hd.nameTakenAfterSave)).toBeTruthy();
   expect((screen.getByRole('textbox', { name: hd.import.label }) as HTMLTextAreaElement).value).toBe(OFFICIAL);
+});
+
+it('judges the passphrase\'s second box only once it is done: same length as the first, or left', async () => {
+  await openWallet('WALLET_PASS2');
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${hd.passphrase.title.replace(/[()]/g, '\\$&')}`) }));
+  const [first, again] = [screen.getByLabelText(hd.passphrase.label), screen.getByLabelText(hd.passphrase.again)];
+  fireEvent.change(first, { target: { value: 'orange' } });
+  // An empty second box is never judged, even after leaving it.
+  fireEvent.blur(again);
+  expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
+  expect(screen.getByText(hd.passphrase.hint)).toBeTruthy();
+  fireEvent.focus(again);
+  fireEvent.change(again, { target: { value: 'ora' } });
+  expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
+  // As long as the first and different: said at once.
+  fireEvent.change(again, { target: { value: 'orangf' } });
+  expect(screen.getByText(hd.passphrase.mismatch)).toBeTruthy();
+  expect(again.getAttribute('aria-invalid')).toBe('true');
+  // Matching: cleared the moment it matches, and the match line shows.
+  fireEvent.change(again, { target: { value: 'orange' } });
+  expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
+  expect(screen.getByText(hd.passphrase.match)).toBeTruthy();
 });

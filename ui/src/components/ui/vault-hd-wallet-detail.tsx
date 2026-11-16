@@ -127,6 +127,8 @@ function AccountCard({ wallet, account, fresh, canManage, protectedWallet = fals
             <InlineNameInput
               initial={account.name ?? ''}
               placeholder={t('vaults.hd.wallet.namePlaceholder')}
+              // A label, not a file: clicking away keeps what was typed (owner, 2026-11-16).
+              commitOnBlur
               onCommit={(value) => {
                 setRenaming(false);
                 const next = value.trim() || null;

@@ -475,10 +475,12 @@ export function HdMismatchBlock({ outcome, error, busy, onClose, onDelete }: {
 }
 
 /** A passphrase field with the same show/hide as other secret inputs: a typo here costs the wallet. */
-function PassphraseField({ label, value, onChange, invalid, disabled }: {
+function PassphraseField({ label, value, onChange, onFocus, onBlur, invalid, disabled }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
   invalid?: boolean;
   disabled?: boolean;
 }) {
@@ -492,6 +494,8 @@ function PassphraseField({ label, value, onChange, invalid, disabled }: {
           type={shown ? 'text' : 'password'}
           value={value}
           onChange={(event) => onChange(event.target.value)}
+          onFocus={onFocus}
+          onBlur={onBlur}
           autoComplete="off"
           spellCheck={false}
           disabled={disabled}
@@ -520,7 +524,12 @@ export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, 
   const [open, setOpen] = useState(Boolean(value || confirm));
   const Chevron = open ? ChevronDown : ChevronRight;
   const typed = Boolean(value || confirm);
-  const mismatch = typed && value !== confirm;
+  // The second box is judged only once it holds something and the person is done with it: they left
+  // it (and haven't come back to it), or it is as long as the first. Never while it is empty or
+  // still being typed.
+  const [confirmLeft, setConfirmLeft] = useState(false);
+  const judged = confirm !== '' && (confirmLeft || confirm.length >= value.length);
+  const mismatch = judged && value !== confirm;
   return (
     <div className="flex flex-col rounded-[10px] border border-edge bg-surface-2">
       <button type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
@@ -535,10 +544,10 @@ export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, 
         <div className="flex flex-col gap-2.5 px-3 pb-3">
           <span className="text-[11.5px] leading-snug text-muted">{t('vaults.hd.passphrase.body')}</span>
           <PassphraseField label={t('vaults.hd.passphrase.label')} value={value} onChange={onChange} disabled={disabled} />
-          <PassphraseField label={t('vaults.hd.passphrase.again')} value={confirm} onChange={onConfirmChange} invalid={mismatch} disabled={disabled} />
+          <PassphraseField label={t('vaults.hd.passphrase.again')} value={confirm} onChange={onConfirmChange} onFocus={() => setConfirmLeft(false)} onBlur={() => setConfirmLeft(true)} invalid={mismatch} disabled={disabled} />
           {mismatch ? (
             <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.hd.passphrase.mismatch')}</span>
-          ) : typed ? (
+          ) : judged ? (
             <span className="text-[11.5px] text-mint-ink">{t('vaults.hd.passphrase.match')}</span>
           ) : (
             <span className="text-[11.5px] text-muted">{t('vaults.hd.passphrase.hint')}</span>
