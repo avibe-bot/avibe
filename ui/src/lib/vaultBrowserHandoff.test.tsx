@@ -23,6 +23,7 @@ import { VaultSandboxError } from '@/lib/vaultSandboxClient';
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(),
   createVaultAgentBindingsBatch: vi.fn(),
+  createVaultGrant: vi.fn(),
   createVaultRevealContext: vi.fn(),
   denyVaultRequest: vi.fn(),
   fulfillVaultAccessRequest: vi.fn(),
@@ -493,6 +494,11 @@ describe('desktop shell protected-vault browser handoff', () => {
 // The hand-off after a failure lives for the page, so these blocks run in order: in the app first,
 // then a cancel (which keeps the app), then the failure that moves this page to the browser.
 describe('desktop shell that runs protected-vault passkey steps in the app', () => {
+  // The shell's contract: a blank window the sandbox may load, as in a browser.
+  const openSandboxWindows = () => {
+    const popup = { closed: false, location: { replace: vi.fn() }, close: vi.fn(() => { popup.closed = true; }) };
+    return vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+  };
   const press = async (user: ReturnType<typeof userEvent.setup>, click: Click) => {
     const element = await screen.findByRole(click.role, { name: click.name }) as HTMLButtonElement | HTMLInputElement;
     await waitFor(() => expect(element.disabled).toBe(false));
@@ -511,7 +517,7 @@ describe('desktop shell that runs protected-vault passkey steps in the app', () 
     expect(vaultPasskeyHandoff()).toBeNull();
     const user = userEvent.setup();
     serve(c);
-    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    const open = openSandboxWindows();
     enterDesktopShell(true);
     expect(vaultPasskeyHandoff()).toBeNull();
     renderAt('/vaults', c.desktop(), c.role);
@@ -540,7 +546,7 @@ describe('desktop shell that runs protected-vault passkey steps in the app', () 
     it('keeps a cancelled step in the app, with nothing sent to the browser', async () => {
       const user = userEvent.setup();
       serve(access);
-      const open = vi.spyOn(window, 'open').mockReturnValue(null);
+      const open = openSandboxWindows();
       enterDesktopShell(true);
       renderAt('/vaults', access.desktop(), access.role);
       await failStep(user, 'authorization_cancelled');
@@ -556,7 +562,7 @@ describe('desktop shell that runs protected-vault passkey steps in the app', () 
     it('says so in one sentence and offers the browser for the same request', async () => {
       const user = userEvent.setup();
       serve(access);
-      const open = vi.spyOn(window, 'open').mockReturnValue(null);
+      const open = openSandboxWindows();
       enterDesktopShell(true);
       renderAt('/vaults', access.desktop(), access.role);
       await failStep(user, 'authorization_popup_blocked');
@@ -572,6 +578,22 @@ describe('desktop shell that runs protected-vault passkey steps in the app', () 
       const target = new URL(String(open.mock.calls.at(-1)![0]));
       expect(target.pathname).toBe('/vaults');
       expect(target.searchParams.get('request_id')).toBe(protectedAccess.id);
+    });
+
+    // Approvals that never ask for the passkey still run here, and their own errors still show.
+    it('keeps showing errors of approvals that need no passkey', async () => {
+      const user = userEvent.setup();
+      const standardAccess = {
+        ...protectedAccess,
+        id: 'vrq_standard',
+        card: { request_type: 'access', protection: 'standard', secret_names: ['GITHUB_TOKEN'], grant_options: [{ grant_id: 'grant_std' }] },
+      } as unknown as VaultRequest;
+      api.createVaultGrant.mockResolvedValue({ ok: false, code: 'grant_refused', message: 'grant refused' });
+      enterDesktopShell(true);
+      expect(vaultPasskeyHandoff()).toBe('fallback');
+      renderAt('/vaults', <VaultApprovalCard request={standardAccess} onResolved={vi.fn()} onCancel={vi.fn()} />);
+      await press(user, { role: 'button', name: /^approve$/i });
+      expect(await screen.findByText('grant refused')).toBeTruthy();
     });
 
     it.each(cases)('$surface then resumes in the browser as without the capability', (c) => handOffToBrowser(c, 'fallback'));

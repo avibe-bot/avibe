@@ -30,6 +30,8 @@ let failedInApp = false;
 // with no passkey step succeeding in between offers the browser rather than loop on the same prompt.
 let cancelsInARow = 0;
 const CANCELS_BEFORE_BROWSER = 2;
+// The failure that moved the page, so only the attempt it ended says so (see `isVaultPasskeyFallback`).
+const movedBy = new WeakSet<object>();
 const listeners = new Set<() => void>();
 
 export function vaultPasskeyHandoff(): VaultPasskeyHandoff | null {
@@ -95,7 +97,19 @@ export function recordVaultPasskeyOutcome(error: unknown): void {
     return;
   }
   failedInApp = true;
+  if (typeof error === 'object') movedBy.add(error);
   for (const listener of [...listeners]) listener();
+}
+
+/**
+ * Whether `error` ended a passkey step because this page moved to the browser hand-off: it is the
+ * failure that moved it, or the refusal of a step that would have started here afterwards. The
+ * surface's hand-off note then says what happened, so the raw error is not shown beside it. Any
+ * other error, including one from a step that never asks for the passkey, is still the surface's.
+ */
+export function isVaultPasskeyFallback(error: unknown): boolean {
+  if (!failedInApp || typeof error !== 'object' || error === null) return false;
+  return movedBy.has(error) || ('code' in error && error.code === 'sandbox_browser_required');
 }
 
 /**

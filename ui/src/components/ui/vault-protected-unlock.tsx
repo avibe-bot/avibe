@@ -3,7 +3,7 @@ import { ExternalLink, Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
-import { useVaultPasskeyHandoff, vaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
+import { isVaultPasskeyFallback, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
@@ -68,7 +68,7 @@ export const VaultProtectedUnlock: React.FC<{
       await fn();
     } catch (err) {
       // This attempt moved the app to the browser hand-off, whose note now says what happened.
-      if (vaultPasskeyHandoff() === 'fallback') return;
+      if (isVaultPasskeyFallback(err)) return;
       vault.setError(friendlyError(t, vaultErrorMessage(t, err, String(err)), vault.status === 'needs-setup'));
     } finally {
       setBusy(false);

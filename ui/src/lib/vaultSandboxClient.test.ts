@@ -388,11 +388,13 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
       await vi.waitFor(() => expect(postMessage.mock.calls.length).toBe(calls + 1));
       const pending = instance.pending.get((postMessage.mock.calls[calls][0] as { id: string }).id)!;
       window.clearTimeout(pending.timer);
-      if (outcome) pending.reject(new client.VaultSandboxError(outcome.code, 'sandbox failure'));
+      const error = outcome ? new client.VaultSandboxError(outcome.code, 'sandbox failure') : null;
+      if (error) pending.reject(error);
       else pending.resolve({});
       await result.catch(() => undefined);
+      return error;
     };
-    return { step, handoff: handoff.vaultPasskeyHandoff };
+    return { step, instance, postMessage, client, handoff: handoff.vaultPasskeyHandoff, isFallback: handoff.isVaultPasskeyFallback };
   }
 
   afterEach(() => {
@@ -459,5 +461,26 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     expect(page.handoff()).toBe(expected);
     await page.step('approveRelease', failure('authorization_popup_blocked'));
     expect(page.handoff()).toBe(expected);
+  });
+
+  // Only the attempt that moved the page reports it; its surface then shows the hand-off note.
+  it('names the failure that moved the page, and refuses later steps without asking the sandbox', async () => {
+    const page = await freshPage('in-app');
+    const moved = await page.step('approveRelease', failure('authorization_popup_blocked'));
+    expect(page.isFallback(moved)).toBe(true);
+    expect(page.isFallback(new Error('grant refused'))).toBe(false);
+    const posted = page.postMessage.mock.calls.length;
+    const refused = page.instance.request('unlock', {}, {});
+    await expect(refused).rejects.toMatchObject({ code: 'sandbox_browser_required' });
+    expect(page.isFallback(await refused.catch((error: unknown) => error))).toBe(true);
+    expect(page.postMessage.mock.calls.length).toBe(posted);
+  });
+
+  it('moves to the browser when the app does not open the sandbox window', async () => {
+    const page = await freshPage('in-app');
+    stubReleaseFetch();
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    expect(page.client.openVaultAuthorizationWindow()).toBeNull();
+    expect(page.handoff()).toBe('fallback');
   });
 });

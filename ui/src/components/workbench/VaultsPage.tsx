@@ -44,8 +44,8 @@ import { useProtectedVault, useVaultSandboxWarm } from '../../lib/useProtectedVa
 import {
   openVaultsInBrowser,
   readVaultBrowserStep,
+  isVaultPasskeyFallback,
   useVaultPasskeyHandoff,
-  vaultPasskeyHandoff,
   withoutVaultBrowserStep,
 } from '../../lib/vaultBrowserHandoff';
 import { isReviewableVaultRequest } from '../../lib/vaultPendingRequests';
@@ -776,7 +776,7 @@ export const VaultsPage: React.FC = () => {
         );
       } catch (err: unknown) {
         // This attempt moved the app to the browser hand-off: the row's menu now offers Show in browser.
-        showToast(vaultPasskeyHandoff() === 'fallback'
+        showToast(isVaultPasskeyFallback(err)
           ? t('vaults.reveal.browserFallback')
           : vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
       } finally {

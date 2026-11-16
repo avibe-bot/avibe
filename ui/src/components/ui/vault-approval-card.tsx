@@ -17,7 +17,7 @@ import {
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
-import { openVaultsInBrowser, useVaultPasskeyHandoff, vaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
+import { isVaultPasskeyFallback, openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
@@ -463,7 +463,7 @@ export const VaultApprovalCard: React.FC<{
       run()
         .catch((err: unknown) => {
           // This attempt moved the app to the browser hand-off, whose note now says what happened.
-          if (vaultPasskeyHandoff() === 'fallback') return;
+          if (isVaultPasskeyFallback(err)) return;
           setError(vaultErrorMessage(t, err, t('vaults.approval.errors.failed')));
           setNeedsAvaultAuthorization(isAvaultAuthorizationRequired(err));
         })
