@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { useApi } from '../../context/ApiContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { useToast } from '../../context/ToastContext';
 import { isDesktopShell } from '../../lib/desktopShell';
 import type { SetupItem } from '../../lib/homePreferences';
 import { isNativeShell } from '../../lib/native';
@@ -62,6 +64,8 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
   const { capabilities } = useInstanceAuthorization();
   const canPush = capabilities.can_read_instance && !isNativeShell();
   const [facts, setFacts] = useState<Facts>(UNKNOWN);
+  const { showToast } = useToast();
+  const { t } = useTranslation();
 
   const read = useCallback(() => {
     const learn = (patch: Partial<Facts>) => setFacts((current) => ({ ...current, ...patch }));
@@ -96,14 +100,24 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
 
   const enableNotifications = useCallback(async () => {
     if (!canPush) return;
+    let failed = false;
+    let refused = false;
     try {
       await enableWebPush(api);
-    } catch {
+    } catch (error) {
       // The browser's prompt was refused or failed; the read below says where it stands.
+      failed = true;
+      refused = (error instanceof Error && error.message === 'permission_denied')
+        || (typeof Notification !== 'undefined' && Notification.permission === 'denied');
     }
     const notifications = await readWebPushDeviceState(api);
     setFacts((current) => ({ ...current, notifications }));
-  }, [api, canPush]);
+    // Not on, and not by the person's choice: say so. A read that fails too (`unavailable`) drops
+    // the item from the list, which would otherwise look like success.
+    if (failed && !refused && notifications !== 'on') {
+      showToast(t('workbench.inbox.notifications.enableFailed'), 'error');
+    }
+  }, [api, canPush, showToast, t]);
 
   const pending: SetupItem[] = [];
   if (owner && noModel) pending.push('model');

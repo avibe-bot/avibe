@@ -22,6 +22,19 @@ FORWARDED_CALLER_HEADERS: Final = frozenset(
     }
 )
 
+# OpenCode names its conversation in ``X-Session-Id`` on every request to a provider that is not
+# its own. OpenCode Go refuses a call without a session id, and its engine config
+# maps this to the upstream header. The gateway retains it for OpenCode; the
+# engine client admits it only for a selected Go source. Other backends drop it.
+OPENCODE_SESSION_CALLER_HEADER: Final = "x-session-id"
+
+
+def forwarded_caller_headers(backend: str) -> frozenset[str]:
+    """Caller headers a ``backend``'s request may carry to the engine."""
+    if backend == "opencode":
+        return FORWARDED_CALLER_HEADERS | {OPENCODE_SESSION_CALLER_HEADER}
+    return FORWARDED_CALLER_HEADERS
+
 
 class ModelHubRequest(dict[str, Any]):
     """Raw request body plus the protocol spoken by the local caller."""

@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,12 +44,11 @@ from storage.agent_session_rows import (
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions
+from storage.models import agent_sessions, messages
 from storage.sessions_service import SQLiteSessionsService
 
-# The notice rows the harness actually writes into this session are agent ``notify``
-# messages: an inbox PREVIEW type (so they raise a card) but not an ``unread`` type (a
-# failure notify is not an unread reply and must not bump the badge).
+# New agent notices in this Session opt into unread; ordinary notify rows and
+# historical workspace notices remain preview-only.
 NOTICE_TYPE = "notify"
 
 
@@ -291,14 +290,7 @@ def test_reserved_session_is_admitted_to_the_inbox_projection(monkeypatch, tmp_p
 def test_unread_results_in_a_system_session_are_counted_like_any_other(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """The unread subselects use the NEGATIVE form, so they must name the admitted set.
-
-    Today's notices are ``notify``, which is not an unread type at all — so this test
-    writes a ``result`` to exercise the predicate directly. The point is agreement: the
-    badge counts what the feed shows. Left as ``!= 'foreground'``, a system session would
-    sit in the feed with its unread never counted, which is the same class of silent
-    disagreement the whole ladder keeps producing.
-    """
+    """System visibility admits unread results as well as new workspace notices."""
     db_path = _migrated_db(monkeypatch, tmp_path)
     engine = _reserved_with_one_notice(db_path)
     with engine.begin() as conn:
@@ -314,23 +306,64 @@ def test_unread_results_in_a_system_session_are_counted_like_any_other(
     with engine.connect() as conn:
         per_session = messages_service.unread_counts_by_session(conn, platform="avibe")
         total = messages_service.total_unread(conn, platform="avibe")
-    assert per_session.get(WORKSPACE_NOTICE_SESSION_ID) == 1
-    assert total == 1
+    assert per_session.get(WORKSPACE_NOTICE_SESSION_ID) == 2
+    assert total == 2
 
 
-def test_a_failure_notify_alone_never_badges_the_system_session(monkeypatch, tmp_path: Path) -> None:
-    """The projection did not turn failure notices into unread replies.
+def test_new_workspace_notice_burst_is_unread_and_one_open_clears_it(monkeypatch, tmp_path: Path) -> None:
+    """Only new workspace notices badge; a burst is one card cleared by one read.
 
-    ``notify`` is an inbox PREVIEW type but not an ``unread`` type, so admitting the
-    session to the inbox raises a card without inflating the nav/PWA badge — which is the
-    pre-existing rule for every failed turn, kept intact here.
+    Existing visibility coverage missed the notify opt-in and historical-data
+    boundary. The old implementation fails at the first three-notice count.
     """
+    from core.web_push_notifications import _badge_count_for_user_key
+
     db_path = _migrated_db(monkeypatch, tmp_path)
     engine = _reserved_with_one_notice(db_path)
-    with engine.connect() as conn:
-        assert WORKSPACE_NOTICE_SESSION_ID in _inbox_ids(conn)
+    ordinary_id, ordinary_scope = _ordinary_session(db_path, channel="ordinary-notify")
+    with engine.begin() as conn:
+        # A pre-upgrade notice has no opt-in metadata. Do not backfill it.
+        conn.execute(update(messages).values(metadata_json="{}"))
         assert messages_service.unread_counts_by_session(conn, platform="avibe") == {}
-        assert messages_service.total_unread(conn, platform="avibe") == 0
+        for index in range(3):
+            row = messages_service.append(
+                conn, scope_id=None, session_id=WORKSPACE_NOTICE_SESSION_ID,
+                platform="avibe", author="agent", message_type="notify",
+                text=f"Restart notice {index}",
+            )
+            assert row["metadata"]["workspace_unread"] is True
+        ordinary = messages_service.append(
+            conn, scope_id=ordinary_scope, session_id=ordinary_id,
+            platform="avibe", author="agent", message_type="notify",
+            text="Ordinary backend failure", metadata={"kind": "backend_failure"},
+        )
+        assert "workspace_unread" not in ordinary["metadata"]
+        # Even a stray opt-in cannot make an ordinary Session's notify unread.
+        messages_service.append(
+            conn, scope_id=ordinary_scope, session_id=ordinary_id,
+            platform="avibe", author="agent", message_type="notify",
+            text="Ordinary notify", metadata={"workspace_unread": True},
+        )
+        messages_service.append(
+            conn, scope_id=None, session_id=WORKSPACE_NOTICE_SESSION_ID,
+            platform="avibe", author="user", message_type="notify", text="Not an agent notice",
+        )
+        expected = {WORKSPACE_NOTICE_SESSION_ID: 3}
+        assert messages_service.unread_counts_by_session(conn, platform="avibe") == expected
+        assert messages_service.unread_counts(conn, platform="avibe") == {}
+        feed = messages_service.list_inbox_sessions(conn, unread_only=True)["sessions"]
+        assert [(card["session_id"], card["unread_count"]) for card in feed] == list(expected.items())
+        assert messages_service.get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID)["unread_count"] == 3
+        assert messages_service.total_unread(conn, platform="avibe") == 3
+        assert _badge_count_for_user_key(conn, user_key="local", contexts={}) == 3
+
+        # The read owner already clears every pending agent row, not just results.
+        assert messages_service.mark_session_read(conn, WORKSPACE_NOTICE_SESSION_ID) == 4
+        assert messages_service.unread_counts_by_session(conn, platform="avibe") == {}
+        assert messages_service.list_inbox_sessions(conn, unread_only=True)["sessions"] == []
+        assert messages_service.get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID)["unread_count"] == 0
+        assert _badge_count_for_user_key(conn, user_key="local", contexts={}) == 0
+        assert messages_service.mark_session_read(conn, WORKSPACE_NOTICE_SESSION_ID) == 0
 
 
 def test_background_would_hide_the_card_which_is_why_system_exists(monkeypatch, tmp_path: Path) -> None:

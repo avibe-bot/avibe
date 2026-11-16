@@ -53,6 +53,7 @@ import {
 import { useProtectedHdSupported, useProtectedVault, useVaultSandboxWarm } from '@/lib/useProtectedVault';
 import { protectedHdBusy, protectedHdSubmitted, useProtectedHdCreate } from '@/lib/useProtectedHdCreate';
 import { ProtectedHdDesignState } from '@/lib/protectedHdDesign';
+import { nameIssueAmong, rememberAddTier, rememberedAddTier, type NameIssue } from '@/lib/vaultNameCheck';
 import { askTurnOffNoteShown, useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
@@ -294,7 +295,22 @@ export const VaultSecretForm: React.FC<{
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
-  const [protection, setProtection] = useState<VaultProtection>(requestSpec?.protection ?? defaultProtection);
+  // A plain Add keeps the tier last chosen in this page's life (a reopened dialog after a failed
+  // protected save stays Protected); a request's spec, a provision or an edit say their own tier.
+  // A handoff that asks for Protected (defaultProtection) is never lowered by what was chosen before.
+  const plainAdd = !requestSpec && !fixedName && !editSecret && defaultProtection !== 'protected';
+  const [protection, setProtection] = useState<VaultProtection>(
+    requestSpec?.protection ?? (plainAdd ? rememberedAddTier() ?? defaultProtection : defaultProtection),
+  );
+  // Whether the typed name is free (checked on leaving the field and again before anything is made).
+  const [nameIssue, setNameIssue] = useState<{ name: string; issue: NameIssue; afterSave?: 'standard-hd' } | null>(null);
+  const nameCheckSeq = useRef(0);
+  // A submit that awaited the name check must not go on to save once the dialog has closed.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   // Standard signing keys sign headlessly; this opt-in writes `policy.always_ask` to force
   // per-use browser approval instead. Only meaningful for a standard keypair (see onSubmit).
   const [alwaysAsk, setAlwaysAsk] = useState(false);
@@ -438,6 +454,25 @@ export const VaultSecretForm: React.FC<{
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim();
+  // The name check applies to a new secret the user names: not a provision's fixed name, an edit, or
+  // a provide request, for which an existing secret of that name is the answer.
+  const checksName = !fixedName && !editSecret && !treatExistingAsFulfilled;
+  const currentNameIssue = nameIssue && nameIssue.name === secretName ? nameIssue : null;
+  /** Read the existing names and record whether this one is free; `fresh` skips the short list cache.
+   *  A failed read blocks nothing: the server refuses a taken name at save. */
+  const checkName = async (candidate: string, fresh: boolean): Promise<NameIssue | null> => {
+    if (!checksName || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(candidate)) return null;
+    // Only the latest check speaks: a slower, older answer must not clear or replace a newer one.
+    const seq = ++nameCheckSeq.current;
+    try {
+      const listed = await api.listVaultSecrets(fresh ? { cache: false } : undefined);
+      const issue = nameIssueAmong(candidate, (listed?.secrets ?? []).map((secret) => secret.name));
+      if (seq === nameCheckSeq.current) setNameIssue(issue ? { name: candidate, issue } : null);
+      return issue;
+    } catch {
+      return null;
+    }
+  };
   const secretNameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(secretName);
   // Said once something is typed: an empty name is not yet an error.
   const nameInvalid = secretName.length > 0 && !secretNameValid;
@@ -562,10 +597,42 @@ export const VaultSecretForm: React.FC<{
   const canSubmit = isEdit
     ? !submitting && !fieldEditBusy && fieldsState.valid
     : Boolean(secretNameValid && valueReady) &&
+      !currentNameIssue &&
       !submitting &&
       (isHd
         ? (protection === 'standard' && hdReady) || (protectedHdReady && !protectedHdBusy(protectedHd.phase) && !protectedHdSubmitted(protectedHd.phase))
         : (protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
+
+  // Why Create is disabled, one reason at a time and in the order the form is filled in: the name,
+  // then what the key needs, then the tier's readiness. A reason is shown only when the user can act
+  // on it right here and no field or notice already says it (a bad name or word, a field row's name,
+  // a key that doesn't parse, a vault still loading or in error): then nothing is added.
+  const fieldRowsNamed = !fieldRows || (fieldRows.every((field) => VAULT_FIELD_PATTERN.test(field.name))
+    && new Set(fieldRows.map((field) => field.name)).size === fieldRows.length);
+  const createBlockedReason = (() => {
+    if (isEdit || canSubmit || submitting) return null;
+    if (isProtectedHd && (protectedHdBusy(protectedHd.phase) || protectedHdSubmitted(protectedHd.phase))) return null;
+    if (!fixedName && !secretName) return t(isHd ? 'vaults.dialog.nameRequiredWallet' : 'vaults.dialog.nameRequired');
+    if (nameInvalid || currentNameIssue) return null;
+    if (!valueReady) {
+      if (!isKeypair) {
+        if (fieldRows) return fieldRowsNamed && fieldRows.some((field) => !field.value) ? t('vaults.dialog.createNeedsValue') : null;
+        return staticSource === 'text' && !value ? t('vaults.dialog.createNeedsValue') : null;
+      }
+      if (isHd) return signingSource === 'import' && !hdImport.trim() ? t('vaults.dialog.createNeedsWords') : null;
+      return (isSolanaKey ? solanaImport : importHex).trim() ? null : t('vaults.dialog.createNeedsKey');
+    }
+    if (entryIssue || checkingAvault) return null;
+    if (protection === 'protected') {
+      // Only where the panel above offers the step: setting up (and, for a key, unlocking).
+      const status = protectedVaultStatus;
+      const actionable = isHd ? protectedHdSupported !== false && status === 'needs-setup' : status === 'needs-setup' || status === 'locked';
+      return actionable ? t('vaults.dialog.createNeedsProtected') : null;
+    }
+    // On a seed wallet the avault notice is drawn only once avault was read.
+    if (isHd) return !hdReady && avaultDep ? t('vaults.dialog.createNeedsAvault') : null;
+    return !p2Ready ? t('vaults.dialog.createNeedsAvault') : null;
+  })();
 
   const clearSelectedFile = useCallback(() => {
     setSelectedFile(null);
@@ -722,6 +789,13 @@ export const VaultSecretForm: React.FC<{
       return;
     }
     if (!created.ok) {
+      if ((created.code === 'secret_exists' || created.code === 'secret_name_case_conflict') && !treatExistingAsFulfilled) {
+        // Another key holds the name: nothing was saved, and the words are still here. Back to the
+        // first step with them, so only the name changes (owner, 2026-11-15).
+        setNameIssue({ name, issue: { kind: 'taken' }, afterSave: 'standard-hd' });
+        setHdStep('setup');
+        return;
+      }
       if (created.code === 'secret_exists') {
         handleExistingSecret();
         return;
@@ -824,6 +898,21 @@ export const VaultSecretForm: React.FC<{
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
+    if (!isProtectedHd && checksName) {
+      // The form is busy while the name is checked: Create and Cancel wait, so one click saves once.
+      setSubmitting(true);
+      const issue = await checkName(secretName, true);
+      if (!mounted.current) return;
+      setSubmitting(false);
+      if (issue) {
+        // Taken after the words were made: back to the first step with them, only the name to change.
+        if (isHd && hdStep !== 'setup') {
+          setNameIssue({ name: secretName, issue, afterSave: 'standard-hd' });
+          setHdStep('setup');
+        }
+        return;
+      }
+    }
     if (isProtectedHd) {
       // The click opens the sandbox window before anything is awaited (protocol v2 §6.6).
       const mergedTags = mergeTags(tags, []);
@@ -839,6 +928,9 @@ export const VaultSecretForm: React.FC<{
         },
         seal: protectedVault.sealHdWallet,
         onSaved: protectedVault.afterCreated,
+        // Checked again with the window reserved but before anything is made in it.
+        precheck: async () => !(await checkName(secretName, true)),
+        onNameTaken: () => setNameIssue({ name: secretName, issue: { kind: 'taken' } }),
       });
       return;
     }
@@ -1093,9 +1185,10 @@ export const VaultSecretForm: React.FC<{
           return;
         }
         if (created.code === 'vault_already_initialized') {
-          // Another tab established the vault first — drop the rejected local VMK and
-          // reload the server's wrap_meta so the user unlocks it instead of splitting keys.
-          await protectedVault.discardAndRefresh();
+          // Another tab established the vault first — drop the rejected local VMK (the root this
+          // save sealed under) and reload the server's wrap_meta so the user unlocks it instead of
+          // splitting keys.
+          await protectedVault.discardAndRefresh('sealed' in cryptoFields ? cryptoFields.sealed.wrap_meta : undefined);
           setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
           return;
         }
@@ -1489,6 +1582,7 @@ export const VaultSecretForm: React.FC<{
               disabled={formBusy}
               onClick={() => {
                 setProtection(key);
+                if (plainAdd) rememberAddTier(key);
                 // A protected seed-phrase wallet's words are typed only in the sandbox window: drop any
                 // the page holds for a standard one.
                 if (isHd && key === 'protected') resetHd();
@@ -1878,14 +1972,23 @@ export const VaultSecretForm: React.FC<{
             // The protected-keypair envelope AAD binds the name it was sealed under, so a rename
             // invalidates a pre-generated key — drop it and let the user regenerate.
           }}
+          onBlur={() => { void checkName(secretName, false); }}
           autoFocus
           required
           disabled={formBusy}
-          aria-invalid={nameInvalid || undefined}
-          className={cn('font-mono', nameInvalid && 'border-destructive/60')}
+          aria-invalid={nameInvalid || currentNameIssue ? true : undefined}
+          className={cn('font-mono', (nameInvalid || currentNameIssue) && 'border-destructive/60')}
         />
         {nameInvalid ? (
           <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.dialog.nameInvalid')}</span>
+        ) : currentNameIssue ? (
+          <span role="alert" className="text-[11.5px] text-destructive-ink">
+            {currentNameIssue.afterSave === 'standard-hd'
+              ? t('vaults.hd.nameTakenAfterSave')
+              : currentNameIssue.issue.kind === 'case'
+                ? t('vaults.dialog.nameCaseConflict', { name: currentNameIssue.issue.existing })
+                : t('vaults.dialog.nameTaken')}
+          </span>
         ) : (
           <span className="text-[11.5px] text-muted">{t('vaults.dialog.nameHint')}</span>
         )}
@@ -1947,6 +2050,8 @@ export const VaultSecretForm: React.FC<{
           ) : (
             <>
               <HintLine text={t('vaults.hd.importHint')} info={t('vaults.hd.importInfo')} />
+              {/* The words box is on this page only on Standard: say so beside it. */}
+              <span className="text-[11.5px] text-muted">{t('vaults.hd.standardTierLine')}</span>
               <HdImportFields
                 text={hdImport}
                 onTextChange={setHdImport}
@@ -2117,6 +2222,9 @@ export const VaultSecretForm: React.FC<{
       {isHd && error ? <span role="alert" className="text-xs text-destructive-ink">{error}</span> : null}
 
       <div className="mt-1 flex justify-end gap-2">
+        {createBlockedReason ? (
+          <span className="mr-auto self-center text-[11.5px] text-muted">{createBlockedReason}</span>
+        ) : null}
         <Button type="button" variant={isProtectedHd && protectedHd.phase.kind === 'mismatch' ? 'secondary' : 'ghost'} onClick={onCancel}
           disabled={submitting || (isProtectedHd && protectedHdBusy(protectedHd.phase))}>
           {t('vaults.dialog.cancel')}

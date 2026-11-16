@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 
 API_ROOT = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
@@ -235,8 +236,20 @@ def _require_on_master(api: GitHubApi, source_sha: str) -> None:
         raise ReleaseBackstopError(f"RC source SHA {source_sha} is not on {MASTER_BRANCH}")
 
 
-def _merged_pull(api: GitHubApi, source_sha: str) -> tuple[int, str]:
-    """Return the number and head SHA of the one PR whose merge into master is this SHA."""
+def _timestamp(value: Any, *, context: str) -> datetime:
+    if not isinstance(value, str):
+        raise ReleaseBackstopError(f"GitHub returned an invalid {context}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReleaseBackstopError(f"GitHub returned an invalid {context}") from exc
+    if parsed.tzinfo is None:
+        raise ReleaseBackstopError(f"GitHub returned an invalid {context}")
+    return parsed
+
+
+def _merged_pull(api: GitHubApi, source_sha: str) -> tuple[int, str, datetime]:
+    """Return the number, head SHA and merge time of the one PR whose merge into master is this SHA."""
 
     merged = [
         pull
@@ -255,7 +268,8 @@ def _merged_pull(api: GitHubApi, source_sha: str) -> tuple[int, str]:
     head = merged[0].get("head")
     if not isinstance(number, int) or isinstance(number, bool) or not isinstance(head, dict):
         raise ReleaseBackstopError("GitHub returned an invalid pull request")
-    return number, _sha(head.get("sha"), context=f"pull request #{number} head")
+    head_sha = _sha(head.get("sha"), context=f"pull request #{number} head")
+    return number, head_sha, _timestamp(merged[0].get("merged_at"), context=f"pull request #{number} merge time")
 
 
 def _required_checks(api: GitHubApi) -> list[tuple[str, int | None]]:
@@ -281,10 +295,16 @@ def _required_checks(api: GitHubApi) -> list[tuple[str, int | None]]:
     return required
 
 
-def _require_green_checks(api: GitHubApi, *, pull_number: int, head_sha: str) -> None:
+def _require_green_checks(api: GitHubApi, *, pull_number: int, head_sha: str, merged_at: datetime) -> None:
+    """Judge each required context as the ruleset did when the pull request merged.
+
+    Only check runs that completed at or before the merge count: a run started
+    afterwards (a label event, a manual rerun) can neither block nor vouch for
+    the merged state. A context with no qualifying run is missing.
+    """
     runs = [
         run
-        for run in _paged(api, f"commits/{head_sha}/check-runs", query={"filter": "latest"})
+        for run in _paged(api, f"commits/{head_sha}/check-runs", query={"filter": "all"})
         if isinstance(run.get("id"), int)
     ]
     problems: list[str] = []
@@ -295,17 +315,30 @@ def _require_green_checks(api: GitHubApi, *, pull_number: int, head_sha: str) ->
             if run.get("name") == context
             and (integration is None or (isinstance(run.get("app"), dict) and run["app"].get("id") == integration))
         ]
-        if not matching:
-            problems.append(f"{context} (missing)")
+        settled = [
+            run
+            for run in matching
+            if run.get("status") == "completed"
+            and run.get("completed_at") is not None
+            and _timestamp(run.get("completed_at"), context=f"{context} check-run completion time") <= merged_at
+        ]
+        if not settled:
+            if matching:
+                newest = max(matching, key=lambda run: run["id"])
+                state = newest.get("conclusion") or newest.get("status")
+                problems.append(f"{context} (no run completed before the merge; newest is {state})")
+            else:
+                problems.append(f"{context} (missing)")
             continue
-        # As the ruleset does, judge a context by its newest run on the head.
-        newest = max(matching, key=lambda run: run["id"])
-        # An unfinished run has no conclusion.
+        # As the ruleset did at merge, judge a context by its newest settled run.
+        # Newest means most recently created, not last to finish: a superseded
+        # run cancelled after its replacement completed must not decide.
+        newest = max(settled, key=lambda run: run["id"])
         if newest.get("conclusion") not in PASSING_CHECK_CONCLUSIONS:
-            problems.append(f"{context} ({newest.get('conclusion') or newest.get('status')})")
+            problems.append(f"{context} ({newest.get('conclusion')})")
     if problems:
         raise ReleaseBackstopError(
-            f"Required checks are not green on pull request #{pull_number} head {head_sha}: "
+            f"Required checks are not green on pull request #{pull_number} head {head_sha} as merged: "
             + ", ".join(problems)
         )
 
@@ -315,8 +348,8 @@ def prove_rc_pull_request(api: GitHubApi, *, tag: str) -> PullRequestProof:
 
     source_sha = resolve_tag_sha(api, tag)
     _require_on_master(api, source_sha)
-    pull_number, head_sha = _merged_pull(api, source_sha)
-    _require_green_checks(api, pull_number=pull_number, head_sha=head_sha)
+    pull_number, head_sha, merged_at = _merged_pull(api, source_sha)
+    _require_green_checks(api, pull_number=pull_number, head_sha=head_sha, merged_at=merged_at)
     try:
         full_backstop, backstop, run_id = _backstop(api, source_sha)
     except ReleaseBackstopError:

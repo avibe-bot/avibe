@@ -8,6 +8,11 @@ import { settingsFixtures, settingsPage } from './fixtures';
 const page = settingsPage('computer-use', <SettingsComputerUsePage />);
 const route = '/settings/computer-use';
 const status = (value: Record<string, unknown>) => settingsFixtures({ '/api/desktop/computer-use/status': value });
+/** A Windows host seen from its own desktop app, whose shell turns Computer Use on (and off). */
+const windowsShell = (value: Record<string, unknown>, actions: 'on' | 'on-off' = 'on-off') => settingsFixtures(
+  { '/api/desktop/computer-use/status': { supported: true, host_platform: 'windows', ...value } },
+  { desktopShell: true, desktopComputerUse: actions },
+);
 
 const designFrames = frames([
   {
@@ -42,15 +47,53 @@ const designFrames = frames([
   },
   {
     name: 'windows-off',
-    title: '设置 · 电脑操作 · Windows 预览 · 未开启',
+    title: '设置 · 电脑操作 · Windows 预览 · 已关闭',
     width: 1440,
     height: 900,
     status: 'shipped',
     route,
-    fixtures: settingsFixtures(
-      { '/api/desktop/computer-use/status': { supported: true, host_platform: 'windows', status: 'off', reason: 'never_enabled' } },
-      { desktopShell: true },
-    ),
+    fixtures: windowsShell({ enabled: false, status: 'off', reason: 'never_enabled' }),
+    render: page,
+  },
+  {
+    name: 'windows-on',
+    title: '设置 · 电脑操作 · Windows 预览 · 已开启（就绪）',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route,
+    fixtures: windowsShell({ enabled: true, status: 'ready', reason: null }),
+    render: page,
+  },
+  {
+    name: 'windows-turning-on',
+    title: '设置 · 电脑操作 · Windows 预览 · 正在开启',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route,
+    fixtures: windowsShell({ enabled: false, status: 'off', reason: 'never_enabled' }),
+    click: ['role=switch[name="{t:settings.computerUse.title}"]'],
+    render: page,
+  },
+  {
+    name: 'windows-tray-only',
+    title: '设置 · 电脑操作 · Windows 预览 · 旧版桌面应用只能从托盘关闭',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route,
+    fixtures: windowsShell({ enabled: true, status: 'ready', reason: null }, 'on'),
+    render: page,
+  },
+  {
+    name: 'windows-unknown',
+    title: '设置 · 电脑操作 · Windows 预览 · 无法读取开关状态',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route,
+    fixtures: windowsShell({ enabled: null, status: 'unavailable', reason: 'invalid_state_file' }),
     render: page,
   },
   {
@@ -60,7 +103,7 @@ const designFrames = frames([
     height: 900,
     status: 'shipped',
     route,
-    fixtures: status({ supported: true, host_platform: 'windows', status: 'unavailable', reason: 'session_locked' }),
+    fixtures: status({ supported: true, host_platform: 'windows', enabled: true, status: 'unavailable', reason: 'session_locked' }),
     render: page,
   },
   {

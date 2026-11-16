@@ -2,8 +2,8 @@
 
 Helper/parser tests cannot expose ARG_MAX, truncation in normal pending output,
 missing persistence or a CLI path that accidentally reaches the owner's daemon.
-The only child injection is an explicitly test-only source capability entry and
-an opaque public-fixture record. No product service, custody or network is run.
+The child uses the actual packaged capability registry and an opaque public-
+fixture record. No product service, custody or network is run.
 """
 from __future__ import annotations
 
@@ -87,13 +87,9 @@ home = Path(os.environ["HOME"]).resolve()
 for path in (paths.get_vibe_remote_dir(), paths.get_config_dir(), paths.get_state_dir(), paths.get_sqlite_state_path()):
     assert path.resolve().is_relative_to(home)
 assert internal_client.default_socket_path() == home / "dispatch.sock"
-# Capability is fixture-only; the real packaged pin remains unmodified.
+# Use the actual packaged ordinary capability; no test-only registry injection.
 current = release.current_support()
-assert current is not None and current.ordinary_input_types == ("p2tr",)
-release.CAPABILITIES_BY_PIN_ID = {current.pin_id: {
-    "ordinary_input_types": ("p2pkh", "p2wpkh", "p2tr"),
-    "hd_input_types": (), "ecdsa_return_types": ("p2pkh", "p2wpkh", "p2tr"),
-}}
+assert current is not None and current.ordinary_input_types == ("p2pkh", "p2wpkh", "p2tr")
 with cli._open_vault_engine().begin() as conn:
     try:
         vault_service.get_secret_meta(conn, "PUBLIC_TEST_BTC")

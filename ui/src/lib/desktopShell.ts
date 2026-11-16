@@ -13,6 +13,8 @@ declare global {
     readonly __AVIBE_DESKTOP_NOTIFICATIONS__?: true;
     /** The macOS shell answers the Computer Use guide's actions. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
+    /** The shell also turns Computer Use off from the page; older shells only turn it on. */
+    readonly __AVIBE_DESKTOP_COMPUTER_USE_DISABLE__?: true;
     /** The main Workbench can ask the shell to open standalone native app windows. */
     readonly __AVIBE_DESKTOP_APP_WINDOWS__?: true;
     /** Identity of a native App child window; grants no IPC capabilities. */
@@ -383,12 +385,17 @@ export type ComputerUsePermissionPane = 'accessibility' | 'screen_recording';
  */
 export function computerUseShellActions(): {
   enable: () => Promise<void>;
+  /** `null` on a shell that cannot turn Computer Use off from the page. */
+  disable: (() => Promise<void>) | null;
   openPermission: (pane: ComputerUsePermissionPane) => Promise<void>;
 } | null {
   const invoke = computerUseInvoke();
   if (!invoke) return null;
   return {
     enable: async () => { await invoke('computer_use_enable'); },
+    disable: window.__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__ === true
+      ? async () => { await invoke('computer_use_disable'); }
+      : null,
     openPermission: async (pane) => { await invoke('computer_use_open_permission', { pane }); },
   };
 }

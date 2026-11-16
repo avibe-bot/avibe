@@ -20,6 +20,52 @@ Vite. TypeScript's native compiler is a development tool, not a browser runtime
 optimization. The React Compiler is not enabled in the application build; its
 lint diagnostics are enforced through the React Hooks plugin.
 
+## Isolated headless browser scripts
+
+Use `scripts/safe-browser.mjs` for small local UI probes and captures.
+`npm run design:shot` uses it automatically. It launches only Playwright's
+bundled headless Chromium, with an ephemeral profile/context, mock Keychain and
+basic password storage; it accepts no headed/focus/debug, custom launch flags,
+existing profile, or stored credentials. `PWDEBUG` is refused on every OS.
+
+```sh
+node scripts/safe-browser.mjs   # launch, self-check, close; no capture
+npm run test:safe-browser      # focused guards + one small browser smoke
+```
+
+For an ad-hoc script in `ui/scripts/`:
+
+```js
+import { launchSafeBrowser, assertSafePage } from './safe-browser.mjs';
+const browser = await launchSafeBrowser({ contextOptions: { viewport: { width: 900, height: 700 } } });
+try {
+  const page = await browser.context.newPage();
+  // Navigate to a test-owned fixture, then exercise/assert its UI.
+  await assertSafePage(page); // also call after navigation and before capture
+} finally {
+  await browser.close();
+}
+```
+
+Before page scripts (including frames/popups/navigation), a context init script
+replaces `navigator.clipboard` read/write APIs and `execCommand` copy/cut/paste,
+and isolates native IPC (Tauri stays locked absent, rather than advertising a
+host that would change desktop fixture behavior). The launch self-check verifies
+identities before calling anything, exercises each stub, and closes the browser
+on failure. Calls
+are recorded as operation names only; text/items stay in page memory, never in
+logs or the OS clipboard. Native design fixtures use `setNativeMock` for their
+in-page peer; clipboard IPC still cannot reach it. This is browser automation
+isolation, not a sandbox for hostile scripts or an OS-level audit.
+
+Existing Playwright suites are **not** globally migrated by this helper. Use the
+CI Playwright container from `.github/workflows/lint.yml` (or local Incus) for
+repeats, cross-engine checks and captures that do not need this Mac. Installing
+`installBrowserIsolation(context)` alone does not make an externally launched
+browser headless or isolate its profile/Keychain. Captures still need sensitive
+mnemonic, passphrase, quiz and suggestion content masked **before saving**; this
+tool does not infer which UI content is sensitive.
+
 ## Lint policy and existing debt
 
 `npm run lint` checks every repository-owned TS/TSX file under `ui/`, excluding

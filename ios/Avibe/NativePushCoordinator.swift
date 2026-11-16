@@ -148,6 +148,9 @@ final class NativePushCoordinator {
     private static let publicBaseURL = "https://avibe.bot"
     private static let topic = "bot.avibe.ios"
     private static let retiringKeyTTL: TimeInterval = 86_400
+    /// How many provider reconciliations one subscription makes before a
+    /// tuple that keeps changing underneath it is reported as unavailable.
+    static let providerReconciliationRounds = 3
 
     private final class TokenWaiter {
         let id = UUID()
@@ -880,31 +883,27 @@ final class NativePushCoordinator {
     private func ensureProvider(
         installation: PushInstallationState
     ) async throws -> PushProviderState {
-        if installation.provider != nil {
-            try await reconcileProvider()
-            let updated = try loadOrCreateInstallation()
-            guard
-                let provider = updated.provider,
-                !updated.providerPatchPending
-            else {
+        if installation.provider == nil {
+            try await waitForProviderToken()
+            guard try loadOrCreateInstallation().provider != nil else {
                 throw NativePushError.unavailable
             }
-            return provider
         }
-        try await waitForProviderToken()
-        let updated = try loadOrCreateInstallation()
-        guard updated.provider != nil else {
-            throw NativePushError.unavailable
+        // `requestPermission` has just asked APNs for the token again. Its
+        // callback can land after a reconciliation has read the installation
+        // and before this check, leaving a newer tuple pending. That tuple
+        // is reconciled again, a bounded number of times.
+        for _ in 0..<Self.providerReconciliationRounds {
+            try await reconcileProvider()
+            let updated = try loadOrCreateInstallation()
+            guard let provider = updated.provider else {
+                throw NativePushError.unavailable
+            }
+            if !updated.providerPatchPending {
+                return provider
+            }
         }
-        try await reconcileProvider()
-        let reconciled = try loadOrCreateInstallation()
-        guard
-            let provider = reconciled.provider,
-            !reconciled.providerPatchPending
-        else {
-            throw NativePushError.unavailable
-        }
-        return provider
+        throw NativePushError.unavailable
     }
 
     private func reconcileProvider() async throws {

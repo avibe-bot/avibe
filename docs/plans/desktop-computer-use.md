@@ -112,7 +112,7 @@ No model credentials belong on hosted runners.
   connected-handle owner/DACL and peer SID checks, ordinary Runtime/shell tokens,
   WTS-active/default input and thread desktops, and the already-pinned source
   driver's action-time target-token/desktop guards. The Windows snapshot pin is
-  `0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293`;
+  `20bfe2c6c205c22e35465706736704f5f8effbab88a1e79357646f556d9a5cad`;
   the Mac snapshot is not accepted as Windows readiness evidence.
 - Driver/helper processes are atomically Job-owned from suspended creation.
   Production Job limits include `KILL_ON_JOB_CLOSE | BREAKAWAY_OK`, never
@@ -449,6 +449,74 @@ absorbs it at call time.
 
 As a consequence, computer use is available only while the desktop shell is
 running. The tray keeps the shell alive after the window closes.
+
+### Settings Off: native contract and compatibility
+
+The Windows Settings switch consumes the following additive backend contract;
+its UI ships separately after this contract lands. macOS Settings, native menu
+placement, Preview/default-off policy, rollback guard, driver sources and launch
+arguments are unchanged.
+
+- `computer_use_disable` has **no arguments**. It reuses the tray's Controller
+  `disable` path and lifecycle `toggle_off`, rather than granting an arbitrary
+  state setter. `allow-computer-use-disable` is declared in the Tauri command
+  manifest and granted only to `main`'s loopback Workbench capability on supported
+  macOS/Windows shells. The command also checks the currently adopted Runtime
+  origin, rejecting bootstrap, other windows, remote pages and other local ports.
+- The separate top-frame `__AVIBE_DESKTOP_COMPUTER_USE_DISABLE__ === true` marker
+  advertises this native action; it is not authorization. The old
+  `__AVIBE_DESKTOP_COMPUTER_USE__` marker still advertises On only. Old shells must
+  not show an actionable Off switch; use the tray instead. Browser/remote pages
+  remain read-only, regardless of the status endpoint's value.
+- A successful native reply means the off record was published and **no process
+  of the owned job is still running when the command resolves**. Windows retains
+  waitable handles for the root and members observed in its stop-time snapshots,
+  requires those handles to be signaled and `ActiveProcesses == 0`, and uses the
+  existing bounded Job termination for remaining members. It does not reconcile
+  historical `TotalProcesses` or claim individual signal proofs for members that
+  exited before the snapshots. macOS also cancels and joins its permission probe.
+  Pending Computer Use actions lose their driver;
+  the tray, ordinary apps, unsaved app state and other Agent tools are untouched.
+  On Windows a helper that ignores graceful EOF is terminated by the existing
+  bounded Job cleanup, not a process-name search or a new launch contract.
+- Controller events are serialized. An earlier On may finish startup before Off
+  executes; a later explicit On may enable again after Off. Off invalidates
+  automatic retry, is idempotent and acknowledges completion, not event enqueue.
+  A UI wait timeout or closed page does not retract an accepted event. The UI's
+  15-second settling limit is a presentation bound, not a backend cancellation
+  guarantee; keep polling authoritative state after timeout.
+- Write failure still tears down the driver and rejects the invocation. The
+  Windows lifecycle stays off in memory, so later capability/recovery ticks do
+  not restart it. **Disk is not claimed off on a failed write**: status can still
+  report the old saved `enabled:true`; restarting the shell can restore that old
+  opt-in. While this shell remains alive, its existing five-second tick retries
+  the pending Off publication/teardown; repeated Off also retries it. Pending is
+  memory-only, and successful persistence/teardown clears it without spawning.
+  No second persistent recovery state is added.
+  Teardown failure retains the waitable driver/job and captured member handles,
+  so a repeated Off cannot mistake a dropped handle for an observed exit. A failed macOS probe
+  join remains unconfirmed rather than acknowledging a later Off.
+  Teardown failure also rejects even if the off record was successfully written;
+  the UI must retain the invocation failure rather than treating the matching
+  saved value alone as proof of success.
+- `/api/desktop/computer-use/status` adds `enabled: true | false | null`, read
+  from the existing validated native record independently of readiness. Windows
+  verifies owner/DACL and non-reparse regular-file identity on the same opened
+  descriptor before and after reading either saved value, without repairing it.
+  Readable
+  first install (`off/never_enabled`) is false; unreadable, malformed,
+  unsupported-schema or unverified state is null. Unsupported hosts return
+  `supported:false, enabled:null`. Missing `enabled` means an old server and
+  unknown, never false. Controller IPC failure changes readiness but preserves
+  the saved opt-in. Neither `error`, `needs_runtime` nor `unavailable` implies On.
+  A true value confirms opt-in, not readiness. No native paths are exposed.
+
+Validation uses hermetic Controller request/reply tests, saved-state/API tests,
+capability/caller tests and the existing ordinary-user Windows hosted process
+harness. That harness covers off publication before teardown, exact-Job membership and captured-helper
+completion, late-spawn cleanup, failed off publication, repeated failed teardown retaining the same owner,
+repeated Off, no automatic respawn, eventual pending-write recovery and old-record
+restart semantics. These are source/CI checks, not installed-app or owner-desktop acceptance.
 
 ### Shell (`desktop/src-tauri`, `desktop/runtime-host`)
 

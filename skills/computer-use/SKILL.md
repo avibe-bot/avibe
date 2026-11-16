@@ -2,7 +2,7 @@
 name: computer-use
 slug: computer-use
 description: Use Avibe's local Computer Use CLI for carefully bounded desktop observation and actions.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Computer Use
@@ -163,11 +163,29 @@ kernel, SDK, saved flows, and safety rules above are the same.
   using the names that `observe apps` reports.
 - Windows asks for no Accessibility or Screen Recording grant. Never tell the
   owner to open System Settings; report the state you received instead.
-- App windows that run as administrator (elevated) are refused. When an
-  action is refused because its target window is elevated, tell the owner that
-  Avibe cannot control that window and that reopening the app without "Run as
-  administrator" lets you continue. Never retry it, ask the owner to elevate
-  Avibe, or work around the refusal.
+- Avibe refuses some Windows actions on purpose. The error's `code` says
+  which; its `message` explains the refusal and the next step. Tell the user
+  what happened in their language, as below. Apart from the one fresh
+  observation allowed for `unverified_window`, none of these is retried,
+  forced with foreground delivery, or worked around, and you never ask anyone
+  to raise Avibe's or an app's rights. After a `protected_window` or
+  `unverified_window` refusal, other work that does not need that window can
+  continue:
+  - `protected_window`, `params.reason` `administrator`: the window runs as
+    administrator. Tell the user Avibe cannot control it, and that reopening
+    the app without "Run as administrator" lets you continue.
+  - `protected_window`, `params.reason` `higher_integrity` (or none): Windows
+    protects the window. Tell the user Avibe cannot control it; there is no
+    step that lets you continue in it.
+  - `unverified_window`: Avibe could not confirm which app owns the window.
+    Observe the app once more and act only on a window from that new
+    observation; if it is refused again, stop and tell the user.
+  - `desktop_unavailable`: the desktop is locked or not available. Ask the
+    user to unlock or reconnect, and stop until they say it is ready; do not
+    wait or poll in a loop.
+  - `administrator_runtime_refused`: Avibe itself runs as administrator, so
+    Computer Use stays off. Tell the user to quit Avibe and reopen it
+    normally, and stop.
 - Avibe launches a Windows app only from the absolute path of its `.exe` on a
   local drive. Network, relative, and other paths are refused, and Avibe never
   launches by name. To work in an app the owner named, first check `observe
@@ -210,9 +228,9 @@ kernel, SDK, saved flows, and safety rules above are the same.
 - To open a menu, `await win.activate()` and observe that this exact window is
   focused before the click: foreground delivery restores the previous window,
   which closes the menu again.
-- An elevated target is different from Avibe itself running as administrator:
-  then Computer Use reports `unavailable` (`elevated_runtime`) and the owner
-  must reopen Avibe normally.
+- Before any action, Computer Use can also be unavailable because Avibe runs
+  as administrator: the status reports `unavailable` (`elevated_runtime`).
+  Report it as for `administrator_runtime_refused`.
 - Turning Computer Use off, quitting Avibe, or Avibe exiting stops the driver
   and ends Computer Use. A later call reports `off` or `unavailable`: report it
   and stop.

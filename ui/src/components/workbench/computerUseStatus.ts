@@ -17,10 +17,14 @@ export const COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS = 1_500;
  * from before the field reports none and could only host Computer Use on
  * macOS, so a missing field reads as `macos`. It describes copy, never
  * enablement.
+ *
+ * `enabled` is the user's opt-in as the server's native state record holds
+ * it: `null` when the server cannot vouch for it or predates the field. It is
+ * never derived from `status`.
  */
 export type ComputerUseStatusRead =
   | { kind: 'unsupported'; host: ComputerUseHost }
-  | { kind: 'status'; status: ComputerUseStatus; host: ComputerUseHost };
+  | { kind: 'status'; status: ComputerUseStatus; host: ComputerUseHost; enabled: boolean | null };
 
 const HOSTS: readonly ComputerUseHost[] = ['macos', 'windows', 'linux', 'unknown'];
 
@@ -36,6 +40,7 @@ export const readComputerUseStatus = async (): Promise<ComputerUseStatusRead | n
     const payload = await response.json() as Partial<ComputerUseStatus> & {
       supported?: boolean;
       host_platform?: unknown;
+      enabled?: unknown;
     };
     const host = readHost(payload.host_platform);
     if (payload.supported === false) return { kind: 'unsupported', host };
@@ -43,6 +48,7 @@ export const readComputerUseStatus = async (): Promise<ComputerUseStatusRead | n
     return {
       kind: 'status',
       host,
+      enabled: typeof payload.enabled === 'boolean' ? payload.enabled : null,
       status: {
         status: payload.status,
         reason: typeof payload.reason === 'string' ? payload.reason : null,

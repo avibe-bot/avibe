@@ -38,7 +38,7 @@ COMPUTER_USE_SCHEMA_VERSION = 1
 # disables admission, JS and Settings without changing macOS or saved opt-in.
 COMPUTER_USE_WINDOWS_SCHEMA_VERSION = 1
 COMPUTER_USE_WINDOWS_TOOL_SNAPSHOT_SHA256 = (
-    "0f48a585592d90136b417417602af36e919ca645538e9588d6deb1eb9d8e1293"
+    "20bfe2c6c205c22e35465706736704f5f8effbab88a1e79357646f556d9a5cad"
 )
 COMPUTER_USE_STATE_DIR_ENV = "AVIBE_COMPUTER_USE_STATE_DIR"
 COMPUTER_USE_STATE_FILE = "computer-use.json"
@@ -124,6 +124,10 @@ class ComputerUseStateError(ValueError):
     """The desktop state file does not satisfy the versioned contract."""
 
 
+class ComputerUseStateUnverified(ComputerUseStateError):
+    """The opened record is not a trusted source of saved opt-in."""
+
+
 @dataclass(frozen=True)
 class ToolSnapshot:
     path: Path
@@ -156,12 +160,22 @@ class ComputerUseStatus:
     reason: str | None
     state: ComputerUseState | None = None
 
+    @property
+    def enabled(self) -> bool | None:
+        """Saved opt-in, independent of readiness; None is not an Off value."""
+        if self.reason in {"invalid_state_file", "state_unverified"}:
+            return None
+        if self.state is not None:
+            return self.state.enabled
+        if self.status == "off" and self.reason == "never_enabled":
+            return False
+        return None
+
     def as_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"status": self.status, "reason": self.reason}
+        payload: dict[str, Any] = {"status": self.status, "reason": self.reason, "enabled": self.enabled}
         if self.state is not None:
             payload.update(
                 {
-                    "enabled": self.state.enabled,
                     "state": self.state.state,
                     "instance_id": self.state.instance_id,
                     "generation": self.state.generation,
@@ -357,9 +371,12 @@ def read_computer_use_state(path: Path | None = None) -> ComputerUseState | None
     target = path or computer_use_state_path()
     try:
         if os.name == "nt":
-            from core.computer_windows import read_state_text
+            from core.computer_windows import AdmissionRefused, read_state_text
 
-            raw = read_state_text(target)
+            try:
+                raw = read_state_text(target)
+            except AdmissionRefused as exc:
+                raise ComputerUseStateUnverified("state_unverified") from exc
         else:
             raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -594,6 +611,8 @@ def effective_computer_use_status(
     checker = verifier or _snapshot_verifier
     try:
         state = read_computer_use_state(target)
+    except ComputerUseStateUnverified:
+        return ComputerUseStatus("unavailable", "state_unverified")
     except ComputerUseStateError:
         return ComputerUseStatus("unavailable", "invalid_state_file")
     if state is None:

@@ -22,6 +22,7 @@ import {
 import { computerUseStatusCopy, type ComputerUseCopyKey } from '../workbench/computerUseStatusCopy';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel } from './SettingsPrimitives';
+import { useWindowsComputerUseSwitch } from './WindowsComputerUseSwitch';
 
 const STEP_COPY: Record<ComputerUseGuideStep, { title: TranslationKey; detail: TranslationKey }> = {
   enable: {
@@ -43,12 +44,6 @@ const STEP_PANE: Partial<Record<ComputerUseGuideStep, ComputerUsePermissionPane>
   accessibility: 'accessibility',
   screenRecording: 'screen_recording',
 };
-
-/**
- * Windows grants no per-app privacy permissions, so its guide is the switch
- * alone. The macOS Accessibility and Screen Recording steps never appear there.
- */
-const WINDOWS_GUIDE_STEPS: readonly ComputerUseGuideStep[] = ['enable'];
 
 const WINDOWS_NOTES: { testId: string; icon: LucideIcon; text: TranslationKey }[] = [
   { testId: 'computer-use-windows-apps', icon: AppWindow, text: 'settings.computerUse.windows.apps' },
@@ -128,6 +123,10 @@ export const SettingsComputerUsePage: FC = () => {
   const desktopShell = isDesktopShell();
   const actions = useMemo(() => computerUseShellActions(), []);
   const [read, setRead] = useState<ComputerUseStatusRead | null>(null);
+  // Which read produced `read`, numbered by when each read started, so a
+  // change confirms only on a read that began after its native call settled.
+  const [readSeq, setReadSeq] = useState(0);
+  const startedReads = useRef(0);
   const [checking, setChecking] = useState(false);
   const [runningStep, setRunningStep] = useState<ComputerUseGuideStep | null>(null);
   const [failedStep, setFailedStep] = useState<ComputerUseGuideStep | null>(null);
@@ -141,9 +140,13 @@ export const SettingsComputerUsePage: FC = () => {
   // A transient failure (`null`) keeps the last observed state.
   const readStatus = useCallback((): Promise<void> => {
     if (!inFlight.current) {
+      const seq = ++startedReads.current;
       inFlight.current = readComputerUseStatus()
         .then((next) => {
-          if (mounted.current && next) setRead(next);
+          if (mounted.current && next) {
+            setRead(next);
+            setReadSeq(seq);
+          }
         })
         .finally(() => {
           inFlight.current = null;
@@ -225,6 +228,14 @@ export const SettingsComputerUsePage: FC = () => {
   // decides whether this page can run the native actions, never the host.
   const host = read?.host ?? 'macos';
   const windows = host === 'windows';
+  const windowsSwitch = useWindowsComputerUseSwitch({
+    enabled: read?.kind === 'status' ? read.enabled : null,
+    readSeq,
+    nextReadSeq: () => startedReads.current + 1,
+    enable: actions?.enable ?? null,
+    disable: actions?.disable ?? null,
+    refresh: () => void readStatus().then(() => readStatus()),
+  });
 
   if (read?.kind === 'unsupported') {
     return (
@@ -256,7 +267,6 @@ export const SettingsComputerUsePage: FC = () => {
   const status = read?.kind === 'status' ? read.status : null;
   const copy = status ? computerUseStatusCopy(status, (key: ComputerUseCopyKey) => t(key), host) : null;
   const progress = status ? computerUseGuideProgress(status) : null;
-  const steps = windows ? WINDOWS_GUIDE_STEPS : COMPUTER_USE_GUIDE_STEPS;
 
   return (
     <SettingsPageShell
@@ -296,7 +306,9 @@ export const SettingsComputerUsePage: FC = () => {
             </span>
           )}
           description={t('settings.computerUse.windows.previewDetail')}
+          actions={windowsSwitch.control}
         >
+          {windowsSwitch.notice && <div className="px-5 pt-4">{windowsSwitch.notice}</div>}
           <ul className="flex flex-col gap-2.5 px-5 py-4" data-testid="computer-use-windows-notes">
             {WINDOWS_NOTES.map(({ testId, icon: Icon, text }) => (
               <li
@@ -323,17 +335,36 @@ export const SettingsComputerUsePage: FC = () => {
         data-computer-use-status={status?.status ?? 'loading'}
       >
         {status
-          ? <ComputerUseStatusIcon status={status.status} />
+          ? windows && status.status === 'off'
+            // Off is neither done nor a problem: a neutral mark, not the shared check.
+            ? <Power className="size-4 shrink-0" aria-hidden="true" />
+            : <ComputerUseStatusIcon status={status.status} />
           : <LoaderCircle className="size-4 shrink-0 animate-spin" aria-hidden="true" />}
         <div className="min-w-0">
           <p className="font-semibold">{copy?.label ?? t('settings.computerUse.loading')}</p>
-          {copy && <p className="mt-0.5 text-[11px] opacity-80">{copy.detail}</p>}
+          {copy && (
+            <p className="mt-0.5 text-[11px] opacity-80">
+              {/* Off names the control the reader can reach: the switch above on a Windows page
+                  that can turn it on, the tray or menu bar in the desktop app, or the computer
+                  itself from a browser. */}
+              {status?.status === 'off'
+                ? windows && (windowsSwitch.canTurnOn || windowsSwitch.changing)
+                  ? t('settings.computerUse.windows.switch.offDetail')
+                  : !desktopShell
+                    ? t('workbench.home.computerUse.offDetailRemote')
+                    : windows
+                      ? t('workbench.home.computerUse.offDetailWindows')
+                      : copy.detail
+                : copy.detail}
+            </p>
+          )}
         </div>
       </div>
 
+      {!windows && (
       <SettingsPanel title={t('settings.computerUse.stepsTitle')}>
         <ol className="flex flex-col" data-testid="computer-use-steps">
-          {steps.map((step, index) => {
+          {COMPUTER_USE_GUIDE_STEPS.map((step, index) => {
             const state = progress?.[step] ?? 'pending';
             const actionable = actions !== null && progress !== null
               && (step === 'enable' ? state === 'current' : state !== 'complete');
@@ -364,15 +395,11 @@ export const SettingsComputerUsePage: FC = () => {
                     <span className="sr-only">{` — ${t(STEP_STATE_LABEL[state])}`}</span>
                   </p>
                   <p className="max-w-2xl text-[12px] leading-relaxed text-muted">
-                    {windows && step === 'enable'
-                      ? t('settings.computerUse.windows.enableDetail')
-                      : t(STEP_COPY[step].detail)}
+                    {t(STEP_COPY[step].detail)}
                   </p>
                   {actionable && failedStep === step && (
                     <GuideNote testId="computer-use-action-failed" tone="destructive">
-                      {windows
-                        ? t('settings.computerUse.windows.actionFailed')
-                        : t('settings.computerUse.actionFailed')}
+                      {t('settings.computerUse.actionFailed')}
                     </GuideNote>
                   )}
                   {step === 'screenRecording' && screenRecordingRequested && state !== 'complete' && (
@@ -406,6 +433,7 @@ export const SettingsComputerUsePage: FC = () => {
           })}
         </ol>
       </SettingsPanel>
+      )}
     </SettingsPageShell>
   );
 };

@@ -2633,8 +2633,10 @@ def test_each_inbox_row_awaits_only_its_own_sessions_turn(isolated_state, latest
     assert single == listed
 
 
-def test_one_sessions_inbox_row_reads_only_that_sessions_rows(isolated_state):
+@pytest.mark.parametrize("reader", ["single", "feed", "session_counts", "scope_counts"])
+def test_unread_queries_keep_catalog_plan_and_bound_workspace_notices(isolated_state, reader):
     from sqlalchemy import event
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, resolve_workspace_notice_session
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -2642,6 +2644,11 @@ def test_one_sessions_inbox_row_reads_only_that_sessions_rows(isolated_state):
         for session_id in ("ses_one", "ses_other"):
             _seed_titled_session(conn, scope_id, session_id, session_id)
             _insert_msg(conn, scope_id, session_id, "agent", "unread reply", "2026-05-30T10:00:00Z", read=False)
+        resolve_workspace_notice_session(conn)
+        messages_service.append(
+            conn, scope_id=None, session_id=WORKSPACE_NOTICE_SESSION_ID,
+            platform="avibe", author="agent", message_type="notify", text="New workspace notice",
+        )
     statements: list[tuple[str, tuple]] = []
 
     @event.listens_for(engine, "before_cursor_execute")
@@ -2649,15 +2656,38 @@ def test_one_sessions_inbox_row_reads_only_that_sessions_rows(isolated_state):
         statements.append((statement, tuple(parameters)))
 
     with engine.connect() as conn:
-        row = messages_service.get_inbox_session(conn, "ses_one")
-        [(statement, parameters)] = statements
-        plan = [str(step[3]) for step in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", parameters)]
+        if reader == "single":
+            assert messages_service.get_inbox_session(conn, "ses_one")["unread_count"] == 1
+        elif reader == "feed":
+            assert len(messages_service.list_inbox_sessions(conn)["sessions"]) == 3
+        elif reader == "session_counts":
+            assert messages_service.unread_counts_by_session(conn, platform="avibe") == {
+                "ses_one": 1, "ses_other": 1, WORKSPACE_NOTICE_SESSION_ID: 1,
+            }
+        else:
+            assert messages_service.unread_counts(conn, platform="avibe") == {scope_id: 2}
+        queries = list(statements)
+        plans = [
+            [str(step[3]) for step in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {sql}", parameters)]
+            for sql, parameters in queries
+        ]
 
-    assert row["unread_count"] == 1
+    plan = [step for steps in plans for step in steps]
     unread_steps = [step for step in plan if "ix_messages_unread_session" in step]
-    assert unread_steps, plan
-    # Counted for the one session by equality, never as a range over every session's rows.
-    assert all("session_id=?" in step and "session_id>?" not in step for step in unread_steps), unread_steps
-    # No other part of the row walks every session's Messages or Deliveries either.
-    assert not [step for step in plan if "session_id>?" in step], plan
+    assert len(unread_steps) == (1 if reader == "scope_counts" else 2), plan
+    catalog = unread_steps[0]
+    prefix = "platform=? AND type=? AND author=? AND read_at=?"
+    assert all(prefix in step for step in unread_steps), unread_steps
+    # The extra JSON test can inspect only pending notices in the one reserved
+    # Session, never every ordinary notify or all communication history.
+    if reader != "scope_counts":
+        assert "session_id=?" in unread_steps[1], unread_steps[1]
+    if reader == "single":
+        assert "session_id=?" in catalog and "session_id>?" not in catalog, catalog
+        assert not [step for step in plan if "session_id>?" in step], plan
+    elif reader != "scope_counts":
+        assert "session_id>?" in catalog, catalog
+    # Only the existing scope aggregate groups scope ids over unread results.
+    # Scope-NULL workspace notices add no query or new GROUP BY materialization.
+    assert sum("B-TREE FOR GROUP BY" in step for step in plan) == (1 if reader == "scope_counts" else 0), plan
     assert not [step for step in plan if step.startswith("SCAN message")], plan

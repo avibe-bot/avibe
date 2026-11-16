@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from storage import vault_policy, vault_service
 from storage.models import vault_operation_challenges, vault_secrets
+from tests.test_vault_protected_bitcoin import legacy_cohort as legacy_cohort
 from tests.test_vault_policy_authorization import (
     capable_policy_sandbox as capable_policy_sandbox,
     complete, create_target, enroll, issue, proof, state,
@@ -53,7 +54,32 @@ def test_protected_internal_preimage_and_public_v1_match_frozen_cohort_oracle(ca
         assert vault_policy.target_state(changed, None)[0]["identitySha256"] != target["identitySha256"]
 
 
-def test_current_taproot_only_pin_refuses_policy_before_factor_readiness():
+def test_packaged_pin_policy_uses_actual_cohort_without_capability_injection():
+    # The pin now enables the previously refused all-three policy target. Keep
+    # the real challenge/assertion/storage path, not only a registry projection.
+    support = release.current_support()
+    assert support is not None
+    assert support.pin_id == "b98626850db4ca71ef4896cfb8a44cea8919f4cf1cd924f84963213a1a6868d9"
+    create_target(protection="protected")
+    credential, factor_id = enroll()
+    context = issue()
+    assert context["v"] == 1
+    assert all(context["target"]["addresses"][key] for key in ("eth", "btc_legacy", "btc_segwit", "btc_taproot"))
+    row = state()["vault_secrets"][0]
+    snapshot = {
+        "v": 2, "kind": "keypair", "protection": "protected", "signerKind": "local",
+        "envelope": {"ciphertext": row["ciphertext"], "nonce": row["nonce"], "wrapMeta": row["wrap_meta"], "revision": row["updated_at"]},
+        "keys": {"signing": {"curve": "secp256k1", "publicKey": json.loads(row["public_meta"])["signing_public_key"]["public_key"]}},
+        "sandboxCohort": {"buildHash": support.build_hash, "manifestHash": support.manifest_hash},
+    }
+    assert context["target"]["identitySha256"] == vault_policy.identity_hash(snapshot)
+    assert complete(proof(context, credential, factor_id))["ok"]
+    after = state()["vault_secrets"][0]
+    assert json.loads(after["policy"])["always_ask"] is False
+    assert all(after[key] == row[key] for key in ("id", "ciphertext", "nonce", "wrap_meta"))
+
+
+def test_retained_taproot_only_pins_refuse_policy_before_factor_readiness(legacy_cohort):
     create_target(protection="protected")
     before = state()  # No factor: unsupported must precede setup_required.
     with pytest.raises(vault_service.SigningPolicyError) as error:

@@ -936,6 +936,7 @@ actor DirectConnectListener {
         _ connection: NWConnection,
         nonce: String
     ) async {
+        let start = ContinuousClock.now
         let request = try? await directDeadline(spareHeadSeconds) {
             try await readRequest(
                 from: connection,
@@ -946,10 +947,13 @@ actor DirectConnectListener {
         guard request == .ownershipCheck(nonce: nonce) else {
             return
         }
-        _ = try? await directDeadline(0.25) {
-            try await connection.sendAll(DirectConnectWire.ownershipAnswer(nonce: nonce))
-            try await connection.finishSending()
-        }
+        // The answer has what the read left of the head bound: the spare is
+        // held no longer than before, and a slow write is not dropped early.
+        await sendAnswer(
+            connection,
+            with: DirectConnectWire.ownershipAnswer(nonce: nonce),
+            within: secondsLeft(of: spareHeadSeconds, since: start)
+        )
     }
 
     private static func serve(
@@ -964,6 +968,7 @@ actor DirectConnectListener {
     ) async {
         let authority: DirectAuthority
         let earlyData: Data
+        let start = ContinuousClock.now
         do {
             let request = try await directDeadline(limits.headSeconds) {
                 try await readRequest(
@@ -978,12 +983,12 @@ actor DirectConnectListener {
                 earlyData = data
             case .ownershipCheck(let nonce):
                 if nonce == ownershipNonce {
-                    _ = try? await directDeadline(0.25) {
-                        try await connection.sendAll(
-                            DirectConnectWire.ownershipAnswer(nonce: nonce)
-                        )
-                        try await connection.finishSending()
-                    }
+                    // As on the spare: what the read left of the head bound.
+                    await sendAnswer(
+                        connection,
+                        with: DirectConnectWire.ownershipAnswer(nonce: nonce),
+                        within: secondsLeft(of: limits.headSeconds, since: start)
+                    )
                 } else {
                     await refuse(connection, status: 405, within: limits.headSeconds)
                 }
@@ -1027,8 +1032,12 @@ actor DirectConnectListener {
                 let listener
             else {
                 if !Task.isCancelled {
-                    await answerRefusal(connection, status: scope == nil ? 403 : 503)
-                    await awaitClose(reader, within: limits.headSeconds)
+                    await refuse(
+                        connection,
+                        status: scope == nil ? 403 : 503,
+                        reader: reader,
+                        within: limits.headSeconds
+                    )
                 }
                 return
             }
@@ -1040,8 +1049,12 @@ actor DirectConnectListener {
             )
             guard admission != .refused else {
                 if !Task.isCancelled {
-                    await answerRefusal(connection, status: 503)
-                    await awaitClose(reader, within: limits.headSeconds)
+                    await refuse(
+                        connection,
+                        status: 503,
+                        reader: reader,
+                        within: limits.headSeconds
+                    )
                 }
                 return
             }
@@ -1087,8 +1100,12 @@ actor DirectConnectListener {
                 guard !Task.isCancelled else {
                     return
                 }
-                await answerRefusal(connection, status: status)
-                await awaitClose(reader, within: limits.headSeconds)
+                await refuse(
+                    connection,
+                    status: status,
+                    reader: reader,
+                    within: limits.headSeconds
+                )
                 return
             case .won(let backend, let stream, let leftover):
                 // The commit point: one main-actor turn that makes the last
@@ -1156,8 +1173,7 @@ actor DirectConnectListener {
                 return
             }
         }
-        await answerRefusal(connection, status: 503)
-        await awaitClose(reader, within: limits.headSeconds)
+        await refuse(connection, status: 503, reader: reader, within: limits.headSeconds)
     }
 
     private enum WatchedRace {
@@ -1451,48 +1467,75 @@ actor DirectConnectListener {
     }
 
     /// Answers a request that will not be tunnelled, then gives the client
-    /// `seconds` to read the answer and close.
+    /// what is left of the answer's budget to read the answer and close.
+    /// Closing first, with bytes of the client's still unread, would reset
+    /// the connection and could cost it the answer.
     private static func refuse(
         _ connection: NWConnection,
         status: Int,
         within seconds: TimeInterval
     ) async {
-        await answerRefusal(connection, status: status)
-        await awaitClose(connection, within: seconds)
-    }
-
-    /// Writes the refusal and finishes sending. A short write to a socket
-    /// that was just accepted; bounded in case the client is not reading.
-    private static func answerRefusal(
-        _ connection: NWConnection,
-        status: Int
-    ) async {
-        _ = try? await directDeadline(0.25) {
-            try await connection.sendAll(DirectConnectWire.refusal(status))
-            try await connection.finishSending()
+        await sendAnswer(
+            connection,
+            with: DirectConnectWire.refusal(status),
+            within: seconds
+        ) {
+            while try await !connection.receiveChunk(maximumLength: 4096).isComplete {}
         }
     }
 
     /// The same, once the reader owns WebKit's side.
-    private static func awaitClose(
-        _ reader: DirectClientReader,
+    private static func refuse(
+        _ connection: NWConnection,
+        status: Int,
+        reader: DirectClientReader,
         within seconds: TimeInterval
     ) async {
-        _ = try? await directDeadline(seconds) {
+        await sendAnswer(
+            connection,
+            with: DirectConnectWire.refusal(status),
+            within: seconds
+        ) {
             while try await reader.read() != nil {}
         }
     }
 
-    /// Gives the client `seconds` to read the answer and close. Closing
-    /// first, with bytes of the client's still unread, would reset the
-    /// connection and could cost it the answer.
-    private static func awaitClose(
+    /// What writing an answer adds to the time its connection is held. A
+    /// short write to a socket that was just accepted; it bounds a client
+    /// that does not read.
+    static let answerGraceSeconds: TimeInterval = 0.25
+
+    /// Writes `bytes`, finishes sending, then runs `afterwards` (the wait
+    /// for the client to read the answer and close), all within one budget
+    /// of `answerGraceSeconds + seconds`. A write slowed by a stalled host
+    /// is not dropped while the budget lasts (a dropped answer reaches the
+    /// client as a bare close), and the connection is held no longer than a
+    /// separate write bound followed by a `seconds` wait would hold it. A
+    /// failed write ends here: the client is gone. Nothing is retried.
+    private static func sendAnswer(
         _ connection: NWConnection,
-        within seconds: TimeInterval
+        with bytes: Data,
+        within seconds: TimeInterval,
+        afterwards: @escaping @Sendable () async throws -> Void = {}
     ) async {
-        _ = try? await directDeadline(seconds) {
-            while try await !connection.receiveChunk(maximumLength: 4096).isComplete {}
+        _ = try? await directDeadline(answerGraceSeconds + seconds) {
+            try await connection.sendAll(bytes)
+            try await connection.finishSending()
+            try await afterwards()
         }
+    }
+
+    /// What is left of `seconds` counted from `start`, never negative.
+    private static func secondsLeft(
+        of seconds: TimeInterval,
+        since start: ContinuousClock.Instant
+    ) -> TimeInterval {
+        let elapsed = start.duration(to: ContinuousClock.now)
+        return max(
+            0,
+            seconds - Double(elapsed.components.seconds)
+                - Double(elapsed.components.attoseconds) / 1e18
+        )
     }
 
     // A cancelled task ends its stream, so a stream that does not watch for

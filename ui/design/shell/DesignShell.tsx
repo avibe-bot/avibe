@@ -14,6 +14,9 @@ import { ToastProvider } from '@/context/ToastProvider';
 import { UnsavedChangesContext } from '@/context/unsavedChangesContext';
 import { WindowManagerContext, type WindowManagerValue } from '@/context/WindowManagerContext';
 import { WorkbenchInboxContext, type InboxState } from '@/context/WorkbenchInboxContext';
+import { PendingVaultRequestsContext, type PendingVaultRequests } from '@/context/PendingVaultRequestsContext';
+import type { VaultRequest } from '@/context/ApiContext';
+import { isReviewableVaultRequest } from '@/lib/vaultPendingRequests';
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '@/context/WorkbenchProjectsContext';
 import { unreadByCategory } from '@/lib/notificationPreferences';
 
@@ -53,6 +56,13 @@ function inboxValue(fixtures: WorkbenchFixtures): InboxState {
     loadingMore: false,
     activateFeed: () => () => {},
   });
+}
+
+/** The Vault requests waiting on the reader, as the frame's `/api/vault/requests` lists them: what the
+ *  shell's own read would hold, for a sidebar or Inbox page a frame draws outside AppShell. */
+function pendingVaultRequestsValue(fixtures: WorkbenchFixtures): PendingVaultRequests {
+  const listed = (fixtures.api?.['/api/vault/requests'] as { requests?: VaultRequest[] } | undefined)?.requests ?? [];
+  return { requests: listed.filter(isReviewableVaultRequest), refresh: () => {}, forget: () => {} };
 }
 
 function statusValue(fixtures: WorkbenchFixtures) {
@@ -124,6 +134,7 @@ export function DesignShell({
   children: ReactNode;
 }) {
   const inbox = useMemo(() => inboxValue(fixtures), [fixtures]);
+  const pendingVaultRequests = useMemo(() => pendingVaultRequestsValue(fixtures), [fixtures]);
   const projects = useMemo(() => projectsValue(fixtures), [fixtures]);
   const status = useMemo(() => statusValue(fixtures), [fixtures]);
   const themeValue = useMemo(() => ({ mode: theme, resolvedTheme: theme, setMode: () => {}, cycleMode: () => {} }), [theme]);
@@ -147,6 +158,7 @@ export function DesignShell({
             <UnsavedChangesContext.Provider value={{ setRegistration: () => {}, authorizeRouteAction: () => null }}>
               <WindowManagerContext.Provider value={inert<WindowManagerValue>({ windows: [], focusedId: null, gestureActive: false })}>
                 <WorkbenchInboxContext.Provider value={inbox}>
+                  <PendingVaultRequestsContext.Provider value={pendingVaultRequests}>
                   <WorkbenchProjectsContext.Provider value={projects}>
                     <DockContext.Provider value={dock}>
                       <ShowPageDragContext.Provider value={showPageDrag}>
@@ -160,6 +172,7 @@ export function DesignShell({
                       </ShowPageDragContext.Provider>
                     </DockContext.Provider>
                   </WorkbenchProjectsContext.Provider>
+                  </PendingVaultRequestsContext.Provider>
                 </WorkbenchInboxContext.Provider>
               </WindowManagerContext.Provider>
             </UnsavedChangesContext.Provider>

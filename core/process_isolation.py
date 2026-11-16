@@ -189,6 +189,12 @@ def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
     marker_readable = True
     try:
         marker = process.environ().get(PROCESS_IDENTITY_ENV)
+    except (psutil.NoSuchProcess, ProcessLookupError):
+        # A readable creation time does not prove the process is still alive:
+        # Windows can retain its process object after the native handle wait.
+        # Preserve the exit evidence instead of reporting an unreadable live
+        # identity, which recovery could then miscount as a fresh termination.
+        raise
     except (psutil.Error, OSError):
         marker = None
         marker_readable = False

@@ -657,7 +657,10 @@ def _error_result(
         payload["dispatched"] = False
     bounded_detail = _bounded_diagnostic(detail)
     if bounded_detail:
+        # Keep detail for existing SDKs while exposing the same bounded
+        # diagnostic under the conventional error.message field.
         payload["detail"] = bounded_detail
+        payload["message"] = bounded_detail
     return {
         "content": [
             {

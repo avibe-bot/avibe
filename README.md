@@ -48,7 +48,7 @@ Avibe runs on your computer, so the work continues for as long as that computer 
 2. **Open** the download, drag Avibe to Applications, and start it.
 3. **Connect a model.** Sign in with your Claude or ChatGPT subscription, or paste an API key, pick a model for Vibey, and say hello.
 
-The app is signed and notarized by Apple, needs nothing else installed, and checks for its own updates.
+The app is signed with a Developer ID and notarized by Apple. The first time you open it, macOS asks whether you are sure you want to open an app downloaded from the Internet, and says Apple checked it for malicious software. Click **Open**. The app needs nothing else installed and checks for its own updates.
 
 ### Windows
 
@@ -56,7 +56,7 @@ The app is signed and notarized by Apple, needs nothing else installed, and chec
 2. **Run** the installer, then start Avibe.
 3. **Connect a model.** Sign in with your Claude or ChatGPT subscription, or paste an API key, pick a model for Vibey, and say hello.
 
-The installer is signed, and Windows may ask you to confirm the first time you run it. The app needs nothing else installed and checks for its own updates.
+The installer is signed. Because it is still new, Windows has not yet seen enough downloads of it to recognize it, so the first time you run it you will probably see a blue box, **Windows protected your PC**, with only a **Don't run** button. Click **More info**, then **Run anyway**. The app needs nothing else installed and checks for its own updates.
 
 On both, step 3 is one sign-in:
 

@@ -5,12 +5,13 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": "^22.18.0 || >=23.6.0"
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && npm --prefix ../ui run build:desktop-account",
     "test:i18n": "node scripts/verify-i18n.mjs",
+    "test:bootstrap": "node --test scripts/connection.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:updater": "cargo test -p avibe-runtime-host update && cargo test -p avibe-desktop update"

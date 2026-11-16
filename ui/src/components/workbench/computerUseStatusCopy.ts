@@ -48,7 +48,9 @@ export type ComputerUseCopyKey =
   | 'workbench.home.computerUse.stateUnverifiedDetail'
   | 'workbench.home.computerUse.lockUnverifiedDetail'
   | 'workbench.home.computerUse.off'
-  | 'workbench.home.computerUse.offDetail';
+  | 'workbench.home.computerUse.offDetail'
+  | 'workbench.home.computerUse.offDetailWindows'
+  | 'workbench.home.computerUse.offDetailRemote';
 
 export type StatusTone = 'muted' | 'mint' | 'gold' | 'destructive';
 

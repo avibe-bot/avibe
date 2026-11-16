@@ -1,8 +1,8 @@
 # Remote direct paths: the App's iroh transport (A2)
 
-Status: **Core, seam, adapter, hosted interop consumer, and registration source are written; the registered transport is inactive until a runtime is ready, and device qualification remains outstanding.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The core and its tests against stand-ins for the iroh binding came with #3659; the join to the proxy seam (section 8, item 2) came after #3537 merged. The published Apple artifact is pinned (#3662), and the binding-backed registration is now in `AvibeApp`; no production enablement or device action is implied.
+Status: **Core and its join to the proxy seam written; inactive, not registered, not qualified.** This is row A2 of [`remote-direct-phase1.md`](remote-direct-phase1.md) and the transport side of [`remote-direct-ios.md`](remote-direct-ios.md) section 12. The core and its tests against stand-ins for the iroh binding came with #3659; the join to the proxy seam (section 8, item 2) came after #3537 merged. The published Apple artifact is pinned (#3662); linking it into the App is tracked separately, in #3685. Nothing in the App creates the transport, and `AvibeApp` registers none.
 
-This is not the whole of A2. Registration source is in this PR; everything that runs real iroh has now been qualified in the hosted merged-master run, while device behavior and enablement remain separate gates. A build that registers a transport is a separate gate with its own approval and evidence; this source change grants neither production enablement nor device qualification.
+This is not the whole of A2. The binding adapter, the registration, and everything that runs real iroh are still to be implemented and qualified (section 8). A build that registers a transport is a separate gate with its own approval and evidence; nothing here grants it.
 
 Statements below are **rule** (what the code does), **read** (taken from the pinned source, not run), or **proposal** (a bound to be set from measurement).
 
@@ -229,10 +229,13 @@ The adapter and seam are merged. The App-side interop consumer below is test-onl
      - So a relay that the App or the path ended is counted once per host for the event, and never as one that ended on its own. The listener still drains the relays asynchronously and keeps their slots until their tasks end.
      - Lease run-out still closes nothing. Closes for a stopped runtime or an account change still count nothing.
      - The background loss is reported as `lostToBackground`. If the transport hears the background before the controller does, the controller enters its own background handling on that report, so the closure stays pending until the listener is ready again on the return (`remote-direct-ios.md` sections 9 and 10). Its own observer then finds the background already entered. In the other order the late report belongs to an ended selection and changes nothing.
-3. **Registration source (this PR), with its own approval and the evidence of item 1:**
-   - `NSLocalNetworkUsageDescription` is already present in both locales under the separately owned copy lane; this PR does not touch those resources.
-   - `AvibeApp` retains one `DirectRendezvousWebViewSource`, creates `DirectIrohTransport(engine: DirectIrohBinding(), fetchRendezvous: source.fetch)`, passes it to `AppModel`, and then binds `source.appModel = model`. This is the line that makes a build use a transport. The source's weak model link is intentional; the App's strong source property keeps rendezvous requests live for the transport's lifetime; otherwise every request is `pageNotReady`.
-   - The existing `DirectPathAppTests` positive composition test remains the stand-in control, while no-transport tests continue to cover the compatibility path.
+   - **Still nothing creates the transport,** and #3537's shipped-App test is unchanged.
+3. **Registration, with its own approval and the evidence of item 1:**
+   - `NSLocalNetworkUsageDescription` in both locales, using the approved copy;
+   - in `AvibeApp`: `DirectIrohTransport(engine: DirectIrohBinding(), fetchRendezvous: source.fetch)` passed to `AppModel`, then `source.appModel = model`. This is the line that makes a build use a transport. `source.fetch` holds the source weakly, so the App must keep the source for as long as the transport lives; otherwise every request is `pageNotReady`;
+   - #3537's shipped-App test flipped to its positive control.
+
+## 8.1 Hosted App/sidecar interop consumer
 
 `DirectIrohInteropTests` owns two explicit XCTest entries, engine and transport.
 Both are compiled and linked by ordinary `ios-shell`; without the host fixture

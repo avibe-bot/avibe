@@ -15,6 +15,9 @@ SOURCE_SHA = "a" * 40
 HEAD_SHA = "d" * 40
 ACTIONS_APP = 15368
 WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+MERGED_AT = "2026-11-11T02:42:32Z"
+BEFORE_MERGE = "2026-11-11T02:40:00Z"
+AFTER_MERGE = "2026-11-11T02:55:00Z"
 
 
 class FakeApi:
@@ -101,7 +104,7 @@ def _job(*, conclusion: str | None = "success", status: str = "completed", name:
 def _pull(**overrides: Any) -> dict[str, Any]:
     return {
         "number": 7,
-        "merged_at": "2026-11-11T02:42:32Z",
+        "merged_at": MERGED_AT,
         "merge_commit_sha": SOURCE_SHA,
         "base": {"ref": "master"},
         "head": {"sha": HEAD_SHA},
@@ -124,8 +127,16 @@ def _check(
     conclusion: str | None = "success",
     status: str = "completed",
     app: int = ACTIONS_APP,
+    completed_at: str | None = BEFORE_MERGE,
 ) -> dict[str, Any]:
-    return {"id": check_id, "name": name, "status": status, "conclusion": conclusion, "app": {"id": app}}
+    return {
+        "id": check_id,
+        "name": name,
+        "status": status,
+        "conclusion": conclusion,
+        "app": {"id": app},
+        "completed_at": completed_at if status == "completed" else None,
+    }
 
 
 def _rc_api(**overrides: Any) -> FakeApi:
@@ -331,7 +342,7 @@ def test_rc_releases_on_its_green_pull_request_whatever_the_backstop_state(
         ),
         (
             {"check_runs": [_check("ruff", 1), _check("unit-tests", 2, status="in_progress", conclusion=None)]},
-            r"unit-tests \(in_progress\)",
+            r"unit-tests \(no run completed before the merge; newest is in_progress\)",
         ),
         ({"check_runs": [_check("ruff", 1)]}, r"unit-tests \(missing\)"),
         ({"check_runs": [_check("ruff", 1), _check("unit-tests", 2, app=99)]}, r"unit-tests \(missing\)"),
@@ -362,6 +373,60 @@ def test_rc_is_refused_without_a_green_merged_pull_request(overrides: dict[str, 
 
     with pytest.raises(gate.ReleaseBackstopError, match=message):
         gate.prove_release(api, tag=RC_TAG, rc_pull_request_gate=True)
+
+
+# Only the state the ruleset enforced when the pull request merged counts:
+# a run started after the merge (a label event, a manual rerun) neither blocks
+# nor vouches for the RC.
+def test_rc_gate_ignores_a_run_still_pending_after_a_green_merge() -> None:
+    checks = [_check("ruff", 1), _check("unit-tests", 2), _check("unit-tests", 3, status="in_progress", conclusion=None)]
+
+    proof = gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
+
+    assert isinstance(proof, gate.PullRequestProof)
+
+
+def test_rc_gate_ignores_a_failure_completed_after_a_green_merge() -> None:
+    checks = [_check("ruff", 1), _check("unit-tests", 2), _check("unit-tests", 3, conclusion="failure", completed_at=AFTER_MERGE)]
+
+    proof = gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
+
+    assert isinstance(proof, gate.PullRequestProof)
+
+
+def test_rc_gate_refuses_a_failure_at_merge_even_if_a_later_run_is_green() -> None:
+    checks = [_check("ruff", 1), _check("unit-tests", 2, conclusion="failure"), _check("unit-tests", 3, completed_at=AFTER_MERGE)]
+
+    with pytest.raises(gate.ReleaseBackstopError, match=r"unit-tests \(failure\)"):
+        gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
+
+
+def test_rc_gate_treats_a_context_with_only_post_merge_runs_as_missing() -> None:
+    checks = [_check("ruff", 1), _check("unit-tests", 3, completed_at=AFTER_MERGE)]
+
+    with pytest.raises(gate.ReleaseBackstopError, match=r"unit-tests \(no run completed before the merge; newest is success\)"):
+        gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
+
+
+def test_rc_gate_judges_by_the_newest_run_not_the_last_to_finish_before_the_merge() -> None:
+    # The superseded run is cancelled after its replacement already passed; both settle before the merge.
+    checks = [
+        _check("ruff", 1),
+        _check("unit-tests", 2, conclusion="cancelled", completed_at="2026-11-11T02:41:00Z"),
+        _check("unit-tests", 3, completed_at="2026-11-11T02:40:00Z"),
+    ]
+
+    proof = gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
+
+    assert isinstance(proof, gate.PullRequestProof)
+
+
+def test_rc_gate_accepts_a_context_skipped_before_the_merge_as_the_ruleset_does() -> None:
+    checks = [_check("ruff", 1), _check("unit-tests", 2, conclusion="skipped")]
+
+    proof = gate.prove_release(_rc_api(check_runs=checks), tag=RC_TAG, rc_pull_request_gate=True)
+
+    assert isinstance(proof, gate.PullRequestProof)
 
 
 @pytest.mark.parametrize(

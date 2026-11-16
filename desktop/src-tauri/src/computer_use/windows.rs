@@ -35,6 +35,10 @@ const HEALTH_LIMIT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE: u64 = 1024 * 1024;
 
 #[cfg(test)]
+#[path = "disable_tests.rs"]
+mod disable_tests;
+
+#[cfg(test)]
 #[path = "windows_tests.rs"]
 mod tests;
 
@@ -69,6 +73,7 @@ impl Default for MenuView {
 enum Event {
     Toggle,
     Enable,
+    Disable(oneshot::Sender<Result<(), String>>),
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
     RuntimeStopped,
@@ -113,6 +118,13 @@ impl Controller {
         self.sender
             .send(Event::Enable)
             .map_err(|_| "Computer Use is unavailable.".to_owned())
+    }
+    pub(crate) async fn disable(&self) -> Result<(), String> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Event::Disable(sender))
+            .map_err(|_| "Computer Use is unavailable.".to_owned())?;
+        receiver.await.map_err(|_| "Computer Use is unavailable.".to_owned())?
     }
     pub(crate) fn runtime_ready(&self, origin: LoopbackOrigin, adoption: bool) {
         let _ = self.sender.send(Event::RuntimeReady { origin, adoption });
@@ -175,6 +187,7 @@ struct RuntimeState {
     endpoint: PathBuf,
     assets_valid: bool,
     retry_start: bool,
+    pending_off: bool,
     started: Instant,
 }
 impl RuntimeState {
@@ -214,6 +227,7 @@ impl RuntimeState {
             endpoint: PathBuf::new(),
             assets_valid,
             retry_start: false,
+            pending_off: false,
             started: Instant::now(),
         };
         // A stale ready record must not survive a new shell lifetime. A first
@@ -233,6 +247,9 @@ impl RuntimeState {
                 event = receiver.recv() => match event {
                     Some(Event::Toggle) => self.toggle().await,
                     Some(Event::Enable) => if !self.lifecycle.enabled() { self.toggle().await },
+                    Some(Event::Disable(reply)) => {
+                        let _ = reply.send(self.disable().await);
+                    }
                     Some(Event::RuntimeReady { origin, adoption }) => {
                         if adoption { self.runtime_lost(false).await; }
                         self.origin = Some(origin);
@@ -252,14 +269,22 @@ impl RuntimeState {
         }
     }
 
+    async fn disable(&mut self) -> Result<(), String> {
+        self.retry_start = false;
+        let directive = self.lifecycle.toggle_off();
+        if self.apply_state(directive).await {
+            Ok(())
+        } else {
+            Err("Computer Use could not be disabled. Check its status and try again.".to_owned())
+        }
+    }
+
     async fn toggle(&mut self) {
         if let Ok(mut view) = self.view.lock() {
             view.invalid_state = false;
         }
         if self.lifecycle.enabled() {
-            self.retry_start = false;
-            let directive = self.lifecycle.toggle_off();
-            self.apply(directive).await;
+            let _ = self.disable().await;
             return;
         }
         self.reprobe().await;
@@ -298,6 +323,12 @@ impl RuntimeState {
     async fn tick(&mut self) {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return;
+        }
+        // Like macOS pending_write, this is process-local retry state, not a
+        // second persisted opt-in. Retry Off before any capability work and
+        // never turn a failed Off into an automatic On.
+        if self.pending_off {
+            let _ = self.disable().await;
         }
         // Re-probe even while ready: a Runtime rollback must retire an already
         // running driver, not merely hide the next toggle.
@@ -361,11 +392,26 @@ impl RuntimeState {
 
     async fn apply_state(&mut self, directive: LifecycleDirective) -> bool {
         let record = self.current_record();
-        let result = apply_transition(&self.store, &record, directive, &mut self.daemon).await;
-        if let Err(error) = &result {
-            self.lifecycle.set_error(stable_error(error, "state_unwritable"));
+        let write_state = directive.write_state;
+        let result = apply_transition(
+            &self.store,
+            &record,
+            directive,
+            &mut self.daemon,
+            &mut self.lifecycle,
+            &mut self.pending_off,
+        )
+        .await;
+        if result.is_err() {
+            if self.lifecycle.enabled() {
+                let _ = self.write_state();
+            }
             self.retry_start = false;
-            let _ = self.write_state();
+        }
+        if write_state {
+            if let Ok(mut view) = self.view.lock() {
+                view.save_failed = result.is_err();
+            }
         }
         self.publish_view();
         result.is_ok()
@@ -455,8 +501,14 @@ impl RuntimeState {
     }
 
     async fn stop_driver(&mut self) -> bool {
-        match self.daemon.take() {
-            Some(driver) => driver.stop(STOP_GRACE).await.is_ok(),
+        match self.daemon.as_mut() {
+            Some(driver) => {
+                if driver.stop(STOP_GRACE).await.is_err() {
+                    return false;
+                }
+                self.daemon = None;
+                true
+            }
             None => true,
         }
     }
@@ -499,7 +551,6 @@ impl RuntimeState {
             view.asset_error = !self.assets_valid;
             view.available = self.capabilities.current() == RuntimeSupport::Supported;
             view.runtime_refused = !view.available;
-            view.save_failed = self.lifecycle.reason() == Some("state_unwritable");
         }
         crate::refresh_computer_use_control(&self.app);
     }
@@ -510,6 +561,8 @@ async fn apply_transition(
     record: &ComputerUseRecord,
     directive: LifecycleDirective,
     daemon: &mut Option<OwnedDriver>,
+    lifecycle: &mut ComputerUseLifecycle,
+    pending_off: &mut bool,
 ) -> io::Result<()> {
     // Publish non-ready BEFORE stopping. A failed ready write also retires the
     // child; no unadvertised generation or stale ready record may stay live.
@@ -518,15 +571,32 @@ async fn apply_transition(
     } else {
         Ok(())
     };
-    if directive.stop_daemon || written.is_err() {
-        if let Some(driver) = daemon.take() {
-            driver
-                .stop(STOP_GRACE)
-                .await
-                .map_err(|_| io::Error::other("daemon_stop_failed"))?;
+    let stopped = if directive.stop_daemon || written.is_err() {
+        match daemon.as_mut() {
+            Some(driver) => match driver.stop(STOP_GRACE).await {
+                Ok(()) => {
+                    *daemon = None;
+                    Ok(())
+                }
+                Err(_) => Err(io::Error::other("daemon_stop_failed")),
+            },
+            None => Ok(()),
+        }
+    } else {
+        Ok(())
+    };
+    let result = stopped.and(written.map_err(|_| io::Error::other("state_unwritable")));
+    if let Err(error) = &result {
+        // set_error restores ON by design. Off must remain off in memory even
+        // when publication fails, or a later tick could restart its driver.
+        if lifecycle.enabled() {
+            lifecycle.set_error(stable_error(error, "state_unwritable"));
         }
     }
-    written.map_err(|_| io::Error::other("state_unwritable"))
+    if directive.write_state {
+        *pending_off = !lifecycle.enabled() && result.is_err();
+    }
+    result
 }
 
 fn stable_error(error: &io::Error, fallback: &'static str) -> &'static str {

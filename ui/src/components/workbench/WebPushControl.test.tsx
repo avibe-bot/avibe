@@ -269,4 +269,87 @@ describe('WebPushControl', () => {
       'error',
     );
   });
+
+  it('says so when the App could not turn notifications on', async () => {
+    native.hasNativeCapability.mockReturnValue(true);
+    native.nativePushStatus.mockResolvedValue({ state: 'off' });
+    push.enableWebPush.mockRejectedValue(new Error('native_push_unavailable'));
+    render(<WebPushControl />);
+
+    fireEvent.click(await screen.findByText('workbench.inbox.notifications.enable'));
+
+    await waitFor(() => expect(toast.showToast).toHaveBeenCalledWith(
+      'workbench.inbox.notifications.enableFailed',
+      'error',
+    ));
+    expect(toast.showToast).toHaveBeenCalledOnce();
+    expect(native.nativePushStatus).toHaveBeenCalledWith();
+    expect(screen.getByText('workbench.inbox.notifications.enable')).toBeTruthy();
+  });
+
+  it('says so when the browser could not turn notifications on', async () => {
+    push.enableWebPush.mockRejectedValue(new Error('subscribe_failed'));
+    render(<WebPushControl />);
+
+    fireEvent.click(await screen.findByText('workbench.inbox.notifications.enable'));
+
+    await waitFor(() => expect(toast.showToast).toHaveBeenCalledWith(
+      'workbench.inbox.notifications.enableFailed',
+      'error',
+    ));
+  });
+
+  it('says nothing more when turning notifications on succeeds', async () => {
+    render(<WebPushControl />);
+
+    const enable = await screen.findByText('workbench.inbox.notifications.enable');
+    push.reconcileWebPush.mockResolvedValue({ support, status: 'enabled' });
+    fireEvent.click(enable);
+
+    await screen.findByText('workbench.inbox.notifications.enabled');
+    expect(toast.showToast).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'the App is not allowed to notify',
+      () => {
+        native.hasNativeCapability.mockReturnValue(true);
+        native.nativePushStatus.mockResolvedValue({ state: 'unavailable' });
+        return new Error('native_push_unavailable');
+      },
+    ],
+    ['the browser prompt was refused', () => new Error('permission_denied')],
+    [
+      'the browser blocks notifications',
+      () => {
+        vi.stubGlobal('Notification', { permission: 'denied' });
+        return new Error('subscribe_failed');
+      },
+    ],
+  ])('says nothing when %s', async (_case, arrange) => {
+    push.enableWebPush.mockRejectedValue(arrange());
+    render(<WebPushControl />);
+
+    fireEvent.click(await screen.findByText('workbench.inbox.notifications.enable'));
+
+    await waitFor(() => expect(push.reconcileWebPush).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(toast.showToast).not.toHaveBeenCalled();
+  });
+
+  it('says nothing when a failed enable left the device registering', async () => {
+    native.hasNativeCapability.mockReturnValue(true);
+    native.nativePushStatus.mockResolvedValue({ state: 'on' });
+    render(<WebPushControl />);
+
+    const enable = await screen.findByText('workbench.inbox.notifications.enable');
+    push.enableWebPush.mockRejectedValue(new Error('native_push_registration_not_accepted'));
+    push.reconcileWebPush.mockResolvedValue({ support, status: 'registering' });
+    fireEvent.click(enable);
+
+    await waitFor(() => expect(push.reconcileWebPush).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    expect(toast.showToast).not.toHaveBeenCalled();
+  });
 });

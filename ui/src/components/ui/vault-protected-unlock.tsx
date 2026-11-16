@@ -12,9 +12,12 @@ import { Button } from './button';
 
 type Vault = ReturnType<typeof useProtectedVault>;
 
-/** Map thrown codes / WebAuthn DOMExceptions to a friendly localized message. */
-function friendlyError(t: TFunction, raw: string): string {
-  if (raw.includes('passkey-prf-unavailable')) return t('vaults.protectedUnlock.errors.prfUnavailable');
+/** Map thrown codes / WebAuthn DOMExceptions to a friendly localized message. `setup`: the panel is
+ *  setting up a first passkey (where a new one can be saved elsewhere), not unlocking with one. */
+function friendlyError(t: TFunction, raw: string, setup: boolean): string {
+  if (raw.includes('passkey-prf-unavailable')) {
+    return t(setup ? 'vaults.protectedUnlock.errors.prfUnavailable' : 'vaults.protectedUnlock.errors.prfUnavailableUnlock');
+  }
   if (raw.includes('passkey-cancelled') || raw.includes('NotAllowed') || raw.includes('AbortError')) {
     return t('vaults.protectedUnlock.errors.cancelled');
   }
@@ -61,7 +64,7 @@ export const VaultProtectedUnlock: React.FC<{
     try {
       await fn();
     } catch (err) {
-      vault.setError(friendlyError(t, vaultErrorMessage(t, err, String(err))));
+      vault.setError(friendlyError(t, vaultErrorMessage(t, err, String(err)), vault.status === 'needs-setup'));
     } finally {
       setBusy(false);
     }
@@ -89,7 +92,7 @@ export const VaultProtectedUnlock: React.FC<{
     return (
       <div className="flex flex-col gap-2 rounded-2xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
         <span className="font-medium text-destructive-ink">{t('vaults.protectedUnlock.errorTitle')}</span>
-        {vault.error && <span className="text-xs text-destructive-ink">{friendlyError(t, vault.error)}</span>}
+        {vault.error && <span className="text-xs text-destructive-ink">{friendlyError(t, vault.error, false)}</span>}
         <Button type="button" variant="secondary" size="sm" className="self-start" onClick={() => run(vault.refresh)} disabled={busy}>
           {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
           {t('vaults.protectedUnlock.retry')}
@@ -175,7 +178,7 @@ export const VaultProtectedUnlock: React.FC<{
           </button>
         )}
 
-        {vault.error && <div className="text-center text-xs text-destructive-ink">{friendlyError(t, vault.error)}</div>}
+        {vault.error && <div className="text-center text-xs text-destructive-ink">{friendlyError(t, vault.error, true)}</div>}
       </div>
     );
   }
@@ -232,7 +235,7 @@ export const VaultProtectedUnlock: React.FC<{
         </button>
       )}
 
-      {vault.error && <div className="text-center text-xs text-destructive-ink">{friendlyError(t, vault.error)}</div>}
+      {vault.error && <div className="text-center text-xs text-destructive-ink">{friendlyError(t, vault.error, false)}</div>}
     </div>
   );
 };

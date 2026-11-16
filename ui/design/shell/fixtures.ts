@@ -52,6 +52,9 @@ export interface WorkbenchFixtures {
   botStatus?: Record<string, BotRuntimeStatus>;
   /** The page is the Avibe desktop app's own window (`isDesktopShell()`), not a browser tab. */
   desktopShell?: boolean;
+  /** The desktop shell answers Computer Use's native actions: turning it on, or on and off
+   *  (`computerUseShellActions()`). Its calls never settle, so a frame shows a change in flight. */
+  desktopComputerUse?: 'on' | 'on-off';
   /** The page runs in the Avibe phone app (`window.avibeNative`, `hasNativeCapability()`), with these
    *  capabilities and versions; its calls answer nothing and it sends no events. */
   nativeShell?: Record<string, number>;

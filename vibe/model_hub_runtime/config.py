@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Final, Iterable
-from urllib.parse import urlsplit
 
 import yaml
 
@@ -12,6 +11,7 @@ from config.v2_config import normalize_model_hub_base_url
 from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_root,
     google_api_base_url,
+    is_opencode_go_endpoint,
     official_api_key_base_url,
     openai_compatible_endpoint,
     validate_api_key_auth_scheme,
@@ -271,15 +271,18 @@ def _append_source(
             base_url = official_api_key_base_url(source.vendor)
         if not base_url:
             raise EngineStateError("OpenAI-compatible source requires a base URL")
-        payload.setdefault("openai-compatibility", []).append(
-            {
-                "name": source.prefix,
-                "prefix": source.prefix,
-                "base-url": openai_compatible_endpoint(base_url),
-                "api-key-entries": [{"api-key": api_key}],
-                "models": models,
-            }
-        )
+        entry = {
+            "name": source.prefix,
+            "prefix": source.prefix,
+            "base-url": openai_compatible_endpoint(base_url),
+            "api-key-entries": [{"api-key": api_key}],
+            "models": models,
+        }
+        if is_opencode_go_endpoint(base_url):
+            # Go requires a stable conversation ID for routing/cache affinity.
+            # CPA copies this per-call header and omits it when the caller sent none.
+            entry["headers"] = {"x-opencode-session": "$X-Session-Id"}
+        payload.setdefault("openai-compatibility", []).append(entry)
         return
     raise EngineStateError("unsupported source protocol")
 

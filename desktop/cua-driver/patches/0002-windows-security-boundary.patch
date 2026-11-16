@@ -2554,10 +2554,9 @@ index 0000000..c356518
 +}
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/security.rs b/libs/cua-driver/rust/crates/platform-windows/src/security.rs
 new file mode 100644
-index 0000000..b8102bd
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/security.rs
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,442 @@
 +//! Windows Computer Use runs only with the daemon's own ordinary-user token.
 +//!
 +//! Never infer this from the shell, a named-pipe peer, or a linked/derived token.
@@ -2600,10 +2599,10 @@ index 0000000..b8102bd
 +
 +fn admit_window(own: TokenFacts, target: Result<TokenFacts, String>) -> Result<(), String> {
 +    let target = target.map_err(|_| UNVERIFIED_WINDOW_REFUSAL.to_owned())?;
-+    if target.elevated || target.integrity_rid > MEDIUM_INTEGRITY_RID {
++    if target.elevated {
 +        return Err(ELEVATED_WINDOW_REFUSAL.to_owned());
 +    }
-+    if target.integrity_rid > own.integrity_rid {
++    if target.integrity_rid > MEDIUM_INTEGRITY_RID || target.integrity_rid > own.integrity_rid {
 +        return Err(HIGHER_INTEGRITY_WINDOW_REFUSAL.to_owned());
 +    }
 +    Ok(())
@@ -2633,6 +2632,62 @@ index 0000000..b8102bd
 +    } else {
 +        None
 +    }
++}
++
++/// Preserve known platform refusals before the daemon fills in a generic
++/// invocation failure for text-only errors. This changes diagnostics only:
++/// it does not grant admission, retry, or claim that dispatch did not occur.
++#[cfg(any(target_os = "windows", test))]
++pub(crate) fn normalize_refusal(
++    mut result: cua_driver_core::protocol::ToolResult,
++) -> cua_driver_core::protocol::ToolResult {
++    use cua_driver_core::protocol::Content;
++    use serde_json::{json, Value};
++
++    if result.is_error != Some(true) {
++        return result;
++    }
++    let refusal = result.content.iter().find_map(|content| match content {
++        Content::Text { text, .. } => refusal_code(text).map(|code| (code, text.clone())),
++        _ => None,
++    });
++    let Some((code, cause)) = refusal else {
++        return result;
++    };
++    let message = match code {
++        "protected_window" if cause == ELEVATED_WINDOW_REFUSAL => "This window runs as administrator, so Avibe cannot control it. Reopen the app without \"Run as administrator\" to continue.",
++        "protected_window" => "This window is protected by Windows, so Avibe cannot control it.",
++        "unverified_window" => "Avibe could not confirm which app owns this window, so it did not act on it. Observe the app again and choose the window from the new observation.",
++        "desktop_unavailable" => "The Windows desktop is locked or not available, so Avibe cannot act. Ask the user to unlock or reconnect, then try again.",
++        "administrator_runtime_refused" => "Avibe is running as administrator, so Computer Use is turned off for safety. Quit Avibe and reopen it normally, without \"Run as administrator\".",
++        _ => unreachable!("refusal_code returned an unknown security refusal"),
++    };
++    let structured = result.structured_content.get_or_insert_with(|| json!({}));
++    let Some(object) = structured.as_object_mut() else {
++        return result;
++    };
++    // An existing error identity belongs to its producer; never replace it.
++    if object.get("code").is_some_and(|existing| existing != code) {
++        return result;
++    }
++    object.entry("code").or_insert_with(|| json!(code));
++    object.insert("message".into(), json!(message));
++    let params = object.entry("params").or_insert_with(|| json!({}));
++    if let Some(params) = params.as_object_mut() {
++        let reason = if cause == ELEVATED_WINDOW_REFUSAL {
++            Some("administrator")
++        } else if cause == HIGHER_INTEGRITY_WINDOW_REFUSAL {
++            Some("higher_integrity")
++        } else {
++            None
++        };
++        if let Some(reason) = reason {
++            params
++                .entry("reason")
++                .or_insert_with(|| Value::String(reason.into()));
++        }
++    }
++    result
 +}
 +
 +#[cfg(target_os = "windows")]
@@ -2767,6 +2822,90 @@ index 0000000..b8102bd
 +    use super::*;
 +
 +    #[test]
++    fn security_refusals_keep_their_identity_through_the_daemon_gate() {
++        use cua_driver_core::{mcp_result::conforming_tool_result, protocol::ToolResult};
++        use serde_json::json;
++
++        let ordinary = TokenFacts {
++            elevated: false,
++            ui_access: false,
++            integrity_rid: 0x2000,
++        };
++        let administrator = TokenFacts {
++            elevated: true,
++            ..ordinary
++        };
++        let low = TokenFacts {
++            integrity_rid: 0x1000,
++            ..ordinary
++        };
++        for (message, code, params) in [
++            (
++                admit_window(ordinary, Ok(administrator)).unwrap_err(),
++                "protected_window",
++                json!({"reason": "administrator"}),
++            ),
++            (
++                admit_window(low, Ok(ordinary)).unwrap_err(),
++                "protected_window",
++                json!({"reason": "higher_integrity"}),
++            ),
++            (
++                admit_window(ordinary, Err("query denied".into())).unwrap_err(),
++                "unverified_window",
++                json!({}),
++            ),
++            (DESKTOP_REFUSAL.to_owned(), "desktop_unavailable", json!({})),
++            (
++                admit_driver(Ok(administrator)).unwrap_err(),
++                "administrator_runtime_refused",
++                json!({}),
++            ),
++        ] {
++            let refusal = normalize_refusal(ToolResult::error(&message));
++            let result =
++                conforming_tool_result("type_text", serde_json::to_value(refusal).unwrap());
++            assert_eq!(result["isError"], true);
++            assert_eq!(result["structuredContent"]["code"], code);
++            assert_eq!(result["structuredContent"]["params"], params);
++            assert!(result["structuredContent"]["message"]
++                .as_str()
++                .unwrap()
++                .contains("Avibe"));
++            assert_eq!(result["content"][0]["text"], message);
++        }
++    }
++
++    #[test]
++    fn refusal_normalization_preserves_other_results_and_existing_params() {
++        use cua_driver_core::protocol::ToolResult;
++        use serde_json::json;
++
++        for result in [
++            ToolResult::text(ELEVATED_WINDOW_REFUSAL),
++            ToolResult::error("unclassified failure"),
++            ToolResult::error(ELEVATED_WINDOW_REFUSAL)
++                .with_structured(json!({"code": "other_error", "params": {"pid": 42}})),
++        ] {
++            let expected = serde_json::to_value(&result).unwrap();
++            assert_eq!(
++                serde_json::to_value(normalize_refusal(result)).unwrap(),
++                expected
++            );
++        }
++        let result = normalize_refusal(ToolResult::error(ELEVATED_WINDOW_REFUSAL).with_structured(json!({
++            "code": "protected_window", "params": {"pid": 42, "window_id": 17}, "extra": "retained"
++        })));
++        let payload = result.structured_content.unwrap();
++        assert_eq!(
++            payload["params"],
++            json!({"pid": 42, "window_id": 17, "reason": "administrator"})
++        );
++        assert_eq!(payload["extra"], "retained");
++        assert_eq!(payload["message"], "This window runs as administrator, so Avibe cannot control it. Reopen the app without \"Run as administrator\" to continue.");
++    }
++
++    #[test]
 +    fn only_verified_unelevated_tokens_at_or_below_medium_are_admitted() {
 +        for (elevated, ui_access) in [(false, false), (false, true), (true, false), (true, true)] {
 +            for integrity_rid in [0, 0x1000, 0x2000, 0x2001, 0x2100, 0x3000, 0x4000, u32::MAX] {
@@ -2832,7 +2971,11 @@ index 0000000..b8102bd
 +                    })
 +                )
 +                .unwrap_err(),
-+                ELEVATED_WINDOW_REFUSAL
++                if elevated {
++                    ELEVATED_WINDOW_REFUSAL
++                } else {
++                    HIGHER_INTEGRITY_WINDOW_REFUSAL
++                }
 +            );
 +        }
 +        assert!(admit_window(own, Ok(own)).is_ok());
@@ -2875,10 +3018,18 @@ index e4989de..b37b52b 100644
  //! tools could not close or automate the app, and it would behave differently
  //! from the same app started from Explorer. An elevated Driver instead
 diff --git a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
-index c3101d1..daa42ec 100644
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
-@@ -673,7 +673,7 @@ impl Tool for ListAppsTool {
+@@ -503,7 +503,7 @@
+                 }
+             }
+         }
+-        self.inner.invoke(args).await
++        crate::security::normalize_refusal(self.inner.invoke(args).await)
+     }
+ }
+
+@@ -673,7 +673,7 @@
                  - active: is it the system-frontmost app? (implies running)\n\
                  - kind: `\"desktop\"` for `.exe`-backed apps (resolved from Start-Menu \
                  shortcuts) or `\"uwp\"` for packaged store apps.\n\
@@ -2887,7 +3038,7 @@ index c3101d1..daa42ec 100644
                      * desktop: full `.exe` commandline (path + any arguments preserved from \
                        the source `.lnk`; the exe is quoted when it contains whitespace).\n\
                      * uwp: `shell:appsFolder\\{PackageFamilyName}!{AppId}` where `{AppId}` \
-@@ -689,8 +689,9 @@ impl Tool for ListAppsTool {
+@@ -689,8 +689,9 @@
                  single entry with `running: true`.\n\n\
                  Use this for \"is X installed?\" as well as \"is X running?\". For per-window \
                  state — on-screen, minimized, window titles — call list_windows instead. \
@@ -2899,7 +3050,7 @@ index c3101d1..daa42ec 100644
                      .into(),
              input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
              read_only: true,
-@@ -1728,6 +1729,7 @@ impl Tool for GetWindowStateTool {
+@@ -1728,6 +1729,7 @@
                      is_error: None,
                      structured_content: Some(structured),
                      action_record: None,
@@ -2907,7 +3058,7 @@ index c3101d1..daa42ec 100644
                  }
              }
              Err(e) => ToolResult::error(format!("Error: {e}")),
-@@ -2095,147 +2097,66 @@ impl Tool for LaunchAppTool {
+@@ -2095,147 +2097,66 @@
      fn def(&self) -> &ToolDef {
          LAUNCH_DEF.get_or_init(|| ToolDef {
              name: "launch_app".into(),
@@ -3097,7 +3248,7 @@ index c3101d1..daa42ec 100644
              .get("additional_arguments")
              .and_then(|v| v.as_array())
              .map(|a| {
-@@ -2244,16 +2165,7 @@ impl Tool for LaunchAppTool {
+@@ -2244,16 +2165,7 @@
                      .collect()
              })
              .unwrap_or_default();
@@ -3115,7 +3266,7 @@ index c3101d1..daa42ec 100644
              .chain(extra_args.iter().map(String::as_str))
              .any(cua_driver_core::launch_guard::contains_remote_debugging_flag)
          {
-@@ -2262,161 +2174,8 @@ impl Tool for LaunchAppTool {
+@@ -2262,161 +2174,8 @@
              );
          }
 
@@ -3279,7 +3430,7 @@ index c3101d1..daa42ec 100644
              Some(crate::input::ForegroundLockGuard::acquire())
          } else {
              None
-@@ -2438,246 +2197,28 @@ impl Tool for LaunchAppTool {
+@@ -2438,246 +2197,28 @@
              }));
          }
 
@@ -3492,9 +3643,7 @@ index c3101d1..daa42ec 100644
 -            // unblocks if/when the modal is dismissed) and return an error so
 -            // the daemon stays responsive instead of wedging on the request.
 -            let result = tokio::time::timeout(std::time::Duration::from_secs(15), launch).await;
-+        let created_app = std::sync::Arc::new(created_app);
-+        let pid = created_app.pid;
-
+-
 -            match result {
 -                Ok(Ok(Ok(p))) => p,
 -                Ok(Ok(Err(e))) if name_lookup_missed => {
@@ -3532,6 +3681,9 @@ index c3101d1..daa42ec 100644
 -        // `restore_foreground_polling_best_effort`). Mirrors how
 -        // `launch_uwp.rs` carries its restore target.
 -        if aumid_for_uwp.is_none() && restore_foreground {
++        let created_app = std::sync::Arc::new(created_app);
++        let pid = created_app.pid;
++
 +        // Restore the prior foreground best-effort, scoped to the created PID.
 +        // HWND crosses the async boundary as usize so the future remains Send.
 +        {
@@ -3543,7 +3695,7 @@ index c3101d1..daa42ec 100644
                  restore_foreground_polling_best_effort(
                      target_foreground_addr,
                      spawned_pid_for_restore,
-@@ -2686,86 +2227,9 @@ impl Tool for LaunchAppTool {
+@@ -2686,86 +2227,9 @@
              });
          }
 
@@ -3632,7 +3784,7 @@ index c3101d1..daa42ec 100644
 
          for _ in 0..5 {
              if !windows_json.is_empty() {
-@@ -2787,114 +2251,8 @@ impl Tool for LaunchAppTool {
+@@ -2787,114 +2251,8 @@
              }
              tokio::time::sleep(std::time::Duration::from_millis(200)).await;
          }
@@ -3749,7 +3901,7 @@ index c3101d1..daa42ec 100644
          if start_minimized {
              // First, minimize anything already resolved (covers the common
              // single-process path where windows_json was populated).
-@@ -2902,18 +2260,7 @@ impl Tool for LaunchAppTool {
+@@ -2902,18 +2260,7 @@
                  .iter()
                  .filter_map(|w| w["window_id"].as_u64())
                  .collect();
@@ -3769,7 +3921,7 @@ index c3101d1..daa42ec 100644
              let parent_pid = pid;
              let immediate_hwnds_for_poll = immediate_hwnds.clone();
              let _ = tokio::task::spawn_blocking(move || {
-@@ -2926,28 +2273,8 @@ impl Tool for LaunchAppTool {
+@@ -2926,28 +2273,8 @@
                  }
              })
              .await;
@@ -3800,7 +3952,7 @@ index c3101d1..daa42ec 100644
              let launch_foreground_lock = foreground_lock.take();
              (async move {
                  use std::collections::HashSet;
-@@ -2960,27 +2287,8 @@ impl Tool for LaunchAppTool {
+@@ -2960,27 +2287,8 @@
                  let mut idle_ticks_after_any_hit: u8 = 0;
                  let mut hit_count_total = minimized.len();
                  for _ in 0..25 {
@@ -3830,7 +3982,7 @@ index c3101d1..daa42ec 100644
                      let mut tick_hits: usize = 0;
                      for cpid in family_new_pids {
                          let wins = tokio::task::spawn_blocking(move || {
-@@ -3026,8 +2334,7 @@ impl Tool for LaunchAppTool {
+@@ -3026,8 +2334,7 @@
              .await;
          }
 
@@ -3840,7 +3992,7 @@ index c3101d1..daa42ec 100644
          if !windows_json.is_empty() {
              summary.push_str("\n\nWindows:");
              for w in &windows_json {
-@@ -3044,28 +2351,335 @@ impl Tool for LaunchAppTool {
+@@ -3044,27 +2351,334 @@
                  "\n→ Call get_window_state(pid: {pid}, window_id) to inspect."
              ));
          }
@@ -3884,7 +4036,7 @@ index c3101d1..daa42ec 100644
  }
 
  // ── click ─────────────────────────────────────────────────────────────────────
-
++
 +#[cfg(test)]
 +mod literal_launch_callsite_tests {
 +    use super::*;
@@ -4184,11 +4336,10 @@ index c3101d1..daa42ec 100644
 +            .contains("only the created process PID"));
 +    }
 +}
-+
+
  fn posted_pixel_click_result(pid: u32, click_word: &str) -> ToolResult {
      ToolResult::text(format!("✅ Posted {click_word} to pid {pid}.")).with_structured(json!({
-         "path": "post_message",
-@@ -5514,9 +5128,10 @@ impl Tool for HotkeyTool {
+@@ -5514,9 +5128,10 @@
                  accelerators via `TranslateAccelerator` (LibreOffice, FAR, classic Notepad, etc.) \
                  never see the combo as a real accelerator on the PostMessage-only path. \
                  Trade-off: brief foreground swap (mitigated by restoring the previous foreground \
@@ -4202,7 +4353,7 @@ index c3101d1..daa42ec 100644
                  - **Legacy Win32 targets without modifiers** (plain `enter`, `tab`, `f5`, etc.) \
                  route through `PostMessage(WM_KEYDOWN/UP)` — no focus steal, no need to update \
                  modifier state.\n\n\
-@@ -7896,6 +7511,7 @@ impl Tool for GetDesktopStateTool {
+@@ -7896,6 +7511,7 @@
              is_error: None,
              structured_content: Some(structured),
              action_record: None,
@@ -4210,7 +4361,7 @@ index c3101d1..daa42ec 100644
          }
      }
  }
-@@ -8875,6 +8491,7 @@ impl Tool for ZoomTool {
+@@ -8875,6 +8491,7 @@
                          "mime_type": "image/jpeg"
                      })),
                      action_record: None,
@@ -4218,7 +4369,7 @@ index c3101d1..daa42ec 100644
                  }
              }
              Ok(Err(e)) => ToolResult::error(format!("Zoom failed: {e}")),
-@@ -9641,21 +9258,40 @@ impl Tool for KillAppTool {
+@@ -9641,21 +9258,40 @@
              }
          };
 
@@ -4266,7 +4417,7 @@ index c3101d1..daa42ec 100644
                  .map_err(|e| {
                  format!(
                      "OpenProcess(pid={pid_v}, PROCESS_TERMINATE|PROCESS_SYNCHRONIZE) failed: {e}. \
-@@ -9664,6 +9300,13 @@ impl Tool for KillAppTool {
+@@ -9664,6 +9300,13 @@
                  )
              })?;
 
@@ -4280,7 +4431,7 @@ index c3101d1..daa42ec 100644
              let term_result = unsafe { TerminateProcess(h, 1) };
 
              // WaitForSingleObject so the caller can assume the process is
-@@ -9673,7 +9316,7 @@ impl Tool for KillAppTool {
+@@ -9673,7 +9316,7 @@
              // success (the kill request landed; the process may take a
              // little longer to disappear from list_apps).
              let wait_status = unsafe { WaitForSingleObject(h, 2000) };

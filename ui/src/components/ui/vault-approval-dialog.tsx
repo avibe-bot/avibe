@@ -8,7 +8,9 @@ import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 
 import { Button } from './button';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
-import { VaultApprovalCard, type ApprovalOutcome } from './vault-approval-card';
+import { DetailRow, VaultApprovalCard, type ApprovalOutcome } from './vault-approval-card';
+import { vaultRequestSessionDisplay } from './vault-request-session';
+import { VaultRequestSessionLink } from './vault-request-session-link';
 
 /**
  * The single approval dialog: {@link VaultApprovalCard} in a modal. Reused by the
@@ -78,9 +80,17 @@ function FullRequestReview({ request, onResolved, onClose }: {
   const full = state.request;
   // Decided from the full request: an approval that needs a passkey this app can't use goes to the browser.
   if (vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(full)) {
+    // The approval happens in the browser; the Session that asked opens here, in the app.
+    const session = vaultRequestSessionDisplay(full);
     return (
       <div className="flex flex-col gap-3">
-        <p className="text-sm text-foreground">{t('vaults.approval.browserNote')}</p>
+        {/* Clear of the dialog's close button. */}
+        <p className="mr-6 text-sm text-foreground">{t('vaults.approval.browserNote')}</p>
+        {session ? (
+          <DetailRow label={t('vaults.approval.session')}>
+            <VaultRequestSessionLink session={session} textClassName="text-[13px]" />
+          </DetailRow>
+        ) : null}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>{t('vaults.approval.close')}</Button>
           <Button type="button" onClick={() => { openVaultsInBrowser({ kind: 'request', requestId: full.id }); onClose(); }}>
