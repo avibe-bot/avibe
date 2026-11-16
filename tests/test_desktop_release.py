@@ -1094,6 +1094,23 @@ def test_driver_workflows_parse_and_install_yaml_before_driver_validation():
     assert "-ProductionEvidencePath" in windows_step["run"]
 
 
+def test_package_job_pins_python_before_any_host_python_runs():
+    """A runner image's own `python` moves ahead of what the release's scripts and pinned wheels
+    support (macos-26 moved to 3.15, where PyYAML 6.0.3 has no wheel). Every package step that
+    runs Python must run on the pinned interpreter, so a tag build is never the first run of
+    signing or packaging on a new one."""
+    steps = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
+    pinned = [index for index, item in enumerate(steps) if "actions/setup-python@" in item.get("uses", "")]
+    assert pinned, "the package job pins no Python"
+    assert steps[pinned[0]]["with"]["python-version"] == "3.12"
+    uses_python = [
+        index for index, item in enumerate(steps)
+        if re.search(r"(?<![\w./-])python3?(?![\w.-])", item.get("run", ""))
+    ]
+    assert uses_python, "no package step runs Python"
+    assert pinned[0] < uses_python[0], steps[uses_python[0]].get("name")
+
+
 @pytest.mark.parametrize(("value", "names"), [
     ("${{ secrets.tauri_signing_private_key }}", {"TAURI_SIGNING_PRIVATE_KEY"}),
     ("a ${{secrets.APPLE_API_KEY}} b ${{ Secrets.APPLE_API_ISSUER }}", {"APPLE_API_KEY", "APPLE_API_ISSUER"}),
