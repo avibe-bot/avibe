@@ -1139,6 +1139,195 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
     }
 
+    /// UIKit hands the device token back as a main-queue block. When it is
+    /// queued while the subscription asks for it again, it runs after the
+    /// subscription's provider reconciliation has found nothing pending and
+    /// before the subscription checks the result: the tuple it leaves pending
+    /// is reconciled again and the registration is still created.
+    func testTokenCallbackQueuedAheadOfReconciliationStillRegisters()
+        async throws
+    {
+        let token = Data(repeating: 41, count: 32)
+        let store = makeInstallationStore(
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            providerPatchPending: false
+        )
+        let recorder = ManagementRecorder()
+        let coordinatorBox = Locked<NativePushCoordinator?>(nil)
+        var registrationCalls = 0
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder,
+            registerForRemoteNotifications: {
+                registrationCalls += 1
+                DispatchQueue.main.async {
+                    coordinatorBox.value?.didRegister(
+                        deviceToken: token,
+                        environment: "sandbox"
+                    )
+                }
+            }
+        )
+        coordinatorBox.value = coordinator
+
+        let subscription = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+        // The callback's own queued reconciliation finds nothing left to do.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(registrationCalls, 1)
+        XCTAssertEqual(
+            recorder.requests.map(Self.requestKind),
+            ["PUT binding", "PATCH provider", "PUT registration"]
+        )
+        XCTAssertEqual(
+            recorder.requests.compactMap(Self.generation),
+            [6]
+        )
+        XCTAssertEqual(store.installation?.provider?.generation, 6)
+        XCTAssertFalse(store.installation?.providerPatchPending ?? true)
+        let record = try XCTUnwrap(try store.listRecords().first)
+        XCTAssertEqual(try store.listRecords().count, 1)
+        XCTAssertEqual(record.state, .active)
+        XCTAssertEqual(
+            subscription["endpoint"] as? String,
+            record.publicSubscription["endpoint"] as? String
+        )
+    }
+
+    func testTokenCallbackDuringProviderPatchStillRegisters() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 42, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            providerPatchPending: true
+        )
+        let recorder = ManagementRecorder()
+        var patches = 0
+        recorder.responseHandler = { request in
+            if request.method == "PATCH" {
+                patches += 1
+                if patches == 1 {
+                    await recorder.waitForReleaseIfNeeded()
+                }
+            }
+            return Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let subscription = Task { @MainActor in
+            try await coordinator.subscribe(
+                vapidPublicKey: Self.vapidPublicKey,
+                instanceOrigin: Self.instanceOrigin
+            )
+        }
+        try await recorder.waitForRequestCount(2)
+        let newerToken = Data(repeating: 43, count: 32)
+        coordinator.didRegister(deviceToken: newerToken, environment: "sandbox")
+        try await waitUntil {
+            store.installation?.provider?.generation == 6
+        }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        recorder.release()
+        _ = try await subscription.value
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(
+            recorder.requests.map(Self.requestKind),
+            [
+                "PUT binding",
+                "PATCH provider",
+                "PATCH provider",
+                "PUT registration",
+            ]
+        )
+        XCTAssertEqual(recorder.requests.compactMap(Self.generation), [5, 6])
+        XCTAssertEqual(
+            recorder.requests.last(where: { $0.method == "PATCH" })
+                .flatMap { $0.body.flatMap(Self.deviceToken) },
+            PushBase64URL.encode(newerToken)
+        )
+        XCTAssertFalse(store.installation?.providerPatchPending ?? true)
+        XCTAssertEqual(try store.listRecords().first?.state, .active)
+    }
+
+    /// A tuple that changes again after every reconciliation ends the
+    /// subscription as unavailable after a bounded number of rounds, with no
+    /// registration created.
+    func testEndlessTokenCallbacksEndUnavailableAfterBoundedRounds()
+        async throws
+    {
+        let base = makeInstallationStore(
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 44, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            providerPatchPending: true
+        )
+        let store = ProviderSettledHookStore(base: base)
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(
+            store: base,
+            management: recorder,
+            keychain: store
+        )
+        var callbacks: UInt8 = 0
+        store.onProviderSettled = {
+            // Every settled tuple is replaced by a new callback before the
+            // subscription reads it.
+            MainActor.assumeIsolated {
+                callbacks += 1
+                coordinator.didRegister(
+                    deviceToken: Data(repeating: 44 &+ callbacks, count: 32),
+                    environment: "sandbox"
+                )
+            }
+        }
+
+        do {
+            _ = try await coordinator.subscribe(
+                vapidPublicKey: Self.vapidPublicKey,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTFail("A tuple that never settles must not subscribe")
+        } catch {
+            XCTAssertEqual(error as? NativePushError, .unavailable)
+        }
+        store.onProviderSettled = nil
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let rounds = NativePushCoordinator.providerReconciliationRounds
+        XCTAssertEqual(rounds, 3)
+        XCTAssertEqual(
+            Array(recorder.requests.compactMap(Self.generation).prefix(rounds)),
+            [5, 6, 7]
+        )
+        XCTAssertFalse(
+            recorder.requests.contains {
+                $0.method == "PUT" && $0.path.contains("/registrations/")
+            }
+        )
+        XCTAssertEqual(try base.listRecords().count, 0)
+    }
+
     func testLostCreateResponseReturnsTheRecoveredRegistration()
         async throws
     {
@@ -1664,6 +1853,7 @@ final class NativePushCoordinatorTests: XCTestCase {
     private func makeCoordinator(
         store: InMemoryPushKeychainStore,
         management: ManagementRecorder,
+        keychain: PushKeychainStoring? = nil,
         tokenWaitSeconds: Double = 0.5,
         marker: InMemoryPushInstallationMarkerStore? = nil,
         account: Locked<MobileAccount?>? = nil,
@@ -1684,7 +1874,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         let generationStore = InMemoryPushGenerationStore()
         generationStore.generation = account.value == nil ? 0 : 1
         return NativePushCoordinator(
-            keychain: store,
+            keychain: keychain ?? store,
             generationStore: generationStore,
             managementRequest: { request in
                 management.record(request)
@@ -1760,6 +1950,15 @@ final class NativePushCoordinatorTests: XCTestCase {
         return (json["provider_generation"] as? NSNumber)?.int64Value
     }
 
+    private static func requestKind(
+        _ request: ManagementRecorder.RecordedRequest
+    ) -> String {
+        if request.path.contains("/registrations/") {
+            return "\(request.method) registration"
+        }
+        return "\(request.method) \(request.path.split(separator: "/").last ?? "")"
+    }
+
     private static func deviceToken(
         _ body: Data
     ) -> String? {
@@ -1830,6 +2029,54 @@ private final class FakePushNotificationCenter: PushNotificationCentering {
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
         removedPending.append(contentsOf: identifiers)
+    }
+}
+
+/// Calls `onProviderSettled` after every write that leaves a provider tuple
+/// with no PATCH pending, before the writer goes on.
+private final class ProviderSettledHookStore: PushKeychainStoring {
+    let base: InMemoryPushKeychainStore
+    var onProviderSettled: (() -> Void)?
+
+    init(base: InMemoryPushKeychainStore) {
+        self.base = base
+    }
+
+    func loadInstallation() throws -> PushInstallationState? {
+        try base.loadInstallation()
+    }
+
+    func saveInstallation(_ state: PushInstallationState) throws {
+        try base.saveInstallation(state)
+        if state.provider != nil, !state.providerPatchPending {
+            onProviderSettled?()
+        }
+    }
+
+    func loadOrphanedInstallations() throws -> [PushOrphanedInstallation] {
+        try base.loadOrphanedInstallations()
+    }
+
+    func saveOrphanedInstallations(
+        _ installations: [PushOrphanedInstallation]
+    ) throws {
+        try base.saveOrphanedInstallations(installations)
+    }
+
+    func loadRecord(kid: String) throws -> PushKeyRecord? {
+        try base.loadRecord(kid: kid)
+    }
+
+    func saveRecord(_ record: PushKeyRecord) throws {
+        try base.saveRecord(record)
+    }
+
+    func deleteRecord(kid: String) throws {
+        try base.deleteRecord(kid: kid)
+    }
+
+    func listRecords() throws -> [PushKeyRecord] {
+        try base.listRecords()
     }
 }
 
