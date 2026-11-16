@@ -1894,7 +1894,7 @@ final class DirectPathAppTests: XCTestCase {
             window.isHidden = true
             window.rootViewController = nil
         }
-        try await Task.sleep(for: .seconds(4))
+        try await waitForPageText(in: window, containing: "Studio")
         capture(window, app, "00-instances-before-open")
 
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
@@ -1912,11 +1912,33 @@ final class DirectPathAppTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(600))
         capture(window, app, "01b-still-loading-at-59s-light")
         timing.advance(by: .seconds(1))
-        try await Task.sleep(for: .seconds(6))
+        // The instance list is the bundled page: wait until it has drawn
+        // the switching state, not a fixed time.
+        try await waitForPageText(in: window, containing: "正在使用")
+        try await Task.sleep(for: .seconds(1))
         capture(window, app, "02-timeout-light")
         window.overrideUserInterfaceStyle = .dark
         try await Task.sleep(for: .seconds(2))
         capture(window, app, "02-timeout-dark")
+    }
+
+    @MainActor
+    private func waitForPageText(in window: UIWindow, containing text: String) async throws {
+        func webViews(in view: UIView) -> [WKWebView] {
+            (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews(in:))
+        }
+        try await eventually(timeout: .seconds(45)) {
+            for webView in webViews(in: window) {
+                let body = try? await webView.evaluateJavaScript(
+                    "document.body ? document.body.innerText : ''"
+                ) as? String
+                if body?.contains(text) == true {
+                    return true
+                }
+            }
+            return false
+        }
+        try await Task.sleep(for: .milliseconds(800))
     }
 
     @MainActor
