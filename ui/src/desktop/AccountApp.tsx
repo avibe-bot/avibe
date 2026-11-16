@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, ArrowRight, Check, Laptop, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { Button } from '../components/ui/button';
@@ -11,7 +11,7 @@ import { InstanceSwitcherView } from './InstanceSwitcherView';
 import { AccountSignOutView } from './AccountSignOutView';
 import { AccountDetailsView } from './AccountDetailsView';
 import { AddInstanceView } from './AddInstanceView';
-import { isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
+import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
 import { UpdatePanel } from '../components/update/UpdatePanel';
 import { modelFromDesktopState } from '../components/update/updatePanelModel';
@@ -104,7 +104,7 @@ export function DesktopUpdatePanel({ state, act, busy, install, close }: {
 const attemptedSignOutIntents = new Set<string>();
 
 export function AccountApp() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { state, error, send, signOutIntent } = useAccountClient();
   const [popover] = useState(() => new URLSearchParams(window.location.search).get('view') === UPDATE_POPOVER);
   const install = useAcceptedInstall(state?.desktop.update.phase);
@@ -125,6 +125,9 @@ export function AccountApp() {
   const [material, setMaterial] = useState<{ generation: number; result: DesktopClientDirectResult } | null>(null);
   const epoch = useRef(0);
   const requestBusy = useRef(false);
+  // Synchronous eligibility spans the request and direct result before React
+  // commits material. Native still owns authoritative invalidation/cleanup.
+  const recoveryProtection = useRef<{ generation: number } | null>(null);
   const direct = material && material.generation === state?.generation ? material.result : null;
   const awaitingRecoveryAcknowledgement = direct?.type === 'totp_enrolled' && !!direct.recoveryCodes?.length;
   const [inputGeneration, setInputGeneration] = useState(state?.generation);
@@ -134,13 +137,33 @@ export function AccountApp() {
     setPassword('');
     if (material && material.generation !== state?.generation) setMaterial(null);
   }
-  useEffect(() => () => { epoch.current += 1; }, []);
+  useLayoutEffect(() => {
+    if (recoveryProtection.current && recoveryProtection.current.generation !== state?.generation) recoveryProtection.current = null;
+  }, [state?.generation]);
+  useEffect(() => () => { epoch.current += 1; recoveryProtection.current = null; }, []);
+  useEffect(() => {
+    const present = (event: Event) => {
+      if (!hasDesktopClient() || !event.cancelable) return;
+      // Consume malformed input as well: it must never become a tokenless fallback.
+      event.preventDefault();
+      const detail: unknown = (event as CustomEvent).detail;
+      const view: unknown = (detail as { view?: unknown } | null)?.view;
+      const token: unknown = (detail as { presentationToken?: unknown } | null)?.presentationToken;
+      if (!isDesktopClientView(view) || typeof token !== 'string' || !token.length
+        || new TextEncoder().encode(token).length > 128 || recoveryProtection.current) return;
+      presentDesktopClient(view, token, desktopLocale(i18n.resolvedLanguage ?? i18n.language));
+    };
+    window.addEventListener(DESKTOP_PRESENT_EVENT, present);
+    return () => window.removeEventListener(DESKTOP_PRESENT_EVENT, present);
+  }, [i18n]);
   const act = useCallback(async (action: DesktopClientAction): Promise<boolean> => {
     if (requestBusy.current) return false;
     requestBusy.current = true;
     setBusy(true);
     const ticket = epoch.current;
     const generation = state?.generation ?? 0;
+    const finalization = action.type === 'finish_totp_enrollment' ? { generation } : null;
+    if (finalization) recoveryProtection.current = finalization;
     const selectedId = action.type === 'select_instance' ? action.instance_id
       : action.type === 'decide_consent' && action.approve ? state?.consent?.instance_id : null;
     if (selectedId) setSelection({ id: selectedId, generation, error: null });
@@ -161,25 +184,28 @@ export function AccountApp() {
       if (action.type === 'begin_totp_enrollment' && reply.result?.type === 'totp_enrollment') {
         setMaterial({ generation: reply.state.generation, result: reply.result });
       } else if (action.type === 'finish_totp_enrollment' && reply.result?.type === 'totp_enrolled') {
+        recoveryProtection.current = reply.result.recoveryCodes?.length ? { generation: reply.state.generation } : null;
         setMaterial({ generation: reply.state.generation, result: reply.result });
       }
       return true;
     } finally {
+      if (finalization && recoveryProtection.current === finalization) recoveryProtection.current = null;
       requestBusy.current = false;
       setBusy(false);
     }
   }, [send, state?.generation, state?.consent?.instance_id]);
   const leave = useCallback((type: 'cancel' | 'return_local' | 'sign_out', recoveryAcknowledged = false) => {
     // Only the saved-codes action acknowledges; native invalidation remains independent.
-    if (awaitingRecoveryAcknowledgement && !recoveryAcknowledged) return;
+    if (recoveryProtection.current && !recoveryAcknowledged) return;
     epoch.current += 1;
+    recoveryProtection.current = null;
     setMaterial(null);
     setCode('');
     setPassword('');
     setSelection(null);
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
-  }, [awaitingRecoveryAcknowledgement, send]);
+  }, [send]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
@@ -200,6 +226,7 @@ export function AccountApp() {
       if (!active || attemptedSignOutIntents.has(signOutIntent.intent_id)) return;
       attemptedSignOutIntents.add(signOutIntent.intent_id);
       epoch.current += 1;
+      recoveryProtection.current = null;
       setMaterial(null);
       setCode('');
       setPassword('');
@@ -209,7 +236,7 @@ export function AccountApp() {
   }, [signOutIntent, state?.generation, send, popover]);
   const localButton = <Button variant="ghost" onClick={() => leave('return_local')}>{t('desktopClient.continueLocal')}</Button>;
   const instances = () => {
-    if (awaitingRecoveryAcknowledgement) return;
+    if (recoveryProtection.current) return;
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
   };
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
@@ -248,6 +275,7 @@ export function AccountApp() {
     content = <div className="mx-auto max-w-xl pt-12"><ShieldCheck className="mb-6 size-10 text-mint-ink" /><Heading title={t('desktopClient.setupReady')}>{t('desktopClient.setupBody')}</Heading><Notice>{t('desktopClient.registrationDisclosure')}</Notice><div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" onClick={() => leave('return_local')}>{t('desktopClient.startLocal')}</Button><Button variant="outline" onClick={() => setView('account')}>{t('desktopClient.signInAndAdd')}<ArrowRight className="size-4" /></Button></div><p className="mt-5 text-sm text-muted">{t('desktopClient.signInLater')}</p>{failure}</div>;
   } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" disabled={busy} onClick={() => {
+      recoveryProtection.current = null;
       setMaterial(null);
       if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
       else setView('account');

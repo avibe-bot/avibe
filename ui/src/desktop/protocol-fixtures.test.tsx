@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import en from '../i18n/en.json';
 import zh from '../i18n/zh.json';
 import { AccountApp } from './AccountApp';
-import { DESKTOP_CLIENT_STATE_EVENT, type DesktopClientRequest } from './bridge';
+import { DESKTOP_CLIENT_STATE_EVENT, DESKTOP_PRESENT_EVENT, DESKTOP_CLIENT_VIEWS, type DesktopClientRequest } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
 import replies from './__fixtures__/instance-client-v1/replies.json';
 import requests from './__fixtures__/instance-client-v1/requests.json';
@@ -15,7 +15,7 @@ import requests from './__fixtures__/instance-client-v1/requests.json';
 // consumer field drift by entering the real account hook and rendered actions.
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
-afterEach(async () => { cleanup(); window.history.replaceState(null, '', '/'); vi.unstubAllGlobals(); await i18n.changeLanguage('en'); });
+afterEach(async () => { cleanup(); window.history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.restoreAllMocks(); await i18n.changeLanguage('en'); });
 function mount(initial: unknown, response: (request: DesktopClientRequest) => unknown) {
   if (!window.location.search) window.history.replaceState(null, '', '/account/index.html?view=instances');
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
@@ -644,5 +644,162 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
       fireEvent.click(back);
       await waitFor(() => expect(invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel')).toHaveLength(1));
     }
+  },
+);
+
+// The native presentation event must reach the real material owner. Older tests
+// exercised only React exits and missed replacement by menus/updater/deep links.
+// Capture only location.assign: the guard, bridge URL helper and hook stay real.
+function capturePresentationUrls() {
+  const original = window;
+  const assign = vi.fn();
+  const location = new Proxy({} as Location, {
+    get(_target, key) {
+      if (key === 'assign') return assign;
+      const value = Reflect.get(original.location, key, original.location);
+      return typeof value === 'function' ? value.bind(original.location) : value;
+    },
+  });
+  const receiver: Window = new Proxy(original, {
+    get(target, key) {
+      if (key === 'location') return location;
+      if (key === 'top') return receiver;
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' && !String(key).startsWith('HTML') ? value.bind(target) : value;
+    },
+  });
+  vi.stubGlobal('window', receiver);
+  return assign;
+}
+function askAccountPresentation(detail: unknown, cancelable = true) {
+  const event = new CustomEvent(DESKTOP_PRESENT_EVENT, { cancelable, detail });
+  window.dispatchEvent(event);
+  return event;
+}
+
+it.each(['en', 'zh'] as const)('account native presentation preserves all five views, exact token and current locale (%s)', async (lang) => {
+  const assign = capturePresentationUrls();
+  const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  await act(async () => { await i18n.changeLanguage(lang); });
+  for (const view of DESKTOP_CLIENT_VIEWS) {
+    const presentationToken = `native/${view} 空&?`;
+    expect(askAccountPresentation({ view, presentationToken }).defaultPrevented).toBe(true);
+    expect(assign).toHaveBeenLastCalledWith(`avibe://desktop/${view}?native_request=${encodeURIComponent(presentationToken)}&locale=${lang}`);
+  }
+  expect(assign).toHaveBeenCalledTimes(5);
+  expect(invoke).toHaveBeenCalledOnce();
+  cleanup();
+  assign.mockClear();
+  expect(askAccountPresentation({ view: 'account', presentationToken: 'after-unmount' }).defaultPrevented).toBe(false);
+  expect(assign).not.toHaveBeenCalled();
+});
+
+it('account native presentation rejects malformed or incompatible input without uncorrelated fallback', async () => {
+  const assign = capturePresentationUrls();
+  const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  for (const detail of [null, {}, { view: 'https://example.test', presentationToken: 'token' },
+    { view: 'account' }, { view: 'account', presentationToken: 7 }, { view: 'account', presentationToken: '' },
+    { view: 'account', presentationToken: 'x'.repeat(129) }, { view: 'account', presentationToken: '界'.repeat(43) }]) {
+    askAccountPresentation(detail);
+  }
+  askAccountPresentation({ view: 'account', presentationToken: 'not-cancelable' }, false);
+  expect(assign).not.toHaveBeenCalled();
+  expect(askAccountPresentation({ view: 'account', presentationToken: 'x'.repeat(128) }).defaultPrevented).toBe(true);
+  expect(assign).toHaveBeenCalledOnce();
+  assign.mockClear();
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 2);
+  askAccountPresentation({ view: 'account', presentationToken: 'incompatible' });
+  expect(assign).not.toHaveBeenCalled();
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+  const receiver = window;
+  vi.stubGlobal('window', new Proxy(receiver, { get: (target, key) => key === 'top' ? null : Reflect.get(target, key) }));
+  expect(askAccountPresentation({ view: 'account', presentationToken: 'embedded' }).defaultPrevented).toBe(false);
+  expect(assign).not.toHaveBeenCalled();
+});
+
+it.each(['acknowledge', 'generation', 'native-sign-out', 'failure', 'unmount', 'generation-inflight'] as const)(
+  'account native presentation protects finalization and pre-commit material, then retires on %s', async (retire) => {
+    const assign = capturePresentationUrls();
+    let finish!: (reply: unknown) => void;
+    let finishRequest!: DesktopClientRequest;
+    let resultRead!: () => void;
+    const accepted = new Promise<void>((resolve) => { resultRead = resolve; });
+    const completed = { ...states.signed_in, enrollment: { ...states.signed_in.enrollment,
+      status: 'paired_this_account', error_code: 'persistence_failed' } };
+    let current = states.enroll;
+    const invoke = mount(current, (request) => {
+      if (request.action.type === 'finish_totp_enrollment') {
+        finishRequest = request;
+        return new Promise((resolve) => { finish = resolve; });
+      }
+      const reply = request.action.type === 'begin_totp_enrollment' ? replies.totp_enrollment
+        : { ...replies.success, state: current };
+      return { ...reply, request_id: request.request_id };
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: 'Add authenticator' }));
+    await screen.findByText(replies.totp_enrollment.result.secret);
+    fireEvent.change(screen.getByLabelText('Authenticator code'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Verify and enable' }));
+    expect(finishRequest).toBeDefined();
+    for (const view of DESKTOP_CLIENT_VIEWS) {
+      expect(askAccountPresentation({ view, presentationToken: `finishing-${view}` }).defaultPrevented).toBe(true);
+    }
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(assign).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state', 'begin_totp_enrollment', 'finish_totp_enrollment']);
+    if (retire === 'unmount') cleanup();
+    if (retire === 'generation-inflight') {
+      fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...completed, generation: completed.generation + 1 } }));
+      expect(askAccountPresentation({ view: 'account', presentationToken: 'new-generation' }).defaultPrevented).toBe(true);
+      expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/account?native_request=new-generation&locale=en');
+      await act(async () => finish({ ...replies.totp_enrolled, state: completed, request_id: finishRequest.request_id }));
+      expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull();
+      return;
+    }
+    current = completed;
+    await act(async () => {
+      if (retire === 'failure') finish({ ...replies.success, ok: false, state: completed, request_id: finishRequest.request_id, error: { code: 'persistence_failed' } });
+      else {
+        finish({ ...replies.totp_enrolled, state: completed, request_id: finishRequest.request_id,
+          get result() { resultRead(); return replies.totp_enrolled.result; } });
+        if (retire !== 'unmount') {
+          await accepted;
+          // All synchronous result handling has finished, but act has not let
+          // React commit the new recovery view. This is not a mocked guard.
+          expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull();
+          expect(askAccountPresentation({ view: 'sign-out', presentationToken: 'reply-before-commit' }).defaultPrevented).toBe(true);
+          expect(assign).not.toHaveBeenCalled();
+        }
+      }
+    });
+    if (retire === 'unmount') {
+      expect(askAccountPresentation({ view: 'account', presentationToken: 'after-unmount' }).defaultPrevented).toBe(false);
+      expect(assign).not.toHaveBeenCalled();
+      return;
+    }
+    if (retire !== 'failure') {
+      expect(screen.getByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
+      expect(screen.getByRole('alert')).toBeTruthy();
+      for (const view of DESKTOP_CLIENT_VIEWS) expect(askAccountPresentation({ view, presentationToken: `codes-${view}` }).defaultPrevented).toBe(true);
+      expect(assign).not.toHaveBeenCalled();
+      if (retire === 'generation') {
+        current = { ...completed, generation: completed.generation + 1, revision: completed.revision + 1 };
+        fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: current }));
+      } else if (retire === 'native-sign-out') {
+        // Remount is an actual new document owner, whose direct get_state
+        // intent must still execute without being treated as a menu request.
+        cleanup();
+        mount(current, (request) => ({ ...replies.success, state: current, request_id: request.request_id,
+          ...(request.action.type === 'get_state' ? { result: { type: 'sign_out_intent', intent_id: 'presentation-native-owner', generation: current.generation } } : {}) }));
+        await waitFor(() => expect((window as unknown as { __TAURI_INTERNALS__: { invoke: ReturnType<typeof vi.fn> } }).__TAURI_INTERNALS__.invoke.mock.calls.some((call) => call[1].request.action.type === 'sign_out')).toBe(true));
+      } else fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
+    }
+    expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull();
+    expect(assign).not.toHaveBeenCalled(); // No deferred replay after acknowledgement/invalidation.
+    expect(askAccountPresentation({ view: 'instances', presentationToken: 'fresh' }).defaultPrevented).toBe(true);
+    expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/instances?native_request=fresh&locale=en');
   },
 );

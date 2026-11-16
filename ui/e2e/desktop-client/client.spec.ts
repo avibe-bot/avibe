@@ -123,6 +123,19 @@ for (const lang of ['en', 'zh'] as const) for (const persistenceError of [false,
   }
   await expect(page.getByRole('button', { name: copy.backWorkbench })).toHaveCount(0);
   await page.keyboard.press('Escape');
+  // This exercises the actual AccountApp consumer, not native menu dispatch.
+  // Refusal must synchronously consume every view without replacing this DOM.
+  const presentation = await page.evaluate(() => {
+    const main = document.querySelector('main');
+    const location = window.location.href;
+    const consumed = ['account', 'instances', 'setup-complete', 'sign-out', 'updates'].map((view) => {
+      const event = new CustomEvent('avibe:desktop-present', { cancelable: true, detail: { view, presentationToken: `recovery-${view}` } });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+    return { consumed, sameDocument: main === document.querySelector('main') && location === window.location.href };
+  });
+  expect(presentation).toEqual({ consumed: [true, true, true, true, true], sameDocument: true });
   await expect(page.getByText('fixture-recovery-one')).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: info.outputPath('recovery-codes.png') });
   expect(requests.some((request) => request.action.type === 'cancel')).toBe(false);
