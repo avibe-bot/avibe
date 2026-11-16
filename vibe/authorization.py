@@ -691,6 +691,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/browse/favorites$"),
         ("GET", r"^/api/cloud/token$"),
         ("GET", r"^/api/asr/status$"),
+        ("PUT", r"^/api/asr/consent$"),
         ("GET", r"^/api/sessions/[^/]+/(?:archive-preview|queue|draft)$"),
         ("POST", r"^/api/sessions$"),
         ("POST", r"^/api/desktop-mini/session$"),

@@ -12,8 +12,18 @@ from core.audio_asr import (
     AudioAsrTimeoutError,
     AudioAsrUnavailableError,
 )
+import pytest
+
 from tests.ui_server_test_helpers import csrf_headers
 from vibe.ui_server import app
+
+
+@pytest.fixture(autouse=True)
+def voice_allowed():
+    """These cases cover transcription itself: this machine's account has said yes to voice."""
+    from core.voice_consent import set_voice_consent
+
+    set_voice_consent("local", "granted")
 
 
 def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
@@ -35,11 +45,11 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
     response = client.get("/api/asr/status")
 
     assert response.status_code == 200
-    assert response.get_json() == {"available": True, "max_file_bytes": 160_044}
+    assert response.get_json() == {"available": True, "max_file_bytes": 160_044, "consent": "granted"}
 
     config.audio_asr.max_file_bytes = 160_043
     response = client.get("/api/asr/status")
-    assert response.get_json() == {"available": False, "max_file_bytes": 160_043}
+    assert response.get_json() == {"available": False, "max_file_bytes": 160_043, "consent": "granted"}
 
 
 def test_asr_transcribe_preserves_compatibility_timeout(monkeypatch):
