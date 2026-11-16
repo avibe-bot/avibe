@@ -22,7 +22,8 @@ import { VersionBadge } from './VersionBadge';
 import { RunningStatus, SidebarStatusRow } from './SidebarStatusRow';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { BotProfileDialogHost } from './workbench/bots/BotProfileDialog';
-import { VoiceConsentHost } from './voice/VoiceConsent';
+import { lazyPage } from '../lib/lazyPage';
+import { useVoiceConsentAsking } from '../lib/voiceConsent';
 import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
@@ -175,6 +176,15 @@ export type AppShellProps = {
   /** Replace the footer view while retaining the real Apps/Settings controls. */
   footer?: (slots: { tools: React.ReactNode; defaultView: React.ReactNode }) => React.ReactNode;
 };
+
+// The question's code loads when it is first put up; nothing on the first screen draws it.
+const VoiceConsentHost = lazyPage(() => import('./voice/VoiceConsent').then((module) => module.VoiceConsentHost));
+
+function VoiceConsentSlot() {
+  const asking = useVoiceConsentAsking();
+  if (!asking) return null;
+  return <React.Suspense fallback={null}><VoiceConsentHost /></React.Suspense>;
+}
 
 export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
   useNativeOuterScrollLock();
@@ -701,7 +711,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
 
       {/* Voice input's question (ui/design: composer/voice-consent/*): put up by any voice
           control, and by Settings › General, so it stays live over Settings too. */}
-      <VoiceConsentHost />
+      <VoiceConsentSlot />
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}
