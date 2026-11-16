@@ -545,6 +545,38 @@
         }
       }
     },
+    "github.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in with an email code sent to your GitHub account's email address. It opens the same account."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请用 GitHub 账号的邮箱接收验证码登录，进入的是同一个账号。"
+          }
+        }
+      }
+    },
+    "github.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub sign-in is unavailable here"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此处无法使用 GitHub 登录"
+          }
+        }
+      }
+    },
     "google.body" : {
       "localizations" : {
         "en" : {

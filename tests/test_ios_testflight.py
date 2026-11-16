@@ -371,6 +371,37 @@ def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
         testflight.archived_notification_service_extensions(app)
 
 
+def test_the_notification_service_ships_with_the_apps_version():
+    testflight.check_extension_version(
+        {"CFBundleShortVersionString": "1.0"}, {"CFBundleShortVersionString": "1.0"}
+    )
+    for app_version, extension_version in [("1.0", "0.1.0"), ("1.0", None), (None, None)]:
+        with pytest.raises(testflight.TestFlightError, match="version"):
+            testflight.check_extension_version(
+                {"CFBundleShortVersionString": app_version},
+                {"CFBundleShortVersionString": extension_version},
+            )
+
+
+def test_each_shipped_bundle_needs_its_own_privacy_manifest(tmp_path: Path):
+    repo = Path(__file__).resolve().parents[1]
+    for source in ["ios/Avibe/Resources", "ios/NotificationService"]:
+        bundle = tmp_path / source.replace("/", "-")
+        bundle.mkdir()
+        (bundle / "PrivacyInfo.xcprivacy").write_bytes(
+            (repo / source / "PrivacyInfo.xcprivacy").read_bytes()
+        )
+        testflight.check_privacy_manifest(bundle)
+
+    missing = tmp_path / "NotificationService.appex"
+    missing.mkdir()
+    with pytest.raises(testflight.TestFlightError, match="no readable"):
+        testflight.check_privacy_manifest(missing)
+    (missing / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps({"NSPrivacyTracking": False}))
+    with pytest.raises(testflight.TestFlightError, match="incomplete"):
+        testflight.check_privacy_manifest(missing)
+
+
 @pytest.mark.parametrize(
     ("info", "entitlements", "message"),
     [

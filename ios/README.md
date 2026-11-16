@@ -37,12 +37,15 @@ and Web resizing cannot both run.
   Each child shows its current host plus Done and Open in Safari controls; the
   latter opens the current HTTP(S) URL in the Safari app.
 - Ordinary child-main-frame navigation stays in that child regardless of
-  origin. Google authorization remains intercepted, and external application
-  schemes use the system.
+  origin. Google and GitHub authorization remain intercepted, and external
+  application schemes use the system.
 - Microphone capture is granted only to the configured instance main frame.
   Authentication, external, and arbitrary subframes receive neither microphone
   access nor a native bridge.
-- Google authorization is intercepted with an email-code explanation.
+- Google and GitHub authorization are intercepted with an email-code
+  explanation. GitHub's are the `/login/oauth/` pages on `github.com`; the
+  rest of `github.com`, including the device-code page an instance's Copilot
+  sign-in opens, is an ordinary external site.
 - Instance WebViews (primary and child) show no form accessory bar
   (previous / next / Done) above the keyboard: `FormAccessoryBar` gives
   WebKit's content view a runtime subclass whose `inputAccessoryView` is nil.
@@ -156,8 +159,9 @@ The closed deviation list is:
 
 1. Primary-main-frame HTTP(S) navigation outside the configured instance and
    authentication origins opens in `SFSafariViewController`.
-2. Google authorization endpoints are intercepted because Google rejects
-   embedded browsers.
+2. Google and GitHub authorization endpoints are intercepted. The App signs
+   in only with avibe.bot's own accounts (App Review guideline 4.8), and
+   Google also rejects embedded browsers.
 3. Top-level external application schemes use `UIApplication`; subframes
    cancel them.
 4. Microphone capture is automatically granted only to an instance-origin
@@ -735,7 +739,7 @@ pinned to Xcode 26.6.
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
+| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google and GitHub authorization and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
 | `decidePolicyFor navigationAction:preferences:` | Intentionally not implemented because WebKit calls this overload instead of the implemented action-policy method. `defaultWebpagePreferences` remains the single preference owner. | Simulator build verifies the selected overload. |
 | `decidePolicyFor navigationResponse` | Implemented. Attachment and non-displayable responses use the same download admission rule; displayable responses use WebKit. | Simulator XCTest and build cover response conversion to `WKDownload`. |
 | `didStartProvisionalNavigation` | Implemented. Cancels stale JavaScript dialogs and starts primary loading state. | Simulator build; exactly-once dialog cleanup is a manual interaction check. |
@@ -756,7 +760,7 @@ pinned to Xcode 26.6.
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google is intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
+| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google and GitHub authorization are intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, GitHub, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
 | `webViewDidClose` | Implemented and closes the matching child subtree. | Simulator build; `window.close()` is an interactive check. |
 | `runJavaScriptAlertPanelWithMessage` | Implemented with an initiating-WebView `UIAlertController` and exactly-once completion. | Simulator build; interaction and removal cleanup are manual checks. |
 | `runJavaScriptConfirmPanelWithMessage` | Implemented with OK/Cancel and exactly-once completion. | Simulator build; existing Web UI `confirm()` callers are manual checks. |
@@ -1038,11 +1042,24 @@ Actions → ios-testflight → Run workflow) and only from `master`. In one job 
 3. archives the Release configuration with manual signing, using
    `<run number>.<attempt>` as `CFBundleVersion`;
 4. checks the archived app's bundle, build number, encryption declaration, and
-   distribution entitlements (`verify-archive`);
+   distribution entitlements, that the Notification Service extension carries
+   the app's version, and that both bundles carry a privacy manifest
+   (`verify-archive`);
 5. exports and uploads with the App Store Connect API key;
 6. waits for App Store Connect to process the build and adds it to the internal
    group `Avibe Internal` (`distribute`); internal testing needs no App Review;
 7. always removes the keychain, profile, and key (`cleanup`).
+
+`MARKETING_VERSION` is the App Store version (1.0) for the app and its
+extension; App Store Connect files each TestFlight build under it.
+
+The app and the Notification Service extension each carry a
+`PrivacyInfo.xcprivacy`. Both declare their `UserDefaults` use (the bundle's
+own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking.
+The app also declares the data it collects, matching its App Privacy answers:
+the account's email address and user ID, linked to the user, for App
+Functionality only. The extension decrypts and shows notifications on the
+device and collects nothing.
 
 `Info.plist` declares `ITSAppUsesNonExemptEncryption = false`: the app uses
 only the system's HTTPS and passkey cryptography, so builds need no export

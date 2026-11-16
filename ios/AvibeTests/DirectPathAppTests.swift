@@ -1090,7 +1090,7 @@ final class DirectPathAppTests: XCTestCase {
             [
                 RuntimeNavigationEvent(
                     stage: .finished,
-                    destination: .googleAuthentication
+                    destination: .thirdPartySignIn(.google)
                 )
             ]
         )

@@ -968,7 +968,12 @@ final class AppModel: ObservableObject {
     private func isAuthenticationDestination(
         _ destination: NavigationDestination?
     ) -> Bool {
-        destination == .authentication || destination == .googleAuthentication
+        switch destination {
+        case .authentication, .thirdPartySignIn:
+            return true
+        case .instance, .external, .browserInternal, nil:
+            return false
+        }
     }
 
     private func runtimeOpenWillEnterForeground() {

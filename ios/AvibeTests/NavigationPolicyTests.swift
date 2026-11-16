@@ -41,7 +41,6 @@ final class NavigationPolicyTests: XCTestCase {
             policy.destination(for: URL(string: "https://auth.avibe.bot/auth/v1/callback?code=1")!),
             .authentication
         )
-        XCTAssertEqual(policy.destination(for: URL(string: "https://github.com/login/oauth/authorize")!), .authentication)
         XCTAssertEqual(policy.destination(for: URL(string: "https://evil.avibe.bot/login")!), .external)
     }
 
@@ -187,11 +186,59 @@ final class NavigationPolicyTests: XCTestCase {
 
     func testGoogleAuthorizationOriginIsIntercepted() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
+        let url = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
 
+        XCTAssertEqual(policy.destination(for: url), .thirdPartySignIn(.google))
         XCTAssertEqual(
-            policy.destination(for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!),
-            .googleAuthentication
+            policy.disposition(for: url, context: .primaryMainFrame),
+            .thirdPartySignIn(.google)
         )
+        XCTAssertEqual(
+            policy.disposition(for: url, context: .popupMainFrame),
+            .thirdPartySignIn(.google)
+        )
+    }
+
+    // The App signs in only with avibe.bot's own accounts (App Review 4.8),
+    // so GitHub's OAuth authorization is intercepted in every browsing
+    // context, as Google's is. The rest of github.com is an ordinary site.
+    func testGitHubAuthorizationIsInterceptedAndTheRestOfGitHubIsExternal() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+
+        for raw in [
+            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
+            "https://github.com/login/oauth/select_account",
+            "https://GitHub.com/Login/OAuth/authorize",
+            "https://github.com/login/oauth",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .thirdPartySignIn(.github), raw)
+            XCTAssertEqual(
+                policy.disposition(for: url, context: .primaryMainFrame),
+                .thirdPartySignIn(.github),
+                raw
+            )
+            XCTAssertEqual(
+                policy.disposition(for: url, context: .popupMainFrame),
+                .thirdPartySignIn(.github),
+                raw
+            )
+        }
+
+        for raw in [
+            // The device-code page an instance's Copilot sign-in opens.
+            "https://github.com/login/device",
+            "https://github.com/login",
+            "https://github.com/login/oauthx",
+            "https://github.com/avibe-bot/avibe",
+            "https://gist.github.com/login/oauth/authorize",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .external, raw)
+            XCTAssertEqual(policy.disposition(for: url, context: .primaryMainFrame), .external, raw)
+            XCTAssertEqual(policy.disposition(for: url, context: .popupMainFrame), .allow, raw)
+            XCTAssertEqual(policy.newWindowDisposition(for: url), .childWebView, raw)
+        }
     }
 
     func testOtherWebOriginsOpenExternallyAndApplicationSchemesLeaveWebKit() {
@@ -260,7 +307,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         for url in [
             URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
-            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://github.com/login/device")!,
             URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!,
             URL(string: "https://example.com/docs")!,
         ] {
@@ -283,7 +330,13 @@ final class NavigationPolicyTests: XCTestCase {
             policy.newWindowDisposition(
                 for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
             ),
-            .googleAuthentication
+            .thirdPartySignIn(.google)
+        )
+        XCTAssertEqual(
+            policy.newWindowDisposition(
+                for: URL(string: "https://github.com/login/oauth/authorize?client_id=abc")!
+            ),
+            .thirdPartySignIn(.github)
         )
     }
 
@@ -292,7 +345,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         for url in [
             URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
-            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://github.com/login/device")!,
             URL(string: "about:blank")!,
             URL(string: "https://example.com/docs")!,
         ] {

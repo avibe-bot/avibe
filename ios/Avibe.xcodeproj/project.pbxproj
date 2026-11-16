@@ -71,6 +71,7 @@
 		1000000000000000000000A7 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
 		1000000000000000000000A8 /* PushKeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A4 /* PushKeychainStore.swift */; };
 		1000000000000000000000A9 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B2 /* Localizable.strings */; };
+		100000000000000000000150 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000150 /* PrivacyInfo.xcprivacy */; };
 		1000000000000000000000AA /* PushNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B3 /* PushNotificationTests.swift */; };
 		1000000000000000000000AB /* relay-apns-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B4 /* relay-apns-envelope.json */; };
 		1000000000000000000000AC /* instance-webpush-receiver.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B5 /* instance-webpush-receiver.json */; };
@@ -201,6 +202,7 @@
 		2000000000000000000000B1 /* PushNotificationProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/PushNotificationProcessor.swift; sourceTree = "<group>"; };
 		920000000000000000000006 /* FixtureNativeBridgeSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureNativeBridgeSupport.swift; sourceTree = "<group>"; };
 		2000000000000000000000B2 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = Localizable.strings; sourceTree = "<group>"; };
+		200000000000000000000150 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		2000000000000000000000B3 /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000B4 /* relay-apns-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = relay-apns-envelope.json; sourceTree = "<group>"; };
 		2000000000000000000000B5 /* instance-webpush-receiver.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = instance-webpush-receiver.json; sourceTree = "<group>"; };
@@ -376,6 +378,7 @@
 				2000000000000000000000B2 /* Localizable.strings */,
 				2000000000000000000000B7 /* NotificationService.entitlements */,
 				2000000000000000000000B0 /* NotificationService.swift */,
+				200000000000000000000150 /* PrivacyInfo.xcprivacy */,
 				2000000000000000000000B1 /* PushNotificationProcessor.swift */,
 			);
 			path = NotificationService;
@@ -628,6 +631,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1000000000000000000000A9 /* Localizable.strings in Resources */,
+				100000000000000000000150 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1044,7 +1048,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1076,7 +1080,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "$(APP_PROVISIONING_PROFILE_SPECIFIER)";
@@ -1134,7 +1138,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotificationService/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1154,7 +1158,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotificationService/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "$(NOTIFICATION_SERVICE_PROFILE_SPECIFIER)";

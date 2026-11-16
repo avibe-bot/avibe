@@ -546,10 +546,11 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   1. **Instance origins** (configured by the user) load in the WebView and get
      the native bridge and the microphone grant.
   2. **Authentication origins** load in the WebView without bridge or
-     microphone access: avibe.bot, the Supabase Auth host avibe.bot uses, and
-     GitHub's OAuth pages. Phase 0 sign-in depends on this class (see Signing
-     in). Google's authorization endpoint is intercepted instead, because
-     Google rejects embedded webviews.
+     microphone access: avibe.bot and the Supabase Auth host avibe.bot uses.
+     Phase 0 sign-in depends on this class (see Signing in). Google's and
+     GitHub's authorization endpoints are intercepted instead: the App signs
+     in only with avibe.bot's own accounts (guideline 4.8), and Google also
+     rejects embedded webviews.
   3. **Other HTTP(S) origins** open in `SFSafariViewController` only when the
      primary main frame navigates to them.
 
@@ -574,8 +575,8 @@ later), so that a bridge change and its Web UI consumer land in one PR.
 - The shell's browser behavior has a closed deviation list:
   1. External primary-main-frame HTTP(S) navigation uses
      `SFSafariViewController`.
-  2. Google authorization is intercepted because Google rejects embedded
-     browsers.
+  2. Google and GitHub authorization are intercepted: the App signs in only
+     with avibe.bot's own accounts, and Google rejects embedded browsers.
   3. User-initiated external application schemes use `UIApplication`; subframe
      navigation to them is cancelled.
   4. Instance-origin main frames receive the microphone grant.
@@ -976,7 +977,7 @@ Push to APNs (section 8).
 | --- | --- | --- |
 | 4.2.7(e): "Thin clients for cloud-based apps are not appropriate" | Medium for managed Enterprise instances | Position the app as the companion to the user's own Avibe; personal instances run on the user's machine. |
 | 4.2.3(i): must work without installing another app | Medium | The app needs a running Avibe; provide the demo instance. |
-| 4.8 Login Services | High: avibe.bot offers Google and GitHub | Add Sign in with Apple to avibe.bot before App Store submission. |
+| 4.8 Login Services | High: avibe.bot offers Google and GitHub | The App intercepts Google and GitHub authorization and signs in only with avibe.bot's own accounts (email code, password, passkey), the guideline's own-account-system exception; Sign in with Apple is not needed. |
 | 5.1.1(v): account deletion in the app | High: email sign-in can create an account | Add account deletion to avibe.bot and an in-app entry that leads to it. |
 | 5.1.3 Health | Applies once HealthKit ships | Section 10. |
 | 2.5.14: recording indicator | Low | The system indicator plus the composer's recording state. |
