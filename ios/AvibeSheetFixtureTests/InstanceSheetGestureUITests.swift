@@ -33,6 +33,61 @@ final class InstanceSheetGestureUITests: XCTestCase {
         SheetFixtureReadiness.requireFailedSelection(in: app)
     }
 
+    /// The full page with a selection (say after an instance failed to
+    /// load) shows its current block under "You're in", named by
+    /// `mobileApp.sheet.reopen`; tapping it submits a selection of that same
+    /// instance through the real bridge, and native accepts it.
+    func testSwitchingPageCurrentBlockReopensTheSelectedInstance() {
+        for (language, section, reopen) in [
+            ("zh", "正在使用", "重新打开 Studio"),
+            ("en", "You’re in", "Open Studio again"),
+        ] {
+            XCTContext.runActivity(named: "page-switching-\(language)") { activity in
+                let app = XCUIApplication()
+                app.launchArguments = [
+                    "-AppleLanguages", "(\(language))",
+                    "-AppleLocale", language == "zh" ? "zh_CN" : "en_US",
+                ]
+                app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = "page-switching"
+                app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
+                app.launch()
+                defer { app.terminate() }
+                SheetFixtureReadiness.waitForDocument(in: app)
+                let sectionShown = SheetFixtureReadiness.waitForText(section, in: app)
+                let tree = XCTAttachment(string: app.debugDescription)
+                tree.name = "page-switching-\(language)-accessibility-tree"
+                tree.lifetime = .keepAlways
+                activity.add(tree)
+                XCTAssertTrue(sectionShown, "The current block's section is missing: \(section)")
+
+                let current = app.webViews.firstMatch.buttons.matching(
+                    NSPredicate(format: "label == %@", reopen)
+                ).firstMatch
+                XCTAssertTrue(current.waitForExistence(timeout: 10), "No button labelled \(reopen)")
+                // The page may still be refreshing its list, which locks it.
+                let actionable = XCTNSPredicateExpectation(
+                    predicate: NSPredicate { _, _ in current.isEnabled && current.isHittable },
+                    object: nil
+                )
+                XCTAssertEqual(XCTWaiter.wait(for: [actionable], timeout: 10), .completed, reopen)
+                current.tap()
+
+                let surface = app.otherElements["fixture-document-surface"]
+                let reopened = XCTNSPredicateExpectation(
+                    predicate: NSPredicate { _, _ in
+                        SheetFixtureReadiness.hasBridgeStages(
+                            ["selection-submitted", "selection-accepted"], in: surface.label
+                        ) && SheetFixtureReadiness.selectionIDs(in: surface.label) == ["current"]
+                    }, object: nil
+                )
+                XCTAssertEqual(
+                    XCTWaiter.wait(for: [reopened], timeout: 10), .completed,
+                    "Expected one accepted selection of the current instance; receipt=\(surface.label)"
+                )
+            }
+        }
+    }
+
     private func launchFixture() {
         app.launch()
         SheetFixtureReadiness.waitForDocument(in: app)
@@ -201,6 +256,14 @@ enum SheetFixtureReadiness {
         return stages.allSatisfy { stage in
             recorded.firstIndex(of: stage) != nil
         } && stages == recorded.filter { stages.contains($0) }
+    }
+
+    /// The instance IDs the page submitted through `session.selectInstance`.
+    static func selectionIDs(in label: String) -> [String] {
+        guard let data = label.data(using: .utf8),
+              let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [] }
+        return evidence["selectionIDs"] as? [String] ?? []
     }
 
     static func isPortraitGeometry(_ geometry: [String: Any]) -> Bool {
