@@ -2243,7 +2243,38 @@ extension WebViewController: WKUIDelegate {
         let allowed = frame.isMainFrame
             && type == .microphone
             && webOrigin(for: origin) == instanceOrigin
-        decisionHandler(allowed ? .grant : .deny)
+        guard allowed else {
+            decisionHandler(.deny)
+            return
+        }
+        // Voice input sends speech to a third-party AI service. A page that asks
+        // each account first carries the consent marker; an older one gets no
+        // microphone and is told to update (VoiceConsentMarker).
+        webView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak webView] result, _ in
+            guard let self, let webView, self.acceptsRuntimeCallback(from: webView) else {
+                decisionHandler(.deny)
+                return
+            }
+            if VoiceConsentMarker.isPresent(result) {
+                decisionHandler(.grant)
+                return
+            }
+            decisionHandler(.deny)
+            self.presentVoiceUpdateRequired(for: webView)
+        }
+    }
+
+    private func presentVoiceUpdateRequired(for webView: WKWebView) {
+        guard let presenter = dialogPresenter(for: webView) else {
+            return
+        }
+        let alert = UIAlertController(
+            title: String(localized: "voice.update_required.title"),
+            message: String(localized: "voice.update_required.message"),
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: String(localized: "common.ok"), style: .default))
+        presenter.present(alert, animated: true)
     }
 
     func webView(

@@ -694,6 +694,38 @@
           }
         }
       }
+    },
+    "voice.update_required.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This Avibe needs an update before voice input can be used."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这个 Avibe 需要更新后才能使用语音输入。"
+          }
+        }
+      }
+    },
+    "voice.update_required.message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update Avibe to the latest version on the computer that runs it."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在运行它的电脑上把 Avibe 更新到最新版本。"
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

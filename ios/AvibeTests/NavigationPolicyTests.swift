@@ -4246,4 +4246,28 @@ final class FormAccessoryBarTests: XCTestCase {
             NSStringFromClass(type(of: content)).hasSuffix(FormAccessoryBar.subclassSuffix)
         )
     }
+
+    // App Store 5.1.2(i): a page that asks before voice goes to a third-party AI
+    // service carries the marker and gets the microphone with no second question;
+    // any other page is told to update.
+    @MainActor
+    func testVoiceConsentMarkerIsReadFromTheInstancePage() async throws {
+        let cases: [(String, Bool)] = [
+            (#"<meta name="avibe-voice-consent" content="1">"#, true),
+            (#"<meta name="avibe-voice-consent" content="0">"#, false),
+            ("", false),
+        ]
+        for (head, marked) in cases {
+            let webView = WKWebView(frame: .zero)
+            webView.loadHTMLString(
+                "<!doctype html><html><head>\(head)</head><body></body></html>",
+                baseURL: URL(string: "https://alice-app.avibe.bot/")
+            )
+            try await WebKitReadiness.waitForDocument(in: webView)
+            let result = try? await webView.evaluateJavaScript(VoiceConsentMarker.script)
+            XCTAssertEqual(VoiceConsentMarker.isPresent(result), marked, head)
+        }
+        XCTAssertFalse(VoiceConsentMarker.isPresent(nil))
+        XCTAssertFalse(VoiceConsentMarker.isPresent("1"))
+    }
 }

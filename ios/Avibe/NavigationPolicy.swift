@@ -9,6 +9,23 @@ enum ThirdPartySignIn: Equatable {
     case github
 }
 
+/// Voice input's consent marker. An instance page that asks each account before
+/// speech goes to a third-party AI service carries
+/// `<meta name="avibe-voice-consent" content="1">` (ui/index.html). A page
+/// without it predates that question, so the App gives it no microphone and
+/// says to update the instance (App Store guideline 5.1.2(i)). A marked page
+/// asks for itself, and the App adds no question of its own.
+enum VoiceConsentMarker {
+    /// Evaluated in the page's main frame when it asks for the microphone.
+    static let script = #"document.querySelector('meta[name="avibe-voice-consent"]')?.content === "1""#
+
+    /// Whether the script's result says the page carries the marker. Anything
+    /// else, an error or a page that is gone included, reads as not marked.
+    static func isPresent(_ result: Any?) -> Bool {
+        (result as? Bool) == true
+    }
+}
+
 enum NavigationDestination: Equatable {
     case instance
     case authentication
