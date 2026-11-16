@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Download, Globe, Laptop, LogOut, RefreshCw, UserRound, WifiOff } from 'lucide-react';
+import { SidebarStatusRow, StatusDot } from '../components/SidebarStatusRow';
+import { VersionChip } from '../components/VersionChip';
 import { Button } from '../components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { cn } from '../lib/utils';
@@ -14,7 +16,9 @@ export type DesktopAccountRowViewProps = {
   localUpdater: ReactNode;
 };
 
-/** Shared product footer; the container owns native state and navigation. */
+/** Shared product footer, the desktop app's bottom row (ui/design: chrome/bottom-row): the computer
+ *  it shows on the left, the desktop app's own version on the right. The container owns native
+ *  state and navigation. */
 export function DesktopAccountRowView({ state, menuOpen, onMenuOpenChange, onPresent, localUpdater }: DesktopAccountRowViewProps) {
   const { t } = useTranslation();
   const remote = state.connection.committed.kind === 'remote';
@@ -26,18 +30,15 @@ export function DesktopAccountRowView({ state, menuOpen, onMenuOpenChange, onPre
     ? t('desktopClient.localName', { name: state.local.name }) : state.connection.committed.name;
   const label = busy ? t('desktopClient.switchLabel', { from: instance, to: state.connection.pending?.name ?? '' })
     : signedIn ? instance : t('desktopClient.signIn');
-  const accountTrigger = <Button data-account-trigger type="button" onClick={signedIn ? undefined : () => onPresent('account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md px-0 text-left text-xs [--press-scale:1]" title={label}>
-          <UserRound data-account-avatar className="size-3.5 shrink-0 text-muted" />
-          <span data-account-group className="flex min-w-0 flex-1 items-center gap-1.5">
-            <span data-account-label className="min-w-0 truncate">{label}</span>
-            {offline ? <WifiOff className="size-3 shrink-0 text-gold-ink" aria-label={t('desktopClient.disconnected')} />
-              : busy ? <RefreshCw className="size-3 shrink-0 animate-spin text-cyan-ink" aria-label={t('desktopClient.connecting')} />
-              : <span data-status-indicator className="size-1.5 shrink-0 rounded-full bg-mint" aria-label={t('desktopClient.connected')} />}
-            {signedIn && <ChevronDown data-account-chevron className={cn('size-3 shrink-0 text-muted', menuOpen ? 'rotate-0' : 'rotate-180')} />}
-          </span>
+  // The status leads, as the Web's running dot does; the chevron says this opens a menu.
+  const accountTrigger = <Button data-account-trigger type="button" onClick={signedIn ? undefined : () => onPresent('account')} variant="ghost" className="h-8 min-w-0 justify-start gap-2 rounded-md pl-0 pr-1.5 text-left text-xs [--press-scale:1]" title={label}>
+          {offline ? <WifiOff className="size-3 shrink-0 text-gold-ink" aria-label={t('desktopClient.disconnected')} />
+            : busy ? <RefreshCw className="size-3 shrink-0 animate-spin text-cyan-ink" aria-label={t('desktopClient.connecting')} />
+            : <StatusDot tone="running" label={t('desktopClient.connected')} />}
+          <span data-account-label className="min-w-0 truncate">{label}</span>
+          {signedIn && <ChevronDown data-account-chevron className={cn('size-3 shrink-0 text-muted', menuOpen ? 'rotate-0' : 'rotate-180')} />}
         </Button>;
-  return <div data-desktop-account-row className="relative flex min-w-0 items-center gap-1">
-    {signedIn ? <Popover open={menuOpen} onOpenChange={onMenuOpenChange}>
+  const status = signedIn ? <Popover open={menuOpen} onOpenChange={onMenuOpenChange}>
       <PopoverTrigger asChild>
         {accountTrigger}
       </PopoverTrigger>
@@ -48,11 +49,13 @@ export function DesktopAccountRowView({ state, menuOpen, onMenuOpenChange, onPre
         {state.remote_auxiliary === 'disabled_incomplete' && <p className="px-3 pb-3 text-xs leading-5 text-muted">{t('desktopClient.auxiliaryIncomplete')}</p>}
         {signedIn && <Button variant="secondary" className="w-full justify-start gap-3 [--press-scale:1]" onClick={() => onPresent('sign-out')}><LogOut className="size-4" />{t('desktopClient.signOut')}</Button>}
       </PopoverContent>
-    </Popover> : accountTrigger}
-    <div data-version-trigger className="shrink-0">
-      {remote ? <Button variant="ghost" size="sm" className="h-8 gap-1 px-1.5 text-2xs text-muted" aria-label={t('desktopClient.localVersion', { version: state.desktop.version })} onClick={() => onPresent('updates')}>
-        {update ? <><Download className="size-3 text-gold-ink" /><span className="size-1.5 rounded-full bg-gold" /></> : state.desktop.version}
-      </Button> : localUpdater}
-    </div>
+    </Popover> : accountTrigger;
+  // While it shows another computer, the desktop app's own version is the same chip as everywhere.
+  const version = remote ? <VersionChip attention={update} updateDot={update} aria-label={t('desktopClient.localVersion', { version: state.desktop.version })} onClick={() => onPresent('updates')}>
+    {update && <Download size={12} aria-hidden="true" />}
+    {t('dashboard.versionPrefix')}{state.desktop.version}
+  </VersionChip> : localUpdater;
+  return <div data-desktop-account-row className="relative min-w-0">
+    <SidebarStatusRow status={status} version={version} />
   </div>;
 }

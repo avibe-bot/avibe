@@ -19,6 +19,7 @@ import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
 import { PendingVaultRequestsContext, usePendingVaultRequestsSource } from '../context/PendingVaultRequestsContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { VersionBadge } from './VersionBadge';
+import { RunningStatus, SidebarStatusRow } from './SidebarStatusRow';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { BotProfileDialogHost } from './workbench/bots/BotProfileDialog';
 import { SidebarResizer } from './SidebarResizer';
@@ -509,7 +510,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
         aria-hidden={settingsCoversSidebar || undefined}
         inert={settingsCoversSidebar || undefined}
         className={clsx(
-          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 bg-[var(--sidebar-background)] px-4 pb-4 md:flex',
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 bg-[var(--sidebar-background)] px-4 pb-2 md:flex',
           desktopDragRegion() === undefined && 'border-r border-border',
           desktopDragRegion() !== undefined
             ? 'pt-[calc(1rem+var(--shell-titlebar-inset))]'
@@ -572,19 +573,13 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
                 <Settings className="size-[18px] text-muted group-hover:text-foreground" />
               </Link>
             )}</>;
+          // One bottom row on every surface (ui/design: chrome/bottom-row).
           const defaultView = hasDesktopClient() ? <DesktopAccountRow /> : (
-          <div className="flex items-center justify-between gap-2 px-1 py-0.5">
-            {capabilities.can_read_instance ? <VersionBadge openUpward /> : <span />}
-            <span className="flex items-center gap-1.5 text-[10px] text-muted">
-              {isRunning ? t('common.running') : t('common.stopped')}
-              <span
-                className={clsx(
-                  'size-[9px] shrink-0 rounded-full',
-                  isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
-                )}
-              />
-            </span>
-          </div>);
+            <SidebarStatusRow
+              status={<RunningStatus running={isRunning} />}
+              version={capabilities.can_read_instance ? <VersionBadge openUpward /> : null}
+            />
+          );
           return footer ? footer({ tools, defaultView }) : <AppShellFooter tools={tools}>{defaultView}</AppShellFooter>;
         })()}
 
