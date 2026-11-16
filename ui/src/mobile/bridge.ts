@@ -153,6 +153,17 @@ export const logoutMobileSession = (): Promise<MobileSessionState> =>
 export const openMobileExternal = (url: string): Promise<{ opened: boolean }> =>
   call('app.openExternal', { url });
 
+/** The avibe.bot pages the App shows over this page. Each has one fixed address, set natively. */
+export type MobilePage = 'accountDeletion' | 'privacyPolicy';
+
+/**
+ * Shows one of the App's avibe.bot pages and resolves once it closes. The account deletion page
+ * uses the App's sign-in; `completed` is true when it reported the account deleted. Whether the
+ * account is still there is the session's answer, which the caller reads next.
+ */
+export const openMobilePage = (page: MobilePage): Promise<{ completed: boolean }> =>
+  call('app.openPage', { page });
+
 /**
  * Closes an account page that native opened over a live instance
  * (`#runtime-account`) and shows that instance again, unchanged. Rejects with

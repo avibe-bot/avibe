@@ -557,6 +557,8 @@ final class MobileSessionCoordinator {
     private var pendingStoreReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
+    /// The avibe.bot page shown with this account's sign-in, while open.
+    private weak var openAccountWebPage: WKWebView?
 
     private enum Phase: Equatable {
         case ready
@@ -571,6 +573,10 @@ final class MobileSessionCoordinator {
 
     var currentAccount: MobileAccount? {
         snapshot?.account
+    }
+
+    var controlPlaneURL: URL {
+        controlPlane.baseURL
     }
 
     var currentInstances: [MobileInstance] {
@@ -624,6 +630,37 @@ final class MobileSessionCoordinator {
         guard transportOperationToken != nil else {
             deactivateAccountSurface()
             return
+        }
+    }
+
+    /// The store an avibe.bot page shown with the account's sign-in uses
+    /// (`AvibePage.accountDeletion`): the account's own, so the page is
+    /// already signed in. Only a signed-in account gets it, and not while a
+    /// sign-out or account change is under way.
+    func accountWebPageDataStore() throws -> WKWebsiteDataStore {
+        guard snapshot != nil else {
+            throw MobileAccountError.signedOut
+        }
+        guard keepsSelection else {
+            throw MobileAccountError.busy
+        }
+        return websiteDataStore.dataStore
+    }
+
+    /// A WebView on `accountWebPageDataStore()` is open. An account
+    /// transition waits for it, as for the runtime's, before it rotates the
+    /// store, and leaves the old store for a later sweep if it is still
+    /// alive. Until `endAccountWebPage(_:)`, no instance can be selected
+    /// (a notification tap included): the page's result decides first
+    /// whether there is still an account to open it for.
+    func beginAccountWebPage(_ webView: WKWebView) {
+        openAccountWebPage = webView
+        recordReleaseBarrier(WebsiteDataStoreReleaseBarrier(webViews: [webView]))
+    }
+
+    func endAccountWebPage(_ webView: WKWebView) {
+        if openAccountWebPage === webView {
+            openAccountWebPage = nil
         }
     }
 
@@ -970,7 +1007,7 @@ final class MobileSessionCoordinator {
     }
 
     func selectInstance(id: String) throws -> MobileInstance {
-        guard phase == .ready else {
+        guard phase == .ready, openAccountWebPage == nil else {
             throw MobileAccountError.busy
         }
         guard
