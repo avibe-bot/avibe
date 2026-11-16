@@ -11,7 +11,7 @@ import WebKit
 struct VoiceCaptureTarget: Equatable {
     let accountID: String
     let instanceID: String
-    let origin: URL
+    let origin: WebOrigin
     let storeIdentifier: UUID
 
     /// Mirrors `MobileSessionCoordinator`'s stored selection.
@@ -28,7 +28,7 @@ struct VoiceCaptureTarget: Equatable {
         guard
             let data = defaults.data(forKey: selectionKey),
             let selection = try? JSONDecoder().decode(StoredSelection.self, from: data),
-            let origin = WebOrigin(url: selection.url).flatMap({ URL(string: $0.serialized) }),
+            let origin = WebOrigin(url: selection.url),
             let rawIdentifier = defaults.string(forKey: storeIdentifierKey),
             let storeIdentifier = UUID(uuidString: rawIdentifier)
         else {
@@ -224,7 +224,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         guard
             let webView,
             let current = webView.url,
-            WebOrigin(url: current)?.serialized == WebOrigin(url: target.origin)?.serialized
+            WebOrigin(url: current, requiresHTTPS: false) == target.origin
         else {
             throw Failure.offline
         }
@@ -313,11 +313,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         self.webView = webView
-        guard let url = URL(string: "/api/csrf-token", relativeTo: target.origin)?
-            .absoluteURL
-        else {
-            throw Failure.offline
-        }
+        let url = target.origin.url.appending(path: "api/csrf-token")
         try await withCheckedThrowingContinuation { continuation in
             loadContinuation = continuation
             webView.load(URLRequest(
@@ -337,8 +333,8 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor in
-            let origin = webView.url.flatMap { WebOrigin(url: $0)?.serialized }
-            if origin == WebOrigin(url: target.origin)?.serialized {
+            let origin = webView.url.flatMap { WebOrigin(url: $0, requiresHTTPS: false) }
+            if origin == target.origin {
                 finishLoad(.success(()))
             } else {
                 finishLoad(.failure(Failure.signIn))
