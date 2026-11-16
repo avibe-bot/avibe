@@ -158,3 +158,45 @@ describe('a passkey without the encryption Protected needs', () => {
     expect(screen.getByText(expected)).toBeTruthy();
   });
 });
+
+// When a failed in-app step moves the panel to the browser hand-off, the control the user pressed
+// is gone (a seed-phrase wallet's launch button, Add a passkey) and focus falls to the page. It
+// lands on the hand-off's action, described by its sentence; focus that is elsewhere stays there.
+describe('browser hand-off after an in-app failure', () => {
+  async function fallbackPanel() {
+    vi.resetModules();
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__', { configurable: true, value: true });
+    const { VaultProtectedUnlock: Panel } = await import('./vault-protected-unlock');
+    const { recordVaultPasskeyOutcome } = await import('@/lib/vaultBrowserHandoff');
+    recordVaultPasskeyOutcome({ code: 'seal_hd_failed' });
+    const i18n = createInstance();
+    await i18n.use(initReactI18next).init({ lng: 'en', resources: { en: { translation: en } } });
+    return (vault: Vault) => render(<I18nextProvider i18n={i18n}><Panel vault={vault} onContinueInBrowser={vi.fn()} /></I18nextProvider>);
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__');
+  });
+
+  it('lands focus that fell to the page on the hand-off action', async () => {
+    const renderPanel = await fallbackPanel();
+    (document.activeElement as HTMLElement | null)?.blur();
+    renderPanel({ ...lockedVault('locked'), status: 'unlocked' });
+    const action = screen.getByRole('button', { name: en.vaults.protectedUnlock.openInBrowser });
+    expect(document.activeElement).toBe(action);
+    expect(action.getAttribute('aria-describedby')).toBe(screen.getByText(en.vaults.protectedUnlock.browserFallbackNote).id);
+  });
+
+  it('leaves focus that is elsewhere where it is', async () => {
+    const renderPanel = await fallbackPanel();
+    const field = document.createElement('input');
+    document.body.appendChild(field);
+    field.focus();
+    renderPanel(lockedVault('needs-setup'));
+    expect(document.activeElement).toBe(field);
+    field.remove();
+  });
+});
