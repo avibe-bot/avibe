@@ -5898,6 +5898,95 @@ def test_engine_client_sends_the_caller_user_agent_instead_of_its_own() -> None:
     assert "x-api-key" not in received
 
 
+@pytest.mark.parametrize(("protocol", "vendor", "base_url", "allowed"), [
+    pytest.param("openai_chat", "custom", "https://opencode.ai/inference/go/openai/v1", True, id="go"),
+    pytest.param("openai_chat", "custom", "https://www.opencode.ai/inference/go/v1", True, id="go-www"),
+    pytest.param("openai_chat", "custom", "https://OPENCODE.AI/inference/go", True, id="go-root"),
+    pytest.param("openai_chat", "custom", "https://api.example.test/v1", False, id="custom-chat"),
+    pytest.param("anthropic", "anthropic", "https://api.anthropic.com", False, id="anthropic"),
+    pytest.param("openai_responses", "codex", "https://api.openai.com/v1", False, id="codex-responses"),
+    pytest.param("google", "google", "https://generativelanguage.googleapis.com", False, id="google"),
+    pytest.param("anthropic", "custom", "https://opencode.ai/inference/go/anthropic", False, id="go-anthropic"),
+    pytest.param("openai_responses", "custom", "https://opencode.ai/inference/go/openai/v1", False, id="go-responses"),
+    pytest.param("google", "custom", "https://opencode.ai/inference/go/google", False, id="go-google"),
+    pytest.param("openai_chat", "custom", "https://opencode.ai/zen/v1", False, id="zen"),
+    pytest.param("openai_chat", "custom", "https://opencode.ai.evil.test/inference/go/v1", False, id="lookalike-host"),
+    pytest.param("openai_chat", "custom", "https://opencode.ai/inference/gopher/v1", False, id="lookalike-path"),
+    pytest.param("openai_chat", "openai", None, False, id="official-default"),
+    pytest.param("openai_chat", "custom", None, False, id="no-endpoint"),
+])
+@pytest.mark.parametrize("session_id", [None, "ses_opencode_sentinel"])
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
+def test_engine_client_session_header_follows_each_selected_source(protocol, vendor, base_url, allowed, session_id, stream):
+    """The engine must not interpret OpenCode's ID on any non-Go attempt.
+
+    YAML-only tests miss CPA's built-in session handling. Capture real engine-bound
+    HTTP while reusing one request across Go/non-Go/retry attempts; neither stripping
+    shared metadata nor gating on the caller's model alias protects both directions.
+    """
+    from aiohttp import web
+
+    async def run() -> None:
+        received = []
+
+        async def respond(request: web.Request) -> web.Response:
+            received.append((dict(request.headers), await request.json()))
+            # A terminal response avoids mocking either upstream protocol translation
+            # or stream framing: this test owns only the engine's incoming request.
+            return web.json_response({"error": {"type": "invalid_request_error", "message": "fixture"}}, status=400)
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", respond)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            go = SourceRecord(
+                source_id="src_gofixture1", vendor="custom", protocol="openai_chat",
+                base_url="https://opencode.ai/inference/go/openai/v1", credential_ref="cred_gofixture1",
+                allowed_origins=(), model_ids=("model-a",), prefix="source-go",
+            )
+            candidate = SourceRecord(
+                source_id="src_otherfixture1", vendor=vendor, protocol=protocol, base_url=base_url,
+                credential_ref="cred_otherfixture1", allowed_origins=(), model_ids=("model-a",), prefix="source-other",
+            )
+            payload = {
+                "model": "opencode-go-alias",
+                "messages": [
+                    {"role": "system", "content": "Keep this prompt prefix unchanged."},
+                    {"role": "user", "content": "Reply OK."},
+                ],
+            }
+            headers = {"User-Agent": "opencode/fixture"}
+            if session_id is not None:
+                headers["X-Session-Id"] = session_id
+            request = ModelHubRequest(payload, protocol="openai_chat", headers=headers)
+            original = json.loads(json.dumps(payload))
+            client = EngineClient(EngineConnection(
+                base_url=f"http://127.0.0.1:{runner.addresses[0][1]}",
+                management_key="fixture-management", gateway_token="fixture-gateway",
+            ))
+            # One metadata object covers both directions and a repeat of each source.
+            for selected, forwards in ((go, True), (candidate, allowed), (go, True), (candidate, allowed)):
+                handle = await client.invoke(
+                    selected, "model-a", request, stream=stream,
+                    request_protocol=request.protocol, request_headers=request.headers,
+                )
+                await handle.outcome()
+                wire_headers, body = received[-1]
+                wire_headers = {key.lower(): value for key, value in wire_headers.items()}
+                assert wire_headers.get("x-session-id") == (session_id if forwards else None)
+                assert wire_headers["user-agent"] == "opencode/fixture"
+                assert body == {**original, "model": f"{selected.prefix}/model-a", "stream": stream}
+                assert request == original
+                assert request.headers == headers
+            assert len(received) == 4
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
 def test_adapter_restores_source_projection_when_reload_fails(tmp_path: Path) -> None:
     class Supervisor:
         def __init__(self) -> None:

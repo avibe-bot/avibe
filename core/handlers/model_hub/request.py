@@ -23,9 +23,9 @@ FORWARDED_CALLER_HEADERS: Final = frozenset(
 )
 
 # OpenCode names its conversation in ``X-Session-Id`` on every request to a provider that is not
-# its own. OpenCode Go refuses a call without a session id, and the engine fills that upstream
-# header from this one (see ``_upstream_forwarded_headers``), so the OpenCode gateway keeps it
-# on the way to the engine. Claude Code and Codex requests never carry it across.
+# its own. OpenCode Go refuses a call without a session id, and its engine config
+# maps this to the upstream header. The gateway retains it for OpenCode; the
+# engine client admits it only for a selected Go source. Other backends drop it.
 OPENCODE_SESSION_CALLER_HEADER: Final = "x-session-id"
 
 

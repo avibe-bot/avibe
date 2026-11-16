@@ -411,6 +411,20 @@ def official_api_key_base_url(vendor: str) -> str | None:
     return _LEGACY_OFFICIAL_BASE_URLS.get(normalized_vendor)
 
 
+def is_opencode_go_endpoint(base_url: str | None) -> bool:
+    """Whether this upstream endpoint needs OpenCode's conversation header.
+
+    Shared by config rendering and per-attempt client admission: CPA interprets
+    generic session headers even without a configured upstream header mapping.
+    """
+    if not base_url:
+        return False
+    parts = urlsplit(base_url)
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/") + "/"
+    return host in {"opencode.ai", "www.opencode.ai"} and path.startswith("/inference/go/")
+
+
 def openai_compatible_endpoint(base_url: str) -> str:
     """The API root the engine calls for an ``openai_chat`` Source's base URL.
 

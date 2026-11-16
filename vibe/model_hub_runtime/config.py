@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Final, Iterable
-from urllib.parse import urlsplit
 
 import yaml
 
@@ -12,6 +11,7 @@ from config.v2_config import normalize_model_hub_base_url
 from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_root,
     google_api_base_url,
+    is_opencode_go_endpoint,
     official_api_key_base_url,
     openai_compatible_endpoint,
     validate_api_key_auth_scheme,
@@ -278,31 +278,13 @@ def _append_source(
             "api-key-entries": [{"api-key": api_key}],
             "models": models,
         }
-        headers = _upstream_forwarded_headers(base_url)
-        if headers:
-            entry["headers"] = headers
+        if is_opencode_go_endpoint(base_url):
+            # Go requires a stable conversation ID for routing/cache affinity.
+            # CPA copies this per-call header and omits it when the caller sent none.
+            entry["headers"] = {"x-opencode-session": "$X-Session-Id"}
         payload.setdefault("openai-compatibility", []).append(entry)
         return
     raise EngineStateError("unsupported source protocol")
-
-
-# OpenCode Go (https://opencode.ai/inference/go/...) rejects a request without
-# ``x-opencode-session`` (HTTP 400 ``missing_session_id``). OpenCode sends its own session id to
-# every non-``opencode`` provider as ``X-Session-Id``; the engine copies a downstream header
-# into the upstream request when a ``headers`` value starts with ``$`` (and omits it when the
-# client sent none), so the per-conversation id survives the local proxy without a fixed value.
-_OPENCODE_GO_HOSTS: Final = frozenset({"opencode.ai", "www.opencode.ai"})
-_OPENCODE_GO_PATH_PREFIX: Final = "/inference/go"
-
-
-def _upstream_forwarded_headers(base_url: str) -> dict[str, str]:
-    """Headers an OpenAI-compatible entry forwards from the client; provider-specific, else empty."""
-    parts = urlsplit(base_url)
-    host = (parts.hostname or "").lower()
-    path = parts.path.rstrip("/") + "/"
-    if host in _OPENCODE_GO_HOSTS and path.startswith(_OPENCODE_GO_PATH_PREFIX + "/"):
-        return {"x-opencode-session": "$X-Session-Id"}
-    return {}
 
 
 def registered_model_ids(source: SourceRecord) -> tuple[str, ...]:

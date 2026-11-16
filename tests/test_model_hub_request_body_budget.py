@@ -198,6 +198,28 @@ def _assert_local_failure(ingress) -> None:
     assert record["failed_attempts"] == []
 
 
+async def test_session_header_ingress_is_opencode_only(ingress):
+    """The caller backend gate is independent of the selected upstream's gate."""
+    payload = _payload(ingress.protocol)
+    async with aiohttp.ClientSession(trust_env=False) as client:
+        async with client.post(
+            ingress.url, json=payload,
+            headers={
+                "Authorization": f"Bearer {ingress.token}",
+                "X-Session-Id": "ses_opencode_sentinel",
+                "User-Agent": "fixture-agent/1.0",
+            },
+        ) as response:
+            assert response.status == 200
+            await response.read()
+    forwarded, = ingress.adapter.requests
+    assert forwarded == payload
+    assert forwarded.headers == {
+        "user-agent": "fixture-agent/1.0",
+        **({"x-session-id": "ses_opencode_sentinel"} if ingress.backend == "opencode" else {}),
+    }
+
+
 @pytest.mark.parametrize("framing", ["content-length", "chunked"])
 async def test_large_multi_image_request_is_forwarded_exactly(ingress, framing):
     """MH-REQUEST-BUDGET-001: ~42 MiB of synthetic images survive real HTTP ingress."""

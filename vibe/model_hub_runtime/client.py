@@ -60,6 +60,8 @@ from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_key_header,
     anthropic_api_root,
     google_api_base_url,
+    is_opencode_go_endpoint,
+    official_api_key_base_url,
     official_api_key_base_urls,
     validate_api_key_auth_scheme,
 )
@@ -662,10 +664,18 @@ class EngineClient:
             endpoint = _endpoint_for_protocol(request_protocol)
             body["model"] = routed_model
             body["stream"] = stream
+        # CPA interprets X-Session-Id beyond the configured Go header mapping.
+        # Gate on this attempt's selected source, not the caller's alias or a
+        # previous hop, without stripping metadata a later Go attempt needs.
+        forwarded = FORWARDED_CALLER_HEADERS
+        if source.protocol == "openai_chat" and is_opencode_go_endpoint(
+            source.base_url or official_api_key_base_url(source.vendor)
+        ):
+            forwarded = forwarded | {OPENCODE_SESSION_CALLER_HEADER}
         headers = {
             key.lower(): value
             for key, value in (request_headers or {}).items()
-            if key.lower() in FORWARDED_CALLER_HEADERS or key.lower() == OPENCODE_SESSION_CALLER_HEADER
+            if key.lower() in forwarded
         }
         headers.update(
             {
