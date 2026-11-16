@@ -750,7 +750,7 @@ export const VaultsPage: React.FC = () => {
         });
         await vault.revealProtectedSecret(items, defaultField, authorizationWindow?.id);
       } catch (err: unknown) {
-        // This attempt moved the app to the browser hand-off: the row's menu now offers Show in browser.
+        // This attempt moved the app to the browser hand-off: the row's menu now offers View in browser.
         showToast(isVaultPasskeyFallback(err)
           ? t('vaults.reveal.browserFallback')
           : vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
