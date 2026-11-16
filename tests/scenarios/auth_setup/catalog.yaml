@@ -1240,6 +1240,10 @@ scenarios:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_preserves_receiver_and_foregrounds_then_requires_fresh_request
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_approved_before_finalize_cannot_discard_new_material
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_same_url_delivery_retires_only_old_approval
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_lifecycle_returns_through_actual_account_action
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_cannot_reauthorize_a_navigated_return_receipt
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_new_owner_retires_only_the_held_candidate
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_return_receipt_survives_lifecycle_retry_after_retirement
   - id: AUTH-SETUP-177
     name: Remote and embedded documents gain no Desktop local capability or account credentials
     status: gap
@@ -1264,5 +1268,8 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Native auxiliary lifecycle and UI limitation evidence is pending.
+    reason: Isolated native lifecycle and actual retained Settings consumer evidence exists; installed and canonical scenario-harness acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_notifications_page_replays_native_preference_on_reveal
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_remote_document_ignores_local_rebind_and_preference_replay
 next_priority: []

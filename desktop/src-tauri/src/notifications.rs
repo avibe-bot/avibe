@@ -345,6 +345,14 @@ fn notify_workbench(app: &AppHandle, enabled: bool) {
     }
 }
 
+/// A retained local settings page does not remount after account closure.
+/// Replay the current preference only after its existing admission is restored.
+pub(crate) fn reconcile(app: &AppHandle) {
+    if let Some(notifications) = app.try_state::<Notifications>() {
+        notify_workbench(app, notifications.enabled());
+    }
+}
+
 fn sync_native_menu(app: &AppHandle, enabled: bool) {
     if let Some(menus) = app.try_state::<crate::NativeMenus>() {
         if menus.notifications.set_checked(enabled).is_err() {

@@ -67,6 +67,8 @@ pub static FIXTURE_ERROR_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic
 pub static FIXTURE_ERROR_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 pub static FIXTURE_PRESENTATION_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static FIXTURE_PRESENTATION_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+pub static FIXTURE_RETIRED_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static FIXTURE_RETIRED_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 """)
         example = source / "desktop/src-tauri/examples/instance_client_probe.rs"
         text = example.read_text()
@@ -93,6 +95,11 @@ pub static FIXTURE_PRESENTATION_RELEASE: tokio::sync::Notify = tokio::sync::Noti
                             emit(json!({"event":"control_ready"}));
                         },
                         "release_presentation"=> avibe_desktop_lib::FIXTURE_PRESENTATION_RELEASE.notify_one(),
+                        "hold_retired_runtime"=> {
+                            avibe_desktop_lib::FIXTURE_RETIRED_HOLD.store(true,std::sync::atomic::Ordering::SeqCst);
+                            emit(json!({"event":"control_ready"}));
+                        },
+                        "release_retired_runtime"=> avibe_desktop_lib::FIXTURE_RETIRED_RELEASE.notify_one(),
 ''' + needle)
         example.write_text(text)
         native = source / "desktop/src-tauri/src/instance_client.rs"
@@ -124,6 +131,34 @@ pub static FIXTURE_PRESENTATION_RELEASE: tokio::sync::Notify = tokio::sync::Noti
             "error":result.as_ref().err().map(|error|error.code.as_str())}));
 ''')
         text = text[:start] + apply + text[end:]
+        start = text.index("    async fn replace_local(")
+        end = text.index("    fn local_url(", start)
+        replacement = text[start:end]
+        needle = "            return result;"
+        assert replacement.count(needle) == 1
+        replacement = replacement.replace(needle, '''
+            println!("{}",serde_json::json!({"event":"replacement_finished","owner":owner,"ok":result.is_ok(),
+                "error":result.as_ref().err().map(|error|error.code.as_str())}));
+''' + needle)
+        text = text[:start] + replacement + text[end:]
+        start = text.index("    async fn retire_current(")
+        end = text.index("    async fn build_candidate(", start)
+        retirement = text[start:end]
+        needle = "            self.retire_runtime(role).await?;"
+        assert retirement.count(needle) == 1
+        retirement = retirement.replace(needle, needle + '''
+            if crate::FIXTURE_RETIRED_HOLD.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                println!("{}",serde_json::json!({"event":"runtime_retired_held"}));
+                tokio::time::timeout(std::time::Duration::from_secs(15), crate::FIXTURE_RETIRED_RELEASE.notified())
+                    .await.expect("fixture retired Runtime release");
+            }
+''')
+        text = text[:start] + retirement + text[end:]
+        needle = "            if !coordinator.state().connection.committed.is_local() {\n                return;"
+        assert text.count(needle) == 1
+        text = text.replace(needle, '''            if !coordinator.state().connection.committed.is_local() {
+                println!("{}",serde_json::json!({"event":"local_rebound_remote_preserved"}));
+                return;''')
         native.write_text(text + '''
 pub fn fixture_presentation_snapshot(app: &AppHandle) {
     let handle = app.clone();
@@ -138,6 +173,14 @@ pub fn fixture_presentation_snapshot(app: &AppHandle) {
             "approval":queue.approval.as_ref().map(GuardAttempt::token),"logout":queue.logout.is_some(),
             "label":active.as_ref().map(|view|view.label()),"visible":physical.is_visible().unwrap(),
             "minimized":physical.is_minimized().unwrap(),"focused":physical.is_focused().unwrap()});
+        {
+            let views = client.view.views.lock().unwrap();
+            result["runtime"] = views.runtime.as_ref().map(|view| serde_json::json!({
+                "label":view.label,"document":view.document,"window":view.window,"destination":view.destination
+            })).into();
+            result["returning"] = views.account.as_ref().and_then(|view|view.returning.as_ref())
+                .map(|(label,document)|serde_json::json!({"label":label,"document":document})).into();
+        }
         #[cfg(target_os="macos")]
         unsafe {
             use objc2::{msg_send,runtime::AnyObject};
@@ -224,6 +267,7 @@ pub fn fixture_initial_account(app: &AppHandle) {
         text = text.replace(needle, """
     let receipt_observer = std::env::var("AVIBE_FIXTURE_RECEIPT_OBSERVER").as_deref() == Ok("1")
         && request.request_id != "feedback-fixture" && matches!(request.action, ClientAction::GetState);
+    let fixture_action = serde_json::to_value(&request.action).unwrap()["type"].clone();
     let reply = instance_client::desktop_client_request(window, app, request).await;
     if receipt_observer && matches!(&reply, Ok(reply) if matches!(reply.result, Some(DirectResult::SignOutIntent { .. }))) {
         // The native receipt tests inspect the genuine result before AccountApp
@@ -233,11 +277,20 @@ pub fn fixture_initial_account(app: &AppHandle) {
             avibe_desktop_lib::FIXTURE_RECEIPT_RELEASE.notified()).await;
     }
 """)
+        needle = 'emit(json!({"event":"reply","error":match &reply'
+        assert text.count(needle) == 1
+        text = text.replace(needle, 'emit(json!({"event":"reply","action":fixture_action,"error":match &reply')
         needle = '"state"=>emit('
         assert text.count(needle) == 1
         text = text.replace(needle, '''"release_receipt"=> avibe_desktop_lib::FIXTURE_RECEIPT_RELEASE.notify_waiters(),
                         ''' + needle)
         example.write_text(text)
+        text = example.read_text()
+        needle = "                            lifecycle.change(Some(lifecycle.local.clone()));"
+        assert text.count(needle) == 1
+        example.write_text(text.replace(needle, '''                            let origin = command["origin"].as_str()
+                                .map(|value|LoopbackOrigin::parse(value).unwrap()).unwrap_or_else(||lifecycle.local.clone());
+                            lifecycle.change(Some(origin));'''))
         build(args, source, "", {
             "head":args.head, "bundle_sha256":args.bundle_sha256, "mode":"account-feedback",
             "library_original_sha256":hashlib.sha256(original_library).hexdigest(),
@@ -305,6 +358,7 @@ def adapt_shell(args, source):
     needle = '            "hide" => handle.get_window(MAIN_WINDOW).unwrap().hide().unwrap(),'
     assert support_text.count(needle) == 1
     support.write_text(support_text.replace(needle, needle + '''
+            "toggle_notifications" => notifications::toggle(&handle),
             "minimize" => handle.get_window(MAIN_WINDOW).unwrap().minimize().unwrap(),
             #[cfg(target_os="macos")]
             "background" => unsafe {
@@ -424,6 +478,17 @@ def adapt_shell(args, source):
     notification_source = notification_source.replace(needle, '''                    println!("{}", serde_json::json!({"event":"mailbox_poll"}));
                 poll_sink.desktop_update_requested();''')
     notifications.write_text(notification_source)
+    notification_source = notifications.read_text()
+    needle = "fn dispatch(window: &Webview, enabled: bool) {\n"
+    assert notification_source.count(needle) == 1
+    notification_source = notification_source.replace(needle, needle + '''
+    println!("{}",serde_json::json!({"event":"notification_preference_dispatched","label":window.label(),"enabled":enabled}));
+''')
+    needle = "    let saved = app.state::<Notifications>().set_enabled(enabled)?;"
+    assert notification_source.count(needle) == 1
+    notifications.write_text(notification_source.replace(needle, needle + '''
+    println!("{}",serde_json::json!({"event":"notification_preference_saved","enabled":saved}));
+'''))
     stream = source / "desktop/runtime-host/src/notifications.rs"
     stream_source = stream.read_text()
     needle = '                    if frame.event == "desktop.update.requested" {\n                        sink.desktop_update_requested();'
@@ -433,10 +498,27 @@ def adapt_shell(args, source):
                     sink.desktop_update_requested();'''))
     pet = source / "desktop/src-tauri/src/pet.rs"
     pet_source = pet.read_text()
-    needle = "        apply_shortcuts(&handle);\n        reconcile_now(&handle);"
+    start = pet_source.index("pub fn apply_shortcuts(")
+    end = pet_source.index("\nfn set_enabled(", start)
+    shortcuts_source = pet_source[start:end]
+    # Preserve the actual reveal/settings producer; replace only registration
+    # effects, never dispatch_settings or its current-Workbench admission.
+    for needle, replacement in [
+        ("    let shortcuts = app.global_shortcut();\n", ""),
+        ("|shortcut| shortcuts.register(shortcut).map_err(|error| error.to_string())",
+         '|shortcut| { println!("fixture register shortcut: {shortcut}"); Ok::<(), String>(()) }'),
+        ("|shortcut| shortcuts.unregister(shortcut).map_err(|error| error.to_string())",
+         '|shortcut| { println!("fixture unregister shortcut: {shortcut}"); Ok::<(), String>(()) }'),
+    ]:
+        assert shortcuts_source.count(needle) == 1, needle
+        shortcuts_source = shortcuts_source.replace(needle, replacement)
+    pet_source = pet_source[:start] + shortcuts_source + pet_source[end:]
+    needle = "    dispatch_view(\n        &window,\n        SETTINGS_EVENT,"
     assert pet_source.count(needle) == 1
-    pet.write_text(pet_source.replace(needle, "        reconcile_now(&handle);"))
-    shell_adaptations["recorded_peripheral_calls"] = ["notification.show", "window.set_badge_count", "pet.apply_shortcuts", "open_url"]
+    pet_source = pet_source.replace(needle,
+        '    println!("{}",serde_json::json!({"event":"mini_settings_dispatched","label":window.label()}));\n' + needle)
+    pet.write_text(pet_source)
+    shell_adaptations["recorded_peripheral_calls"] = ["notification.show", "window.set_badge_count", "shortcut.register", "shortcut.unregister", "open_url"]
     return shell_adaptations
 
 

@@ -285,6 +285,15 @@ struct RuntimeDocument {
     owner: u64,
     document: u64,
 }
+impl RuntimeDocument {
+    fn allows_navigation(&self, destination: &Url, bundle: &Url) -> bool {
+        destination.as_str() == "about:blank"
+            || (!self.disposable && self.destination == *bundle && destination == &self.destination)
+            || (destination.origin() == self.destination.origin()
+                && destination.username().is_empty()
+                && destination.password().is_none())
+    }
+}
 struct AccountDocument {
     label: String,
     window: u64,
@@ -1445,12 +1454,7 @@ pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<boo
             }
         }
         if let Some(candidate) = views.candidate.as_ref().filter(|view| view.label == label) {
-            return Some(
-                destination.as_str() == "about:blank"
-                    || (destination.origin() == candidate.destination.origin()
-                        && destination.username().is_empty()
-                        && destination.password().is_none()),
-            );
+            return Some(candidate.allows_navigation(destination, &client.view.bundle));
         }
         if views.runtime.as_ref().is_none_or(|view| view.label != label) {
             return None;
@@ -1768,12 +1772,15 @@ impl NativeView {
         self.presentation.lock().expect("presentation").pending_commit = None;
         Ok(())
     }
-    async fn retire_current(&self) -> Result<(), ClientError> {
+    async fn retire_current(&self) -> Result<Option<(String, u64)>, ClientError> {
         let role = self.views.lock().expect("views").runtime.take();
+        // Capture identity at the same boundary that removes its authority.
+        // A candidate load may have awaited while this document navigated.
+        let document = role.as_ref().map(|role| (role.label.clone(), role.document));
         if let Some(role) = role {
             self.retire_runtime(role).await?;
         }
-        Ok(())
+        Ok(document)
     }
     async fn build_candidate(
         &self,
@@ -1889,13 +1896,42 @@ impl NativeView {
     }
     async fn replace_local(&self, owner: u64, preserve_account: bool) -> Result<(), ClientError> {
         self.presentation_epoch(owner)?;
+        let physical = self
+            .app
+            .state::<Client>()
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .window;
+        // A trusted lifecycle replacement may transfer an existing return
+        // receipt. Capture it before retirement (including lifecycle retries);
+        // arbitrary navigation or a different account document cannot acquire it.
+        let mut returning = if preserve_account {
+            let views = self.views.lock().expect("views");
+            views.account.as_ref().and_then(|account| {
+                let runtime = views.runtime.as_ref()?;
+                let receipt = (runtime.label.clone(), runtime.document);
+                (account.admitted
+                    && account.window == physical
+                    && runtime.window == physical
+                    && !runtime.disposable
+                    && account.returning.as_ref() == Some(&receipt))
+                .then(|| (account.label.clone(), account.document, account.owner, receipt))
+            })
+        } else {
+            None
+        };
         loop {
             let epoch = self.presentation_epoch(owner)?;
             let result = async {
                 let url = self.local_url()?;
                 let candidate = self.build_candidate(epoch.clone(), url.clone(), false, vec![]).await?;
                 epoch.check()?;
-                self.retire_current().await?;
+                if let Some(retired) = self.retire_current().await? {
+                    if returning.as_ref().is_some_and(|(_, _, _, receipt)| receipt != &retired) {
+                        returning = None;
+                    }
+                }
                 epoch.check()?;
                 if !preserve_account {
                     self.close_account().await?;
@@ -1903,7 +1939,21 @@ impl NativeView {
                 }
                 epoch.check()?;
                 let mut views = self.views.lock().expect("views");
-                views.runtime = views.candidate.take();
+                let runtime = views.candidate.take();
+                if let (Some((label, document, account_owner, receipt)), Some(runtime)) = (&returning, &runtime) {
+                    if let Some(account) = views.account.as_mut().filter(|account| {
+                        account.admitted
+                            && account.label == *label
+                            && account.document == *document
+                            && account.owner == *account_owner
+                            && account.window == physical
+                            && runtime.window == physical
+                            && account.returning.as_ref() == Some(receipt)
+                    }) {
+                        account.returning = Some((runtime.label.clone(), runtime.document));
+                    }
+                }
+                views.runtime = runtime;
                 views.terminal = None;
                 drop(views);
                 let mut state = self.presentation.lock().expect("presentation");
@@ -1934,6 +1984,7 @@ impl NativeView {
         }
         // Runtime monitor owns the single local control connection. Selection
         // only gates its user-facing output; it never stops or reopens it.
+        crate::notifications::reconcile(&self.app);
         crate::pet::reconcile(&self.app);
         crate::refresh_native_controls(&self.app, None);
     }
@@ -2220,6 +2271,48 @@ mod tests {
             .navigate(Url::parse("tauri://localhost/account/index.html?view=account").unwrap())
             .unwrap();
         assert!(!updater_caller(app.handle(), &bundle, account_page));
+    }
+
+    #[test]
+    fn a_local_bootstrap_candidate_admits_only_its_exact_bundled_destination() {
+        let bundle: Url = "tauri://localhost/".parse().unwrap();
+        let mut candidate = RuntimeDocument {
+            label: "main-runtime-1".into(),
+            window: 1,
+            destination: bundle.clone(),
+            disposable: false,
+            directory: None,
+            owner: 1,
+            document: 0,
+        };
+        assert!(candidate.allows_navigation(&bundle, &bundle));
+        assert!(candidate.allows_navigation(&"about:blank".parse().unwrap(), &bundle));
+        for raw in [
+            "tauri://localhost/account/index.html",
+            "tauri://localhost/?other=1",
+            "tauri://localhost/#other",
+            "tauri://other/",
+            "tauri://localhost:123/",
+            "tauri://user@localhost/",
+            "tauri://user:password@localhost/",
+            "https://localhost/",
+        ] {
+            assert!(!candidate.allows_navigation(&raw.parse().unwrap(), &bundle), "{raw}");
+        }
+        candidate.disposable = true;
+        assert!(!candidate.allows_navigation(&bundle, &bundle));
+        candidate.destination = "https://remote.example.test/".parse().unwrap();
+        assert!(!candidate.allows_navigation(&bundle, &bundle));
+        assert!(candidate.allows_navigation(
+            &"https://remote.example.test/path?query=1#fragment".parse().unwrap(),
+            &bundle
+        ));
+        assert!(!candidate.allows_navigation(&"https://user:password@remote.example.test/".parse().unwrap(), &bundle));
+        assert!(!candidate.allows_navigation(&"https://other.example.test/".parse().unwrap(), &bundle));
+        candidate.disposable = false;
+        candidate.destination = "tauri://localhost/account/index.html".parse().unwrap();
+        assert!(!candidate.allows_navigation(&candidate.destination, &bundle));
+        assert!(!candidate.allows_navigation(&bundle, &bundle));
     }
 
     #[test]

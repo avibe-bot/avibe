@@ -23,9 +23,12 @@ import proxy
 
 @pytest.fixture
 def account_native(tmp_path, request):
+    options = getattr(request, "param", {})
     calls = []
     revocation_received = threading.Event()
     revocation_release = threading.Event()
+    local_document_entered = threading.Event()
+    local_document_release = threading.Event()
     policy = {"grant": "ok", "factor": False}
     identity = {"account": {"id": "synthetic-account", "email": "user@example.test"}, "instances": []}
 
@@ -118,9 +121,17 @@ def account_native(tmp_path, request):
                 value = {"operation_id": "fixture-operation", "local": local_descriptor()}
             elif path == "/api/desktop/instances/ensure-local":
                 value = {"outcome": "already_paired", "owner_match": True, "instance_id": "local"}
-            elif path in ("/", "/settings/general", "/settings/shortcuts"):
+            elif path == "/fixture-settings.js" and options.get("settings"):
+                content_type = "application/javascript"
+                value = Path(os.environ["DESKTOP_SETTINGS_FIXTURE"]).joinpath("settings.js").read_text()
+            elif path in ("/", "/settings/general", "/settings/shortcuts", "/settings/notifications"):
+                if policy.get("hold_local_document") and path == "/" and headers["host"] == urlsplit(alternate_origin).netloc:
+                    local_document_entered.set()
+                    assert local_document_release.wait(timeout=15), "fixture local document not released"
                 content_type = "text/html"
-                value = "<!doctype html><html><body>Isolated local Workbench</body></html>"
+                value = (Path(os.environ["DESKTOP_SETTINGS_FIXTURE"]).joinpath("index.html").read_text()
+                         if options.get("settings") and path == "/settings/notifications"
+                         else "<!doctype html><html><body>Isolated local Workbench</body></html>")
                 if policy.get("document_redirect") and headers["host"] == "studio.avibe.bot":
                     status, location = 302, "https://other.avibe.bot/"
             else:
@@ -141,15 +152,20 @@ def account_native(tmp_path, request):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_port}"
+    alternate = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler) if options.get("lifecycle") else None
+    if alternate:
+        threading.Thread(target=alternate.serve_forever, daemon=True).start()
+    alternate_origin = f"http://127.0.0.1:{alternate.server_port}" if alternate else None
     mappings = tmp_path / "mappings.json"
-    mappings.write_text(json.dumps({"avibe.bot": base, "provider.fixture.test": base,
-                                    "studio.avibe.bot": base, "other.avibe.bot": base,
-                                    f"127.0.0.1:{server.server_port}": base}))
+    mapped = {"avibe.bot": base, "provider.fixture.test": base, "studio.avibe.bot": base, "other.avibe.bot": base,
+              f"127.0.0.1:{server.server_port}": base}
+    if alternate:
+        mapped[f"127.0.0.1:{alternate.server_port}"] = alternate_origin
+    mappings.write_text(json.dumps(mapped))
     tunnel, tunnel_url, fingerprint, hold = proxy.start(tmp_path, mappings)
     config = tmp_path / "native.json"
     config.write_text(json.dumps({"root": str(tmp_path), "backend": base, "provider": base,
                                  "local": base, "proxy": tunnel_url, "mappings": str(mappings)}))
-    options = getattr(request, "param", {})
     foreground = os.environ.get("AVIBE_FIXTURE_FOREGROUND") == "1"
     locale = getattr(request.node, "callspec", None)
     locale = locale.params.get("locale", options.get("locale", "en")) if locale else options.get("locale", "en")
@@ -242,10 +258,13 @@ def account_native(tmp_path, request):
         yield {"send": send, "wait": wait, "js": js, "state": state, "request": request, "present": present,
                "calls": calls, "policy": policy, "root": tmp_path, "history": history,
                "identity": identity, "hold": hold, "foreground": foreground,
+               "local_origin": base, "alternate_origin": alternate_origin,
+               "local_document_entered": local_document_entered, "local_document_release": local_document_release,
                "revocation_received": revocation_received, "revocation_release": revocation_release}
     finally:
         hold.release.set()
         revocation_release.set()
+        local_document_release.set()
         if process.poll() is None:
             process.terminate()
             try:
@@ -254,6 +273,8 @@ def account_native(tmp_path, request):
                 process.kill()
                 process.wait(timeout=5)
         server.shutdown()
+        if alternate:
+            alternate.shutdown()
         tunnel.shutdown()
         log.close()
         (tmp_path / "process-cleanup.json").write_text(json.dumps({
@@ -1150,3 +1171,247 @@ def test_recovery_presentation_same_url_delivery_retires_only_old_approval(accou
     ordinary_presentation(f, "avibe://settings")
     eventually(f, lambda _: presentation_snapshot(f)["label"] != before["label"])
     link_destination(f, "/settings/general")
+
+
+def account_return_action(f, route):
+    if route == "escape":
+        script = "window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));"
+    elif route == "selected-local":
+        script = """document.querySelector('[data-instance-id="local"] button').click();"""
+    else:
+        script = "[...document.querySelectorAll('button')].find(b=>b.textContent==='Back to Workbench').click();"
+    f["send"](action="eval", script=script)
+    return f["wait"]("reply", lambda event: event.get("action") == "cancel")
+
+
+def local_lifecycle(f, operation, origin=None):
+    f["send"](action=operation, **({"origin": origin} if origin else {}))
+    f["wait"](operation)
+    if operation == "runtime_offline":
+        navigation = f["wait"]("navigation", lambda event: event["origin"] == "null" and event["path"] == "/")
+        assert navigation["allowed"], navigation
+    finished = f["wait"]("replacement_finished")
+    assert finished["ok"], finished
+    return presentation_snapshot(f)
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "lifecycle": True}], indirect=True)
+@pytest.mark.parametrize("transition", ["rebind", "offline", "offline-online"])
+@pytest.mark.parametrize("route", ["back", "escape", "selected-local"])
+def test_retained_local_lifecycle_returns_through_actual_account_action(account_native, transition, route):
+    """AUTH-SETUP-176: trusted local publication keeps the retained account return live."""
+    f = account_native
+    assert password(f)["ok"]
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)
+    f["present"]("instances" if route == "selected-local" else "account")
+    eventually(f, lambda _: f["js"]("""return Boolean(document.querySelector('[data-instance-id="local"] button'));"""
+                                   if route == "selected-local" else "return [...document.querySelectorAll('button')].some(b=>b.textContent==='Back to Workbench');"))
+    account = presentation_snapshot(f)
+    if transition.startswith("offline"):
+        published = local_lifecycle(f, "runtime_offline")
+    if transition != "offline":
+        published = local_lifecycle(f, "runtime_rebind", f["alternate_origin"])
+    assert published["label"] == account["label"] and published["document"] == account["document"]
+    assert published["runtime"]["label"] != original["label"]
+    reply = account_return_action(f, route)
+    # Successful return retires its invoking document. The command's final
+    # receiver fence must withhold its reply, rather than revive old authority.
+    assert reply["error"] == "untrusted_desktop_caller", {"reply": reply, "published": published}
+    settled = eventually(f, lambda state: len(state["views"]) == 1 and not active(f)["label"].startswith("main-account-"))
+    assert settled["state"]["connection"]["committed"]["kind"] == "local"
+    destination = active(f)["url"]
+    assert destination == ("tauri://localhost/" if transition == "offline" else f["alternate_origin"] + "/")
+    if transition != "offline":
+        assert active(f)["label"] == published["runtime"]["label"]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "settings": True}], indirect=True)
+def test_retained_notifications_page_replays_native_preference_on_reveal(account_native):
+    """Actual SettingsNotificationsPage and native preference owner retain one document."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)["label"]
+    # Mount the actual settings consumer after the local Runtime is admitted,
+    # as ordinary Settings navigation does; startup candidates have no authority.
+    f["send"](action="eval", script="location='/settings/notifications';")
+    f["wait"]("loaded", lambda event: event["url"].endswith("/settings/notifications"))
+    selector = '[role="switch"][aria-label="Desktop app notifications"]'
+    read_switch = "return document.querySelector(" + json.dumps(selector) + ")?.getAttribute('aria-checked');"
+    eventually(f, lambda _: f["js"](read_switch) == "true")
+    marker = f["js"]("window.notificationMarker=crypto.randomUUID();history.pushState({fixture:true},'', '/settings/notifications#retained');document.querySelector('#retained-draft').value='unsent fixture draft';return [window.notificationMarker,location.href,history.length];")
+    f["js"]("window.preferenceEvents=[];window.miniEvents=[];window.addEventListener('avibe:desktop-notifications',e=>window.preferenceEvents.push(e.detail));window.addEventListener('avibe:desktop-pet-settings',e=>window.miniEvents.push(e.detail));return true;")
+    f["present"]("account")
+    account = active(f)["label"]
+    f["send"](action="shell_control", operation="toggle_notifications")
+    f["wait"]("shell_control", lambda event: event["operation"] == "toggle_notifications")
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["notifications_enabled"] is False
+    # Both hidden retained Runtime and active Account remain denied command authority.
+    for label in [original, account]:
+        denied = f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_notifications_set_enabled',{enabled:true}).then(()=>false,()=>true);", label)
+        assert denied
+    assert f["js"]("return window.preferenceEvents;", original) == []
+    reveal_start = len(f["history"])
+    reply = account_return_action(f, "back")
+    assert reply["error"] == "untrusted_desktop_caller"
+    eventually(f, lambda _: active(f)["label"] == original)
+    # This is a real producer completion (the Mini sibling's reveal callback),
+    # followed by the actual retained React switch; no absence sleep is used.
+    eventually(f, lambda _: any(event.get("event") == "mini_settings_dispatched" and event["label"] == original
+                               for event in f["history"][reveal_start:]))
+    assert f["js"](read_switch) == "false"
+    assert f["js"]("return [window.notificationMarker,location.href,history.length];") == marker
+    assert f["js"]("return document.querySelector('#retained-draft').value;") == "unsent fixture draft"
+    assert f["js"]("return window.miniEvents.length;") > 0
+    start = len(f["history"])
+    f["send"](action="eval", script="document.querySelector(" + json.dumps(selector) + ").click();")
+    assert f["wait"]("notification_preference_saved")["enabled"] is True
+    eventually(f, lambda _: f["js"](read_switch) == "true")
+    saved = [event for event in f["history"][start:] if event.get("event") == "notification_preference_saved"]
+    assert len(saved) == 1, saved
+    dispatched = [event["label"] for event in f["history"] if event.get("event") == "notification_preference_dispatched"]
+    assert set(dispatched) == {original}, dispatched
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "lifecycle": True}], indirect=True)
+@pytest.mark.parametrize("navigation_order", ["before-replacement", "candidate-held"])
+def test_retained_local_replacement_cannot_reauthorize_a_navigated_return_receipt(account_native, navigation_order):
+    """A trusted rebind cannot heal an account receipt invalidated by arbitrary navigation."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    runtime = active(f)["label"]
+    f["present"]("account")
+    before = presentation_snapshot(f)
+    if navigation_order == "candidate-held":
+        f["policy"]["hold_local_document"] = True
+        f["send"](action="runtime_rebind", origin=f["alternate_origin"])
+        f["wait"]("runtime_rebind")
+        assert f["local_document_entered"].wait(10)
+    # The new validated local origin is allowed by the real production policy
+    # even while its separate candidate is waiting for its document.
+    origin = f["alternate_origin"] if navigation_order == "candidate-held" else f["local_origin"]
+    f["send"](action="eval", label=runtime, script="location=" + json.dumps(origin + "/settings/general") + ";")
+    f["wait"]("loaded", lambda event: event["url"].endswith("/settings/general"))
+    navigated = presentation_snapshot(f)
+    assert navigated["runtime"]["document"] != before["runtime"]["document"]
+    assert navigated["returning"] == before["returning"]
+    if navigation_order == "candidate-held":
+        f["policy"]["hold_local_document"] = False
+        f["local_document_release"].set()
+        assert f["wait"]("replacement_finished")["ok"]
+        replaced = presentation_snapshot(f)
+    else:
+        replaced = local_lifecycle(f, "runtime_rebind", f["alternate_origin"])
+    assert replaced["runtime"]["label"] != runtime
+    reply = account_return_action(f, "back")
+    assert {"returning": replaced["returning"], "error": reply["error"], "active": active(f)["label"]} == {
+        "returning": before["returning"], "error": "instance_session_missing", "active": before["label"],
+    }
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "lifecycle": True}], indirect=True)
+def test_retained_local_replacement_new_owner_retires_only_the_held_candidate(account_native):
+    """Cancel defeats an in-flight lifecycle load; its late page cannot become a return receipt."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)["label"]
+    marker = f["js"]("window.retainedMarker=crypto.randomUUID();return window.retainedMarker;")
+    f["present"]("account")
+    account = presentation_snapshot(f)
+    f["policy"]["hold_local_document"] = True
+    start = len(f["history"])
+    f["send"](action="runtime_rebind", origin=f["alternate_origin"])
+    f["wait"]("runtime_rebind")
+    assert f["local_document_entered"].wait(10)
+    held = presentation_snapshot(f)
+    assert held["runtime"]["label"] == original and held["returning"] == account["returning"]
+    candidate = next(view["label"] for view in f["state"]()["views"]
+                     if view["label"] not in [original, account["label"]])
+    f["send"](action="eval", script="[...document.querySelectorAll('button')].find(b=>b.textContent==='Back to Workbench').click();")
+    eventually(f, lambda _: presentation_snapshot(f)["owner"] != account["owner"])
+    f["policy"]["hold_local_document"] = False
+    f["local_document_release"].set()
+    eventually(f, lambda _: any(event.get("event") == "replacement_finished" and event["owner"] == account["owner"]
+                               for event in f["history"][start:]))
+    stale = next(event for event in f["history"][start:] if event.get("event") == "replacement_finished"
+                 and event["owner"] == account["owner"])
+    assert not stale["ok"], stale
+    # The new owner's destination follows the current rebind. The old candidate
+    # must be retired; it cannot publish itself or lend its label to Cancel.
+    settled = eventually(f, lambda state: len(state["views"]) == 1 and active(f)["label"] != account["label"])
+    assert candidate not in [view["label"] for view in settled["views"]]
+    assert active(f)["url"] == f["alternate_origin"] + "/"
+    assert active(f)["label"] != original
+    assert f["js"]("return window.retainedMarker ?? null;") is None
+    assert marker
+    dispatched = [event["label"] for event in f["history"][start:]
+                  if event.get("event") in ["notification_preference_dispatched", "mini_settings_dispatched"]]
+    assert candidate not in dispatched and account["label"] not in dispatched and original not in dispatched
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "lifecycle": True}], indirect=True)
+def test_retained_remote_document_ignores_local_rebind_and_preference_replay(account_native):
+    """Local lifecycle changes do not retarget a committed remote return receipt."""
+    f = account_native
+    f["identity"]["instances"] = [catalog_entry()]
+    assert password(f)["ok"]
+    dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+    eventually(f, lambda state: state["state"]["connection"]["committed"]["kind"] == "remote")
+    remote = active(f)["label"]
+    marker = f["js"]("window.retainedMarker=crypto.randomUUID();history.pushState({},'', '/?remote=retained');return [window.retainedMarker,location.href,history.length];")
+    f["present"]("account")
+    account = presentation_snapshot(f)
+    start = len(f["history"])
+    for operation in ["runtime_offline", "runtime_rebind"]:
+        f["send"](action=operation, **({"origin": f["alternate_origin"]} if operation == "runtime_rebind" else {}))
+        f["wait"](operation)
+        f["wait"]("local_rebound_remote_preserved")
+        snapshot = presentation_snapshot(f)
+        assert snapshot["runtime"] == account["runtime"]
+        assert snapshot["returning"] == account["returning"]
+    f["send"](action="shell_control", operation="toggle_notifications")
+    f["wait"]("shell_control", lambda event: event["operation"] == "toggle_notifications")
+    for label in [remote, account["label"]]:
+        assert f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_notifications_state').then(()=>false,()=>true);", label)
+    assert account_return_action(f, "back")["error"] == "untrusted_desktop_caller"
+    eventually(f, lambda state: len(state["views"]) == 1 and active(f)["label"] == remote)
+    assert f["js"]("return [window.retainedMarker,location.href,history.length];") == marker
+    assert not [event for event in f["history"][start:] if event.get("event") in
+                ["notification_preference_dispatched", "mini_settings_dispatched"]]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "lifecycle": True}], indirect=True)
+def test_retained_local_return_receipt_survives_lifecycle_retry_after_retirement(account_native):
+    """A valid receipt survives a lifecycle-only retry after its old role is actually detached."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)["label"]
+    f["present"]("account")
+    account = presentation_snapshot(f)
+    f["send"](action="hold_retired_runtime")
+    f["wait"]("control_ready")
+    f["send"](action="runtime_rebind", origin=f["alternate_origin"])
+    f["wait"]("runtime_rebind")
+    f["wait"]("runtime_retired_held")
+    roles = [view["label"] for view in f["state"]()["views"]]
+    assert original not in roles
+    candidate = next(label for label in roles if label != account["label"])
+    assert f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_notifications_set_enabled',{enabled:false}).then(()=>false,()=>true);", candidate)
+    assert presentation_snapshot(f)["returning"] == account["returning"]
+    f["send"](action="runtime_rebind", origin=f["local_origin"])
+    f["wait"]("runtime_rebind")
+    f["send"](action="release_retired_runtime")
+    assert f["wait"]("replacement_finished")["ok"]
+    published = presentation_snapshot(f)
+    assert published["label"] == account["label"] and published["owner"] == account["owner"]
+    assert published["returning"] == {key: published["runtime"][key] for key in ["label", "document"]}
+    assert published["runtime"]["label"] != original
+    assert account_return_action(f, "back")["error"] == "untrusted_desktop_caller"
+    eventually(f, lambda state: len(state["views"]) == 1 and active(f)["label"] == published["runtime"]["label"])
+    assert active(f)["url"] == f["local_origin"] + "/"
