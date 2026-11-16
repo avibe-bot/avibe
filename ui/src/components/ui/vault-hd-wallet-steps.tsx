@@ -504,7 +504,8 @@ function PassphraseField({ label, value, onChange, onFocus, onBlur, onEnter, inv
           disabled={disabled}
           aria-label={label}
           aria-invalid={invalid || undefined}
-          className="min-w-0 flex-1 font-mono text-xs"
+          // A red border when judged different, as the name field shows a problem.
+          className={cn('min-w-0 flex-1 font-mono text-xs', invalid && 'border-destructive/60')}
         />
         <Button type="button" variant="ghost" size="icon" onClick={() => { setShown((current) => !current); onEnter?.(); }} aria-label={shown ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}>
           {shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}

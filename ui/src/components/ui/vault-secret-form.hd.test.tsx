@@ -596,11 +596,15 @@ it('judges the passphrase\'s second box only once it is done: same length as the
   fireEvent.change(again, { target: { value: 'orangf' } });
   expect(screen.getByText(hd.passphrase.mismatch)).toBeTruthy();
   expect(again.getAttribute('aria-invalid')).toBe('true');
+  // A red border on the second box, not on the first.
+  expect(again.className).toContain('border-destructive');
+  expect(first.className).not.toContain('border-destructive');
   // Matching: cleared the moment it matches, and the match line shows.
   fireEvent.change(again, { target: { value: 'orange' } });
   expect(screen.queryByText(hd.passphrase.mismatch)).toBeNull();
   expect(screen.getByText(hd.passphrase.match)).toBeTruthy();
   expect(screen.queryByText(reason)).toBeNull();
+  expect(again.className).not.toContain('border-destructive');
   expect((screen.getByRole('button', { name: hd.generateCta }) as HTMLButtonElement).disabled).toBe(false);
   // Emptied again: no longer judged, even though it was left before.
   fireEvent.blur(again);
