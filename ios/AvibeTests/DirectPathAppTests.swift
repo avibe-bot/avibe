@@ -1122,6 +1122,8 @@ final class DirectPathAppTests: XCTestCase {
         line: UInt = #line
     ) async throws {
         let hold = PushHold(path: "/api/push/apns/installations/hold/provider")
+        // A second signal is harmless; a failure must not leave it held.
+        defer { hold.release.signal() }
         let startRequest: @MainActor (AppModel) -> Task<Void, Error>? = { app in
             Task { @MainActor in
                 _ = try await app.mobileSessionCoordinator.pushManagementRequest(
@@ -1150,7 +1152,11 @@ final class DirectPathAppTests: XCTestCase {
             _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         }
         let open = try XCTUnwrap(atOpen, file: file, line: line)
-        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
+        if restoring {
+            try await waitForTheBootstrap(of: app)
+        }
+        // The request launches its own account transport.
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 60)
         try await eventually { app.route != .loading }
 
         guard case .browser(let runtime) = app.route else {
@@ -1256,6 +1262,7 @@ final class DirectPathAppTests: XCTestCase {
         ) {
             _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         }
+        defer { first.page.close() }
         XCTAssertFalse(app.directFaultCovers(first.runtime))
 
         // The App's port is taken while it is in the background: the return
@@ -1281,7 +1288,9 @@ final class DirectPathAppTests: XCTestCase {
         // the reopen message alone.
         let before = notifications.providerPatches.arrivals
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        try await eventually { notifications.providerPatches.arrivals > before }
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            notifications.providerPatches.arrivals > before
+        }
         try await eventually { app.route != .loading }
         guard case .browser(let reopened) = app.route else {
             notifications.providerPatches.releaseAll()
@@ -1312,12 +1321,11 @@ final class DirectPathAppTests: XCTestCase {
             notifications: notifications,
             afterArrivals: arrivals
         ) {}
+        defer { restored.page.close() }
         XCTAssertFalse(next.directListenerFault)
         XCTAssertEqual(next.directLoadGate(for: restored.runtime), .open)
         XCTAssertFalse(next.presentsDirectFaultOnly(restored.runtime))
         XCTAssertEqual(nextTransport.selections.count, 0)
-        first.page.close()
-        restored.page.close()
     }
 
     @MainActor
@@ -1340,6 +1348,7 @@ final class DirectPathAppTests: XCTestCase {
             file: file,
             line: line
         ) {}
+        defer { opened.page.close() }
         if let directTransport {
             XCTAssertEqual(
                 directTransport.selections.last?.runtime,
@@ -1349,7 +1358,6 @@ final class DirectPathAppTests: XCTestCase {
             )
         }
         XCTAssertGreaterThanOrEqual(notifications.registrations, 1, file: file, line: line)
-        opened.page.close()
     }
 
     @MainActor
@@ -1402,6 +1410,17 @@ final class DirectPathAppTests: XCTestCase {
         )
     }
 
+    /// A launch made with `launchesWithInstanceOneSelected` or
+    /// `reusingDefaults` returns before its bootstrap: wait for its session
+    /// read with the budget the fixture gives one WebKit transport launch,
+    /// so a slow launch does not read as a bounced open.
+    @MainActor
+    private func waitForTheBootstrap(of app: AppModel) async throws {
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            app.mobileSessionCoordinator.currentAccount?.id == "account-1"
+        }
+    }
+
     /// Runs `open` and checks that its provider update reaches the control
     /// plane and stays in flight while the open of `instanceID` settles at
     /// `.browser` and the root view's WebView registers and is kept; then
@@ -1418,7 +1437,11 @@ final class DirectPathAppTests: XCTestCase {
     ) async throws -> (runtime: MobileRuntimeContext, page: RuntimePage) {
         let before = arrivals ?? notifications.providerPatches.arrivals
         try open()
-        try await eventually { notifications.providerPatches.arrivals > before }
+        // A launch reads the session first (a restore opens only then).
+        try await waitForTheBootstrap(of: app)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            notifications.providerPatches.arrivals > before
+        }
         try await eventually { app.route != .loading }
         guard
             case .browser(let runtime) = app.route,
@@ -1438,9 +1461,16 @@ final class DirectPathAppTests: XCTestCase {
             file: file,
             line: line
         )
-        let controller = try makeRuntimeController(app, runtime)
-        app.registerRuntimeController(controller, for: runtime)
-        let page = try RuntimePage(controller: controller)
+        let page: RuntimePage
+        let controller: WebViewController
+        do {
+            controller = try makeRuntimeController(app, runtime)
+            app.registerRuntimeController(controller, for: runtime)
+            page = try RuntimePage(controller: controller)
+        } catch {
+            notifications.providerPatches.releaseAll()
+            throw error
+        }
         XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
         XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
 
