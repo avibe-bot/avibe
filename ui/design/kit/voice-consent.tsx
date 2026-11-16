@@ -1,12 +1,16 @@
-// Asking before voice input sends a recording to third-party AI services (ui/design:
-// composer/voice-consent/*). App Store guideline 5.1.2(i): say where the data goes and get an
-// explicit yes before it goes. One question per account on this Avibe, asked on the first press
+// Asking before voice input sends speech to a third-party AI service (ui/design:
+// composer/voice-consent/*). App Store guideline 5.1.2(i): "clearly disclose where personal data
+// will be shared with third parties, including with third-party AI, and obtain explicit
+// permission before doing so." One question per account on this Avibe, asked on the first press
 // of any voice control, before the microphone opens; the answer can be changed in
-// Settings › General. Product tokens and src/components/ui primitives only; copy is draft copy
-// (kit/draft.ts) and moves to src/i18n when this ships.
-import { AudioLines, CloudUpload, FileText, MicOff, ShieldCheck } from 'lucide-react';
-import type { ComponentType, ReactNode } from 'react';
+// Settings › General. Owner direction (2026-11-16): a title, one or two ordinary sentences,
+// Allow / Don't allow, and a small way to the details; no provider names or risk lists in the
+// body. Two variants for the owner to pick: `link` sends "Learn more" to the privacy policy;
+// `details` opens small print in the dialog. Product tokens and src/components/ui primitives
+// only; copy is draft copy (kit/draft.ts) and moves to src/i18n when this ships.
+import { ChevronDown, MicOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import clsx from 'clsx';
 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -15,71 +19,55 @@ import { SettingsPanel, ToggleSwitch } from '@/components/settings/SettingsPrimi
 
 import { useDraft } from './draft';
 
-/** Who supplies the speech and language models: avibe.bot's own (a personal Avibe), or the ones an
- *  organization's admins configured (an Avibe paired to an organization). */
-export type VoiceSupplier = 'personal' | 'organization';
+const PRIVACY_VOICE = 'https://avibe.bot/privacy#voice';
 
-function Point({ icon: Icon, children }: { icon: ComponentType<{ className?: string }>; children: ReactNode }) {
-  return (
-    <li className="flex items-start gap-3">
-      <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-muted">
-        <Icon className="size-4" />
-      </span>
-      <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-foreground">{children}</span>
-    </li>
-  );
-}
+export type VoiceConsentVariant = 'link' | 'details';
 
-/** The question itself. A dialog on a desktop, a sheet on a phone (the shipped Dialog does both).
- *  Nothing is recorded until "Allow"; "Don't allow", the ×, Esc or a drag down all mean no. */
-export function VoiceConsentDialog({ supplier }: { supplier: VoiceSupplier }) {
+/** The question. A dialog on a desktop, a sheet on a phone (the shipped Dialog does both).
+ *  Nothing is recorded until Allow; Don't allow records the no; the × or Esc only closes. */
+export function VoiceConsentDialog({ variant, expanded = false }: { variant: VoiceConsentVariant; expanded?: boolean }) {
   const d = useDraft();
+  const link = 'text-xs font-medium text-accent-ink underline-offset-2 hover:underline';
   return (
     <Dialog open>
-      <DialogContent className="max-w-md" closeLabel={d('关闭', 'Close')}>
+      <DialogContent className="max-w-sm" closeLabel={d('关闭', 'Close')}>
         <DialogHeader>
           <DialogTitle>{d('开启语音输入？', 'Turn on voice input?')}</DialogTitle>
-          <DialogDescription>
-            {d(
-              '语音输入要把你说的话交给第三方 AI 服务转成文字。开启前请看一下会发送什么、发给谁。',
-              'Voice input uses third-party AI services to turn your speech into text. Here is what is sent and where.',
-            )}
-          </DialogDescription>
-        </DialogHeader>
-        <ul className="flex flex-col gap-3">
-          <Point icon={AudioLines}>
-            {d('你的录音，经 avibe.bot 转发。', 'Your recording, passed on by avibe.bot.')}
-          </Point>
-          <Point icon={FileText}>
-            {d(
-              '为了识别更准，还会附上：光标前后的文字、Agent 的上一条回复、你的上一条消息、你的伙伴名字。',
-              "To make it more accurate, also: the text around your cursor, the Agent's last reply, your previous message, and your Bots' names.",
-            )}
-          </Point>
-          <Point icon={CloudUpload}>
-            {supplier === 'personal'
+          <DialogDescription className="text-sm leading-relaxed">
+            {variant === 'link'
               ? d(
-                '发给新加坡的阿里云百炼：它识别语音，再由同一平台上的 DeepSeek 模型整理文字。',
-                'Sent to Alibaba Cloud Model Studio in Singapore, which transcribes it; a DeepSeek model on the same platform tidies the text.',
+                '你说的话会交给第三方 AI 语音服务转成文字，avibe.bot 不保存录音。',
+                "What you say goes to a third-party AI speech service to be turned into text. avibe.bot doesn't keep your recordings.",
               )
               : d(
-                '发给你所在组织的管理员选定的语音识别和语言模型服务。',
-                "Sent to the speech recognition and language model services your organization's admins chose.",
+                '你说的话会交给第三方 AI 服务转成文字，为了更准确，也会带上当前对话里的少量文字。',
+                'What you say goes to a third-party AI service to be turned into text, with a little of the current conversation for accuracy.',
               )}
-          </Point>
-          <Point icon={ShieldCheck}>
-            {d(
-              'avibe.bot 不保存录音，也不保存文字。AI 服务按各自的隐私政策处理。',
-              'avibe.bot keeps neither the audio nor the text. The AI services handle it under their own privacy policies.',
-            )}
-          </Point>
-        </ul>
-        <p className="text-xs leading-relaxed text-muted">
-          {d('之后可以在 设置 › 常规 里随时更改。', 'You can change this anytime in Settings › General.')}{' '}
-          <a href="https://avibe.bot/privacy#voice" className="text-accent-ink underline-offset-2 hover:underline">
-            {d('隐私政策', 'Privacy policy')}
+          </DialogDescription>
+        </DialogHeader>
+        {variant === 'link' ? (
+          <a href={PRIVACY_VOICE} target="_blank" rel="noreferrer" className={clsx(link, 'justify-self-start')}>
+            {d('了解详情', 'Learn more')}
           </a>
-        </p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <button type="button" className={clsx(link, 'flex items-center gap-1 self-start')} aria-expanded={expanded}>
+              {d('了解详情', 'Learn more')}
+              <ChevronDown className={clsx('size-3.5 transition-transform', expanded && 'rotate-180')} />
+            </button>
+            {expanded && (
+              <p className="text-xs leading-relaxed text-muted">
+                {d(
+                  '录音和这些文字经 avibe.bot 转给阿里云百炼（新加坡）识别，再由同一平台上的模型整理。avibe.bot 不保存录音和文字。随时可以在设置 › 常规里更改。',
+                  'They pass through avibe.bot to Alibaba Cloud Model Studio (Singapore), which transcribes the recording, and a model on the same platform tidies the text. avibe.bot keeps neither. You can change this anytime in Settings › General.',
+                )}{' '}
+                <a href={PRIVACY_VOICE} target="_blank" rel="noreferrer" className="text-accent-ink underline-offset-2 hover:underline">
+                  {d('隐私政策', 'Privacy policy')}
+                </a>
+              </p>
+            )}
+          </div>
+        )}
         <DialogFooter>
           <Button variant="ghost">{d('不允许', "Don't allow")}</Button>
           <Button variant="brand">{d('允许', 'Allow')}</Button>
@@ -103,11 +91,11 @@ export function VoiceOffNote() {
       <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
         <span className="font-semibold text-foreground">{d('语音输入已关闭', 'Voice input is off')}</span>
         <span className="text-muted">
-          {d('可以直接打字。要用语音，在 设置 › 常规 里开启。', 'Type instead, or turn it on in Settings › General.')}
+          {d('可以直接打字，或在设置 › 常规里开启。', 'Type instead, or turn it on in Settings › General.')}
         </span>
       </div>
       <Button type="button" variant="outline" size="sm" className="pointer-events-auto shrink-0">
-        {d('开启…', 'Turn on…')}
+        {d('开启', 'Turn on')}
       </Button>
     </div>
   );
@@ -122,8 +110,8 @@ export function VoiceInputSetting({ enabled }: { enabled: boolean }) {
       variant="preference"
       title={d('语音输入', 'Voice input')}
       description={d(
-        '把录音经 avibe.bot 交给第三方 AI 服务转成文字，avibe.bot 不保存录音和文字。只对你的账号在这个 Avibe 上生效。',
-        'Sends your recordings through avibe.bot to third-party AI services that turn them into text. avibe.bot keeps neither the audio nor the text. Applies to your account on this Avibe.',
+        '用第三方 AI 语音服务把你说的话转成文字，avibe.bot 不保存录音。只对你的账号在这个 Avibe 上生效。',
+        "A third-party AI speech service turns what you say into text; avibe.bot doesn't keep your recordings. Applies to your account on this Avibe.",
       )}
       actions={<ToggleSwitch enabled={enabled} label={d('语音输入', 'Voice input')} onClick={() => {}} />}
     />

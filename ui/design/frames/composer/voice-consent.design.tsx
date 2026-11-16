@@ -12,7 +12,7 @@ import { frames } from '../../frame';
 import { DesktopScreen } from '../../shell/DesktopScreen';
 import { ComposerNoteLayer } from '../../shell/HeldComposer';
 import { PhoneConversation } from '../../shell/PhoneScreen';
-import { GeneralWithVoiceInput, VoiceConsentDialog, VoiceOffNote, type VoiceSupplier } from '../../kit/voice-consent';
+import { GeneralWithVoiceInput, VoiceConsentDialog, VoiceOffNote, type VoiceConsentVariant } from '../../kit/voice-consent';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
 import { csoFixtures } from './fixtures';
 
@@ -31,10 +31,10 @@ const frame = (name: string, title: string, size: [number, number], render: () =
   render,
 });
 
-const ask = (supplier: VoiceSupplier, screen: 'phone' | 'desktop') => () => (
+const ask = (variant: VoiceConsentVariant, screen: 'phone' | 'desktop', expanded = false) => () => (
   <>
     {screen === 'phone' ? <PhoneConversation /> : <DesktopScreen />}
-    <VoiceConsentDialog supplier={supplier} />
+    <VoiceConsentDialog variant={variant} expanded={expanded} />
   </>
 );
 
@@ -46,13 +46,15 @@ const off = (screen: 'phone' | 'desktop') => () => {
 const settings = (enabled: boolean) => settingsPage('general', <GeneralWithVoiceInput enabled={enabled} />);
 
 const designFrames = frames([
-  frame('a-ask-phone', '1 · 第一次按住说话（老用户：升级后第一次）：麦克风还没打开，先问一次；手机上是底部弹层', phone, ask('personal', 'phone')),
-  frame('a-ask-desktop', '1 · 同上，桌面：对话框；点「允许」后下一次按住照常录音', desktop, ask('personal', 'desktop')),
-  frame('a-ask-org-phone', '1b · 组织的 Avibe：服务由组织管理员选定，不写具体厂商', phone, ask('organization', 'phone')),
-  frame('b-off-phone', '2 · 选了「不允许」后再按住（或点麦克风）：不录音，提示怎么开启；打字照常', phone, off('phone')),
-  frame('b-off-desktop', '2 · 同上，桌面', desktop, off('desktop')),
-  frame('c-settings-off', '3 · 设置 › 常规：语音输入（按账号、按这个 Avibe）。打开时再弹一次第 1 步的说明；关闭立即生效', desktop, settings(false), { route: '/settings/general', fixtures: settingsFixtures() }),
-  frame('c-settings-on-phone', '3 · 同上，已允许，手机', phone, settings(true), { route: '/settings/general', fixtures: settingsFixtures() }),
+  frame('a-link-phone', 'A · 第一次按住说话（老用户：升级后第一次）：标题、一句话、「了解详情」打开隐私政策的语音一节', phone, ask('link', 'phone')),
+  frame('a-link-desktop', 'A · 同上，桌面', desktop, ask('link', 'desktop')),
+  frame('b-details-phone', 'B · 一句话（含上下文），「了解详情」在弹层里展开小字', phone, ask('details', 'phone')),
+  frame('b-details-phone-open', 'B · 展开的小字：经 avibe.bot、服务商与地区、不保存、在哪里更改、隐私政策', phone, ask('details', 'phone', true)),
+  frame('b-details-desktop', 'B · 同上，桌面', desktop, ask('details', 'desktop')),
+  frame('c-off-phone', '2 · 选了「不允许」后再按住（或点麦克风）：不录音，提示怎么开启；打字照常', phone, off('phone')),
+  frame('c-off-desktop', '2 · 同上，桌面', desktop, off('desktop')),
+  frame('d-settings-off', '3 · 设置 › 常规：语音输入（按账号、按这个 Avibe）。打开时再问一次；关闭立即生效', desktop, settings(false), { route: '/settings/general', fixtures: settingsFixtures() }),
+  frame('d-settings-on-phone', '3 · 同上，已允许，手机', phone, settings(true), { route: '/settings/general', fixtures: settingsFixtures() }),
 ]);
 
 export default designFrames;
