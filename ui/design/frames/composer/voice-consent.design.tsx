@@ -13,20 +13,37 @@ import { DesktopScreen } from '../../shell/DesktopScreen';
 import { ComposerNoteLayer } from '../../shell/HeldComposer';
 import { PhoneConversation } from '../../shell/PhoneScreen';
 import { GeneralWithVoiceInput, VoiceConsentDialog, VoiceOffNote, type VoiceConsentVariant } from '../../kit/voice-consent';
+import { botConversationApi, demoProjects, demoSessions, inboxRow, mainBot, message, type WorkbenchFixtures } from '../../shell/fixtures';
+import { agentsApi } from '../../shell/teamFixtures';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
-import { csoFixtures } from './fixtures';
 
-const route = '/chat/ses_cso';
+// An everyday exchange with the main Bot behind the question, so nothing in the background reads
+// as a warning (owner direction, 2026-11-16).
+const reply = '排好了：上午坐高铁到西湖边散步，中午在湖滨吃饭，下午去龙井村喝茶，傍晚回程。要我顺便查一下高铁票吗？';
+const everyday = [
+  message('ses_main', 'e1', 'user', '下周六想带家人去杭州玩一天，帮我排个不赶的行程。', 14),
+  message('ses_main', 'e2', 'agent', reply, 12),
+];
+const speech = { '/api/asr/status': { available: true, consent: null }, '/api/cloud/token': { ok: false } };
+const everydayFixtures: WorkbenchFixtures = {
+  projects: demoProjects,
+  sessionsByProject: demoSessions,
+  bots: [mainBot],
+  inboxSessions: [inboxRow('ses_main', null, '', reply, 12)],
+  api: { ...agentsApi, ...botConversationApi(mainBot, [mainBot], everyday), ...speech },
+};
+
+const route = '/chat/ses_main';
 const phone: [number, number] = [390, 844];
 const desktop: [number, number] = [1440, 900];
 
-const frame = (name: string, title: string, size: [number, number], render: () => ReactNode, extra: { route?: string; fixtures?: ReturnType<typeof csoFixtures> } = {}) => ({
+const frame = (name: string, title: string, size: [number, number], render: () => ReactNode, extra: { route?: string; fixtures?: WorkbenchFixtures } = {}) => ({
   name,
   title,
   width: size[0],
   height: size[1],
   status: 'proposed' as const,
-  fixtures: extra.fixtures ?? csoFixtures(),
+  fixtures: extra.fixtures ?? everydayFixtures,
   route: extra.route ?? route,
   render,
 });
