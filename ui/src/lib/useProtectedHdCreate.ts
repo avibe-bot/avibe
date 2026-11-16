@@ -100,7 +100,8 @@ const refusalOf = (result: { code?: string; message?: string } | null | undefine
 const savedBitcoinTypes = (secret: VaultSecret | undefined, name: string): BitcoinAddressType[] | undefined => {
   if (secret?.name !== name) return undefined;
   const types = secret.accounts?.find((account) => account.account === 0)?.bitcoin_address_types;
-  return Array.isArray(types) ? types : undefined;
+  // Taproot is always offered; a list without it is not one this screen narrows to.
+  return Array.isArray(types) && types.includes('p2tr') ? types : undefined;
 };
 
 /** Whether two #0 address sets are the same wallet's (every listed chain's address equal). */

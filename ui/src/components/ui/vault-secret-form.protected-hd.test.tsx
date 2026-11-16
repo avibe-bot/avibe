@@ -175,8 +175,10 @@ it.each([
 });
 
 it.each([
-  ['all three types the save answer lists', { name: NAME, accounts: [{ account: 0, bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'] }] }, true],
+  // The answer's own addresses are a decoy: only the window's confirmed #0 addresses are ever shown.
+  ['all three types the save answer lists', { name: NAME, accounts: [{ account: 0, btc_segwit: 'bc1qDECOY', bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'] }] }, true],
   ['a save answer that lists Taproot only', { name: NAME, accounts: [{ account: 0, bitcoin_address_types: ['p2tr'] }] }, false],
+  ['a list without Taproot', { name: NAME, accounts: [{ account: 0, bitcoin_address_types: ['p2wpkh'] }] }, false],
   ['a save answer with no list', {}, false],
   ['a list for another name', { name: 'OTHER', accounts: [{ account: 0, bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'] }] }, false],
 ])('the done screen offers BTC as the server lists it: %s', async (_label, secret, switchable) => {
@@ -192,6 +194,7 @@ it.each([
   fireEvent.click(chip);
   fireEvent.click(await screen.findByRole('radio', { name: new RegExp(`^${en.vaults.addresses.typeSegwit}`) }));
   expect(await screen.findByText(wallet.expected_account0.btc_segwit)).toBeTruthy();
+  expect(screen.queryByText('bc1qDECOY')).toBeNull();
 });
 
 it('a lost save reply is checked, never retried: unconfirmed until the exact wallet is found by name', async () => {
