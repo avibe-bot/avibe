@@ -32,21 +32,26 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       const requests = await installBridge(page, state, { projection: true });
       await language(page, lang);
       await page.goto(`/?theme=${theme}`);
-      const avatar = page.locator('[data-account-avatar]');
-      await expect(avatar).toBeVisible();
+      // ui/design: chrome/bottom-row. The status dot leads the row, flush with the tools above; the
+      // version is flush right; the row sits no farther from the window's edge than from the tools.
+      await expect(page.locator('[data-sidebar-status-row] [data-status-indicator]')).toBeVisible();
       const footer = page.locator('[data-sidebar-footer]');
       const measurements = await footer.evaluate((node) => {
         const rect = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
-        return { avatar: rect('[data-account-avatar]').x, tools: node.firstElementChild!.getBoundingClientRect().x,
-          dotGap: rect('[data-status-indicator]').x - rect('[data-account-label]').right,
-          arrowGap: rect('[data-account-chevron]').x - rect('[data-status-indicator]').right,
-          versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right };
+        const tools = node.firstElementChild!.getBoundingClientRect();
+        const row = rect('[data-sidebar-status-row]');
+        return { dot: rect('[data-status-indicator]').x, tools: tools.x,
+          labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
+          arrowGap: rect('[data-account-chevron]').x - rect('[data-account-label]').right,
+          versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
+          above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
       });
-      expect(measurements.avatar).toBe(16);
+      expect(measurements.dot).toBe(16);
       expect(measurements.tools).toBe(16);
-      expect(measurements.dotGap).toBeLessThanOrEqual(6);
-      expect(measurements.arrowGap).toBeLessThanOrEqual(6);
+      expect(measurements.labelGap).toBeLessThanOrEqual(8);
+      expect(measurements.arrowGap).toBeLessThanOrEqual(8);
       expect(measurements.versionRight).toBe(measurements.footerRight);
+      expect(measurements.below).toBeLessThanOrEqual(measurements.above);
       await expect(footer).not.toContainText('max@example.test');
       await page.locator('[data-version-trigger] button').click();
       const popup = page.getByRole('dialog', { name: lang === 'en' ? 'Version & Update' : '版本与更新' });
