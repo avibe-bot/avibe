@@ -132,6 +132,8 @@ final class InstanceSheetGestureUITests: XCTestCase {
 
         // Each way a gesture can fail to dismiss names itself.
         XCTAssertTrue(SheetFixtureReadiness.dismissalFailure(from: [:])
+            .hasPrefix("The sheet stayed, and no dismissal receipt was readable"))
+        XCTAssertTrue(SheetFixtureReadiness.dismissalFailure(from: ["stages": [String]()])
             .hasPrefix("The gesture never reached the window"))
         XCTAssertTrue(SheetFixtureReadiness.dismissalFailure(
             from: ["stages": ["native-touch-began", "native-touch-ended"]]
@@ -262,10 +264,11 @@ enum SheetFixtureReadiness {
                        "Expected native rejection and rendered row error receipts; receipt=\(surface.label)")
     }
 
-    /// After a dismissing gesture: the native receipt shows the sheet
-    /// dismissed, and then its Close button is gone. `waitForExistence`
-    /// cannot assert this: it returns at once when the element exists and
-    /// never waits for it to go. A failure names what the gesture did.
+    /// After a dismissing gesture: the sheet's Close button goes within
+    /// `timeout` and stays gone. `waitForExistence` cannot express this: it
+    /// requires the element to be gone at its first check and never waits
+    /// for it to go. If the sheet stays, the failure names what the gesture
+    /// did, from the fixture's native receipt.
     static func requireGestureDismissal(
         of close: XCUIElement,
         in app: XCUIApplication,
@@ -274,22 +277,22 @@ enum SheetFixtureReadiness {
         line: UInt = #line
     ) {
         var last: [String: Any] = [:]
-        let dismissed = XCTNSPredicateExpectation(
+        let gone = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                last = dismissalEvidence(in: app)
-                return (last["stages"] as? [String])?.contains("sheet-did-dismiss") == true
+                let evidence = dismissalEvidence(in: app)
+                if !evidence.isEmpty { last = evidence }
+                return !close.exists
             }, object: nil
         )
-        guard XCTWaiter.wait(for: [dismissed], timeout: timeout) == .completed else {
+        guard XCTWaiter.wait(for: [gone], timeout: timeout) == .completed else {
             XCTFail(dismissalFailure(from: last), file: file, line: line)
             return
         }
-        let gone = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == false"), object: close
-        )
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [gone], timeout: 3), .completed,
-            "The sheet reported its dismissal but its Close button is still in the tree",
+        // Gone, and it does not come back (waitForExistence waits for
+        // appearance, which is what this checks).
+        XCTAssertFalse(
+            close.waitForExistence(timeout: 1),
+            "The sheet's Close button came back after the gesture",
             file: file, line: line
         )
     }
@@ -311,7 +314,9 @@ enum SheetFixtureReadiness {
 
     /// What a gesture that did not dismiss the sheet did, in words.
     static func dismissalFailure(from evidence: [String: Any]) -> String {
-        let stages = evidence["stages"] as? [String] ?? []
+        guard let stages = evidence["stages"] as? [String] else {
+            return "The sheet stayed, and no dismissal receipt was readable"
+        }
         let receipt = (try? JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         if stages.contains("sheet-dismiss-refused") {
