@@ -1,6 +1,7 @@
 import Combine
 import Network
 import UIKit
+import UserNotifications
 import WebKit
 import XCTest
 @testable import Avibe
@@ -763,6 +764,159 @@ final class DirectPathAppTests: XCTestCase {
 
         XCTAssertEqual(try localized("en"), "Connection lost — reopen the app")
         XCTAssertEqual(try localized("zh-Hans"), "连接中断，请重新打开 App")
+    }
+
+    // MARK: The App as shipped, with notifications on
+
+    // Release checks for the App as it ships (no direct transport). Each
+    // open resumes push registration; the device token is delivered to the
+    // App's real `didRegister`, and the App's push coordinator sends the
+    // provider update through the account coordinator, held in flight by
+    // the control plane until the open's WebView has registered.
+    //
+    // `RootViewStandIn` makes and registers the runtime's WebView the way
+    // the root view does. With `.nextUpdate` it does so on the main queue
+    // right after the route changes, as SwiftUI's next update does, which
+    // is before the provider update starts. With `.afterTheProviderUpdate`
+    // it waits until that update is in flight first.
+
+    @MainActor
+    func testColdStartRestoresLastInstanceWithNotificationsOn() async throws {
+        try await assertColdStartRestoresInstanceOne(registration: .nextUpdate)
+    }
+
+    @MainActor
+    func testTenConsecutiveSwitchesOpenWithNotificationsOn() async throws {
+        try await assertTenSwitchesOpen(registration: .nextUpdate)
+    }
+
+    @MainActor
+    func testColdStartRestoresLastInstanceWhenItsProviderUpdateIsInFlightAtRegistration() async throws {
+        try await assertColdStartRestoresInstanceOne(registration: .afterTheProviderUpdate)
+    }
+
+    @MainActor
+    func testTenConsecutiveSwitchesOpenWhenEachProviderUpdateIsInFlightAtRegistration() async throws {
+        try await assertTenSwitchesOpen(registration: .afterTheProviderUpdate)
+    }
+
+    @MainActor
+    private func assertColdStartRestoresInstanceOne(
+        registration: RootViewStandIn.Registration,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try await requireAHostWithoutNotificationPermission()
+        let notifications = try NotificationsOn()
+        var root: RootViewStandIn?
+        let app = try await makeApp(
+            directTransport: nil,
+            launchesWithInstanceOneSelected: true,
+            notifications: notifications,
+            whenTheAppExists: { app in
+                root = RootViewStandIn(
+                    app: app,
+                    notifications: notifications,
+                    registration: registration
+                )
+            }
+        )
+        let view = try XCTUnwrap(root, file: file, line: line)
+        try await waitForTheBootstrap(of: app)
+        try await assertOpens(
+            "instance-1",
+            in: app,
+            root: view,
+            notifications: notifications,
+            afterArrivals: 0,
+            file: file,
+            line: line
+        ) {}
+    }
+
+    @MainActor
+    private func assertTenSwitchesOpen(
+        registration: RootViewStandIn.Registration,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        try await requireAHostWithoutNotificationPermission()
+        let notifications = try NotificationsOn()
+        let app = try await makeApp(
+            directTransport: nil,
+            notifications: notifications
+        )
+        let root = RootViewStandIn(
+            app: app,
+            notifications: notifications,
+            registration: registration
+        )
+        for index in 0..<10 {
+            let instanceID = index.isMultiple(of: 2) ? "instance-1" : "instance-2"
+            try await assertOpens(
+                instanceID,
+                in: app,
+                root: root,
+                notifications: notifications,
+                afterArrivals: notifications.providerPatches.arrivals,
+                step: "switch \(index + 1)",
+                file: file,
+                line: line
+            ) {
+                _ = try app.mobileSessionCoordinator.selectInstance(id: instanceID)
+            }
+        }
+        XCTAssertGreaterThanOrEqual(
+            notifications.providerPatches.arrivals,
+            10,
+            file: file,
+            line: line
+        )
+    }
+
+    /// Runs `open`, then checks the open of `instanceID` end to end: its
+    /// provider update reaches the control plane, the browser shows the
+    /// runtime, the root view's WebView registers and is kept, and after
+    /// the update is released and the account coordinator is idle, the
+    /// browser and the WebView are still there.
+    @MainActor
+    private func assertOpens(
+        _ instanceID: String,
+        in app: AppModel,
+        root: RootViewStandIn,
+        notifications: NotificationsOn,
+        afterArrivals arrivals: Int,
+        step: String = "",
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ open: () throws -> Void
+    ) async throws {
+        defer { notifications.providerPatches.releaseAll() }
+        let registered = root.registrations.count
+        try open()
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            notifications.providerPatches.arrivals > arrivals
+                && root.registrations.count > registered
+        }
+        let made = try XCTUnwrap(root.registrations.last, step, file: file, line: line)
+        XCTAssertEqual(made.runtime.instance.id, instanceID, step, file: file, line: line)
+        XCTAssertEqual(
+            app.route,
+            .browser(made.runtime),
+            "\(step): the WebView registered while the provider update was \(made.providerUpdateInFlight ? "in flight" : "not yet sent")",
+            file: file,
+            line: line
+        )
+        XCTAssertNotNil(made.controller.livePrimaryWebView, step, file: file, line: line)
+
+        // Released, including any follow-up update the coordinator sends.
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return app.mobileSessionCoordinator.isCurrentRuntime(made.runtime)
+                || app.route != .browser(made.runtime)
+        }
+        XCTAssertEqual(app.route, .browser(made.runtime), step, file: file, line: line)
+        XCTAssertNotNil(made.controller.livePrimaryWebView, step, file: file, line: line)
     }
 
     // MARK: The App with a transport
@@ -1810,11 +1964,19 @@ final class DirectPathAppTests: XCTestCase {
     /// The isolated preferences of the last App `makeApp` built.
     private var appDefaults: UserDefaults?
 
+    /// Where the account coordinator keeps the selected instance.
+    private static let selectionKey = "avibe.mobile.selection"
+
     /// An `AppModel` signed in through a local control plane, past its
     /// bootstrap. `nil` builds it exactly as the App does, with no
     /// transport argument at all. `beforeTheAppExists` runs once the control
     /// plane listens and before the `AppModel` is made, which is where a
     /// test takes the baseline of what the App itself does.
+    /// `launchesWithInstanceOneSelected` launches with instance-1 as the
+    /// stored selection, so the bootstrap restores it; `makeApp` then
+    /// returns at once and the test waits for the open itself.
+    /// `notifications` is the device's push state. `whenTheAppExists` runs
+    /// right after the `AppModel` is made, before its bootstrap runs.
     @MainActor
     private func makeApp(
         directTransport: DirectTransporting?,
@@ -1824,9 +1986,21 @@ final class DirectPathAppTests: XCTestCase {
         pushKeychain: InMemoryPushKeychainStore? = nil,
         pushInstallationMarker: InMemoryPushInstallationMarkerStore? = nil,
         pushNotificationCenter: PushNotificationCentering? = nil,
+        launchesWithInstanceOneSelected: Bool = false,
+        notifications: NotificationsOn? = nil,
+        // Before `beforeTheAppExists`: an unlabeled trailing closure at a
+        // call site keeps meaning that last parameter.
+        whenTheAppExists: (AppModel) -> Void = { _ in },
         beforeTheAppExists: () throws -> Void = {}
     ) async throws -> AppModel {
+        let providerPatches = notifications?.providerPatches
         let server = try LocalHTTPServer { request in
+            if let providerPatches,
+               request.method == "PATCH",
+               request.path == providerPatches.path
+            {
+                return providerPatches.response()
+            }
             if request.method == "POST",
                let hold = pushHolds.first(where: { $0.path == request.path })
             {
@@ -1884,6 +2058,20 @@ final class DirectPathAppTests: XCTestCase {
             await self.removeTrackedStores()
         }
 
+        if let providerPatches {
+            addTeardownBlock {
+                providerPatches.releaseAll()
+            }
+        }
+        if launchesWithInstanceOneSelected {
+            defaults.set(
+                Data(
+                    #"{"accountID":"account-1","instanceID":"instance-1","url":"https://instance-one.example"}"#.utf8
+                ),
+                forKey: Self.selectionKey
+            )
+        }
+
         try beforeTheAppExists()
 
         let controlPlane = MobileControlPlaneConfiguration(testBaseURL: baseURL)
@@ -1894,9 +2082,12 @@ final class DirectPathAppTests: XCTestCase {
                 controlPlane: controlPlane,
                 directTransport: directTransport,
                 directFaultMarker: directFaultMarker,
-                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushKeychain: notifications?.keychain
+                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
+                pushGenerationStore: notifications?.generationStore
+                    ?? InMemoryPushGenerationStore(),
+                pushInstallationMarker: notifications?.marker
+                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
@@ -1905,9 +2096,12 @@ final class DirectPathAppTests: XCTestCase {
                 defaults: defaults,
                 controlPlane: controlPlane,
                 directTransport: directTransport,
-                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushKeychain: notifications?.keychain
+                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
+                pushGenerationStore: notifications?.generationStore
+                    ?? InMemoryPushGenerationStore(),
+                pushInstallationMarker: notifications?.marker
+                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
@@ -1915,13 +2109,18 @@ final class DirectPathAppTests: XCTestCase {
             app = AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
-                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushKeychain: notifications?.keychain
+                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
+                pushGenerationStore: notifications?.generationStore
+                    ?? InMemoryPushGenerationStore(),
+                pushInstallationMarker: notifications?.marker
+                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 badgeCenter: SilentBadgeCenter()
             )
         }
+        notifications?.app = app
+        whenTheAppExists(app)
         trackStore(of: app)
         releaseFixtureApps.append { [weak app] in
             app?.showInstancePicker()
@@ -1929,6 +2128,9 @@ final class DirectPathAppTests: XCTestCase {
         }
         addTeardownBlock { @MainActor [self] in
             server.requests.attach(to: self, name: "direct App bootstrap requests")
+        }
+        if launchesWithInstanceOneSelected {
+            return app
         }
         try await WebKitReadiness.waitForSignedInFixture(
             app,
@@ -2043,6 +2245,36 @@ final class DirectPathAppTests: XCTestCase {
             baseURL: runtime.instance.url
         )
         return page
+    }
+
+    /// The checks with notifications on deliver each open's device token
+    /// themselves. On a test host where the App may show alerts, the App's
+    /// real `refreshAPNsRegistration` would also register with APNs, whose
+    /// token reaches every push coordinator at an arbitrary time. Fail
+    /// rather than skip, so the checks cannot go quiet.
+    @MainActor
+    private func requireAHostWithoutNotificationPermission() async throws {
+        let status = await UNUserNotificationCenter.current()
+            .notificationSettings().authorizationStatus
+        switch status {
+        case .notDetermined, .denied:
+            return
+        default:
+            XCTFail(
+                "The notifications-on checks need a test host without notification permission; erase the simulator."
+            )
+            throw DirectTestTimeout()
+        }
+    }
+
+    /// A launch made with `launchesWithInstanceOneSelected` returns before
+    /// its bootstrap: wait for its session read with the budget the fixture
+    /// gives one WebKit transport launch.
+    @MainActor
+    private func waitForTheBootstrap(of app: AppModel) async throws {
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            app.mobileSessionCoordinator.currentAccount?.id == "account-1"
+        }
     }
 
     /// The runtime controller the root view would create for `runtime`.
@@ -2667,5 +2899,192 @@ private final class FaultMarkerSpy: DirectFaultMarkerStoring {
         takes += 1
         defer { isMarked = false }
         return isMarked
+    }
+}
+
+/// A device with notifications on for account-1: the push keychain holds an
+/// active registration for the account, and each open's push-registration
+/// resume is answered with a device token, as APNs answers
+/// `registerForRemoteNotifications` (the App delegate hands it to the push
+/// coordinator's `didRegister`). The App's own push coordinator then sends
+/// the provider update, which `providerPatches` holds in flight. The App's
+/// real authorization read still runs; the tests require a host without
+/// notification permission, so it never registers with APNs itself.
+@MainActor
+private final class NotificationsOn {
+    let keychain = InMemoryPushKeychainStore()
+    let generationStore = InMemoryPushGenerationStore()
+    let marker = InMemoryPushInstallationMarkerStore()
+    let providerPatches: ProviderPatchGate
+    private(set) var tokensDelivered = 0
+    private var opens: AnyCancellable?
+
+    /// The App whose opens are answered: each open (a new runtime identity,
+    /// set right after `openRuntime` resumes push registration) gets a token.
+    weak var app: AppModel? {
+        didSet {
+            opens = app?.$runtimeIdentity.dropFirst().sink { [weak self] _ in
+                self?.deliverToken()
+            }
+        }
+    }
+
+    init() throws {
+        let installationID = UUID()
+        marker.installationID = installationID
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 12, count: 32),
+            accountID: "account-1",
+            bindGeneration: 1,
+            providerGeneration: 0,
+            provider: nil,
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "fixture-active-key",
+            instanceOrigin: "https://instance-one.example",
+            accountID: "account-1",
+            accountGeneration: generationStore.generation,
+            bindGeneration: 1,
+            privateKey: Data(),
+            authSecret: Data(repeating: 3, count: 16),
+            vapidKeyHash: "fixture",
+            state: .active,
+            pendingRevoke: false,
+            replacementRegistrationIDs: []
+        ))
+        providerPatches = ProviderPatchGate(
+            path: "/api/push/apns/installations/\(installationID.uuidString)/provider"
+        )
+    }
+
+    /// As APNs does, after the registration call has returned.
+    private func deliverToken() {
+        tokensDelivered += 1
+        Task { @MainActor [weak self] in
+            self?.app?.pushCoordinator.didRegister(
+                deviceToken: Data(repeating: 9, count: 32),
+                environment: "sandbox"
+            )
+        }
+    }
+}
+
+/// Answers each provider update with its headers at once and its body only
+/// when released, so the request stays in flight until then.
+private final class ProviderPatchGate: @unchecked Sendable {
+    let path: String
+    private let lock = NSLock()
+    private var arrived = 0
+    private var held: [DispatchSemaphore] = []
+
+    init(path: String) {
+        self.path = path
+    }
+
+    /// How many provider updates have reached the control plane.
+    var arrivals: Int {
+        lock.withLock { arrived }
+    }
+
+    func response() -> LocalHTTPResponse {
+        let release = DispatchSemaphore(value: 0)
+        lock.withLock {
+            arrived += 1
+            held.append(release)
+        }
+        return LocalHTTPResponse(
+            status: 200,
+            headers: [("Content-Type", "application/json")],
+            body: Data(
+                ("{\"pad\":\"" + String(repeating: "x", count: 100_000) + "\"}").utf8
+            ),
+            bodyRelease: release
+        )
+    }
+
+    func releaseAll() {
+        let released: [DispatchSemaphore] = lock.withLock {
+            defer { held.removeAll() }
+            return held
+        }
+        for release in released {
+            release.signal()
+        }
+    }
+}
+
+/// Makes and registers each shown runtime's WebView controller, as the
+/// root view does, and records what it made.
+@MainActor
+private final class RootViewStandIn {
+    enum Registration {
+        /// On the main actor right after the route changes: SwiftUI's next
+        /// update.
+        case nextUpdate
+        /// Only once the open's provider update is in flight.
+        case afterTheProviderUpdate
+    }
+
+    struct Made {
+        let runtime: MobileRuntimeContext
+        let controller: WebViewController
+        /// Whether a provider update was in flight when it registered.
+        let providerUpdateInFlight: Bool
+    }
+
+    private(set) var registrations: [Made] = []
+    private var subscription: AnyCancellable?
+
+    init(
+        app: AppModel,
+        notifications: NotificationsOn,
+        registration: Registration
+    ) {
+        subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
+            guard let self, let app, case .browser(let runtime) = route else {
+                return
+            }
+            let arrivals = notifications.providerPatches.arrivals
+            switch registration {
+            case .nextUpdate:
+                // Queued behind the jobs the open has queued so far; the
+                // provider update needs two more hops after those.
+                Task { @MainActor in
+                    self.register(runtime, in: app)
+                }
+            case .afterTheProviderUpdate:
+                Task { @MainActor in
+                    while notifications.providerPatches.arrivals <= arrivals {
+                        try? await Task.sleep(for: .milliseconds(10))
+                    }
+                    self.register(runtime, in: app)
+                }
+            }
+        }
+    }
+
+    private func register(_ runtime: MobileRuntimeContext, in app: AppModel) {
+        guard
+            let origin = WebOrigin(url: runtime.instance.url)
+        else {
+            return
+        }
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: app.runtimeWebsiteDataStore,
+            directStatus: app.directStatusProvider,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let inFlight = !app.mobileSessionCoordinator.isCurrentRuntime(runtime)
+            && app.mobileSessionCoordinator.isSelectedRuntime(runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        controller.loadViewIfNeeded()
+        registrations.append(
+            Made(runtime: runtime, controller: controller, providerUpdateInFlight: inFlight)
+        )
     }
 }
