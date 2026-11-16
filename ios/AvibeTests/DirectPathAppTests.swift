@@ -775,13 +775,37 @@ final class DirectPathAppTests: XCTestCase {
     // the control plane until the open's WebView has registered.
     //
     // `RootViewStandIn` makes and registers the runtime's WebView the way
-    // the root view does: on the main actor right after the route changes,
-    // as SwiftUI's next update does, which is before the provider update
-    // starts. (A WebView that registers while the update is already in
-    // flight is still refused on this App; #3834 changes that.)
+    // the root view does. With `.nextUpdate` it does so on the main actor
+    // right after the route changes, as SwiftUI's next update does, which
+    // is before the provider update starts. With `.afterTheProviderUpdate`
+    // it waits until that update is in flight: the race where the update
+    // starts first (from recovery, or a late view update). The update keeps
+    // the selection, so the registration is accepted either way.
 
     @MainActor
     func testColdStartRestoresLastInstanceWithNotificationsOn() async throws {
+        try await assertColdStartRestoresInstanceOne(registration: .nextUpdate)
+    }
+
+    @MainActor
+    func testTenConsecutiveSwitchesOpenWithNotificationsOn() async throws {
+        try await assertTenSwitchesOpen(registration: .nextUpdate)
+    }
+
+    @MainActor
+    func testColdStartRestoresLastInstanceWhenItsProviderUpdateIsInFlightAtRegistration() async throws {
+        try await assertColdStartRestoresInstanceOne(registration: .afterTheProviderUpdate)
+    }
+
+    @MainActor
+    func testTenConsecutiveSwitchesOpenWhenEachProviderUpdateIsInFlightAtRegistration() async throws {
+        try await assertTenSwitchesOpen(registration: .afterTheProviderUpdate)
+    }
+
+    @MainActor
+    private func assertColdStartRestoresInstanceOne(
+        registration: RootViewStandIn.Registration
+    ) async throws {
         try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         var root: RootViewStandIn?
@@ -790,7 +814,11 @@ final class DirectPathAppTests: XCTestCase {
             launchesWithInstanceOneSelected: true,
             notifications: notifications,
             whenTheAppExists: { app in
-                root = RootViewStandIn(app: app)
+                root = RootViewStandIn(
+                    app: app,
+                    notifications: notifications,
+                    registration: registration
+                )
             }
         )
         let view = try XCTUnwrap(root)
@@ -807,14 +835,20 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
-    func testTenConsecutiveSwitchesOpenWithNotificationsOn() async throws {
+    private func assertTenSwitchesOpen(
+        registration: RootViewStandIn.Registration
+    ) async throws {
         try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         let app = try await makeApp(
             directTransport: nil,
             notifications: notifications
         )
-        let root = RootViewStandIn(app: app)
+        let root = RootViewStandIn(
+            app: app,
+            notifications: notifications,
+            registration: registration
+        )
         for index in 0..<10 {
             let instanceID = index.isMultiple(of: 2) ? "instance-1" : "instance-2"
             try await assertOpens(
@@ -829,6 +863,156 @@ final class DirectPathAppTests: XCTestCase {
             }
         }
         XCTAssertGreaterThanOrEqual(notifications.providerPatches.arrivals, 10)
+    }
+
+    // What the registration must still refuse while a provider update is in
+    // flight: the WebView is invalidated, and an abandoned browser returns
+    // to the instance list.
+
+    @MainActor
+    func testASignOutStillRefusesTheRegistrationWhileAProviderUpdateIsInFlight() async throws {
+        try await requireAHostWithoutNotificationPermission()
+        let notifications = try NotificationsOn()
+        let app = try await makeApp(directTransport: nil, notifications: notifications)
+        defer { notifications.providerPatches.releaseAll() }
+        let runtime = try await openHoldingItsProviderUpdate("instance-1", in: app, notifications: notifications)
+
+        // Sign-out begins; its push cleanup waits behind the held update, so
+        // the browser is still shown when the WebView arrives.
+        let signOut = Task { @MainActor in
+            _ = try await app.mobileSessionCoordinator.logout()
+        }
+        try await eventually { !app.mobileSessionCoordinator.isSelectedRuntime(runtime) }
+        XCTAssertEqual(app.route, .browser(runtime))
+        let controller = registerTheRootViewsController(for: runtime, in: app)
+        XCTAssertNil(controller.livePrimaryWebView)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+
+        notifications.providerPatches.releaseAll()
+        _ = await signOut.result
+        trackStore(of: app)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+    }
+
+    /// Another sign-in begins (the account and its generation change), and
+    /// then a provider update runs when the old runtime's WebView arrives.
+    @MainActor
+    func testAnAccountSwitchStillRefusesTheRegistrationWhileAProviderUpdateIsInFlight() async throws {
+        try await requireAHostWithoutNotificationPermission()
+        let notifications = try NotificationsOn()
+        let hold = PushHold(path: "/api/push/apns/installations/hold/provider")
+        defer { hold.release.signal() }
+        let app = try await makeApp(
+            directTransport: nil,
+            pushHolds: [hold],
+            notifications: notifications
+        )
+        let runtime = try await openHoldingItsProviderUpdate("instance-1", in: app, notifications: notifications)
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return app.mobileSessionCoordinator.isCurrentRuntime(runtime)
+        }
+
+        // The fixture has no code endpoint: the sign-in fails after the
+        // account transition has begun.
+        _ = try? await app.mobileSessionCoordinator.requestOTP(email: "other@example.com")
+        trackStore(of: app)
+        XCTAssertFalse(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+        let management = try await holdPushManagement(hold, in: app)
+        let controller = registerTheRootViewsController(for: runtime, in: app)
+        XCTAssertNil(controller.livePrimaryWebView)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+
+        hold.release.signal()
+        _ = await management.result
+        XCTAssertEqual(app.route, .onboarding(.instances))
+    }
+
+    /// The stored selection no longer names the runtime when its WebView
+    /// arrives, while its provider update is in flight.
+    @MainActor
+    func testAChangedStoredSelectionStillRefusesTheRegistrationWhileAProviderUpdateIsInFlight() async throws {
+        try await requireAHostWithoutNotificationPermission()
+        let notifications = try NotificationsOn()
+        let app = try await makeApp(directTransport: nil, notifications: notifications)
+        defer { notifications.providerPatches.releaseAll() }
+        let runtime = try await openHoldingItsProviderUpdate("instance-1", in: app, notifications: notifications)
+
+        let defaults = try XCTUnwrap(appDefaults)
+        defaults.set(
+            Data(
+                #"{"accountID":"account-1","instanceID":"instance-2","url":"https://instance-two.example"}"#.utf8
+            ),
+            forKey: Self.selectionKey
+        )
+        let controller = registerTheRootViewsController(for: runtime, in: app)
+        XCTAssertNil(controller.livePrimaryWebView)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+    }
+
+    /// A different instance was opened meanwhile, and its own provider
+    /// update is in flight when the first runtime's WebView arrives late:
+    /// that WebView is refused and the newer browser stays.
+    @MainActor
+    func testADifferentInstanceOpenedMeanwhileRefusesTheLateRegistrationWhileAProviderUpdateIsInFlight() async throws {
+        try await requireAHostWithoutNotificationPermission()
+        let notifications = try NotificationsOn()
+        let app = try await makeApp(directTransport: nil, notifications: notifications)
+        defer { notifications.providerPatches.releaseAll() }
+        let first = try await openHoldingItsProviderUpdate("instance-1", in: app, notifications: notifications)
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return app.mobileSessionCoordinator.isCurrentRuntime(first)
+        }
+        let second = try await openHoldingItsProviderUpdate("instance-2", in: app, notifications: notifications)
+
+        let late = registerTheRootViewsController(for: first, in: app)
+        XCTAssertNil(late.livePrimaryWebView)
+        XCTAssertEqual(app.route, .browser(second))
+        let current = registerTheRootViewsController(for: second, in: app)
+        XCTAssertNotNil(current.livePrimaryWebView)
+        XCTAssertEqual(app.route, .browser(second))
+    }
+
+    /// Opens `instanceID` by a tap and returns once its provider update is
+    /// in flight, before any WebView has registered.
+    @MainActor
+    private func openHoldingItsProviderUpdate(
+        _ instanceID: String,
+        in app: AppModel,
+        notifications: NotificationsOn
+    ) async throws -> MobileRuntimeContext {
+        let before = notifications.providerPatches.arrivals
+        _ = try app.mobileSessionCoordinator.selectInstance(id: instanceID)
+        guard case .browser(let runtime) = app.route, runtime.instance.id == instanceID else {
+            XCTFail("The open of \(instanceID) ended at \(app.route).")
+            throw DirectTestTimeout()
+        }
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            notifications.providerPatches.arrivals > before
+        }
+        XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        return runtime
+    }
+
+    /// The controller the root view makes for `runtime`, registered, with
+    /// its view loaded (an invalidated one has no live WebView).
+    @MainActor
+    private func registerTheRootViewsController(
+        for runtime: MobileRuntimeContext,
+        in app: AppModel
+    ) -> WebViewController {
+        let controller = WebViewController(
+            instanceOrigin: WebOrigin(url: runtime.instance.url)!,
+            websiteDataStore: app.runtimeWebsiteDataStore,
+            directStatus: app.directStatusProvider,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        app.registerRuntimeController(controller, for: runtime)
+        controller.loadViewIfNeeded()
+        return controller
     }
 
     /// Runs `open`, then checks the open of `instanceID` end to end: its
@@ -1071,7 +1255,9 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testARuntimeAbandonedAtRegistrationEndsItsDirectSelection() async throws {
         let transport = StandInDirectTransport()
-        let hold = PushHold(path: "/api/push/hold-1")
+        // An exclusive operation that does not keep the selection and leaves
+        // the account as it is: a second-factor answer the server holds.
+        let hold = PushHold(path: "/api/two-factor/verify")
         let app = try await makeApp(
             directTransport: transport,
             pushHolds: [hold]
@@ -1081,11 +1267,21 @@ final class DirectPathAppTests: XCTestCase {
         let target = try XCTUnwrap(transport.selections.last)
         XCTAssertEqual(target.runtime, runtime)
 
-        // An ordinary push-management request is in flight when the root
-        // view's WebView arrives: the App refuses it and returns to the
-        // instance picker, without the usual stop of a runtime.
-        let management = try await holdPushManagement(hold, in: app)
+        // That operation is in flight when the root view's WebView arrives:
+        // the App refuses it and returns to the instance picker, without the
+        // usual stop of a runtime. (A push-management request keeps the
+        // selection and does not; see the opens across one below.)
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let operation = Task { @MainActor in
+            _ = try await app.mobileSessionCoordinator.verifySecondFactor(
+                method: .totp,
+                code: "123456"
+            )
+        }
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertFalse(app.mobileSessionCoordinator.keepsSelectedRuntime(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
         let deselected = transport.deselectCount
         app.registerRuntimeController(
             try makeRuntimeController(app, runtime),
@@ -1095,10 +1291,12 @@ final class DirectPathAppTests: XCTestCase {
         // The selection ended with the browser.
         XCTAssertEqual(transport.deselectCount, deselected + 1)
 
-        // The request ends. The account still has its instance, so only the
-        // ended selection stands between a report and the direct path.
+        // The operation ends without changing the account. It still has its
+        // instance, so only the ended selection stands between a report and
+        // the direct path.
         hold.release.signal()
-        try await management.value
+        _ = await operation.result
+        app.mobileSessionCoordinator.deactivateAccountSurface()
         try await reportUsableWhileTheAccountIsIdle(
             transport,
             for: target,
@@ -2974,10 +3172,17 @@ private final class ProviderPatchGate: @unchecked Sendable {
 }
 
 /// Makes and registers each shown runtime's WebView controller, as the
-/// root view does in SwiftUI's next update after the route changes, and
-/// records what it made.
+/// root view does, and records what it made.
 @MainActor
 private final class RootViewStandIn {
+    enum Registration {
+        /// On the main actor right after the route changes: SwiftUI's next
+        /// update.
+        case nextUpdate
+        /// Only once the open's provider update is in flight.
+        case afterTheProviderUpdate
+    }
+
     struct Made {
         let runtime: MobileRuntimeContext
         let controller: WebViewController
@@ -2988,15 +3193,30 @@ private final class RootViewStandIn {
     private(set) var registrations: [Made] = []
     private var subscription: AnyCancellable?
 
-    init(app: AppModel) {
+    init(
+        app: AppModel,
+        notifications: NotificationsOn,
+        registration: Registration
+    ) {
         subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
             guard let self, let app, case .browser(let runtime) = route else {
                 return
             }
-            // Queued behind the jobs the open has queued so far; the
-            // provider update needs two more hops after those.
-            Task { @MainActor in
-                self.register(runtime, in: app)
+            let arrivals = notifications.providerPatches.arrivals
+            switch registration {
+            case .nextUpdate:
+                // Queued behind the jobs the open has queued so far; the
+                // provider update needs two more hops after those.
+                Task { @MainActor in
+                    self.register(runtime, in: app)
+                }
+            case .afterTheProviderUpdate:
+                Task { @MainActor in
+                    while notifications.providerPatches.arrivals <= arrivals {
+                        try? await Task.sleep(for: .milliseconds(10))
+                    }
+                    self.register(runtime, in: app)
+                }
             }
         }
     }

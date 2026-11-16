@@ -1221,6 +1221,18 @@ final class MobileSessionCoordinator {
         phase == .ready && isSelectedRuntime(runtime)
     }
 
+    /// Whether `runtime` is the current runtime, or the only thing running
+    /// is an exclusive operation that keeps the selection: a
+    /// push-management request, which the App makes on its own while it
+    /// opens, or a refresh of the signed-in account. Any other operation, a
+    /// reset, a sign-out, or an account change does not keep it, and neither
+    /// does a changed generation, store, or stored selection. Only the
+    /// runtime WebView's registration asks this; the open itself and direct
+    /// authorization still ask `isCurrentRuntime`.
+    func keepsSelectedRuntime(_ runtime: MobileRuntimeContext) -> Bool {
+        keepsSelection && isSelectedRuntime(runtime)
+    }
+
     /// Whether `runtime` is still this account's selected instance, whatever
     /// ordinary exclusive operation runs meanwhile (a push-management request
     /// keeps the account, the store, and the selection as they are). Once a
