@@ -92,15 +92,4 @@ enum VoiceCaptureProbeSetup {
     }
 }
 
-@available(iOS 18.0, *)
-struct VoiceCaptureProbeShortcuts: AppShortcutsProvider {
-    static var appShortcuts: [AppShortcut] {
-        AppShortcut(
-            intent: SpeakToMainBotIntent(),
-            phrases: ["Speak to Main Bot in \(.applicationName)"],
-            shortTitle: "Speak to Main Bot",
-            systemImageName: "waveform"
-        )
-    }
-}
 #endif

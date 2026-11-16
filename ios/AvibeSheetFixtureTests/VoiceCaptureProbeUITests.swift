@@ -42,7 +42,7 @@ final class VoiceCaptureProbeUITests: XCTestCase {
         for trigger in candidates {
             let before = serverRequestCount()
             run(trigger, label: "r1-start-\(trigger.rawValue)")
-            sleep(5)
+            sleep(10)
             let after = serverRequestCount()
             note("r1 start via \(trigger.rawValue): stand-in requests \(before) -> \(after)")
             if after > before {
@@ -83,8 +83,9 @@ final class VoiceCaptureProbeUITests: XCTestCase {
     private func run(_ trigger: Trigger, label: String) {
         switch trigger {
         case .actionButton:
+            note("\(label): pressing the Action Button at \(Date())")
             XCUIDevice.shared.press(.action)
-            sleep(1)
+            sleep(4)
             shot("\(label)-after-press")
         case .spotlight:
             runFromSpotlight(label: label)

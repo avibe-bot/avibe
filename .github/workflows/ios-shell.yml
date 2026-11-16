@@ -152,6 +152,7 @@ jobs:
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
             -only-testing:AvibeTests/NativeBadgeTests \
+            ENABLE_DEBUG_DYLIB=NO IROH_DEBUG_DYLIB_PATH= IROH_DEBUG_DYLIB_INPUT= \
             CODE_SIGNING_ALLOWED=NO \
             test
 
@@ -206,9 +207,11 @@ jobs:
           container="$(xcrun simctl get_app_container "$SIMULATOR_ID" bot.avibe.ios data 2>/dev/null)"
           cp "$container/Library/Caches/voice-capture-probe.log" "$RUNNER_TEMP/probe/" || true
           ls -la "$container/Library/Caches/VoiceCapture" > "$RUNNER_TEMP/probe/takes.txt" 2>&1 || true
-          xcrun simctl spawn "$SIMULATOR_ID" log show --last 15m --style compact \
-            --predicate 'process == "Avibe" OR process == "AvibeLiveActivity" OR eventMessage CONTAINS[c] "bot.avibe.ios"' \
-            > "$RUNNER_TEMP/probe/simulator.log" 2>&1 || true
+          xcrun simctl spawn "$SIMULATOR_ID" log show --last 20m --style compact --info --debug \
+            > "$RUNNER_TEMP/probe/simulator-full.log" 2>&1 || true
+          grep -E 'Avibe|AvibeLiveActivity|linkd|appintents|SpringBoard.*([Aa]ction|Ringer|Hardware)|liveactivitiesd|WorkflowKit|ActionButton|audiomxd|mediaserverd' \
+            "$RUNNER_TEMP/probe/simulator-full.log" | grep -v 'runningboard:monitor' > "$RUNNER_TEMP/probe/simulator.log" || true
+          gzip -f "$RUNNER_TEMP/probe/simulator-full.log" || true
           xcrun xcresulttool export attachments --path "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
             --output-path "$RUNNER_TEMP/probe/attachments" > "$RUNNER_TEMP/probe/attachments.txt" 2>&1 || true
           echo "== app probe log"; cat "$RUNNER_TEMP/probe/voice-capture-probe.log" || true
