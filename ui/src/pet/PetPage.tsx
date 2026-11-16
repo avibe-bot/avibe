@@ -12,6 +12,7 @@ import { FileCard } from '@/components/ui/file-card';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
+import { noteVoiceStatus, voiceSendAllowed } from '@/lib/voiceConsent';
 import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { readMessageAttachments } from '@/lib/messageAttachments';
@@ -1372,7 +1373,10 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
       if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
       // Whether this account allowed voice input (lib/voiceConsent): a status without the field
       // comes from an instance that asks nothing.
-      else setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes, allowed: !('consent' in value) || value.consent === 'granted' });
+      else {
+        noteVoiceStatus(value);
+        setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes, allowed: !('consent' in value) || value.consent === 'granted' });
+      }
     }).catch(() => { if (alive() && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });
   }, [enabled, epoch]);
   useEffect(() => {
@@ -1413,7 +1417,9 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
     if (!epoch.isCurrent() || !available || captureRef.current) return;
     // Voice goes to a third-party AI service: the mini window records nothing before this
     // account said yes, and says where to turn it on (the question is asked in Avibe's window).
-    if (!asrForEpoch.allowed) {
+    // A "no" given since in Avibe's window or on another device reaches this window's store
+    // through the event stream (lib/voiceConsent).
+    if (!asrForEpoch.allowed || !voiceSendAllowed()) {
       setError('consentOff');
       // The answer may have changed in Avibe's window since this surface read it.
       readAsr(() => true);
