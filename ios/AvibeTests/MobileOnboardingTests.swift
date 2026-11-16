@@ -1139,6 +1139,7 @@ final class MobileOnboardingTests: XCTestCase {
         )
         XCTAssertEqual(historyRequest.method, .navigationHistoryChanged)
         XCTAssertNil(NativeShellMetadata.capabilities["navigation"])
+        XCTAssertEqual(NativeShellMetadata.capabilities["systemSchedule"], 1)
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
             [
@@ -1159,6 +1160,9 @@ final class MobileOnboardingTests: XCTestCase {
                 "push.subscribe",
                 "push.unsubscribe",
                 "push.openedAck",
+                "systemSchedule.cancel",
+                "systemSchedule.capabilities",
+                "systemSchedule.request",
                 "viewport.setOuterScrollLocked",
                 "voice.permission",
             ]
@@ -4095,6 +4099,112 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    func testLogoutRevokesAndDetachesBeforeAwaitingPushCleanup() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let cleanupStarted = expectation(description: "push cleanup started")
+        let releaseCleanup = expectation(description: "release push cleanup")
+        var transitionPreparations = 0
+        var transitionEvents: [String] = []
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [
+                transport,
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+            ],
+            onPrepareAccountTransition: {
+                transitionPreparations += 1
+                transitionEvents.append("runtime_revoked")
+                return []
+            },
+            onDetachAccount: { accountID in
+                transitionEvents.append("detached:\(accountID)")
+            },
+            onPreparePushLogout: {
+                transitionEvents.append("push_cleanup_started")
+                cleanupStarted.fulfill()
+                await self.fulfillment(of: [releaseCleanup], timeout: 30)
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+
+        let logout = Task { try await coordinator.logout() }
+        await fulfillment(of: [cleanupStarted], timeout: 30)
+        XCTAssertEqual(transitionPreparations, 1)
+        XCTAssertEqual(
+            transitionEvents,
+            [
+                "runtime_revoked",
+                "detached:account-1",
+                "push_cleanup_started",
+            ]
+        )
+        releaseCleanup.fulfill()
+        let logoutRoute = try await logout.value
+        XCTAssertEqual(logoutRoute, .signedOut)
+        XCTAssertEqual(transitionPreparations, 1)
+    }
+
+    func testColdStartSignedOutDetachesThePersistedDepartingAccount() async throws {
+        let defaults = makeDefaults()
+        let signedIn = FakeMobileAuthTransport()
+        signedIn.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [signedIn]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let signedOut = FakeMobileAuthTransport()
+        signedOut.session = nil
+        var detachedAccounts: [String] = []
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [signedOut, FakeMobileAuthTransport()],
+            onDetachAccount: { detachedAccounts.append($0) }
+        )
+        relaunched.activateAccountSurface()
+
+        let relaunchedRoute = try await relaunched.bootstrap()
+        XCTAssertEqual(relaunchedRoute, .signedOut)
+        XCTAssertEqual(detachedAccounts, ["account-1"])
+    }
+
+    func testColdStartDifferentAccountDetachesThePersistedDepartingAccount() async throws {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let replacementTransport = FakeMobileAuthTransport()
+        replacementTransport.session = snapshot(accountID: "account-2")
+        let replacementBootstrapTransport = FakeMobileAuthTransport()
+        replacementBootstrapTransport.session = snapshot(accountID: "account-2")
+        var detachedAccounts: [String] = []
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [replacementTransport, replacementBootstrapTransport],
+            onDetachAccount: { detachedAccounts.append($0) }
+        )
+        relaunched.activateAccountSurface()
+
+        let relaunchedRoute = try await relaunched.bootstrap()
+        XCTAssertEqual(relaunchedRoute, .signedOut)
+        XCTAssertNil(relaunched.currentAccount)
+        XCTAssertEqual(detachedAccounts, ["account-1"])
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "MobileOnboardingTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -4115,6 +4225,7 @@ final class MobileOnboardingTests: XCTestCase {
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
         ] = { [] },
+        onDetachAccount: @escaping @MainActor (String) -> Void = { _ in },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) -> MobileSessionCoordinator {
         var queue = transports
@@ -4133,6 +4244,7 @@ final class MobileOnboardingTests: XCTestCase {
             passkeyAuthenticator: passkeyAuthenticator ?? FakePasskeyAuthenticator(),
             onOpenRuntime: onOpen,
             onPrepareAccountTransition: onPrepareAccountTransition,
+            onDetachAccount: onDetachAccount,
             onPreparePushLogout: onPreparePushLogout
         )
     }

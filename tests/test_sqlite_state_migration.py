@@ -7248,6 +7248,85 @@ def test_legacy_sessions_import_still_requires_platform_for_an_unresolvable_lega
         ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
 
 
+def test_system_schedule_operations_migration_is_additive_and_reversible(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20261114_0089")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select name from sqlite_master where type = 'table' and name = 'system_schedule_operations'"
+        ).fetchone() is None
+        assert conn.execute(
+            "select name from sqlite_master where type = 'table' and name = 'system_schedule_attempts'"
+        ).fetchone() is None
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+    with sqlite3.connect(db_path) as conn:
+        operation_columns = {
+            row[1]: (row[2], row[3])
+            for row in conn.execute(
+                "pragma table_info(system_schedule_operations)"
+            ).fetchall()
+        }
+        attempt_columns = {
+            row[1]: (row[2], row[3])
+            for row in conn.execute(
+                "pragma table_info(system_schedule_attempts)"
+            ).fetchall()
+        }
+        operation_indexes = {
+            row[1]
+            for row in conn.execute(
+                "pragma index_list(system_schedule_operations)"
+            ).fetchall()
+        }
+        attempt_indexes = {
+            row[1]: row[2]
+            for row in conn.execute(
+                "pragma index_list(system_schedule_attempts)"
+            ).fetchall()
+        }
+        unique_attempt_index_columns = {
+            tuple(
+                column[2]
+                for column in conn.execute(
+                    f'pragma index_info("{name}")'
+                ).fetchall()
+            )
+            for name, unique in attempt_indexes.items()
+            if unique
+        }
+    assert operation_columns["operation_id"][1] == 1
+    assert operation_columns["session_id"][1] == 1
+    assert operation_columns["bound_device_id"][1] == 0
+    assert attempt_columns["request_id"][1] == 1
+    assert attempt_columns["generation"][1] == 1
+    assert attempt_columns["attempt_key"][1] == 1
+    assert attempt_columns["terminal_state"][1] == 0
+    assert {"idx_system_schedule_operations_session"} <= operation_indexes
+    assert {
+        "idx_system_schedule_attempts_expiry",
+        "idx_system_schedule_attempts_pending_claim",
+        "idx_system_schedule_attempts_sticky_claim",
+        "idx_system_schedule_attempts_operation",
+    } <= attempt_indexes.keys()
+    assert attempt_indexes["idx_system_schedule_attempts_operation"] == 0
+    assert ("attempt_key",) in unique_attempt_index_columns
+
+    command.downgrade(
+        migrations.alembic_config(db_path),
+        "20261114_0089",
+    )
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select name from sqlite_master where type = 'table' and name = 'system_schedule_operations'"
+        ).fetchone() is None
+        assert conn.execute(
+            "select name from sqlite_master where type = 'table' and name = 'system_schedule_attempts'"
+        ).fetchone() is None
+
+
 def test_state_under_any_directory_name_migrates_in_place(tmp_path: Path) -> None:
     # One name that carries every character Alembic's ConfigParser treats specially
     # or that SQLAlchemy 2.1 percent-encodes when it renders the URL: non-ASCII, a

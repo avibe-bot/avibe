@@ -12,10 +12,12 @@ from contextlib import closing
 from datetime import datetime
 import errno
 import json
+from pathlib import Path
 import shutil
 import sqlite3
 from types import SimpleNamespace
 
+from alembic.script import ScriptDirectory
 import pytest
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -32,6 +34,112 @@ NOTICE_LOG = (
     "You can still go back to 3.2.6; 3.2.5 and older can no longer open this database. "
     "Freeing some disk space is recommended."
 )
+
+
+@pytest.fixture(autouse=True)
+def exact_epoch3_graph(tmp_path, monkeypatch):
+    """Keep these historical boundary tests on the exact 0089 graph.
+
+    Every current or future successor is removed by ancestry, not by a filename
+    list, so default ``head`` continues to mean the S2 boundary this module owns.
+    """
+    source = migrations.alembic_dir()
+    script = ScriptDirectory.from_config(migrations.alembic_config())
+    ancestors = {
+        Path(revision.path).name
+        for revision in script.iterate_revisions("20261114_0089", "base")
+    }
+    graph = tmp_path / "epoch3-graph"
+    shutil.copytree(source, graph, ignore=shutil.ignore_patterns("__pycache__"))
+    # The copied env keeps its production rule: current-model schema validation
+    # belongs only to the real installed graph head, never this historical
+    # fixture's synthetic head.
+    env = graph / "env.py"
+    env_source = env.read_text(encoding="utf-8")
+    installed_head_expression = (
+        "ScriptDirectory.from_config(alembic_config()).get_heads()"
+    )
+    assert installed_head_expression in env_source
+    env.write_text(
+        env_source.replace(
+            installed_head_expression,
+            f"ScriptDirectory({str(source)!r}).get_heads()",
+        ),
+        encoding="utf-8",
+    )
+    for path in (graph / "versions").glob("*.py"):
+        if path.name != "__init__.py" and path.name not in ancestors:
+            path.unlink()
+    monkeypatch.setattr(migrations, "alembic_dir", lambda: graph)
+
+    reference = tmp_path / "epoch3-reference.sqlite"
+    migrations.run_migrations(reference)
+    with closing(sqlite3.connect(reference)) as conn:
+        expected_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            if not row[0].startswith("sqlite_")
+        }
+        expected_columns = {
+            table: {
+                row[1]
+                for row in conn.execute(f'PRAGMA table_info("{table}")')
+            }
+            for table in expected_tables
+        }
+
+    def historical_schema_problem(conn):
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        for table in expected_tables:
+            if table not in tables:
+                return f"compatible schema is missing table {table}"
+            columns = {
+                row[1]: row
+                for row in conn.execute(f'PRAGMA table_info("{table}")')
+            }
+            missing = expected_columns[table] - columns.keys()
+            if missing:
+                return (
+                    f"compatible schema is missing {table} columns: "
+                    f"{sorted(missing)}"
+                )
+            for name in columns.keys() - expected_columns[table]:
+                column = columns[name]
+                if column[3] and (
+                    column[4] is None
+                    or str(column[4]).strip("() ").upper() == "NULL"
+                ):
+                    return (
+                        "compatible schema requires old writers to supply new "
+                        f"column {table}.{name}"
+                    )
+        for table, index in (
+            ("messages", "ix_messages_turn_id"),
+            ("agent_events", "ix_agent_events_turn_sequence_id"),
+            ("agent_events", "ix_agent_events_session_type_context_seq"),
+            ("message_deliveries", "ix_message_deliveries_turn"),
+            ("message_deliveries", "ix_message_deliveries_recovery_owner"),
+        ):
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'index' AND tbl_name = ? AND name = ?",
+                (table, index),
+            ).fetchone():
+                return f"compatible schema is missing required index {index}"
+        return None
+
+    monkeypatch.setattr(
+        migrations,
+        "_compatible_schema_problem",
+        historical_schema_problem,
+    )
 
 
 @pytest.fixture

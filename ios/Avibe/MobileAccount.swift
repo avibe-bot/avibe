@@ -525,6 +525,7 @@ final class MobileSessionCoordinator {
     private let onPrepareAccountTransition: () -> [
         WebsiteDataStoreReleaseBarrier
     ]
+    private let onDetachAccount: @MainActor (String) -> Void
     private let onPreparePushLogout: @MainActor () async -> Void
 
     private var transport: MobileAuthTransporting?
@@ -612,6 +613,7 @@ final class MobileSessionCoordinator {
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
         ],
+        onDetachAccount: @escaping @MainActor (String) -> Void = { _ in },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) {
         self.defaults = defaults
@@ -622,6 +624,7 @@ final class MobileSessionCoordinator {
             ?? MobilePasskeyAuthenticator()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
+        self.onDetachAccount = onDetachAccount
         self.onPreparePushLogout = onPreparePushLogout
         transport = nil
     }
@@ -1096,7 +1099,7 @@ final class MobileSessionCoordinator {
             publishing: .signedOut, generation: resetGeneration,
             borrowingCleanup: borrowsCleanup
         )
-        invalidateAccount(clearSelection: true)
+        invalidateAccount(clearSelection: true, prepareRuntime: false)
         secondFactorEmail = nil
 
         if let oldTransport = transport {
@@ -1181,12 +1184,27 @@ final class MobileSessionCoordinator {
                 authoritativeTransition = nil
             }
         }
+        if let accountID = snapshot?.account.id ?? storedSelection()?.accountID,
+           !stateKeepsAccount(state, accountID: accountID)
+        {
+            onDetachAccount(accountID)
+        }
         if !borrowingCleanup {
             await preparePushLogout()
         }
         // Push cleanup can be superseded by logout and even a new login.
         // Transport ownership alone does not authorize the old state write.
         try requireCurrentGeneration(requestGeneration)
+    }
+
+    private func stateKeepsAccount(
+        _ state: MobileSessionState,
+        accountID: String
+    ) -> Bool {
+        guard case .signedIn(let snapshot, _) = state else {
+            return false
+        }
+        return snapshot.account.id == accountID
     }
 
     private func preparePushLogout() async {
@@ -1471,14 +1489,19 @@ final class MobileSessionCoordinator {
         return generation
     }
 
-    private func invalidateAccount(clearSelection: Bool) {
+    private func invalidateAccount(
+        clearSelection: Bool,
+        prepareRuntime: Bool = true
+    ) {
         snapshot = nil
         if clearSelection {
             clearStoredSelection()
         }
-        pendingStoreReleaseBarriers.append(
-            contentsOf: onPrepareAccountTransition()
-        )
+        if prepareRuntime {
+            pendingStoreReleaseBarriers.append(
+                contentsOf: onPrepareAccountTransition()
+            )
+        }
         // An account page over a live runtime starts no transport; the
         // runtime is released by now, so the transition's requests can run.
         ensureTransport()
@@ -1496,6 +1519,9 @@ final class MobileSessionCoordinator {
         phase = .resetting(token)
         generation += 1
         authoritativeTransition = nil
+        pendingStoreReleaseBarriers.append(
+            contentsOf: onPrepareAccountTransition()
+        )
         // Reset is now the sole owner across cleanup and store replacement;
         // an old operation's defer cannot release its replacement transport.
         transportOperationToken = token

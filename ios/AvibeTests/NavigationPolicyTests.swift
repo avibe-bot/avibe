@@ -2456,7 +2456,9 @@ final class NavigationPolicyTests: XCTestCase {
                 showInstances: {
                     instancesShown.fulfill()
                 },
-                instanceName: { nativeName }
+                instanceName: { nativeName },
+                instanceID: { "instance-1" },
+                deviceID: { "device-1" }
             )
         )
         primaryWebView = webView
@@ -2530,6 +2532,7 @@ final class NavigationPolicyTests: XCTestCase {
               accountPresentationCapability: info.capabilities.accountPresentation,
               instancePresentationCapability: info.capabilities.instancePresentation,
               instanceInfo: info.instance,
+              deviceInfo: info.device,
               legacyAccountResult,
               accountRootResult,
               invalidAccountArguments,
@@ -2559,7 +2562,14 @@ final class NavigationPolicyTests: XCTestCase {
             2
         )
         XCTAssertEqual(instancePayload["instancePresentationCapability"] as? Int, 1)
-        XCTAssertEqual(instancePayload["instanceInfo"] as? [String: String], ["name": "Studio"])
+        XCTAssertEqual(
+            instancePayload["instanceInfo"] as? [String: String],
+            ["id": "instance-1", "name": "Studio"]
+        )
+        XCTAssertEqual(
+            instancePayload["deviceInfo"] as? [String: String],
+            ["id": "device-1"]
+        )
         XCTAssertTrue(instancePayload["legacyAccountResult"] is NSNull)
         XCTAssertTrue(instancePayload["accountRootResult"] is NSNull)
         XCTAssertEqual(instancePayload["invalidAccountArguments"] as? [String],
@@ -2588,7 +2598,10 @@ final class NavigationPolicyTests: XCTestCase {
                 "return JSON.stringify((await window.avibeNative.call('app.info')).instance);",
                 arguments: [:], in: nil, contentWorld: .page
             )
-            XCTAssertEqual(try jsonObject(from: info) as? [String: String], ["name": expected])
+            XCTAssertEqual(
+                try jsonObject(from: info) as? [String: String],
+                ["id": "instance-1", "name": expected]
+            )
         }
 
         try await probe.loadHTML(

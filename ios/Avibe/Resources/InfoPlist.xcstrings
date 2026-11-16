@@ -68,6 +68,40 @@
           }
         }
       }
+    },
+    "NSAlarmKitUsageDescription" : {
+      "comment" : "Explains the system alarm permission prompt.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe creates an alarm only after you confirm its title and time."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在你确认标题和时间后，Avibe 才会创建闹钟。"
+          }
+        }
+      }
+    },
+    "NSRemindersFullAccessUsageDescription" : {
+      "comment" : "Explains the system Reminders permission prompt.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe adds a reminder only after you confirm its title and time."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在你确认标题和时间后，Avibe 才会添加提醒事项。"
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

@@ -331,11 +331,27 @@ final class WebViewFactory {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let instanceID: () -> String?
+    private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
     private let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
+    private let systemScheduleCapabilities: (
+        WKWebView,
+        WebOrigin
+    ) -> [String: Any]?
+    private let systemScheduleRequest: (
+        WKWebView,
+        SystemScheduleRequest,
+        WebOrigin
+    ) async -> [String: Any]?
+    private let systemScheduleCancel: (
+        WKWebView,
+        SystemScheduleCancelRequest,
+        WebOrigin
+    ) async -> [String: Any]?
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
     ] = [:]
@@ -355,6 +371,8 @@ final class WebViewFactory {
         showAccountRoot: showAccountRoot,
         showInstances: showInstances,
         instanceName: instanceName,
+        instanceID: instanceID,
+        deviceID: deviceID,
         directStatus: directStatus,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
@@ -391,6 +409,15 @@ final class WebViewFactory {
         },
         reconcileNotifications: { [weak self] reconcile, origin in
             self?.reconcileNotifications(reconcile, origin) ?? false
+        },
+        systemScheduleCapabilities: { [weak self] webView, origin in
+            self?.systemScheduleCapabilities(webView, origin)
+        },
+        systemScheduleRequest: { [weak self] webView, request, origin in
+            await self?.systemScheduleRequest(webView, request, origin)
+        },
+        systemScheduleCancel: { [weak self] webView, request, origin in
+            await self?.systemScheduleCancel(webView, request, origin)
         }
     )
 
@@ -404,10 +431,26 @@ final class WebViewFactory {
         showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
+        instanceID: @escaping () -> String? = { nil },
+        deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
+        systemScheduleCapabilities: @escaping (
+            WKWebView,
+            WebOrigin
+        ) -> [String: Any]? = { _, _ in nil },
+        systemScheduleRequest: @escaping (
+            WKWebView,
+            SystemScheduleRequest,
+            WebOrigin
+        ) async -> [String: Any]? = { _, _, _ in nil },
+        systemScheduleCancel: @escaping (
+            WKWebView,
+            SystemScheduleCancelRequest,
+            WebOrigin
+        ) async -> [String: Any]? = { _, _, _ in nil },
         pushCoordinator: NativePushCoordinator? = nil
     ) {
         self.instanceOrigin = instanceOrigin
@@ -419,10 +462,15 @@ final class WebViewFactory {
         self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
         self.instanceName = instanceName
+        self.instanceID = instanceID
+        self.deviceID = deviceID
         self.directStatus = directStatus
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleCapabilities = systemScheduleCapabilities
+        self.systemScheduleRequest = systemScheduleRequest
+        self.systemScheduleCancel = systemScheduleCancel
         self.pushCoordinator = pushCoordinator
     }
 
@@ -579,6 +627,8 @@ final class WebViewController: UIViewController {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let instanceID: () -> String?
+    private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
     /// Whether this runtime's WebView may be loaded now; `nil` without a
     /// direct transport, which loads as before.
@@ -592,6 +642,15 @@ final class WebViewController: UIViewController {
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
     private let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
+    private let systemScheduleCapabilities: (WebOrigin) -> [String: Any]?
+    private let systemScheduleRequest: (
+        SystemScheduleRequest,
+        WebOrigin
+    ) async -> [String: Any]?
+    private let systemScheduleCancel: (
+        SystemScheduleCancelRequest,
+        WebOrigin
+    ) async -> [String: Any]?
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
@@ -604,6 +663,7 @@ final class WebViewController: UIViewController {
     private var isInvalidatedForAccountTransition = false
     private var accountActionAvailable = false
     private var primaryNavigationInProgress = false
+    private var systemScheduleNavigationEpoch = 0
     /// One Runtime settlement is owed for the current primary main-frame
     /// navigation or policy action. Every terminal delegate exit claims this
     /// bit before notifying AppModel, so policy cancellation and its later
@@ -656,6 +716,14 @@ final class WebViewController: UIViewController {
                 guard let self, !self.isInvalidatedForAccountTransition else { return nil }
                 return self.instanceName()
             },
+            instanceID: { [weak self] in
+                guard let self, !self.isInvalidatedForAccountTransition else { return nil }
+                return self.instanceID()
+            },
+            deviceID: { [weak self] in
+                guard let self, !self.isInvalidatedForAccountTransition else { return nil }
+                return self.deviceID()
+            },
             directStatus: directStatus,
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
@@ -665,6 +733,39 @@ final class WebViewController: UIViewController {
             },
             reconcileNotifications: { [weak self] reconcile, origin in
                 self?.reconcileNotifications(reconcile, origin) ?? false
+            },
+            systemScheduleCapabilities: { [weak self] sourceWebView, origin in
+                guard let self,
+                      self.isTrustedPrimaryScheduleSource(
+                          sourceWebView,
+                          origin: origin
+                      )
+                else {
+                    return nil
+                }
+                return self.systemScheduleCapabilities(origin)
+            },
+            systemScheduleRequest: { [weak self] sourceWebView, request, origin in
+                guard let self,
+                      self.isTrustedPrimaryScheduleSource(
+                          sourceWebView,
+                          origin: origin
+                      )
+                else {
+                    return nil
+                }
+                return await self.systemScheduleRequest(request, origin)
+            },
+            systemScheduleCancel: { [weak self] sourceWebView, request, origin in
+                guard let self,
+                      self.isTrustedPrimaryScheduleSource(
+                          sourceWebView,
+                          origin: origin
+                      )
+                else {
+                    return nil
+                }
+                return await self.systemScheduleCancel(request, origin)
             },
             pushCoordinator: pushCoordinator
         )
@@ -682,6 +783,35 @@ final class WebViewController: UIViewController {
         return created
     }
 
+    func trustedPrimaryScheduleNavigationEpoch(origin: WebOrigin) -> Int? {
+        guard hasTrustedPrimaryScheduleSource(origin: origin) else {
+            return nil
+        }
+        return systemScheduleNavigationEpoch
+    }
+
+    func hasTrustedPrimaryScheduleSource(origin: WebOrigin) -> Bool {
+        guard
+            !isInvalidatedForAccountTransition,
+            !primaryNavigationInProgress,
+            let retainedWebView,
+            let currentURL = retainedWebView.url,
+            WebOrigin(url: currentURL, requiresHTTPS: false) == origin,
+            origin == instanceOrigin
+        else {
+            return false
+        }
+        return true
+    }
+
+    private func isTrustedPrimaryScheduleSource(
+        _ webView: WKWebView,
+        origin: WebOrigin
+    ) -> Bool {
+        retainedWebView === webView
+            && hasTrustedPrimaryScheduleSource(origin: origin)
+    }
+
     init(
         instanceOrigin: WebOrigin,
         websiteDataStore: WKWebsiteDataStore,
@@ -691,11 +821,24 @@ final class WebViewController: UIViewController {
         showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
+        instanceID: @escaping () -> String? = { nil },
+        deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
+        systemScheduleCapabilities: @escaping (
+            WebOrigin
+        ) -> [String: Any]? = { _ in nil },
+        systemScheduleRequest: @escaping (
+            SystemScheduleRequest,
+            WebOrigin
+        ) async -> [String: Any]? = { _, _ in nil },
+        systemScheduleCancel: @escaping (
+            SystemScheduleCancelRequest,
+            WebOrigin
+        ) async -> [String: Any]? = { _, _ in nil },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
@@ -710,6 +853,8 @@ final class WebViewController: UIViewController {
         self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
         self.instanceName = instanceName
+        self.instanceID = instanceID
+        self.deviceID = deviceID
         self.directStatus = directStatus
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
@@ -720,6 +865,9 @@ final class WebViewController: UIViewController {
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleCapabilities = systemScheduleCapabilities
+        self.systemScheduleRequest = systemScheduleRequest
+        self.systemScheduleCancel = systemScheduleCancel
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
@@ -2091,6 +2239,7 @@ extension WebViewController: WKNavigationDelegate {
         }
         cancelPendingDialogs(for: webView)
         if isPrimaryWebView(webView) {
+            systemScheduleNavigationEpoch += 1
             preparePrimaryNavigationSettlement(for: webView, isMainFrame: true)
             primaryWebContentTerminationHandled = false
             primaryNavigationInProgress = true

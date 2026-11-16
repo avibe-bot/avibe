@@ -461,6 +461,823 @@ final class DirectPathAppTests: XCTestCase {
     /// Without a transport nothing is gated: Retry reloads at once, and the
     /// runtime's WebView is given no gate at all, as before.
     @MainActor
+    func testTrustedRuntimeScheduleConfirmsCreatesOnceAndDetachesOnLogout() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+
+        let capabilities = try jsonObject(
+            try await page.systemScheduleCapabilities()
+        )
+        XCTAssertEqual(capabilities["contract"] as? Int, 1)
+        XCTAssertEqual(
+            capabilities["supportedKinds"] as? [String],
+            ["alarm"]
+        )
+
+        let first = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-1",
+                    operationID: "operation-1",
+                    now: now
+                )
+            )
+        }
+        try await eventually {
+            app.systemScheduleConfirmation?.request.operationID == "operation-1"
+        }
+        let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+        XCTAssertEqual(confirmation.request.kind, .alarm)
+        XCTAssertEqual(confirmation.request.title, "Take medicine")
+        XCTAssertEqual(confirmation.request.instanceID, "instance-1")
+        XCTAssertEqual(confirmation.request.sessionID, "session-1")
+        XCTAssertEqual(confirmation.instanceName, "One")
+        XCTAssertFalse(confirmation.isSubmitting)
+
+        app.confirmSystemSchedule(id: confirmation.id)
+        let receipt = try jsonObject(try await first.value)
+        XCTAssertEqual(receipt["state"] as? String, "scheduled")
+        XCTAssertEqual(receipt["authorization"] as? String, "authorized")
+        XCTAssertEqual(receipt["systemIdentifier"] as? String, "system-1")
+        XCTAssertEqual(platform.scheduleCalls, 1)
+        XCTAssertEqual(platform.systemCreationCalls, 1)
+
+        // A bridge retry uses the stored operation result. It does not show a
+        // second native confirmation or create another system item.
+        let retry = try jsonObject(
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-2",
+                    operationID: "operation-1",
+                    now: now
+                )
+            )
+        )
+        XCTAssertEqual(retry["requestId"] as? String, "request-2")
+        XCTAssertEqual(retry["state"] as? String, "scheduled")
+        XCTAssertNil(app.systemScheduleConfirmation)
+        XCTAssertEqual(platform.scheduleCalls, 1)
+        XCTAssertEqual(platform.systemCreationCalls, 1)
+
+        let store = UserDefaultsSystemScheduleStore(
+            defaults: try XCTUnwrap(appDefaults)
+        )
+        let owner = try XCTUnwrap(
+            store.managementOwner(accountID: "account-1")
+        )
+        XCTAssertEqual(
+            store.record(
+                operationID: "operation-1",
+                instanceID: "instance-1",
+                owner: owner
+            )?.lifecycle,
+            .managedScheduled
+        )
+        _ = try await app.mobileSessionCoordinator.logout()
+        trackStore(of: app)
+        XCTAssertEqual(
+            store.record(
+                operationID: "operation-1",
+                instanceID: "instance-1",
+                owner: owner
+            )?.lifecycle,
+            .detachedRetained
+        )
+        XCTAssertEqual(platform.cancelCalls, 0)
+    }
+
+    @MainActor
+    func testColdBootstrapFailurePreservesScheduleOwnerAndManagedRecord() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let request = try XCTUnwrap(
+            SystemScheduleRequest.parse(
+                scheduleParams(
+                    requestID: "request-bootstrap-failure",
+                    operationID: "operation-bootstrap-failure",
+                    now: now
+                )
+            )
+        )
+        var owner: SystemScheduleManagementOwner?
+        var store: UserDefaultsSystemScheduleStore?
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { .status(500) },
+            systemScheduleNow: { now },
+            launchesWithInstanceOneSelected: true,
+            whenTheAppExists: { _ in
+                guard let defaults = self.appDefaults else {
+                    XCTFail("App defaults were not created before bootstrap.")
+                    return
+                }
+                let seeded = UserDefaultsSystemScheduleStore(defaults: defaults)
+                guard let seededOwner = seeded.managementOwner(
+                    accountID: "account-1"
+                ) else {
+                    XCTFail("Could not seed the schedule management owner.")
+                    return
+                }
+                XCTAssertTrue(
+                    seeded.save(
+                        StoredSystemSchedule(
+                            operationID: request.operationID,
+                            owner: seededOwner,
+                            intent: StoredSystemScheduleIntent(request: request),
+                            systemIdentifier: "system-1",
+                            authorization: .authorized,
+                            lifecycle: .managedScheduled,
+                            effectMayExist: true,
+                            generation: 2,
+                            createState: .scheduled,
+                            lastError: nil,
+                            updatedAt: now
+                        )
+                    )
+                )
+                owner = seededOwner
+                store = seeded
+            }
+        )
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            if case .loading = app.route { return false }
+            return true
+        }
+
+        let persistedOwner = try XCTUnwrap(owner)
+        let persistedStore = try XCTUnwrap(store)
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertTrue(persistedStore.isActive(owner: persistedOwner))
+        XCTAssertEqual(
+            persistedStore.record(
+                operationID: request.operationID,
+                instanceID: request.instanceID,
+                owner: persistedOwner
+            )?.lifecycle,
+            .managedScheduled
+        )
+    }
+
+    @MainActor
+    func testPendingScheduleRetryUsesOperationIntentInsteadOfRequestID() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+
+        let first = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-original",
+                    operationID: "operation-retry",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let retry = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-retry",
+                    operationID: "operation-retry",
+                    now: now
+                )
+            )
+        }
+        try await settle()
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        XCTAssertEqual(
+            app.systemScheduleConfirmation?.request.operationID,
+            "operation-retry"
+        )
+
+        let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+        app.denySystemSchedule(id: confirmation.id)
+        let firstResult = try jsonObject(try await first.value)
+        let retryResult = try jsonObject(try await retry.value)
+        XCTAssertEqual(firstResult["state"] as? String, "user_denied")
+        XCTAssertEqual(retryResult["requestId"] as? String, "request-retry")
+        XCTAssertEqual(retryResult["state"] as? String, "user_denied")
+    }
+
+    @MainActor
+    func testRuntimeCancelClosesPendingAndSubmittedConfirmation() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer {
+            platform.releasePermission()
+            page.close()
+        }
+
+        let pendingCreate = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-pending-cancel",
+                    operationID: "operation-pending-cancel",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let pendingCancel = try jsonObject(
+            try await page.systemScheduleCancel(
+                requestID: "cancel-pending",
+                operationID: "operation-pending-cancel",
+                kind: "alarm"
+            )
+        )
+        XCTAssertEqual(pendingCancel["state"] as? String, "cancelled")
+        let pendingCreateResult = try jsonObject(try await pendingCreate.value)
+        XCTAssertEqual(pendingCreateResult["state"] as? String, "cancelled")
+        XCTAssertNil(app.systemScheduleConfirmation)
+        XCTAssertEqual(platform.scheduleCalls, 0)
+
+        platform.holdBeforeSystemCreation = true
+        let submittedCreate = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-submitted-cancel",
+                    operationID: "operation-submitted-cancel",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let submittedConfirmation = try XCTUnwrap(
+            app.systemScheduleConfirmation
+        )
+        app.confirmSystemSchedule(id: submittedConfirmation.id)
+        try await eventually { platform.isWaitingForPermission }
+        let submittedCancel = Task { @MainActor in
+            try await page.systemScheduleCancel(
+                requestID: "cancel-submitted",
+                operationID: "operation-submitted-cancel",
+                kind: "alarm"
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation == nil }
+        platform.releasePermission()
+        let submittedCreateResult = try jsonObject(try await submittedCreate.value)
+        let submittedCancelResult = try jsonObject(try await submittedCancel.value)
+        XCTAssertEqual(submittedCreateResult["state"] as? String, "cancelled")
+        XCTAssertEqual(submittedCancelResult["state"] as? String, "cancelled")
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+    }
+
+    @MainActor
+    func testCancelAfterSystemWriteReportsCleanupFailureIndependently() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        platform.holdAfterSystemCreation = true
+        platform.cancelResult = .failure(
+            .failed(
+                code: "cleanup_failed",
+                message: "Cleanup failed.",
+                systemIdentifier: "system-1",
+                effectMayExist: true
+            )
+        )
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer {
+            platform.releaseCreationResult()
+            page.close()
+        }
+
+        let create = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-cleanup-failure",
+                    operationID: "operation-cleanup-failure",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+        app.confirmSystemSchedule(id: confirmation.id)
+        try await eventually { platform.isWaitingAfterSystemCreation }
+
+        let cancel = Task { @MainActor in
+            try await page.systemScheduleCancel(
+                requestID: "cancel-cleanup-failure",
+                operationID: "operation-cleanup-failure",
+                kind: "alarm"
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation == nil }
+        platform.releaseCreationResult()
+
+        let createResult = try jsonObject(try await create.value)
+        let cancelResult = try jsonObject(try await cancel.value)
+        XCTAssertEqual(createResult["state"] as? String, "cancelled")
+        XCTAssertEqual(cancelResult["state"] as? String, "failed")
+        XCTAssertEqual(
+            (cancelResult["error"] as? [String: Any])?["code"] as? String,
+            "cleanup_failed"
+        )
+        XCTAssertEqual(cancelResult["systemIdentifier"] as? String, "system-1")
+        XCTAssertEqual(platform.systemCreationCalls, 1)
+        XCTAssertEqual(platform.cancelCalls, 1)
+    }
+
+    @MainActor
+    func testScheduleDenialAndExpiredConfirmationNeverCallTheSystem() async throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+
+        let deniedRequest = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-denied",
+                    operationID: "operation-denied",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let deniedConfirmation = try XCTUnwrap(
+            app.systemScheduleConfirmation
+        )
+        app.denySystemSchedule(id: deniedConfirmation.id)
+        let denied = try jsonObject(try await deniedRequest.value)
+        XCTAssertEqual(denied["state"] as? String, "user_denied")
+        XCTAssertEqual(platform.scheduleCalls, 0)
+
+        let expiredRequest = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-expired",
+                    operationID: "operation-expired",
+                    now: now
+                )
+            )
+        }
+        try await eventually {
+            app.systemScheduleConfirmation?.request.operationID
+                == "operation-expired"
+        }
+        let expiredConfirmation = try XCTUnwrap(
+            app.systemScheduleConfirmation
+        )
+        now = now.addingTimeInterval(301)
+        app.confirmSystemSchedule(id: expiredConfirmation.id)
+        let expired = try jsonObject(try await expiredRequest.value)
+        XCTAssertEqual(expired["state"] as? String, "expired")
+        XCTAssertEqual(platform.scheduleCalls, 0)
+    }
+
+    @MainActor
+    func testCorruptSystemScheduleStoreReturnsTheLocalStateErrorThroughTheBridge() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let corrupt = Data("not-json".utf8)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now },
+            beforeTheAppExists: { [self] in
+                try XCTUnwrap(appDefaults).set(
+                    corrupt,
+                    forKey: "avibe.systemSchedule.records"
+                )
+            }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+
+        let create = try jsonObject(
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-corrupt-store",
+                    operationID: "operation-corrupt-store",
+                    now: now
+                )
+            )
+        )
+        XCTAssertEqual(create["state"] as? String, "failed")
+        XCTAssertEqual(
+            (create["error"] as? [String: Any])?["code"] as? String,
+            "local_state_unavailable"
+        )
+        XCTAssertEqual(
+            (create["error"] as? [String: Any])?["message"] as? String,
+            "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
+        )
+
+        let cancel = try jsonObject(
+            try await page.systemScheduleCancel(
+                requestID: "cancel-corrupt-store",
+                operationID: "operation-corrupt-store",
+                kind: "alarm"
+            )
+        )
+        XCTAssertEqual(cancel["state"] as? String, "failed")
+        XCTAssertEqual(
+            (cancel["error"] as? [String: Any])?["code"] as? String,
+            "local_state_unavailable"
+        )
+        XCTAssertEqual(
+            (cancel["error"] as? [String: Any])?["message"] as? String,
+            "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(appDefaults).data(
+                forKey: "avibe.systemSchedule.records"
+            ),
+            corrupt
+        )
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        XCTAssertEqual(platform.cancelCalls, 0)
+    }
+
+    @MainActor
+    func testExpiredCreatingUnknownRecoversBeforeTheAppExpiryGuard() async throws {
+        let requestTime = Date(timeIntervalSince1970: 1_800_000_000)
+        var now = requestTime
+        let platform = RuntimeSystemSchedulePlatform()
+        platform.existenceResult = .exists(.authorized)
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+        let params = scheduleParams(
+            requestID: "request-expired-recovery",
+            operationID: "operation-expired-recovery",
+            now: requestTime
+        )
+        let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
+        let store = UserDefaultsSystemScheduleStore(
+            defaults: try XCTUnwrap(appDefaults)
+        )
+        let owner = try XCTUnwrap(
+            store.managementOwner(accountID: "account-1")
+        )
+        let identifier = platform.systemIdentifier(for: request, owner: owner)
+        XCTAssertTrue(
+            store.save(
+                StoredSystemSchedule(
+                    operationID: request.operationID,
+                    owner: owner,
+                    intent: StoredSystemScheduleIntent(request: request),
+                    systemIdentifier: identifier,
+                    authorization: .authorized,
+                    lifecycle: .creatingUnknown,
+                    effectMayExist: true,
+                    generation: 2,
+                    createState: nil,
+                    lastError: nil,
+                    updatedAt: requestTime
+                )
+            )
+        )
+        now = requestTime.addingTimeInterval(301)
+
+        let receipt = try jsonObject(
+            try await page.systemScheduleRequest(params)
+        )
+
+        XCTAssertEqual(receipt["state"] as? String, "expired")
+        XCTAssertNil(app.systemScheduleConfirmation)
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+        XCTAssertEqual(platform.cancelCalls, 1)
+        XCTAssertEqual(
+            store.record(
+                operationID: request.operationID,
+                instanceID: request.instanceID,
+                owner: owner
+            )?.lifecycle,
+            .closedRemoved
+        )
+    }
+
+    @MainActor
+    func testClaimedCreateKeepsDeviceResultAfterDeadlineCrosses() async throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        platform.holdAfterSystemCreation = true
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer {
+            platform.releaseCreationResult()
+            page.close()
+        }
+
+        let request = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-delayed-result",
+                    operationID: "operation-delayed-result",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+        app.confirmSystemSchedule(id: confirmation.id)
+        try await eventually { platform.isWaitingAfterSystemCreation }
+        XCTAssertEqual(platform.systemCreationCalls, 1)
+
+        now = now.addingTimeInterval(301)
+        platform.releaseCreationResult()
+        let receipt = try jsonObject(try await request.value)
+
+        XCTAssertEqual(receipt["state"] as? String, "scheduled")
+        XCTAssertEqual(platform.cancelCalls, 0)
+    }
+
+    @MainActor
+    func testLogoutDuringClaimedCreateDetachesThenCompensatesLateOSSuccess() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        platform.holdAfterSystemCreation = true
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer {
+            platform.releaseCreationResult()
+            page.close()
+        }
+
+        let request = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-logout-race",
+                    operationID: "operation-logout-race",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+        app.confirmSystemSchedule(id: confirmation.id)
+        try await eventually { platform.isWaitingAfterSystemCreation }
+
+        let store = UserDefaultsSystemScheduleStore(
+            defaults: try XCTUnwrap(appDefaults)
+        )
+        let owner = try XCTUnwrap(
+            store.managementOwner(accountID: "account-1")
+        )
+        _ = try await app.mobileSessionCoordinator.logout()
+        XCTAssertEqual(
+            store.record(
+                operationID: "operation-logout-race",
+                instanceID: "instance-1",
+                owner: owner
+            )?.lifecycle,
+            .detachedCleanupPending
+        )
+
+        platform.releaseCreationResult()
+        let receipt = try jsonObject(try await request.value)
+        XCTAssertEqual(receipt["state"] as? String, "stale_context")
+        XCTAssertEqual(platform.cancelCalls, 1)
+        XCTAssertEqual(
+            store.record(
+                operationID: "operation-logout-race",
+                instanceID: "instance-1",
+                owner: owner
+            )?.lifecycle,
+            .detachedCleaned
+        )
+        trackStore(of: app)
+    }
+
+    @MainActor
+    func testInstanceSwitchEndsPendingScheduleWithoutCallingTheSystem() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+
+        let request = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-stale",
+                    operationID: "operation-stale",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+
+        _ = try await select("instance-2", in: app)
+        let receipt = try jsonObject(try await request.value)
+        XCTAssertEqual(receipt["state"] as? String, "stale_context")
+        XCTAssertEqual(
+            (receipt["error"] as? [String: Any])?["code"] as? String,
+            "stale_context"
+        )
+        XCTAssertNil(app.systemScheduleConfirmation)
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+    }
+
+    @MainActor
+    func testProvisionalNavigationRevokesScheduleAuthorityBeforeURLChanges() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: RuntimeSystemSchedulePlatform(),
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
+
+        XCTAssertTrue(page.hasTrustedScheduleSource(origin: origin))
+        try page.beginPrimaryProvisionalNavigation()
+        XCTAssertFalse(page.hasTrustedScheduleSource(origin: origin))
+    }
+
+    @MainActor
+    func testSameOriginReturnDoesNotReviveARequestRevokedAtProvisionalStart() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+
+        let request = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-same-origin-return",
+                    operationID: "operation-same-origin-return",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let revokedConfirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+
+        try await page.load(
+            "<!doctype html><title>Trusted again</title>",
+            baseURL: runtime.instance.url
+        )
+        let receipt = try jsonObject(try await request.value)
+        XCTAssertEqual(receipt["state"] as? String, "stale_context")
+        XCTAssertNil(app.systemScheduleConfirmation)
+
+        app.confirmSystemSchedule(id: revokedConfirmation.id)
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+    }
+
+    @MainActor
+    func testPrimaryNavigationAwayRevokesPendingScheduleAuthority() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+
+        let request = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-navigation",
+                    operationID: "operation-navigation",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+        try await page.load(
+            "<!doctype html><title>Elsewhere</title>",
+            baseURL: URL(string: "https://example.com")!
+        )
+
+        app.confirmSystemSchedule(id: confirmation.id)
+        try await eventually { app.systemScheduleConfirmation == nil }
+        _ = await request.result
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+    }
+
+    @MainActor
+    func testLatePermissionReturnCannotCreateForAReplacedRuntime() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        platform.holdBeforeSystemCreation = true
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer {
+            platform.releasePermission()
+            page.close()
+        }
+
+        let request = Task { @MainActor in
+            try await page.systemScheduleRequest(
+                scheduleParams(
+                    requestID: "request-late",
+                    operationID: "operation-late",
+                    now: now
+                )
+            )
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+        app.confirmSystemSchedule(id: confirmation.id)
+        try await eventually { platform.isWaitingForPermission }
+        XCTAssertEqual(platform.scheduleCalls, 1)
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+
+        let store = UserDefaultsSystemScheduleStore(
+            defaults: try XCTUnwrap(appDefaults)
+        )
+        let owner = try XCTUnwrap(
+            store.managementOwner(accountID: "account-1")
+        )
+        _ = try await select("instance-2", in: app)
+        XCTAssertNil(app.systemScheduleConfirmation)
+        platform.releasePermission()
+        let receipt = try jsonObject(try await request.value)
+        XCTAssertEqual(receipt["state"] as? String, "stale_context")
+        try await settle()
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+        XCTAssertEqual(
+            store.record(
+                operationID: "operation-late",
+                instanceID: "instance-1",
+                owner: owner
+            )?.lifecycle,
+            .closedNoItem
+        )
+    }
+
+    @MainActor
     func testWithoutATransportNothingIsGated() async throws {
         let app = try await makeApp(directTransport: nil)
         let runtime = try await select("instance-1", in: app)
@@ -3090,6 +3907,114 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testSameOriginPopupCannotUsePrimaryRuntimeScheduleAuthority() async throws {
+        let server = try LocalHTTPServer { request in
+            if request.path == "/child" {
+                return .html("<!doctype html><title>Child</title>")
+            }
+            return .html(
+                """
+                <!doctype html><title>Primary</title>
+                <button id="open-child" onclick="window.open('/child', '_blank')">Open</button>
+                """
+            )
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(
+            WebOrigin(url: baseURL, requiresHTTPS: false)
+        )
+        var capabilityCalls = 0
+        var requestCalls = 0
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            navigationPolicy: NavigationPolicy(
+                instanceOrigins: [origin],
+                authenticationOrigins: []
+            ),
+            systemScheduleCapabilities: { _ in
+                capabilityCalls += 1
+                return ["contract": 1]
+            },
+            systemScheduleRequest: { request, _ in
+                requestCalls += 1
+                return SystemScheduleReceipt.terminal(
+                    request: request,
+                    state: .scheduled,
+                    authorization: .authorized,
+                    systemIdentifier: "must-not-be-created"
+                ).jsonObject
+            },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.loadViewIfNeeded()
+        controller.view.frame = window.bounds
+        controller.view.layoutIfNeeded()
+        defer {
+            controller.presentedViewController?.dismiss(animated: false)
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let primary = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        func title(of webView: WKWebView) async -> String? {
+            try? await webView.evaluateJavaScript("document.title") as? String
+        }
+        try await eventually { await title(of: primary) == "Primary" }
+        _ = try await primary.evaluateJavaScript(
+            "document.querySelector('#open-child').click(); true"
+        )
+        var child: WKWebView?
+        try await eventually {
+            let popup = controller.presentedViewController
+                as? UINavigationController
+            child = popup?.topViewController?.viewIfLoaded?
+                .subviews.compactMap { $0 as? WKWebView }.first
+            return child != nil
+        }
+        let childWebView = try XCTUnwrap(child)
+        try await eventually { await title(of: childWebView) == "Child" }
+
+        let result = try await childWebView.callAsyncJavaScript(
+            """
+            const codes = [];
+            try {
+              await window.avibeNative.call("systemSchedule.capabilities");
+              codes.push("accepted");
+            } catch (error) {
+              codes.push(error.code);
+            }
+            try {
+              await window.avibeNative.call("systemSchedule.request", params);
+              codes.push("accepted");
+            } catch (error) {
+              codes.push(error.code);
+            }
+            return JSON.stringify(codes);
+            """,
+            arguments: [
+                "params": scheduleParams(
+                    requestID: "popup-request",
+                    operationID: "popup-operation",
+                    now: Date()
+                )
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(result as? String, #"["forbidden","forbidden"]"#)
+        XCTAssertEqual(capabilityCalls, 0)
+        XCTAssertEqual(requestCalls, 0)
+    }
+
+    @MainActor
     func testATransportChangeReachesAnInstanceChildWindowUntilItLeavesTheInstance() async throws {
         let instanceServer = try LocalHTTPServer { request in
             switch request.path {
@@ -3221,6 +4146,34 @@ final class DirectPathAppTests: XCTestCase {
 
     private var storeIdentifiers: Set<UUID> = []
     private var releaseFixtureApps: [@MainActor () -> Void] = []
+    private func scheduleParams(
+        requestID: String,
+        operationID: String,
+        now: Date
+    ) -> [String: Any] {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return [
+            "requestId": requestID,
+            "operationId": operationID,
+            "kind": "alarm",
+            "title": "Take medicine",
+            "fireAt": formatter.string(from: now.addingTimeInterval(3_600)),
+            "timeZone": "UTC",
+            "recurrence": NSNull(),
+            "instanceId": "instance-1",
+            "sessionId": "session-1",
+            "expiresAt": formatter.string(from: now.addingTimeInterval(300)),
+        ]
+    }
+
+    private func jsonObject(_ json: String?) throws -> [String: Any] {
+        let data = try XCTUnwrap(json?.data(using: .utf8))
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+    }
+
     /// What `direct.status()` answers for `origin`, through the provider
     /// the App gives its WebViews. `nil` when it answers later or not at all.
     @MainActor
@@ -3347,6 +4300,8 @@ final class DirectPathAppTests: XCTestCase {
         pushNotificationCenter: PushNotificationCentering? = nil,
         runtimeOpenTiming: RuntimeOpenTiming? = nil,
         runtimeOpenNotificationCenter: NotificationCenter = .default,
+        systemSchedulePlatform: SystemSchedulePlatforming? = nil,
+        systemScheduleNow: @escaping @MainActor () -> Date = Date.init,
         launchesWithInstanceOneSelected: Bool = false,
         notifications: NotificationsOn? = nil,
         // Before `beforeTheAppExists`: an unlabeled trailing closure at a
@@ -3450,6 +4405,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                systemSchedulePlatform: systemSchedulePlatform,
+                systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming,
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
@@ -3466,6 +4423,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                systemSchedulePlatform: systemSchedulePlatform,
+                systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming,
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
@@ -3481,6 +4440,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                systemSchedulePlatform: systemSchedulePlatform,
+                systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming,
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
@@ -3655,6 +4616,15 @@ final class DirectPathAppTests: XCTestCase {
             instanceOrigin: origin,
             websiteDataStore: app.runtimeWebsiteDataStore,
             directStatus: app.directStatusProvider,
+            systemScheduleCapabilities: { [weak app] origin in
+                app?.systemScheduleCapabilities(origin: origin)
+            },
+            systemScheduleRequest: { [weak app] request, origin in
+                await app?.requestSystemSchedule(request, origin: origin)
+            },
+            systemScheduleCancel: { [weak app] request, origin in
+                await app?.cancelSystemSchedule(request, origin: origin)
+            },
             didStartLoading: {},
             didFinishLoading: {},
             didFailLoading: {}
@@ -3928,6 +4898,110 @@ private final class RendezvousRequests {
     }
 }
 
+/// A controllable system-schedule platform for the App/bridge composition.
+/// Its optional hold models the system permission sheet returning after the
+/// Runtime that requested it has already been replaced.
+@MainActor
+private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
+    private var permissionContinuation: CheckedContinuation<Void, Never>?
+    private var creationResultContinuation: CheckedContinuation<Void, Never>?
+    private(set) var scheduleCalls = 0
+    private(set) var systemCreationCalls = 0
+    private(set) var cancelCalls = 0
+    var holdBeforeSystemCreation = false
+    var holdAfterSystemCreation = false
+    var existenceResult: SystemScheduleExistence = .absentConclusive(.authorized)
+    var cancelResult: Result<
+        SystemScheduleAuthorization,
+        SystemSchedulePlatformFailure
+    > = .success(.authorized)
+
+    var isWaitingForPermission: Bool {
+        permissionContinuation != nil
+    }
+
+    var isWaitingAfterSystemCreation: Bool {
+        creationResultContinuation != nil
+    }
+
+    func capabilities() -> SystemScheduleCapabilities {
+        SystemScheduleCapabilities(
+            iosVersion: "26.6.2",
+            alarmKitAvailable: true,
+            alarmAuthorization: .authorized,
+            remindersAvailable: false,
+            remindersAuthorization: .unsupported,
+            supportedKinds: [.alarm]
+        )
+    }
+
+    func systemIdentifier(
+        for request: SystemScheduleRequest,
+        owner: SystemScheduleManagementOwner
+    ) -> String {
+        "system-1"
+    }
+
+    func existence(
+        kind: SystemScheduleKind,
+        systemIdentifier: String
+    ) async -> SystemScheduleExistence {
+        existenceResult
+    }
+
+    func schedule(
+        _ request: SystemScheduleRequest,
+        systemIdentifier: String,
+        stillCurrent: @escaping @MainActor () -> Bool
+    ) async -> Result<SystemScheduleSubmission, SystemSchedulePlatformFailure> {
+        scheduleCalls += 1
+        if holdBeforeSystemCreation {
+            await withCheckedContinuation { continuation in
+                permissionContinuation = continuation
+            }
+        }
+        guard stillCurrent() else {
+            return .failure(.staleContext)
+        }
+        systemCreationCalls += 1
+        if holdAfterSystemCreation {
+            await withCheckedContinuation { continuation in
+                creationResultContinuation = continuation
+            }
+        }
+        return .success(
+            SystemScheduleSubmission(
+                systemIdentifier: systemIdentifier,
+                authorization: .authorized
+            )
+        )
+    }
+
+    func cancel(
+        kind: SystemScheduleKind,
+        systemIdentifier: String,
+        stillAuthorized: @escaping @MainActor () -> Bool
+    ) async -> Result<SystemScheduleAuthorization, SystemSchedulePlatformFailure> {
+        guard stillAuthorized() else { return .failure(.staleContext) }
+        cancelCalls += 1
+        return cancelResult
+    }
+
+    func releasePermission() {
+        let continuation = permissionContinuation
+        permissionContinuation = nil
+        holdBeforeSystemCreation = false
+        continuation?.resume()
+    }
+
+    func releaseCreationResult() {
+        let continuation = creationResultContinuation
+        creationResultContinuation = nil
+        holdAfterSystemCreation = false
+        continuation?.resume()
+    }
+}
+
 /// One runtime controller in a window, and its primary WebView.
 @MainActor
 private final class RuntimePage {
@@ -3965,9 +5039,11 @@ private final class RuntimePage {
 
     private var window: UIWindow?
     private var webView: WKWebView?
+    private let controller: WebViewController
     private let loader = PageLoader()
 
     init(controller: WebViewController) throws {
+        self.controller = controller
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
         window.rootViewController = controller
         window.makeKeyAndVisible()
@@ -4026,6 +5102,74 @@ private final class RuntimePage {
             in: nil,
             contentWorld: .page
         ) as? String
+    }
+
+    /// Requests a system schedule through the page bridge and returns the
+    /// terminal receipt exactly as JSON. The native confirmation may keep
+    /// this call suspended until the test confirms or invalidates it.
+    func systemScheduleRequest(_ params: [String: Any]) async throws -> String? {
+        try await webView?.callAsyncJavaScript(
+            """
+            const receipt = await window.avibeNative.call(
+              "systemSchedule.request",
+              params
+            );
+            return JSON.stringify(receipt);
+            """,
+            arguments: ["params": params],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+    }
+
+    func systemScheduleCapabilities() async throws -> String? {
+        try await webView?.callAsyncJavaScript(
+            """
+            const capabilities = await window.avibeNative.call(
+              "systemSchedule.capabilities"
+            );
+            return JSON.stringify(capabilities);
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+    }
+
+    func systemScheduleCancel(
+        requestID: String,
+        operationID: String,
+        kind: String,
+        purpose: String = "user"
+    ) async throws -> String? {
+        try await webView?.callAsyncJavaScript(
+            """
+            const receipt = await window.avibeNative.call(
+              "systemSchedule.cancel",
+              { requestId, operationId, kind, purpose }
+            );
+            return JSON.stringify(receipt);
+            """,
+            arguments: [
+                "requestId": requestID,
+                "operationId": operationID,
+                "kind": kind,
+                "purpose": purpose,
+            ],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+    }
+
+    func hasTrustedScheduleSource(origin: WebOrigin) -> Bool {
+        controller.hasTrustedPrimaryScheduleSource(origin: origin)
+    }
+
+    func beginPrimaryProvisionalNavigation() throws {
+        controller.webView(
+            try XCTUnwrap(webView),
+            didStartProvisionalNavigation: nil
+        )
     }
 
     /// Lets go of the WebView and its window, as the App does when the

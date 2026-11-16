@@ -53,5 +53,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSAlarmKitUsageDescription</key>
+	<string>Avibe creates an alarm only after you confirm its title and time.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Avibe adds a reminder only after you confirm its title and time.</string>
 </dict>
 </plist>

@@ -1,0 +1,688 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from sqlalchemy import select, text
+
+from storage.db import create_sqlite_engine
+from storage.importer import ensure_sqlite_state
+from storage.models import (
+    agent_sessions,
+    system_schedule_attempts,
+)
+from storage.system_schedule_service import (
+    SystemScheduleServiceError,
+    _canonical_receipt,
+    cancel_operation,
+    claim_next,
+    create_operation,
+    get_operation,
+    record_receipt,
+)
+
+NOW = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
+FIRE_AT = "2026-11-16T16:00:00.123456Z"
+CONTRACT_VECTORS = (
+    Path(__file__).parent / "fixtures" / "system_schedule_contract_vectors.json"
+)
+
+
+def test_shared_contract_vectors_cover_closed_shapes_and_terminal_receipts():
+    vectors = json.loads(CONTRACT_VECTORS.read_text())
+    assert vectors["contract"] == 1
+    assert {request["title"] for request in vectors["createRequests"]} == {
+        "Take medicine",
+        "吃药 💊",
+    }
+    create_keys = {
+        "requestId",
+        "operationId",
+        "kind",
+        "title",
+        "fireAt",
+        "timeZone",
+        "recurrence",
+        "instanceId",
+        "sessionId",
+        "expiresAt",
+    }
+    assert all(set(request) == create_keys for request in vectors["createRequests"])
+    assert all(request["recurrence"] is None for request in vectors["createRequests"])
+    assert all(
+        set(request) == {"requestId", "operationId", "kind", "purpose"}
+        for request in vectors["cancelRequests"]
+    )
+    assert {request["purpose"] for request in vectors["cancelRequests"]} == {
+        "user",
+        "compensation",
+    }
+    parsed = [_canonical_receipt(receipt).payload for receipt in vectors["receipts"]]
+    assert parsed == vectors["receipts"]
+    assert {receipt["state"] for receipt in parsed} == {
+        "scheduled",
+        "user_denied",
+        "permission_denied",
+        "unsupported",
+        "failed",
+        "expired",
+        "stale_context",
+        "cancelled",
+    }
+
+
+@pytest.fixture()
+def isolated_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-schedule",
+                scope_id=None,
+                agent_id=None,
+                agent_name="codex",
+                agent_backend="codex",
+                agent_variant="default",
+                model=None,
+                reasoning_effort=None,
+                session_anchor="schedule-test",
+                workdir="/tmp",
+                native_session_id="native-schedule-test",
+                title="Schedule test",
+                status="active",
+                visibility="foreground",
+                pinned=0,
+                agent_status="idle",
+                composer_draft_text=None,
+                composer_draft_updated_at=None,
+                metadata_json="{}",
+                created_at="2026-11-16T14:00:00Z",
+                updated_at="2026-11-16T14:00:00Z",
+                last_active_at="2026-11-16T14:00:00Z",
+            )
+        )
+    return tmp_path
+
+
+def _create(*, operation_id: str = "wake-up", now: datetime = NOW, expires_in: int = 300):
+    return create_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id=operation_id,
+        kind="alarm",
+        title="Wake up",
+        fire_at=FIRE_AT,
+        time_zone="America/Los_Angeles",
+        expires_in=expires_in,
+        now=now,
+    )
+
+
+def _get(operation_id: str = "wake-up", *, now: datetime = NOW):
+    return get_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id=operation_id,
+        now=now,
+    )
+
+
+def _receipt(
+    claim: dict,
+    *,
+    state: str,
+    system_identifier: str | None = None,
+    authorization: str = "authorized",
+    error: dict | None = None,
+) -> dict:
+    request = claim["request"]
+    return {
+        "contract": 1,
+        "requestId": request["requestId"],
+        "operationId": request["operationId"],
+        "kind": request["kind"],
+        "state": state,
+        "systemIdentifier": system_identifier,
+        "fireAt": request.get("fireAt"),
+        "timeZone": request.get("timeZone"),
+        "authorization": authorization,
+        "error": error,
+    }
+
+
+def _record(claim: dict, receipt: dict, *, now: datetime = NOW):
+    return record_receipt(
+        instance_id="instance-a",
+        device_id="device-a",
+        lease_token=claim["leaseToken"],
+        receipt=receipt,
+        now=now,
+    )
+
+
+def _schedule(operation_id: str = "wake-up") -> dict:
+    _create(operation_id=operation_id)
+    claim = claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+    _record(
+        claim,
+        _receipt(claim, state="scheduled", system_identifier=f"opaque-{operation_id}"),
+    )
+    return claim
+
+
+def test_create_is_canonical_session_bound_idempotent_and_conflict_safe(isolated_state):
+    created = _create()
+    retried = _create()
+
+    assert retried == created
+    assert created["session_id"] == "ses-schedule"
+    assert created["instance_id"] == "instance-a"
+    assert created["state"] == "pending"
+    assert created["fire_at"] == "2026-11-16T16:00:00.123Z"
+    assert created["expires_at"] == "2026-11-16T15:05:00.000Z"
+    assert created["create"]["generation"] == 1
+    assert created["create"]["request_id"].startswith("ssr_")
+
+    with pytest.raises(SystemScheduleServiceError, match="different system schedule") as exc_info:
+        create_operation(
+            session_id="ses-schedule",
+            instance_id="instance-a",
+            operation_id="wake-up",
+            kind="reminder",
+            title="Wake up",
+            fire_at=FIRE_AT,
+            time_zone="America/Los_Angeles",
+            expires_in=300,
+            now=NOW,
+        )
+    assert exc_info.value.code == "operation_conflict"
+
+    with pytest.raises(SystemScheduleServiceError) as exc_info:
+        get_operation(
+            session_id="ses-schedule",
+            instance_id="instance-b",
+            operation_id="wake-up",
+            now=NOW,
+        )
+    assert exc_info.value.code == "system_schedule_not_found"
+
+    with pytest.raises(SystemScheduleServiceError) as exc_info:
+        create_operation(
+            session_id="missing-session",
+            instance_id="instance-a",
+            operation_id="missing",
+            kind="alarm",
+            title="Wake up",
+            fire_at=FIRE_AT,
+            time_zone="America/Los_Angeles",
+            expires_in=300,
+            now=NOW,
+        )
+    assert exc_info.value.code == "session_not_found"
+
+    for operation_id in ("hidden\u007fcontrol", "hidden\u200eformat"):
+        with pytest.raises(SystemScheduleServiceError) as exc_info:
+            create_operation(
+                session_id="ses-schedule",
+                instance_id="instance-a",
+                operation_id=operation_id,
+                kind="alarm",
+                title="Wake up",
+                fire_at=FIRE_AT,
+                time_zone="America/Los_Angeles",
+                expires_in=300,
+                now=NOW,
+            )
+        assert exc_info.value.code == "invalid_request"
+
+
+def test_created_operation_survives_originating_session_deletion(isolated_state):
+    _create(operation_id="survives-session")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.delete().where(agent_sessions.c.id == "ses-schedule")
+        )
+
+    operation = _get("survives-session")
+    assert operation["state"] == "pending"
+    claim = claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        now=NOW,
+    )
+    assert claim["request"]["sessionId"] == "ses-schedule"
+
+
+def test_unclaimed_create_expires_but_claimed_create_awaits_device(isolated_state):
+    _create(operation_id="unclaimed", expires_in=30)
+    assert _get("unclaimed", now=NOW + timedelta(seconds=31))["state"] == "expired"
+    assert claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        now=NOW + timedelta(seconds=31),
+    ) is None
+
+    _create(operation_id="claimed", expires_in=30)
+    claim = claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+    waiting = _get("claimed", now=NOW + timedelta(seconds=31))
+    assert waiting["state"] == "awaiting_device"
+    assert waiting["status_message"] == (
+        "Waiting for your iPhone to return the result."
+    )
+    assert waiting["create"]["terminal_state"] is None
+    assert claim_next(
+        instance_id="instance-a",
+        device_id="device-b",
+        now=NOW + timedelta(seconds=31),
+    ) is None
+
+    scheduled = _record(
+        claim,
+        _receipt(claim, state="scheduled", system_identifier="opaque-claimed"),
+        now=NOW + timedelta(seconds=32),
+    )
+    assert scheduled["operation"]["state"] == "scheduled"
+    assert scheduled["operation"]["cleanup"] is None
+
+
+def test_device_binding_is_sticky_and_exclusions_allow_cancel_to_pass_create(
+    isolated_state,
+):
+    _create(expires_in=300)
+    create_claim = claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+    assert claim_next(instance_id="instance-a", device_id="device-b", now=NOW) is None
+    assert claim_next(instance_id="instance-a", device_id="device-a", now=NOW) == create_claim
+    assert claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        exclude_lease_tokens=[create_claim["leaseToken"]],
+        allow_create=False,
+        now=NOW,
+    ) is None
+
+    cancelled = cancel_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id="wake-up",
+        now=NOW + timedelta(seconds=1),
+    )
+    assert cancelled["state"] == "cancelled"
+    cancel_claim = claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        exclude_lease_tokens=[create_claim["leaseToken"]],
+        allow_create=False,
+        now=NOW + timedelta(seconds=1),
+    )
+    assert cancel_claim["action"] == "cancel"
+    assert cancel_claim["generation"] == 1
+    assert cancel_claim["purpose"] == "user"
+    assert claim_next(
+        instance_id="instance-a",
+        device_id="device-b",
+        now=NOW + timedelta(seconds=1),
+    ) is None
+
+
+def test_cancelled_claimed_create_is_never_redispatched(isolated_state):
+    for suffix, cancel_state in (
+        ("inflight", None),
+        ("failed", "failed"),
+        ("settled", "cancelled"),
+    ):
+        operation_id = f"cancelled-sticky-{suffix}"
+        _create(operation_id=operation_id)
+        create_claim = claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            now=NOW,
+        )
+        cancel_operation(
+            session_id="ses-schedule",
+            instance_id="instance-a",
+            operation_id=operation_id,
+            now=NOW + timedelta(seconds=1),
+        )
+        cancel_claim = claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            exclude_lease_tokens=[create_claim["leaseToken"]],
+            now=NOW + timedelta(seconds=1),
+        )
+        assert cancel_claim["action"] == "cancel"
+        if cancel_state is not None:
+            error = None
+            if cancel_state == "failed":
+                error = {"code": "remove_failed", "message": "Try again."}
+            _record(
+                cancel_claim,
+                _receipt(cancel_claim, state=cancel_state, error=error),
+                now=NOW + timedelta(seconds=2),
+            )
+        excluded = [cancel_claim["leaseToken"]] if cancel_state is None else []
+        assert claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            exclude_lease_tokens=excluded,
+            now=NOW + timedelta(seconds=3),
+        ) is None
+        if cancel_state is None:
+            _record(
+                cancel_claim,
+                _receipt(cancel_claim, state="cancelled"),
+                now=NOW + timedelta(seconds=4),
+            )
+
+
+def test_cancel_and_create_receipts_can_arrive_in_either_order(isolated_state):
+    for suffix, cancel_first in (("a", True), ("b", False)):
+        operation_id = f"race-{suffix}"
+        _create(operation_id=operation_id)
+        create_claim = claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            now=NOW,
+        )
+        cancel_operation(
+            session_id="ses-schedule",
+            instance_id="instance-a",
+            operation_id=operation_id,
+            now=NOW + timedelta(seconds=1),
+        )
+        cancel_claim = claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            exclude_lease_tokens=[create_claim["leaseToken"]],
+            now=NOW + timedelta(seconds=1),
+        )
+        create_receipt = _receipt(
+            create_claim,
+            state="scheduled",
+            system_identifier=f"opaque-{suffix}",
+        )
+        cancel_receipt = _receipt(
+            cancel_claim,
+            state="cancelled",
+            system_identifier=f"opaque-{suffix}",
+        )
+        ordered = (
+            ((cancel_claim, cancel_receipt), (create_claim, create_receipt))
+            if cancel_first
+            else ((create_claim, create_receipt), (cancel_claim, cancel_receipt))
+        )
+        for offset, (claim, receipt) in enumerate(ordered, start=2):
+            _record(claim, receipt, now=NOW + timedelta(seconds=offset))
+        operation = _get(operation_id, now=NOW + timedelta(seconds=5))
+        assert operation["state"] == "cancelled"
+        assert operation["create"]["terminal_state"] == "cancelled"
+        assert operation["create"]["receipt"]["state"] == "scheduled"
+        assert operation["cancel"]["terminal_state"] == "cancelled"
+        assert operation["cleanup"] is None
+
+
+def test_late_side_effect_after_cancel_failure_creates_compensation_generation(
+    isolated_state,
+):
+    _create()
+    create_claim = claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+    cancel_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id="wake-up",
+        now=NOW + timedelta(seconds=1),
+    )
+    cancel_claim = claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        exclude_lease_tokens=[create_claim["leaseToken"]],
+        now=NOW + timedelta(seconds=1),
+    )
+    _record(
+        cancel_claim,
+        _receipt(
+            cancel_claim,
+            state="failed",
+            error={"code": "lookup_unknown", "message": "Could not inspect the item."},
+        ),
+        now=NOW + timedelta(seconds=2),
+    )
+    operation = _record(
+        create_claim,
+        _receipt(create_claim, state="scheduled", system_identifier="opaque-late"),
+        now=NOW + timedelta(seconds=3),
+    )["operation"]
+    assert operation["state"] == "cancelled"
+    assert operation["cleanup"]["purpose"] == "compensation"
+    assert operation["cleanup"]["generation"] == 2
+    compensation = claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        now=NOW + timedelta(seconds=3),
+    )
+    assert compensation["purpose"] == "compensation"
+
+
+def test_claimed_cancel_survives_deadline_and_retry_uses_new_generation(isolated_state):
+    _schedule()
+    cancel_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id="wake-up",
+        expires_in=30,
+        now=NOW + timedelta(seconds=1),
+    )
+    first = claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        now=NOW + timedelta(seconds=2),
+    )
+    assert claim_next(
+        instance_id="instance-a",
+        device_id="device-a",
+        now=NOW + timedelta(seconds=32),
+    ) == first
+    _record(
+        first,
+        _receipt(
+            first,
+            state="failed",
+            error={"code": "remove_failed", "message": "Try again."},
+        ),
+        now=NOW + timedelta(seconds=33),
+    )
+    retried = cancel_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id="wake-up",
+        expires_in=30,
+        now=NOW + timedelta(seconds=34),
+    )
+    assert retried["cancel"]["generation"] == 2
+    assert retried["cancel"]["state"] == "pending"
+
+
+def test_unclaimed_cancel_expires_without_rewriting_scheduled_create(isolated_state):
+    _schedule()
+    cancel_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id="wake-up",
+        expires_in=30,
+        now=NOW + timedelta(seconds=1),
+    )
+    operation = _get(now=NOW + timedelta(seconds=32))
+    assert operation["state"] == "scheduled"
+    assert operation["cancel"]["terminal_state"] == "expired"
+
+
+def test_receipts_are_strict_idempotent_and_bound_to_exact_attempt(isolated_state):
+    _create()
+    claim = claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+    receipt = _receipt(
+        claim,
+        state="permission_denied",
+        authorization="denied",
+        error={"code": "permission_denied", "message": "Permission was denied."},
+    )
+
+    mismatched = dict(receipt)
+    mismatched["fireAt"] = "2026-11-16T16:00:00.124Z"
+    with pytest.raises(SystemScheduleServiceError) as exc_info:
+        _record(claim, mismatched)
+    assert exc_info.value.code == "receipt_mismatch"
+
+    first = _record(claim, receipt)
+    duplicate = _record(claim, receipt, now=NOW + timedelta(seconds=1))
+    assert duplicate["operation"]["create"]["receipt"] == first["operation"]["create"]["receipt"]
+
+    conflicting = dict(receipt)
+    conflicting["error"] = {"code": "permission_denied", "message": "Changed."}
+    with pytest.raises(SystemScheduleServiceError) as exc_info:
+        _record(claim, conflicting, now=NOW + timedelta(seconds=2))
+    assert exc_info.value.code == "receipt_conflict"
+
+    with pytest.raises(SystemScheduleServiceError) as exc_info:
+        record_receipt(
+            instance_id="instance-a",
+            device_id="device-b",
+            lease_token=claim["leaseToken"],
+            receipt=receipt,
+            now=NOW + timedelta(seconds=2),
+        )
+    assert exc_info.value.code == "receipt_mismatch"
+
+
+def test_every_observable_entry_advances_unclaimed_expiry(isolated_state):
+    entry_times = [
+        ("status", 0),
+        ("cancel", 1),
+        ("claim", 2),
+        ("create", 3),
+        ("receipt", 4),
+    ]
+    for label, offset in entry_times:
+        operation_id = f"due-{label}"
+        _create(operation_id=operation_id, expires_in=30)
+        later = NOW + timedelta(seconds=31 + offset)
+        if label == "status":
+            _get(operation_id, now=later)
+        elif label == "cancel":
+            cancel_operation(
+                session_id="ses-schedule",
+                instance_id="instance-a",
+                operation_id=operation_id,
+                now=later,
+            )
+        elif label == "claim":
+            claim_next(instance_id="instance-a", device_id="device-a", now=later)
+        elif label == "create":
+            _create(operation_id=f"trigger-{label}", now=later)
+        else:
+            _create(
+                operation_id="receipt-trigger",
+                now=NOW - timedelta(seconds=1),
+            )
+            claim = claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+            _record(
+                claim,
+                _receipt(
+                    claim,
+                    state="permission_denied",
+                    authorization="denied",
+                    error={"code": "permission_denied", "message": "Denied."},
+                ),
+                now=later,
+            )
+        assert _get(operation_id, now=later)["state"] == "expired"
+
+
+def test_poll_and_expiry_queries_have_matching_sqlite_indexes(isolated_state):
+    engine = create_sqlite_engine()
+    queries = {
+        "idx_system_schedule_attempts_expiry": (
+            "SELECT request_id FROM system_schedule_attempts INDEXED BY "
+            "idx_system_schedule_attempts_expiry WHERE action='create' "
+            "AND claim_state='pending' AND terminal_state IS NULL AND deadline <= ?"
+        ),
+        "idx_system_schedule_attempts_pending_claim": (
+            "SELECT request_id FROM system_schedule_attempts INDEXED BY "
+            "idx_system_schedule_attempts_pending_claim WHERE action='create' "
+            "AND claim_state='pending' AND instance_id=? ORDER BY created_at, request_id LIMIT 1"
+        ),
+        "idx_system_schedule_attempts_sticky_claim": (
+            "SELECT request_id FROM system_schedule_attempts INDEXED BY "
+            "idx_system_schedule_attempts_sticky_claim WHERE action='cancel' "
+            "AND claim_state='claimed' AND instance_id=? AND device_id=? "
+            "AND terminal_state IS NULL AND receipt_json IS NULL "
+            "ORDER BY updated_at, request_id LIMIT 1"
+        ),
+    }
+    with engine.begin() as conn:
+        names = {
+            row["name"]
+            for row in conn.execute(
+                select(text("name")).select_from(text("pragma_index_list('system_schedule_attempts')"))
+            ).mappings()
+        }
+        assert set(queries) <= names
+        for index_name, sql in queries.items():
+            params = (
+                ("2026-11-16T15:00:00.000Z",)
+                if index_name.endswith("expiry")
+                else (("instance-a", "device-a") if index_name.endswith("sticky_claim") else ("instance-a",))
+            )
+            plan = " ".join(
+                row[3]
+                for row in conn.exec_driver_sql(
+                    f"EXPLAIN QUERY PLAN {sql}",
+                    params,
+                )
+            )
+            assert index_name in plan
+
+
+def test_attempt_rows_keep_every_cancel_generation(isolated_state):
+    _schedule()
+    for generation in (1, 2):
+        cancel_operation(
+            session_id="ses-schedule",
+            instance_id="instance-a",
+            operation_id="wake-up",
+            expires_in=30,
+            now=NOW + timedelta(seconds=generation),
+        )
+        claim = claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            now=NOW + timedelta(seconds=generation),
+        )
+        _record(
+            claim,
+            _receipt(
+                claim,
+                state="failed",
+                error={"code": "remove_failed", "message": "Try again."},
+            ),
+            now=NOW + timedelta(seconds=generation, milliseconds=1),
+        )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            select(
+                system_schedule_attempts.c.generation,
+                system_schedule_attempts.c.terminal_state,
+                system_schedule_attempts.c.attempt_key,
+            )
+            .where(system_schedule_attempts.c.operation_id == "wake-up")
+            .where(system_schedule_attempts.c.action == "cancel")
+            .order_by(system_schedule_attempts.c.generation)
+        ).all()
+    assert rows == [
+        (1, "failed", '["wake-up","cancel",1]'),
+        (2, "failed", '["wake-up","cancel",2]'),
+    ]

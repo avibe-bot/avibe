@@ -196,6 +196,43 @@ final class AppModel: ObservableObject {
     /// itself would give up on it.
     static let runtimeOpenAutomaticBudget: Duration = .seconds(60)
 
+    private final class PendingSystemSchedule {
+        let id: UUID
+        let request: SystemScheduleRequest
+        let context: SystemScheduleContext
+        let continuation: CheckedContinuation<SystemScheduleReceipt, Never>
+        var retryContinuations: [(
+            requestID: String,
+            continuation: CheckedContinuation<SystemScheduleReceipt, Never>
+        )] = []
+        var expiryTask: Task<Void, Never>?
+        var isSubmitting = false
+        var isInvalidated = false
+        var cancellationRequested = false
+        var cancellationContinuations: [(
+            request: SystemScheduleCancelRequest,
+            continuation: CheckedContinuation<SystemScheduleReceipt, Never>
+        )] = []
+
+        init(
+            id: UUID,
+            request: SystemScheduleRequest,
+            context: SystemScheduleContext,
+            continuation: CheckedContinuation<SystemScheduleReceipt, Never>
+        ) {
+            self.id = id
+            self.request = request
+            self.context = context
+            self.continuation = continuation
+        }
+    }
+
+    private enum SystemScheduleContextResolution {
+        case available(SystemScheduleContext)
+        case localStateUnavailable
+        case invalid
+    }
+
     @Published private(set) var route: AppRoute = .loading
     /// Chosen once when the one runtime-preserving sheet opens. Repeated
     /// presentation requests never replace its document or change its mode.
@@ -213,6 +250,7 @@ final class AppModel: ObservableObject {
     /// Recovery shown over the instance list after an automatic timeout.
     @Published private(set) var runtimeOpenNotice: RuntimeOpenNotice?
     @Published private(set) var lastRuntimeOpenTermination: RuntimeOpenTermination?
+    @Published private(set) var systemScheduleConfirmation: SystemScheduleConfirmation?
 
     let websiteDataStore: AccountWebsiteDataStore
 
@@ -260,6 +298,10 @@ final class AppModel: ObservableObject {
     private let pushOpenedLifetime: TimeInterval
     /// The App icon badge: the selected instance's Inbox total, which its Web
     /// UI sets through `badge.set` (and a push sets while the App is away).
+    private let systemScheduleCoordinator: SystemScheduleCoordinator
+    let systemScheduleDeviceID: String
+    private let systemScheduleNow: () -> Date
+    private var pendingSystemSchedule: PendingSystemSchedule?
     private let nativeBadge: NativeBadge
     /// Retires an instance's Session notifications once nothing there is unread.
     private let sessionNotifications: SessionNotificationCleaner
@@ -288,6 +330,9 @@ final class AppModel: ObservableObject {
         },
         onPrepareAccountTransition: { [weak self] in
             self?.prepareForAccountTransition() ?? []
+        },
+        onDetachAccount: { [weak self] accountID in
+            self?.systemScheduleCoordinator.detach(accountID: accountID)
         },
         onPreparePushLogout: { [weak self] in
             // Signing out or another account: the badge counted this
@@ -382,6 +427,8 @@ final class AppModel: ObservableObject {
         pushNotificationCenter: PushNotificationCentering? = nil,
         pushOpenedNow: @escaping () -> Date = Date.init,
         pushOpenedLifetime: TimeInterval = 120,
+        systemSchedulePlatform: SystemSchedulePlatforming? = nil,
+        systemScheduleNow: @escaping () -> Date = Date.init,
         runtimeOpenTiming: (any RuntimeOpenTiming)? = nil,
         runtimeOpenBudget: Duration = AppModel.runtimeOpenAutomaticBudget,
         runtimeOpenLongWait: Duration = .seconds(8),
@@ -409,6 +456,15 @@ final class AppModel: ObservableObject {
         self.pushNotificationCenter = pushNotificationCenter
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
+        self.systemScheduleNow = systemScheduleNow
+        self.systemScheduleDeviceID = SystemScheduleDeviceIdentity.resolve(
+            defaults: defaults
+        )
+        self.systemScheduleCoordinator = SystemScheduleCoordinator(
+            platform: systemSchedulePlatform ?? LiveSystemSchedulePlatform(),
+            store: UserDefaultsSystemScheduleStore(defaults: defaults),
+            now: systemScheduleNow
+        )
         self.runtimeOpenTiming = runtimeOpenTiming ?? ContinuousRuntimeOpenTiming()
         self.runtimeOpenBudget = runtimeOpenBudget
         self.runtimeOpenLongWait = runtimeOpenLongWait
@@ -447,6 +503,7 @@ final class AppModel: ObservableObject {
     }
 
     deinit {
+        pendingSystemSchedule?.expiryTask?.cancel()
         for observer in runtimeOpenLifecycleObservers {
             runtimeOpenNotificationCenter.removeObserver(observer)
         }
@@ -523,10 +580,472 @@ final class AppModel: ObservableObject {
         }?.name
     }
 
+    func systemScheduleCapabilities(origin: WebOrigin) -> [String: Any]? {
+        guard currentSystemScheduleContext(origin: origin) != nil else {
+            return nil
+        }
+        return systemScheduleCoordinator.capabilities().jsonObject
+    }
+
+    func requestSystemSchedule(
+        _ request: SystemScheduleRequest,
+        origin: WebOrigin
+    ) async -> [String: Any] {
+        let context: SystemScheduleContext
+        switch resolveCurrentSystemScheduleContext(
+            origin: origin,
+            instanceID: request.instanceID
+        ) {
+        case .available(let current):
+            context = current
+        case .localStateUnavailable:
+            return systemScheduleCoordinator.localStateUnavailable(request).jsonObject
+        case .invalid:
+            return systemScheduleReceipt(
+                request,
+                state: .staleContext,
+                code: "stale_context",
+                message: "The request no longer belongs to the selected account, instance, and Runtime."
+            ).jsonObject
+        }
+        if let existing = systemScheduleCoordinator.prepare(
+            request,
+            context: context
+        ) {
+            return existing.jsonObject
+        }
+        if let pending = pendingSystemSchedule {
+            if pending.request.operationID == request.operationID {
+                guard pending.request.hasSameIntent(as: request),
+                      pending.context.hasSameOwner(as: context)
+                else {
+                    return systemScheduleReceipt(
+                        request,
+                        state: .failed,
+                        code: "operation_conflict",
+                        message: "This operation ID already belongs to a different system schedule."
+                    ).jsonObject
+                }
+                let receipt = await withCheckedContinuation {
+                    (continuation: CheckedContinuation<SystemScheduleReceipt, Never>) in
+                    pending.retryContinuations.append(
+                        (requestID: request.requestID, continuation: continuation)
+                    )
+                }
+                return receipt.jsonObject
+            }
+            return systemScheduleReceipt(
+                request,
+                state: .failed,
+                code: "confirmation_in_progress",
+                message: "Confirm or cancel the system schedule already shown on this iPhone."
+            ).jsonObject
+        }
+        if systemScheduleCoordinator.requiresRecovery(request, context: context) {
+            return await recoverSystemSchedule(request, context: context).jsonObject
+        }
+        let now = systemScheduleNow()
+        guard request.expiresAt > now else {
+            return systemScheduleCoordinator.finishWithoutEffect(
+                request,
+                context: context,
+                state: .expired,
+                code: "expired",
+                message: "The system schedule request expired before confirmation."
+            ).jsonObject
+        }
+        guard request.fireAt > now else {
+            return systemScheduleCoordinator.finishWithoutEffect(
+                request,
+                context: context,
+                state: .failed,
+                code: "fire_time_in_past",
+                message: "The requested time has already passed."
+            ).jsonObject
+        }
+
+        let receipt = await withCheckedContinuation {
+            (continuation: CheckedContinuation<SystemScheduleReceipt, Never>) in
+            let id = UUID()
+            let pending = PendingSystemSchedule(
+                id: id,
+                request: request,
+                context: context,
+                continuation: continuation
+            )
+            pendingSystemSchedule = pending
+            systemScheduleConfirmation = SystemScheduleConfirmation(
+                id: id,
+                request: request,
+                instanceName: selectedInstanceName() ?? request.instanceID,
+                isSubmitting: false
+            )
+            let delay = max(0, request.expiresAt.timeIntervalSince(now))
+            pending.expiryTask = Task { @MainActor [weak self, weak pending] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled,
+                      let self,
+                      let pending,
+                      self.pendingSystemSchedule === pending
+                else {
+                    return
+                }
+                if pending.isSubmitting {
+                    return
+                }
+                self.finishSystemSchedule(
+                    pending,
+                    receipt: self.systemScheduleCoordinator.finishWithoutEffect(
+                        pending.request,
+                        context: pending.context,
+                        state: .expired,
+                        code: "expired",
+                        message: "The system schedule request expired before it was created."
+                    )
+                )
+            }
+        }
+        return receipt.jsonObject
+    }
+
+    private func recoverSystemSchedule(
+        _ request: SystemScheduleRequest,
+        context: SystemScheduleContext
+    ) async -> SystemScheduleReceipt {
+        await withCheckedContinuation {
+            (continuation: CheckedContinuation<SystemScheduleReceipt, Never>) in
+            let pending = PendingSystemSchedule(
+                id: UUID(),
+                request: request,
+                context: context,
+                continuation: continuation
+            )
+            pending.isSubmitting = true
+            pendingSystemSchedule = pending
+            Task { @MainActor [weak self, weak pending] in
+                guard let self, let pending else { return }
+                let receipt = await self.systemScheduleCoordinator.schedule(
+                    pending.request,
+                    context: pending.context,
+                    creationFence: { [weak self, weak pending] in
+                        guard let self, let pending else { return .staleContext }
+                        return self.systemScheduleCreationFence(pending)
+                    },
+                    postWriteFence: { [weak self, weak pending] in
+                        guard let self, let pending else { return .staleContext }
+                        return self.systemSchedulePostWriteFence(pending)
+                    }
+                )
+                guard self.pendingSystemSchedule === pending else {
+                    return
+                }
+                self.finishSystemSchedule(pending, receipt: receipt)
+            }
+        }
+    }
+
+    func cancelSystemSchedule(
+        _ request: SystemScheduleCancelRequest,
+        origin: WebOrigin
+    ) async -> [String: Any]? {
+        let context: SystemScheduleContext
+        switch resolveCurrentSystemScheduleContext(origin: origin) {
+        case .available(let current):
+            context = current
+        case .localStateUnavailable:
+            return systemScheduleCoordinator.localStateUnavailable(request).jsonObject
+        case .invalid:
+            return nil
+        }
+        if let pending = pendingSystemSchedule,
+           request.purpose == .user,
+           pending.request.operationID == request.operationID,
+           pending.request.kind == request.kind,
+           pending.context.hasSameOwner(as: context)
+        {
+            if pending.isSubmitting {
+                pending.cancellationRequested = true
+                pending.isInvalidated = true
+                pending.expiryTask?.cancel()
+                pending.expiryTask = nil
+                systemScheduleConfirmation = nil
+                let receipt = await withCheckedContinuation {
+                    (continuation: CheckedContinuation<SystemScheduleReceipt, Never>) in
+                    pending.cancellationContinuations.append(
+                        (request: request, continuation: continuation)
+                    )
+                }
+                return receipt.jsonObject
+            }
+            let receipt = systemScheduleCoordinator.finishWithoutEffect(
+                pending.request,
+                context: pending.context,
+                state: .cancelled,
+                code: nil,
+                message: nil
+            )
+            finishSystemSchedule(pending, receipt: receipt)
+            return receipt.replacingRequestID(request.requestID).jsonObject
+        }
+        return await systemScheduleCoordinator.cancel(
+            request,
+            context: context,
+            stillCurrent: { [weak self] in
+                self?.currentSystemScheduleContext(origin: origin) == context
+            }
+        ).jsonObject
+    }
+
+    func confirmSystemSchedule(id: UUID) {
+        guard let pending = pendingSystemSchedule,
+              pending.id == id,
+              !pending.isSubmitting
+        else {
+            return
+        }
+        guard systemScheduleStillCurrent(pending) else {
+            finishSystemSchedule(
+                pending,
+                receipt: systemScheduleCoordinator.finishWithoutEffect(
+                    pending.request,
+                    context: pending.context,
+                    state: .staleContext,
+                    code: "stale_context",
+                    message: "The account, instance, or Runtime changed before confirmation."
+                )
+            )
+            return
+        }
+        let now = systemScheduleNow()
+        guard pending.request.expiresAt > now else {
+            finishSystemSchedule(
+                pending,
+                receipt: systemScheduleCoordinator.finishWithoutEffect(
+                    pending.request,
+                    context: pending.context,
+                    state: .expired,
+                    code: "expired",
+                    message: "The system schedule request expired before it was created."
+                )
+            )
+            return
+        }
+        guard pending.request.fireAt > now else {
+            finishSystemSchedule(
+                pending,
+                receipt: systemScheduleCoordinator.finishWithoutEffect(
+                    pending.request,
+                    context: pending.context,
+                    state: .failed,
+                    code: "fire_time_in_past",
+                    message: "The requested time has already passed."
+                )
+            )
+            return
+        }
+        pending.expiryTask?.cancel()
+        pending.expiryTask = nil
+        pending.isSubmitting = true
+        systemScheduleConfirmation = SystemScheduleConfirmation(
+            id: pending.id,
+            request: pending.request,
+            instanceName: systemScheduleConfirmation?.instanceName
+                ?? pending.request.instanceID,
+            isSubmitting: true
+        )
+        Task { @MainActor [weak self, weak pending] in
+            guard let self, let pending else { return }
+            let receipt = await self.systemScheduleCoordinator.schedule(
+                pending.request,
+                context: pending.context,
+                creationFence: { [weak self, weak pending] in
+                    guard let self, let pending else { return .staleContext }
+                    return self.systemScheduleCreationFence(pending)
+                },
+                postWriteFence: { [weak self, weak pending] in
+                    guard let self, let pending else { return .staleContext }
+                    return self.systemSchedulePostWriteFence(pending)
+                }
+            )
+            guard self.pendingSystemSchedule === pending else {
+                return
+            }
+            self.finishSystemSchedule(pending, receipt: receipt)
+        }
+    }
+
+    func denySystemSchedule(id: UUID) {
+        guard let pending = pendingSystemSchedule,
+              pending.id == id,
+              !pending.isSubmitting
+        else {
+            return
+        }
+        finishSystemSchedule(
+            pending,
+            receipt: systemScheduleCoordinator.finishWithoutEffect(
+                pending.request,
+                context: pending.context,
+                state: .userDenied,
+                code: "user_denied",
+                message: "The user did not approve this system schedule."
+            )
+        )
+    }
+
+    private func currentSystemScheduleContext(
+        origin: WebOrigin,
+        instanceID: String? = nil
+    ) -> SystemScheduleContext? {
+        guard case .available(let context) = resolveCurrentSystemScheduleContext(
+            origin: origin,
+            instanceID: instanceID
+        ) else {
+            return nil
+        }
+        return context
+    }
+
+    private func resolveCurrentSystemScheduleContext(
+        origin: WebOrigin,
+        instanceID: String? = nil
+    ) -> SystemScheduleContextResolution {
+        guard
+            case .browser(let runtime) = route,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            instanceID == nil || runtime.instance.id == instanceID,
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized,
+            let navigationEpoch = runtimeController?
+                .trustedPrimaryScheduleNavigationEpoch(origin: origin),
+            sessionCoordinator.currentAccount?.id == runtime.account.id
+        else {
+            return .invalid
+        }
+        guard let owner = systemScheduleCoordinator.managementOwner(
+            accountID: runtime.account.id
+        ) else {
+            return .localStateUnavailable
+        }
+        return .available(
+            SystemScheduleContext(
+                owner: owner,
+                instanceID: runtime.instance.id,
+                origin: origin.serialized,
+                runtimeIdentity: runtimeIdentity,
+                navigationEpoch: navigationEpoch
+            )
+        )
+    }
+
+    private func systemScheduleStillCurrent(
+        _ pending: PendingSystemSchedule
+    ) -> Bool {
+        guard pendingSystemSchedule === pending,
+              !pending.isInvalidated,
+              let url = URL(string: pending.context.origin),
+              let origin = WebOrigin(url: url, requiresHTTPS: false),
+              let current = currentSystemScheduleContext(
+                  origin: origin,
+                  instanceID: pending.context.instanceID
+              )
+        else {
+            return false
+        }
+        return current == pending.context
+    }
+
+    private func systemScheduleCreationFence(
+        _ pending: PendingSystemSchedule
+    ) -> SystemScheduleFenceFailure? {
+        if pending.cancellationRequested { return .cancelled }
+        guard systemScheduleStillCurrent(pending) else {
+            return .staleContext
+        }
+        let now = systemScheduleNow()
+        guard pending.request.expiresAt > now else { return .expired }
+        guard pending.request.fireAt > now else { return .fireTimeInPast }
+        return nil
+    }
+
+    private func systemSchedulePostWriteFence(
+        _ pending: PendingSystemSchedule
+    ) -> SystemScheduleFenceFailure? {
+        if pending.cancellationRequested { return .cancelled }
+        return systemScheduleStillCurrent(pending) ? nil : .staleContext
+    }
+
+    private func systemScheduleReceipt(
+        _ request: SystemScheduleRequest,
+        state: SystemScheduleState,
+        code: String?,
+        message: String?
+    ) -> SystemScheduleReceipt {
+        let capabilities = systemScheduleCoordinator.capabilities()
+        let authorization = request.kind == .alarm
+            ? capabilities.alarmAuthorization
+            : capabilities.remindersAuthorization
+        return SystemScheduleReceipt.terminal(
+            request: request,
+            state: state,
+            authorization: authorization,
+            code: code,
+            message: message
+        )
+    }
+
+    private func invalidatePendingSystemSchedule() {
+        guard let pending = pendingSystemSchedule else { return }
+        if pending.isSubmitting {
+            pending.expiryTask?.cancel()
+            pending.expiryTask = nil
+            pending.isInvalidated = true
+            systemScheduleConfirmation = nil
+            return
+        }
+        finishSystemSchedule(
+            pending,
+            receipt: systemScheduleCoordinator.finishWithoutEffect(
+                pending.request,
+                context: pending.context,
+                state: .staleContext,
+                code: "stale_context",
+                message: "The account, instance, or Runtime changed before the system schedule was created."
+            )
+        )
+    }
+
+    private func finishSystemSchedule(
+        _ pending: PendingSystemSchedule,
+        receipt: SystemScheduleReceipt
+    ) {
+        guard pendingSystemSchedule === pending else { return }
+        pending.expiryTask?.cancel()
+        pending.expiryTask = nil
+        pendingSystemSchedule = nil
+        systemScheduleConfirmation = nil
+        pending.continuation.resume(returning: receipt)
+        for retry in pending.retryContinuations {
+            retry.continuation.resume(
+                returning: receipt.replacingRequestID(retry.requestID)
+            )
+        }
+        pending.retryContinuations.removeAll()
+        for cancellation in pending.cancellationContinuations {
+            cancellation.continuation.resume(
+                returning: systemScheduleCoordinator.pendingCancellationReceipt(
+                    cancellation.request,
+                    context: pending.context
+                )
+            )
+        }
+        pending.cancellationContinuations.removeAll()
+    }
+
     private func showRuntimeSheet(
         startScreen: MobileOnboardingStartScreen,
         fallback: MobileOnboardingStartScreen
     ) {
+        invalidatePendingSystemSchedule()
         switch route {
         case .accountOverBrowser:
             return
@@ -577,6 +1096,13 @@ final class AppModel: ObservableObject {
         sessionCoordinator.activateAccountSurface()
         do {
             let state = try await sessionCoordinator.bootstrap()
+            if case .signedIn(let snapshot, _) = state {
+                systemScheduleCoordinator.synchronizeAccount(
+                    accountID: snapshot.account.id
+                )
+            } else {
+                systemScheduleCoordinator.synchronizeAccount(accountID: nil)
+            }
             if let runtime = sessionCoordinator.restorableRuntime(from: state) {
                 sessionCoordinator.deactivateAccountSurface()
                 openRuntime(runtime)
@@ -584,6 +1110,9 @@ final class AppModel: ObservableObject {
                 route = .onboarding(.instances)
             }
         } catch {
+            // Bootstrap failure is not authenticated sign-out evidence. Keep
+            // the persisted schedule owner unchanged until a later bootstrap
+            // confirms signed-out or a different account.
             route = .onboarding(.instances)
         }
         hasCompletedBootstrap = true
@@ -611,6 +1140,7 @@ final class AppModel: ObservableObject {
 
     private func retireRuntimeOpenForAccountTransition() {
         runtimeOpenNotice = nil
+        invalidatePendingSystemSchedule()
         guard let attempt = runtimeOpenAttempt else {
             return
         }
@@ -737,6 +1267,7 @@ final class AppModel: ObservableObject {
         for runtime: MobileRuntimeContext,
         phase: RuntimeOpenPhase
     ) -> Int {
+        invalidatePendingSystemSchedule()
         cancelRuntimeOpenTimers()
         runtimeOpenNotice = nil
         runtimeIdentity += 1
@@ -850,6 +1381,7 @@ final class AppModel: ObservableObject {
         }
         runtimeOpenAttempt = nil
         cancelRuntimeOpenTimers()
+        invalidatePendingSystemSchedule()
         // Retire the generation before controller teardown, so a callback
         // already queued on the main actor cannot regain authority.
         runtimeIdentity += 1
@@ -890,6 +1422,13 @@ final class AppModel: ObservableObject {
         attemptID: Int,
         runtime: MobileRuntimeContext
     ) {
+        if event.stage == .started,
+           runtimeIdentity == attemptID,
+           route.runtime == runtime,
+           sessionCoordinator.isSelectedRuntime(runtime)
+        {
+            invalidatePendingSystemSchedule()
+        }
         guard
             runtimeIdentity == attemptID,
             let attempt = runtimeOpenAttempt,
@@ -1560,6 +2099,7 @@ final class AppModel: ObservableObject {
     private func prepareForAccountTransition() -> [
         WebsiteDataStoreReleaseBarrier
     ] {
+        invalidatePendingSystemSchedule()
         clearPendingPushOpened()
         // Any account invalidation ends a route-prepare or held open; neither
         // may leave the Native loading surface behind without an attempt.

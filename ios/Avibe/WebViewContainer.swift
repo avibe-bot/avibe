@@ -21,11 +21,22 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let showAccountRoot: () -> Void
     let showInstances: () -> Void
     let instanceName: () -> String?
+    let instanceID: () -> String?
+    let deviceID: () -> String?
     let directStatus: DirectStatusProvider?
     let directLoadGate: DirectLoadGateProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
     let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
+    let systemScheduleCapabilities: (WebOrigin) -> [String: Any]?
+    let systemScheduleRequest: (
+        SystemScheduleRequest,
+        WebOrigin
+    ) async -> [String: Any]?
+    let systemScheduleCancel: (
+        SystemScheduleCancelRequest,
+        WebOrigin
+    ) async -> [String: Any]?
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
@@ -43,11 +54,24 @@ struct WebViewContainer: UIViewControllerRepresentable {
         showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
+        instanceID: @escaping () -> String? = { nil },
+        deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
+        systemScheduleCapabilities: @escaping (
+            WebOrigin
+        ) -> [String: Any]? = { _ in nil },
+        systemScheduleRequest: @escaping (
+            SystemScheduleRequest,
+            WebOrigin
+        ) async -> [String: Any]? = { _, _ in nil },
+        systemScheduleCancel: @escaping (
+            SystemScheduleCancelRequest,
+            WebOrigin
+        ) async -> [String: Any]? = { _, _ in nil },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
@@ -64,11 +88,16 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
         self.instanceName = instanceName
+        self.instanceID = instanceID
+        self.deviceID = deviceID
         self.directStatus = directStatus
         self.directLoadGate = directLoadGate
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleCapabilities = systemScheduleCapabilities
+        self.systemScheduleRequest = systemScheduleRequest
+        self.systemScheduleCancel = systemScheduleCancel
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
@@ -93,11 +122,16 @@ struct WebViewContainer: UIViewControllerRepresentable {
             showAccountRoot: showAccountRoot,
             showInstances: showInstances,
             instanceName: instanceName,
+            instanceID: instanceID,
+            deviceID: deviceID,
             directStatus: directStatus,
             directLoadGate: directLoadGate,
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
             reconcileNotifications: reconcileNotifications,
+            systemScheduleCapabilities: systemScheduleCapabilities,
+            systemScheduleRequest: systemScheduleRequest,
+            systemScheduleCancel: systemScheduleCancel,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,
