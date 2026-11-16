@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import type { HdAccountAddresses, HdQuestion, PhraseCheck } from '@/lib/vaultHdWallet';
+import { passphraseJudged, type HdAccountAddresses, type HdQuestion, type PhraseCheck } from '@/lib/vaultHdWallet';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Button } from './button';
 import { Input } from './input';
@@ -475,10 +475,14 @@ export function HdMismatchBlock({ outcome, error, busy, onClose, onDelete }: {
 }
 
 /** A passphrase field with the same show/hide as other secret inputs: a typo here costs the wallet. */
-function PassphraseField({ label, value, onChange, invalid, disabled }: {
+function PassphraseField({ label, value, onChange, onFocus, onBlur, onEnter, invalid, disabled }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  /** Enter in the box, or show/hide on it: the person is done with it, as if it were left. */
+  onEnter?: () => void;
   invalid?: boolean;
   disabled?: boolean;
 }) {
@@ -492,6 +496,9 @@ function PassphraseField({ label, value, onChange, invalid, disabled }: {
           type={shown ? 'text' : 'password'}
           value={value}
           onChange={(event) => onChange(event.target.value)}
+          onFocus={onFocus}
+          onBlur={onBlur}
+          onKeyDown={(event) => { if (event.key === 'Enter') onEnter?.(); }}
           autoComplete="off"
           spellCheck={false}
           disabled={disabled}
@@ -499,7 +506,7 @@ function PassphraseField({ label, value, onChange, invalid, disabled }: {
           aria-invalid={invalid || undefined}
           className="min-w-0 flex-1 font-mono text-xs"
         />
-        <Button type="button" variant="ghost" size="icon" onClick={() => setShown((current) => !current)} aria-label={shown ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}>
+        <Button type="button" variant="ghost" size="icon" onClick={() => { setShown((current) => !current); onEnter?.(); }} aria-label={shown ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}>
           {shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
         </Button>
       </span>
@@ -509,18 +516,22 @@ function PassphraseField({ label, value, onChange, invalid, disabled }: {
 
 /** Creating a wallet: an optional BIP39 passphrase, folded by default and entered twice (ui/design:
  *  vault/mnemonic/create-passphrase). Taken as typed; the seed applies the same NFKD as import. */
-export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, disabled }: {
+export function HdCreatePassphrase({ value, confirm, confirmLeft, onChange, onConfirmChange, onConfirmLeftChange, disabled }: {
   value: string;
   confirm: string;
+  /** Whether the second box was left (see {@link passphraseJudged}); the form also reads it. */
+  confirmLeft: boolean;
   onChange: (value: string) => void;
   onConfirmChange: (value: string) => void;
+  onConfirmLeftChange: (left: boolean) => void;
   disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(Boolean(value || confirm));
   const Chevron = open ? ChevronDown : ChevronRight;
   const typed = Boolean(value || confirm);
-  const mismatch = typed && value !== confirm;
+  const judged = passphraseJudged(value, confirm, confirmLeft);
+  const mismatch = judged && value !== confirm;
   return (
     <div className="flex flex-col rounded-[10px] border border-edge bg-surface-2">
       <button type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
@@ -535,10 +546,10 @@ export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, 
         <div className="flex flex-col gap-2.5 px-3 pb-3">
           <span className="text-[11.5px] leading-snug text-muted">{t('vaults.hd.passphrase.body')}</span>
           <PassphraseField label={t('vaults.hd.passphrase.label')} value={value} onChange={onChange} disabled={disabled} />
-          <PassphraseField label={t('vaults.hd.passphrase.again')} value={confirm} onChange={onConfirmChange} invalid={mismatch} disabled={disabled} />
+          <PassphraseField label={t('vaults.hd.passphrase.again')} value={confirm} onChange={(next) => { onConfirmChange(next); if (!next) onConfirmLeftChange(false); }} onFocus={() => onConfirmLeftChange(false)} onBlur={() => onConfirmLeftChange(true)} onEnter={() => onConfirmLeftChange(true)} invalid={mismatch} disabled={disabled} />
           {mismatch ? (
             <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.hd.passphrase.mismatch')}</span>
-          ) : typed ? (
+          ) : judged ? (
             <span className="text-[11.5px] text-mint-ink">{t('vaults.hd.passphrase.match')}</span>
           ) : (
             <span className="text-[11.5px] text-muted">{t('vaults.hd.passphrase.hint')}</span>

@@ -49,6 +49,7 @@ import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { blockHdWallet, unblockHdWallet } from '@/lib/vaultHdQuarantine';
 import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
+  passphraseJudged,
 } from '@/lib/vaultHdWallet';
 import { useProtectedHdSupported, useProtectedVault, useVaultSandboxWarm } from '@/lib/useProtectedVault';
 import { protectedHdBusy, protectedHdSubmitted, useProtectedHdCreate } from '@/lib/useProtectedHdCreate';
@@ -257,6 +258,7 @@ export const VaultSecretForm: React.FC<{
   // Creating a wallet: an optional passphrase, typed twice. Kept apart from the import's own.
   const [hdNewPassphrase, setHdNewPassphrase] = useState('');
   const [hdNewPassphraseAgain, setHdNewPassphraseAgain] = useState('');
+  const [hdPassphraseAgainLeft, setHdPassphraseAgainLeft] = useState(false);
   // Whether the wallet just saved used one, for the done screen's recovery line.
   const [hdSavedWithPassphrase, setHdSavedWithPassphrase] = useState(false);
   const [hdAsk, setHdAsk] = useState(false);
@@ -619,6 +621,13 @@ export const VaultSecretForm: React.FC<{
         if (fieldRows) return fieldRowsNamed && fieldRows.some((field) => !field.value) ? t('vaults.dialog.createNeedsValue') : null;
         return staticSource === 'text' && !value ? t('vaults.dialog.createNeedsValue') : null;
       }
+      if (isHd && signingSource === 'generate') {
+        // The passphrase's second box not yet judged (empty, or still being typed): say what is
+        // left to do. Once judged, its own mismatch line speaks.
+        return hdNewPassphrase !== hdNewPassphraseAgain && !passphraseJudged(hdNewPassphrase, hdNewPassphraseAgain, hdPassphraseAgainLeft)
+          ? t('vaults.dialog.createNeedsPassphraseAgain')
+          : null;
+      }
       if (isHd) return signingSource === 'import' && !hdImport.trim() ? t('vaults.dialog.createNeedsWords') : null;
       return (isSolanaKey ? solanaImport : importHex).trim() ? null : t('vaults.dialog.createNeedsKey');
     }
@@ -713,6 +722,7 @@ export const VaultSecretForm: React.FC<{
     setHdPassphrase('');
     setHdNewPassphrase('');
     setHdNewPassphraseAgain('');
+    setHdPassphraseAgainLeft(false);
     setHdMismatch(false);
     setHdMismatchNotSaved(false);
   };
@@ -776,6 +786,7 @@ export const VaultSecretForm: React.FC<{
       setHdPassphrase('');
       setHdNewPassphrase('');
       setHdNewPassphraseAgain('');
+    setHdPassphraseAgainLeft(false);
       setHdQuiz([]);
       setHdChosen({});
       setHdMismatchNotSaved(true);
@@ -812,6 +823,7 @@ export const VaultSecretForm: React.FC<{
     setHdPassphrase('');
     setHdNewPassphrase('');
     setHdNewPassphraseAgain('');
+    setHdPassphraseAgainLeft(false);
     setHdQuiz([]);
     setHdChosen({});
     const stored = created.secret?.accounts?.find((account) => account.account === 0);
@@ -2041,8 +2053,10 @@ export const VaultSecretForm: React.FC<{
                 <HdCreatePassphrase
                   value={hdNewPassphrase}
                   confirm={hdNewPassphraseAgain}
+                  confirmLeft={hdPassphraseAgainLeft}
                   onChange={setHdNewPassphrase}
                   onConfirmChange={setHdNewPassphraseAgain}
+                  onConfirmLeftChange={setHdPassphraseAgainLeft}
                   disabled={formBusy}
                 />
               ) : null}

@@ -205,3 +205,51 @@ it('a protected wallet: every account approves every signature, with no switch, 
   expect(api.prepareVaultBitcoinAddressTypes).not.toHaveBeenCalled();
   for (const text of ['bc1pBTC0', 'bc1pBTC1']) expect(screen.getByText(text)).toBeTruthy();
 });
+
+it('keeps a typed account name when the field is left, and keeps the old one when it is left empty', async () => {
+  api.updateVaultHdAccount.mockResolvedValue({ ok: true, secret: wallet([account(0, { name: 'treasury' })]) });
+  open(wallet([account(0, { name: 'main' })]));
+  fireEvent.click(screen.getByRole('button', { name: w.rename }));
+  let input = screen.getByPlaceholderText(w.namePlaceholder);
+  fireEvent.change(input, { target: { value: '  treasury ' } });
+  await act(async () => { fireEvent.blur(input); });
+  expect(api.updateVaultHdAccount).toHaveBeenCalledWith('AGENT_WALLET', 0, { name: 'treasury' }, { handleError: false });
+  api.updateVaultHdAccount.mockClear();
+  // Emptied and left: the previous name stays, nothing is sent.
+  fireEvent.click(screen.getByRole('button', { name: w.rename }));
+  input = screen.getByPlaceholderText(w.namePlaceholder);
+  fireEvent.change(input, { target: { value: '   ' } });
+  await act(async () => { fireEvent.blur(input); });
+  expect(api.updateVaultHdAccount).not.toHaveBeenCalled();
+  expect(screen.getByText('main')).toBeTruthy();
+  // Escape still cancels.
+  fireEvent.click(screen.getByRole('button', { name: w.rename }));
+  input = screen.getByPlaceholderText(w.namePlaceholder);
+  fireEvent.change(input, { target: { value: 'other' } });
+  await act(async () => { fireEvent.keyDown(input, { key: 'Escape' }); });
+  expect(api.updateVaultHdAccount).not.toHaveBeenCalled();
+});
+
+it('a newly added account names itself by leaving the field too', async () => {
+  const next = wallet([account(0), account(1)]);
+  api.enableVaultHdAccount.mockResolvedValue({ ok: true, secret: next });
+  api.updateVaultHdAccount.mockResolvedValue({ ok: true, secret: wallet([account(0), account(1, { name: 'savings' })]) });
+  const onChanged = vi.fn();
+  const capabilities = OWNER_INSTANCE_CAPABILITIES;
+  const tree = (secret: VaultSecret) => (
+    <I18nextProvider i18n={i18n}>
+      <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: null, capabilities }}>
+        <VaultHdWalletDialog secret={secret} open onOpenChange={vi.fn()} onChanged={onChanged} />
+      </InstanceAuthorizationContext.Provider>
+    </I18nextProvider>
+  );
+  const { rerender } = render(tree(wallet([account(0)])));
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: w.add.replace('{{account}}', '1') })); });
+  rerender(tree(next));
+  // The new account opens on the same name field, focused.
+  const input = screen.getByPlaceholderText(w.namePlaceholder);
+  expect(document.activeElement).toBe(input);
+  fireEvent.change(input, { target: { value: 'savings' } });
+  await act(async () => { fireEvent.blur(input); });
+  expect(api.updateVaultHdAccount).toHaveBeenCalledWith('AGENT_WALLET', 1, { name: 'savings' }, { handleError: false });
+});

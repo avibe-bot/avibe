@@ -6459,7 +6459,8 @@
       "createNeedsWords": "Paste the recovery words to import the wallet.",
       "createNeedsKey": "Paste the private key to import.",
       "createNeedsProtected": "Set up or unlock Protected above first.",
-      "createNeedsAvault": "Install or update avault as shown above first."
+      "createNeedsAvault": "Install or update avault as shown above first.",
+      "createNeedsPassphraseAgain": "Enter the passphrase again to create the wallet."
     },
     "requests": {
       "title": "Pending requests",
