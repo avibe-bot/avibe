@@ -1,4 +1,5 @@
 import AuthenticationServices
+import CryptoKit
 import WebKit
 import XCTest
 @testable import Avibe
@@ -1151,6 +1152,156 @@ final class MobileOnboardingTests: XCTestCase {
             events,
             ["push.logout", "push.management", "account.transition"]
         )
+    }
+
+    /// The owner's morning, end to end below the view: notifications on with
+    /// a device token held, sign out, sign in again in the same process,
+    /// open the instance, and turn notifications on. The account
+    /// coordinator and the push coordinator are the real ones, wired as
+    /// `AppModel` wires them; the account transport, the push keychain, the
+    /// notification center, the system permission and APNs are stand-ins.
+    /// APNs answers the subscription's registration with a main-queue block
+    /// queued ahead of its provider reconciliation (#3837's race). The
+    /// subscription must still register.
+    func testEnableNotificationsAfterSignOutAndSignInInSameSessionSucceeds()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let token = Data(repeating: 41, count: 32)
+        let installationID = UUID()
+        let keychain = InMemoryPushKeychainStore()
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 12, count: 32),
+            accountID: "account-1",
+            bindGeneration: 1,
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        let generationStore = InMemoryPushGenerationStore()
+        generationStore.generation = 1
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "morning-key",
+            instanceOrigin: instance.url.absoluteString,
+            accountID: "account-1",
+            accountGeneration: 1,
+            bindGeneration: 1,
+            privateKey: P256.KeyAgreement.PrivateKey().rawRepresentation,
+            authSecret: Data(repeating: 3, count: 16),
+            vapidKeyHash: "morning",
+            state: .active,
+            pendingRevoke: false,
+            replacementRegistrationIDs: []
+        ))
+        let marker = InMemoryPushInstallationMarkerStore()
+        marker.installationID = installationID
+
+        // Every account transport the coordinator makes reaches the same
+        // account and the same push service, which answers 200.
+        var requests: [String] = []
+        let transports = (0..<24).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            transport.pushManagementHandler = { request in
+                let kind = request.path.split(separator: "/").last.map(String.init) ?? ""
+                requests.append("\(request.method) \(request.path.contains("/registrations/") ? "registration" : kind)")
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return transport
+        }
+        var push: NativePushCoordinator!
+        var registrations = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: transports,
+            // `AppModel.openRuntime` resumes push registration on every open.
+            onOpen: { _ in push.resumeAfterAccountActivation() },
+            onPreparePushLogout: { await push.prepareForLogout() }
+        )
+        push = NativePushCoordinator(
+            keychain: keychain,
+            generationStore: generationStore,
+            managementRequest: { request in
+                try await coordinator.pushManagementRequest(request)
+            },
+            accountProvider: { coordinator.currentAccount },
+            registerForRemoteNotifications: {
+                registrations += 1
+                // UIKit hands the token back as a main-queue block.
+                DispatchQueue.main.async {
+                    push.didRegister(deviceToken: token, environment: "sandbox")
+                }
+            },
+            requestNotificationAuthorization: { true },
+            notificationAuthorizationStatus: { .authorized },
+            installationMarker: marker,
+            notificationCenter: QuietPushNotificationCenter()
+        )
+
+        // Signed in, the instance open, notifications on.
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        try await settlePush(coordinator)
+
+        // Sign out: the push installation is revoked for this account.
+        coordinator.activateAccountSurface()
+        let signedOut = try await coordinator.logout()
+        XCTAssertEqual(signedOut, .signedOut)
+        XCTAssertTrue(requests.contains { $0.hasPrefix("POST revoke") }, "\(requests)")
+
+        // Sign in again in the same process, and open the instance.
+        let signedIn = try await coordinator.verifyOTP(
+            email: "account-1@example.com",
+            code: "123456"
+        )
+        guard case .signedIn = signedIn else {
+            return XCTFail("Signing in again ended at \(signedIn).")
+        }
+        _ = try coordinator.selectInstance(id: instance.id)
+        try await settlePush(coordinator)
+
+        // Turn notifications on.
+        let beforeEnable = requests.count
+        let registrationsBeforeEnable = registrations
+        let vapidPublicKey = PushBase64URL.encode(
+            P256.KeyAgreement.PrivateKey().publicKey.x963Representation
+        )
+        let subscription = try await push.subscribe(
+            vapidPublicKey: vapidPublicKey,
+            instanceOrigin: instance.url.absoluteString
+        )
+        try await settlePush(coordinator)
+
+        XCTAssertGreaterThan(registrations, registrationsBeforeEnable)
+        let enable = Array(requests[beforeEnable...])
+        XCTAssertEqual(enable.filter { $0 == "PUT binding" }.count, 1, "\(enable)")
+        XCTAssertEqual(enable.filter { $0 == "PUT registration" }.count, 1, "\(enable)")
+        XCTAssertTrue(enable.contains("PATCH provider"), "\(enable)")
+        XCTAssertNotNil(subscription["endpoint"] as? String)
+        let active = try keychain.listRecords().filter {
+            $0.state == .active && $0.accountID == "account-1"
+        }
+        XCTAssertEqual(active.count, 1)
+        XCTAssertFalse(keychain.installation?.providerPatchPending ?? true)
+    }
+
+    /// Lets the push coordinator's queued work (resume, recovery, a token
+    /// callback and its reconciliation) finish, and the account
+    /// coordinator become idle.
+    private func settlePush(_ coordinator: MobileSessionCoordinator) async throws {
+        for _ in 0..<5 {
+            for _ in 0..<50 {
+                await Task.yield()
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     /// What the App icon badge checks before a runtime page sets it: an
@@ -3883,4 +4034,19 @@ private extension Result where Success == NativeBridgeRequest, Failure == Native
         }
         return value
     }
+}
+
+@MainActor
+private final class QuietPushNotificationCenter: PushNotificationCentering {
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] {
+        []
+    }
+
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] {
+        []
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
 }
