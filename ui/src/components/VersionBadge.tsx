@@ -6,11 +6,8 @@ import {
   type UpgradeResult,
 } from '../context/ApiContext';
 import { AlertCircle, GitCommitHorizontal } from 'lucide-react';
-import {
-  badgeVariants,
-  interactiveBadgeTriggerClassName,
-  mobileHeaderPopoverClassName,
-} from './ui/badge-variants';
+import { mobileHeaderPopoverClassName } from './ui/badge-variants';
+import { VersionChip } from './VersionChip';
 import { cn } from '@/lib/utils';
 import { setConfigField } from '@/lib/configMutations';
 import { scheduleUpgradeReload } from '../lib/upgradeReload';
@@ -717,27 +714,20 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       <div className="relative" ref={popupRef}>
         {/* Version Badge trigger */}
         <PopoverTrigger asChild>
-          <button
-            type="button"
+          <VersionChip
             onClick={handleBadgeClick}
             // Fetch the panel's chunk as the pointer or focus arrives, before the click opens it.
             onPointerEnter={() => void UpdatePanel.preload()}
             onFocus={() => void UpdatePanel.preload()}
-            className={cn(
-              badgeVariants({ variant: hasUpdate || hasVersionSkew ? 'warning' : 'secondary' }),
-              interactiveBadgeTriggerClassName,
-              'relative rounded-md font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
-            )}
+            attention={hasUpdate || hasVersionSkew}
+            updateDot={hasUpdate}
             title={badgeTitle}
             aria-controls={popupId}
           >
             {hasVersionSkew && <AlertCircle size={12} aria-hidden="true" />}
             {isSourceBuild ? <GitCommitHorizontal size={12} /> : t('dashboard.versionPrefix')}
             {displayVersion}
-            {hasUpdate && (
-              <span className="absolute -top-1 -right-1 size-2.5 rounded-full border-2 border-background bg-gold animate-pulse" />
-            )}
-          </button>
+          </VersionChip>
         </PopoverTrigger>
 
         {/* Popup */}
