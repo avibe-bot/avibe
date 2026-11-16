@@ -19,7 +19,7 @@ import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voi
 import { isVoiceCaptureActive, prewarmVoiceCapture, type VoiceCaptureState } from '../../lib/voiceRecording';
 import { emitVoiceTelemetry, type VoiceTelemetryEvent, type VoiceTelemetryOutcome } from '../../lib/voiceTelemetry';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
-import { noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
+import { beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
 
 // Press and hold to talk (ui/design: mobile/main-bot-voice/*, composer/hold-*): one gesture
 // and one take, from the press to the sent message. A press that reaches `holdMs` opens the
@@ -310,6 +310,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   useEffect(() => {
     mounted.current = true;
     let alive = true;
+    const consentRead = beginVoiceConsentRead();
     apiFetch('/api/asr/status')
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
@@ -318,7 +319,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         availableRef.current = ok;
         setAvailable(ok);
         maxFileBytes.current = typeof data?.max_file_bytes === 'number' && data.max_file_bytes > 0 ? Math.floor(data.max_file_bytes) : null;
-        noteVoiceStatus(data);
+        noteVoiceStatus(data, consentRead);
         if (ok && voiceConsentForPress() === 'granted') primeCloudToken();
       })
       .catch(() => {

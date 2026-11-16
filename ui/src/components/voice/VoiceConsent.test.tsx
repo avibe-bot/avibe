@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastContext } from '../../context/ToastContext';
 import {
+  answerVoiceConsent,
   askVoiceConsent,
+  beginVoiceConsentRead,
   closeVoiceConsent,
   gateVoicePress,
   knownVoiceConsent,
@@ -97,6 +99,20 @@ describe('voice consent', () => {
     expect(showToast).toHaveBeenCalledWith('voice.consent.saveFailed', 'error');
     expect(voiceConsentAsking()).toBe(true);
     expect(gateVoicePress()).toBe('ask');
+  });
+
+  it('a read that started before a saved answer cannot bring the old answer back', async () => {
+    noteVoiceStatus({ available: true, consent: 'granted' });
+    const slowRead = beginVoiceConsentRead();
+    expect(await answerVoiceConsent('declined')).toBe(true);
+    noteVoiceStatus({ available: true, consent: 'granted' }, slowRead);
+    expect(knownVoiceConsent()).toBe('declined');
+    // Nor can an older read overtake a newer one.
+    const older = beginVoiceConsentRead();
+    const newer = beginVoiceConsentRead();
+    noteVoiceStatus({ available: true, consent: 'declined' }, newer);
+    noteVoiceStatus({ available: true, consent: 'granted' }, older);
+    expect(knownVoiceConsent()).toBe('declined');
   });
 
   it('shows the small print, with where speech goes, only on Learn more', () => {

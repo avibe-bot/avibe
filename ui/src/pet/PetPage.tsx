@@ -12,7 +12,7 @@ import { FileCard } from '@/components/ui/file-card';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
-import { noteVoiceStatus, voiceSendAllowed } from '@/lib/voiceConsent';
+import { beginVoiceConsentRead, noteVoiceStatus, voiceSendAllowed } from '@/lib/voiceConsent';
 import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { readMessageAttachments } from '@/lib/messageAttachments';
@@ -1368,13 +1368,14 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
   // this bind/epoch: a previous available result cannot start a capture on
   // the next one. Settings changes take effect on that next epoch.
   const readAsr = useCallback((alive: () => boolean) => {
+    const consentRead = beginVoiceConsentRead();
     void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
       if (!alive() || !epoch.isCurrent()) return;
       if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
       // Whether this account allowed voice input (lib/voiceConsent): a status without the field
       // comes from an instance that asks nothing.
       else {
-        noteVoiceStatus(value);
+        noteVoiceStatus(value, consentRead);
         setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes, allowed: !('consent' in value) || value.consent === 'granted' });
       }
     }).catch(() => { if (alive() && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });

@@ -94,7 +94,7 @@ import type {
 import { DeferredMentionEditor } from './deferredMentionEditor';
 import type { MentionReference } from '../../lib/mentions';
 import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
-import { askVoiceConsent, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
+import { askVoiceConsent, beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
 
 export type ComposerAttachment = {
   localId: string;
@@ -764,6 +764,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     void prewarmVoiceCapture().catch(() => undefined);
     let alive = true;
     const statusRead = beginVoiceStatusRead();
+    const consentRead = beginVoiceConsentRead();
     apiFetch('/api/asr/status')
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -779,7 +780,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         if (available) setVoiceSlotHeld(true);
         setAsrMaxFileBytes(maxFileBytes);
         statusRead.remember({ available, maxFileBytes });
-        noteVoiceStatus(data);
+        noteVoiceStatus(data, consentRead);
         // Prewarm the cloud token so the first recording uploads straight to
         // avibe.bot with no mint latency (no-op when the cloud is unavailable).
         // The instance mints none before this account allowed voice input.

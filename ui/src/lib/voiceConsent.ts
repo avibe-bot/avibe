@@ -23,6 +23,18 @@ const listeners = new Set<() => void>();
 
 const emit = () => listeners.forEach((listener) => listener());
 
+// Reads and saved answers in the order they happened. A status read takes its number when it
+// starts, a saved answer when the instance took it; a read is applied only when nothing newer
+// was, so a slow read cannot bring back an answer the reader has since changed.
+let sequence = 0;
+let applied = 0;
+
+/** Number a `/api/asr/status` read as it starts; hand it to `noteVoiceStatus` with the body. */
+export function beginVoiceConsentRead(): number {
+  sequence += 1;
+  return sequence;
+}
+
 const set = (next: VoiceConsent | undefined) => {
   if (next === known) return;
   known = next;
@@ -35,6 +47,7 @@ export const VOICE_CONSENT_REQUIRED_EVENT = 'avibe:voice-consent-required';
 
 // The answer belongs to the reader it was read for: a new reader reads its own.
 subscribeLocalSnapshotPrincipal((next) => {
+  applied = beginVoiceConsentRead();
   set(undefined);
   if (next) void refreshVoiceConsent();
 });
@@ -46,8 +59,11 @@ if (typeof window !== 'undefined') {
 
 /** Take the answer from a `/api/asr/status` body. A body without the field comes from an
  *  instance that asks no question and refuses nothing, so voice goes on as before. */
-export function noteVoiceStatus(data: unknown): void {
+export function noteVoiceStatus(data: unknown, read: number = beginVoiceConsentRead()): void {
   if (typeof data !== 'object' || data === null) return;
+  // Superseded by a newer read or a saved answer.
+  if (read <= applied) return;
+  applied = read;
   if (!('consent' in data)) {
     set('granted');
     return;
@@ -117,9 +133,10 @@ export async function resolveVoicePress(): Promise<VoicePress> {
 
 /** Read the answer now (the question does when it opens on an unknown answer). */
 export async function refreshVoiceConsent(): Promise<VoiceConsent | undefined> {
+  const read = beginVoiceConsentRead();
   try {
     const response = await apiFetch('/api/asr/status');
-    if (response.ok) noteVoiceStatus(await response.json());
+    if (response.ok) noteVoiceStatus(await response.json(), read);
   } catch {
     // Unknown stays unknown: the question stays up and the answer is saved when given.
   }
@@ -139,6 +156,7 @@ export async function answerVoiceConsent(choice: 'granted' | 'declined'): Promis
   } catch {
     return false;
   }
+  applied = beginVoiceConsentRead();
   set(choice);
   return true;
 }

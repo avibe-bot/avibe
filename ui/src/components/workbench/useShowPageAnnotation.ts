@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { actionShortcutMatches, isPlainEscape, useActionShortcuts } from '../../lib/actionShortcuts';
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
-import { askVoiceConsent, noteVoiceStatus, voiceConsentForPress } from '../../lib/voiceConsent';
+import { askVoiceConsent, beginVoiceConsentRead, noteVoiceStatus, voiceConsentForPress } from '../../lib/voiceConsent';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import {
@@ -191,10 +191,11 @@ export function useShowPageAnnotation(src: string | null, keepTarget?: string | 
     let availability: Promise<ShowPageVoiceAvailability> | null = null;
     const loadAvailability = async (): Promise<ShowPageVoiceAvailability> => {
       try {
+        const consentRead = beginVoiceConsentRead();
         const response = await apiFetch('/api/asr/status');
         const data = response.ok ? await response.json() : null;
         const available = data?.available === true;
-        noteVoiceStatus(data);
+        noteVoiceStatus(data, consentRead);
         if (available && voiceConsentForPress() === 'granted') primeCloudToken();
         return {
           available,

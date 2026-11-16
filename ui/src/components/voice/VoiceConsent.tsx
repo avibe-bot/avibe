@@ -12,6 +12,7 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import {
   answerVoiceConsent,
   askVoiceConsent,
+  beginVoiceConsentRead,
   closeVoiceConsent,
   knownVoiceConsent,
   noteVoiceStatus,
@@ -154,11 +155,12 @@ export function VoiceInputSetting() {
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let alive = true;
+    const consentRead = beginVoiceConsentRead();
     apiFetch('/api/asr/status')
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (!alive || !data) return;
-        noteVoiceStatus(data);
+        noteVoiceStatus(data, consentRead);
         // Where voice works here, or an answer was given that can still be taken back.
         setAvailable(data.available === true || data.consent === 'granted' || data.consent === 'declined');
       })
