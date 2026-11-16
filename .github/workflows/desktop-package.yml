@@ -215,9 +215,11 @@ jobs:
       # Signing must exist before the Runtime is built: every Mach-O inside
       # runtime.zip is signed before the archive and its hashes exist. A tag
       # build fails here on a missing or partial credential set; a manual build
-      # accepts the complete set or none of it. Only identity, keychain, and
-      # notary key locations leave this step, under names Tauri never reads.
-      # The cache warm-up alone skips it and stays ad-hoc.
+      # accepts the complete set or none of it. The Developer ID provisioning
+      # profile is part of the set and must fit the imported identity. Only
+      # identity, keychain, notary key, and profile locations leave this step,
+      # under names Tauri never reads. The cache warm-up alone skips it and
+      # stays ad-hoc.
       - name: Import Apple signing identity
         if: runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'
         env:
@@ -229,6 +231,7 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
         run: >
           python desktop/scripts/macos_signing.py import-identity
           --release-tag "$RELEASE_TAG" --env-file "$GITHUB_ENV"
@@ -414,10 +417,12 @@ jobs:
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       # The .app inside the DMG. A signed build signs the Cua Driver helper and
-      # then the app with the Team's Developer ID, pins both code identities,
-      # and notarizes and staples the app. The smoke test, the DMG, and the
-      # updater archive all use this final app. Only a manual build without
-      # credentials reaches the ad-hoc branch.
+      # then the app with the Team's Developer ID, the restricted entitlements,
+      # and the embedded provisioning profile that authorizes them, pins both
+      # code identities, and notarizes and staples the app. The smoke test, the
+      # DMG, and the updater archive all use this final app. Only a manual build
+      # without credentials, and the warm-up, reach the ad-hoc branch, which
+      # keeps Tauri's seal and its profile-free entitlements.
       - name: Sign macOS app
         if: runner.os == 'macOS'
         working-directory: desktop
@@ -504,6 +509,9 @@ jobs:
           }
           trap cleanup EXIT
 
+          # macOS kills, at exec, an app whose signature, entitlements, or
+          # embedded provisioning profile it refuses (status 137); any exit
+          # within these ten seconds fails the build before anything ships.
           for _ in $(seq 1 10); do
             if ! kill -0 "$app_pid" 2>/dev/null; then
               wait "$app_pid" || status=$?

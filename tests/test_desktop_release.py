@@ -997,8 +997,14 @@ def test_workflow_signs_every_macos_layer_before_recording():
     signing = step("Sign macOS app")["run"]
     assert "macos_signing.py sign-app" in signing and "macos_signing.py notarize" in signing
     assert "release builds must be Developer ID signed" in signing
-    # The manual no-credential branch keeps the ad-hoc, inside-out seal.
+    # The manual no-credential branch keeps the ad-hoc, inside-out seal, and
+    # with it the profile-free entitlements Tauri sealed the bundle with.
     assert signing.count("--preserve-metadata=identifier,entitlements,flags,runtime") == 2
+    adhoc_branch = signing.split("release builds must be Developer ID signed", 1)[1].split("\n          fi\n", 1)[0]
+    assert "codesign --force --sign -" in adhoc_branch
+    assert "--entitlements" not in adhoc_branch and "provisionprofile" not in adhoc_branch
+    # The profile entitlements are reachable only through the Developer ID signer.
+    assert "app-developer-id" not in (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
     assert "--deep --sign" not in signing
     assert "Contents/Helpers/cua-driver" in signing
     assert "Contents/MacOS/cua-driver" in signing
@@ -1116,7 +1122,7 @@ def test_apple_secrets_reach_only_the_identity_import_and_never_tauri():
     updater = {"TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"}
     apple = {
         "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_TEAM_ID",
-        "APPLE_API_KEY", "APPLE_API_ISSUER", "APPLE_API_PRIVATE_KEY",
+        "APPLE_API_KEY", "APPLE_API_ISSUER", "APPLE_API_PRIVATE_KEY", "APPLE_PROVISIONING_PROFILE",
     }
     by_step = {}
     for job in package["jobs"].values():

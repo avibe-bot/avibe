@@ -8,8 +8,8 @@ the hardened runtime and with a secure timestamp, from the inside out:
    manifest, and its tree hash exist (`sign_runtime`, called by
    build-runtime-bundle.py). The notary service opens nested archives, so one
    unsigned binary in runtime.zip rejects the whole app;
-2. the Cua Driver helper, then Avibe.app, which is notarized and stapled
-   (`sign-app`, `notarize`);
+2. the Cua Driver helper, then Avibe.app with its Developer ID provisioning
+   profile, which is notarized and stapled (`sign-app`, `notarize`);
 3. the DMG that carries the stapled app, which is notarized and stapled too
    (`sign-dmg`, `notarize`, `verify-release`).
 
@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import json
 import os
 import plistlib
@@ -36,6 +37,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -53,7 +55,19 @@ HELPER_IDENTIFIER = "bot.avibe.desktop.cua-driver"
 PYTHON_IDENTIFIER = "bot.avibe.desktop.runtime.python"
 NODE_IDENTIFIER = "bot.avibe.desktop.runtime.node"
 
-APP_ENTITLEMENTS = DESKTOP_DIR / "src-tauri" / "Entitlements.plist"
+# What Tauri seals the bundle with (bundle.macOS.entitlements). Every build
+# without a provisioning profile runs with exactly these, so they must never
+# hold an entitlement that only a profile can authorize: macOS kills such code
+# at launch.
+BUNDLE_ENTITLEMENTS = DESKTOP_DIR / "src-tauri" / "Entitlements.plist"
+# The Developer ID app: the bundle's entitlements plus the restricted ones its
+# embedded provisioning profile authorizes. Only sign_app signs with them, and
+# never without the profile.
+APP_ENTITLEMENTS = ENTITLEMENTS_DIR / "app-developer-id.plist"
+# Where macOS looks for the profile of a macOS app bundle.
+EMBEDDED_PROFILE = "Contents/embedded.provisionprofile"
+APP_APPLICATION_IDENTIFIER = f"{TEAM_ID}.{APP_IDENTIFIER}"
+PROFILE_EXPIRY_WARNING = timedelta(days=30)
 HELPER_ENTITLEMENTS = ENTITLEMENTS_DIR / "cua-driver.plist"
 # libffi (Python) and V8 (Node) each generate code differently per architecture.
 PYTHON_ENTITLEMENTS = {
@@ -74,6 +88,7 @@ APPLE_SECRETS = (
     "APPLE_API_KEY",
     "APPLE_API_ISSUER",
     "APPLE_API_PRIVATE_KEY",
+    "APPLE_PROVISIONING_PROFILE",
 )
 
 KEYCHAIN_NAME = "avibe-signing.keychain-db"
@@ -344,7 +359,126 @@ def unexpected_app_code(app: Path) -> list[Path]:
     return [path for path, _type in macho_files(app) if path not in expected]
 
 
-def sign_app(app: Path, *, identity: str, keychain: str | None) -> None:
+def decode_profile(path: Path) -> dict:
+    """The property list inside a provisioning profile's CMS envelope.
+
+    `security cms -D` only extracts it; macOS checks Apple's signature on the
+    profile when the app launches.
+    """
+
+    result = subprocess.run(["security", "cms", "-D", "-i", str(path)], check=False, capture_output=True)
+    try:
+        profile = plistlib.loads(result.stdout) if result.returncode == 0 else None
+    except Exception:  # plistlib raises several types for malformed input
+        profile = None
+    if not isinstance(profile, dict):
+        raise SigningError(f"{path.name} is not a readable provisioning profile")
+    return profile
+
+
+def certificate_fingerprint(der: bytes) -> str:
+    """The SHA-1 fingerprint by which `security find-identity` names an identity."""
+
+    return hashlib.sha1(der).hexdigest().upper()
+
+
+def identity_fingerprint(identity: str, keychain: str | None) -> str:
+    """The certificate fingerprint of the one valid code-signing identity that
+    `codesign --sign <identity>` resolves to."""
+
+    command = ["security", "find-identity", "-v", "-p", "codesigning"]
+    if keychain:
+        command.append(keychain)
+    listed = run(command, capture=True).stdout
+    found = {
+        match.group(1).upper()
+        for match in re.finditer(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"(.*)"\s*$', listed, re.MULTILINE)
+        if match.group(2) == identity
+    }
+    if len(found) != 1:
+        raise SigningError(f"Expected one valid code-signing identity named APPLE_SIGNING_IDENTITY, found {len(found)}")
+    return found.pop()
+
+
+def signing_certificate_fingerprint(path: Path) -> str:
+    """The fingerprint of the leaf certificate in a signature."""
+
+    with tempfile.TemporaryDirectory(prefix="avibe-certificates-") as temporary:
+        prefix = Path(temporary) / "certificate"
+        run(["codesign", "--display", f"--extract-certificates={prefix}", str(path)], capture=True)
+        leaf = Path(f"{prefix}0")
+        if not leaf.is_file():
+            raise SigningError(f"{path}: signature carries no certificate")
+        return certificate_fingerprint(leaf.read_bytes())
+
+
+def _allows(granted: object, wanted: object) -> bool:
+    if granted == wanted:
+        return True
+    if isinstance(wanted, list):
+        return granted == "*" or (isinstance(granted, list) and all(item in granted for item in wanted))
+    return False
+
+
+def check_profile(profile: dict, certificate: str, *, now: datetime | None = None) -> None:
+    """Refuse a profile with which macOS would not launch the Developer ID app
+    signed by `certificate` (a fingerprint), or which would expire.
+
+    A Developer ID profile is issued for direct distribution: it provisions all
+    devices instead of listing some. Each entitlement the app claims beyond the
+    bundle's own must be granted by the profile, and the signing certificate
+    must be one of the profile's.
+    """
+
+    if profile.get("TeamIdentifier") != [TEAM_ID]:
+        raise SigningError(f"The provisioning profile is not issued to Team {TEAM_ID}")
+    granted = profile.get("Entitlements")
+    granted = granted if isinstance(granted, dict) else {}
+    if granted.get("com.apple.application-identifier") != APP_APPLICATION_IDENTIFIER:
+        raise SigningError(f"The provisioning profile is not for the application identifier {APP_APPLICATION_IDENTIFIER}")
+    platform = profile.get("Platform")
+    if (
+        not isinstance(platform, list)
+        or "OSX" not in platform
+        or profile.get("ProvisionsAllDevices") is not True
+        or "ProvisionedDevices" in profile
+    ):
+        raise SigningError("The provisioning profile is not a macOS Developer ID (direct distribution, all devices) profile")
+    bundle = plistlib.loads(BUNDLE_ENTITLEMENTS.read_bytes())
+    for key, value in plistlib.loads(APP_ENTITLEMENTS.read_bytes()).items():
+        if key not in bundle and not _allows(granted.get(key), value):
+            raise SigningError(f"The provisioning profile does not allow {key} as {APP_ENTITLEMENTS.name} claims it")
+    now = now or datetime.now(timezone.utc)
+    expires = profile.get("ExpirationDate")
+    if not isinstance(expires, datetime):
+        raise SigningError("The provisioning profile has no expiration date")
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)  # plistlib reads dates as naive UTC
+    if expires <= now:
+        raise SigningError(f"The provisioning profile expired on {expires:%Y-%m-%d}")
+    if expires - now < PROFILE_EXPIRY_WARNING:
+        print(f"::warning::The provisioning profile expires on {expires:%Y-%m-%d}; renew it before then.", flush=True)
+    listed = {certificate_fingerprint(der) for der in profile.get("DeveloperCertificates") or [] if isinstance(der, bytes)}
+    if certificate.upper() not in listed:
+        raise SigningError(
+            "The provisioning profile does not list the signing certificate; "
+            "a new signing certificate needs a new profile"
+        )
+
+
+def verify_embedded_profile(app: Path, profile: Path) -> None:
+    """The app carries exactly the given profile, and it covers the app's
+    actual signing certificate."""
+
+    embedded = app / EMBEDDED_PROFILE
+    if embedded.is_symlink() or not embedded.is_file():
+        raise SigningError(f"Avibe.app is missing {EMBEDDED_PROFILE}")
+    if embedded.read_bytes() != profile.read_bytes():
+        raise SigningError(f"Avibe.app {EMBEDDED_PROFILE} differs from the provisioning profile it was signed with")
+    check_profile(decode_profile(embedded), signing_certificate_fingerprint(app))
+
+
+def sign_app(app: Path, *, identity: str, keychain: str | None, profile: Path) -> None:
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     if info.get("CFBundleIdentifier") != APP_IDENTIFIER:
         raise SigningError(f"Avibe.app bundle identifier must stay {APP_IDENTIFIER}")
@@ -353,20 +487,26 @@ def sign_app(app: Path, *, identity: str, keychain: str | None) -> None:
         raise SigningError("Avibe.app is missing Contents/Helpers/cua-driver")
     if extra := unexpected_app_code(app):
         raise SigningError(f"Avibe.app contains unreviewed nested code: {[str(path.relative_to(app)) for path in extra]}")
+    check_profile(decode_profile(profile), identity_fingerprint(identity, keychain))
     base = codesign_command(identity, keychain)
     codesign(
         [*base, "--identifier", HELPER_IDENTIFIER, "--entitlements", str(HELPER_ENTITLEMENTS), str(helper)],
         label="Contents/Helpers/cua-driver",
     )
-    # The bundle signature seals the main executable and the signed helper; its
+    # The profile belongs to the app alone; the bundle signature seals it as a
+    # resource, with the main executable and the signed helper. The bundle's
     # identifier comes from Info.plist.
+    embedded = app / EMBEDDED_PROFILE
+    embedded.unlink(missing_ok=True)
+    shutil.copyfile(profile, embedded)
     codesign([*base, "--entitlements", str(APP_ENTITLEMENTS), str(app)], label="Avibe.app")
-    verify_app(app)
+    verify_app(app, profile)
 
 
-def verify_app(app: Path) -> None:
+def verify_app(app: Path, profile: Path) -> None:
     verify_code(app / "Contents/Helpers/cua-driver", identifier=HELPER_IDENTIFIER, entitlements=HELPER_ENTITLEMENTS)
     verify_code(app, identifier=APP_IDENTIFIER, entitlements=APP_ENTITLEMENTS, deep=True)
+    verify_embedded_profile(app, profile)
 
 
 def sign_dmg(dmg: Path, *, identity: str, keychain: str | None) -> None:
@@ -491,7 +631,7 @@ def assess(path: Path, *, kind: str) -> None:
         raise SigningError(f"Gatekeeper does not accept {path.name} as notarized Developer ID code")
 
 
-def verify_release(app: Path, dmg: Path) -> None:
+def verify_release(app: Path, dmg: Path, profile: Path) -> None:
     """The shipped shapes: the stapled app, and the stapled DMG with the same
     app inside it."""
 
@@ -499,12 +639,12 @@ def verify_release(app: Path, dmg: Path) -> None:
     for path, kind in ((app, "exec"), (dmg, "open")):
         stapler("validate", path)
         assess(path, kind=kind)
-    verify_app(app)
+    verify_app(app, profile)
     with tempfile.TemporaryDirectory(prefix="avibe-dmg-verify-") as mountpoint:
         run(["hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mountpoint, str(dmg)], capture=True)
         try:
             inner = Path(mountpoint) / "Avibe.app"
-            verify_app(inner)
+            verify_app(inner, profile)
             stapler("validate", inner)
             assess(inner, kind="exec")
         finally:
@@ -545,8 +685,9 @@ def credential_policy(environment: dict[str, str], release_tag: str) -> bool:
 
 
 def import_identity(environment: dict[str, str], *, release_tag: str, env_file: Path, work_dir: Path) -> None:
-    """Install the Developer ID identity in a temporary keychain and the notary
-    key in a private file, and export only their locations and names.
+    """Install the Developer ID identity in a temporary keychain, and the notary
+    key and the provisioning profile in private files, and export only their
+    locations and names. The profile must fit the imported identity.
 
     Tauri never receives Apple credentials: none of the exported names is one
     that tauri-bundler reads, so it can neither sign nor notarize on its own.
@@ -586,9 +727,19 @@ def import_identity(environment: dict[str, str], *, release_tag: str, env_file: 
     listed = run(["security", "list-keychains", "-d", "user"], capture=True).stdout
     search = [line.strip().strip('"') for line in listed.splitlines() if line.strip()]
     run(["security", "list-keychains", "-d", "user", "-s", str(keychain), *search])
-    identities = run(["security", "find-identity", "-v", "-p", "codesigning", str(keychain)], capture=True).stdout
-    if f'"{environment["APPLE_SIGNING_IDENTITY"]}"' not in identities:
-        raise SigningError("The imported certificate does not provide a valid APPLE_SIGNING_IDENTITY")
+    try:
+        certificate_sha1 = identity_fingerprint(environment["APPLE_SIGNING_IDENTITY"], str(keychain))
+    except SigningError:
+        raise SigningError("The imported certificate does not provide a valid APPLE_SIGNING_IDENTITY") from None
+    profile = work_dir / "embedded.provisionprofile"
+    try:
+        profile_bytes = base64.b64decode("".join(environment["APPLE_PROVISIONING_PROFILE"].split()), validate=True)
+    except binascii.Error:
+        raise SigningError("APPLE_PROVISIONING_PROFILE must be a base64 .provisionprofile") from None
+    descriptor = os.open(profile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(profile_bytes)
+    check_profile(decode_profile(profile), certificate_sha1)
     key = work_dir / f"AuthKey_{environment['APPLE_API_KEY']}.p8"
     descriptor = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -599,6 +750,7 @@ def import_identity(environment: dict[str, str], *, release_tag: str, env_file: 
             "apple_signing": "enabled",
             "AVIBE_CODESIGN_IDENTITY": environment["APPLE_SIGNING_IDENTITY"],
             "AVIBE_CODESIGN_KEYCHAIN": str(keychain),
+            "AVIBE_PROVISIONING_PROFILE": str(profile),
             "AVIBE_NOTARY_KEY_PATH": str(key),
             "AVIBE_NOTARY_KEY_ID": environment["APPLE_API_KEY"],
             "AVIBE_NOTARY_ISSUER": environment["APPLE_API_ISSUER"],
@@ -629,11 +781,14 @@ def main() -> int:
         signer.add_argument("path", type=Path)
         signer.add_argument("--identity", default=os.environ.get("AVIBE_CODESIGN_IDENTITY"))
         signer.add_argument("--keychain", default=os.environ.get("AVIBE_CODESIGN_KEYCHAIN"))
+        if name == "sign-app":
+            signer.add_argument("--provisioning-profile", type=Path, default=os.environ.get("AVIBE_PROVISIONING_PROFILE"))
     notarizer = sub.add_parser("notarize", help="submit, require Accepted, staple, and validate")
     notarizer.add_argument("path", type=Path)
     releaser = sub.add_parser("verify-release", help="Gatekeeper, staple, and code identity checks of the shipped app and DMG")
     releaser.add_argument("--app", type=Path, required=True)
     releaser.add_argument("--dmg", type=Path, required=True)
+    releaser.add_argument("--provisioning-profile", type=Path, default=os.environ.get("AVIBE_PROVISIONING_PROFILE"))
     args = parser.parse_args()
     try:
         if args.command == "import-identity":
@@ -644,7 +799,9 @@ def main() -> int:
             if not args.identity:
                 raise SigningError("No signing identity: run import-identity first")
             if args.command == "sign-app":
-                sign_app(args.path, identity=args.identity, keychain=args.keychain)
+                if not args.provisioning_profile:
+                    raise SigningError("No provisioning profile: run import-identity first")
+                sign_app(args.path, identity=args.identity, keychain=args.keychain, profile=args.provisioning_profile)
             else:
                 sign_dmg(args.path, identity=args.identity, keychain=args.keychain)
         elif args.command == "notarize":
@@ -658,7 +815,9 @@ def main() -> int:
                 issuer=os.environ["AVIBE_NOTARY_ISSUER"],
             )
         else:
-            verify_release(args.app, args.dmg)
+            if not args.provisioning_profile:
+                raise SigningError("No provisioning profile: run import-identity first")
+            verify_release(args.app, args.dmg, args.provisioning_profile)
     except SigningError as error:
         print(f"::error::{error}", file=sys.stderr, flush=True)
         return 1

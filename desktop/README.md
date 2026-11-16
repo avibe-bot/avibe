@@ -227,16 +227,20 @@ Every macOS tag build (`gh-vX.Y.ZrcN` TEST and `vX.Y.Z` stable) is Developer ID
 signed and notarized, and fails rather than publish an ad-hoc app. The
 `desktop-updater` Environment holds the Apple set: `APPLE_CERTIFICATE` (base64
 `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
-`APPLE_API_KEY`, `APPLE_API_ISSUER`, and `APPLE_API_PRIVATE_KEY` (the raw `.p8`
-App Store Connect key). `scripts/macos_signing.py` owns every step. Tauri seals
+`APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY` (the raw `.p8`
+App Store Connect key), and `APPLE_PROVISIONING_PROFILE` (base64 of the app's
+Developer ID provisioning profile, on one line). `scripts/macos_signing.py`
+owns every step. Tauri seals
 the bundle ad hoc and never receives Apple credentials, so it cannot sign or
 notarize on its own.
 
 1. **Credentials.** The identity goes into a temporary runner keychain and the
-   notary key into a `0600` file; both are deleted when the job ends. A tag build
-   with a missing or partial set fails before anything is built. A manual build
-   accepts the complete set or none of it. `APPLE_TEAM_ID` must equal the pinned
-   Team.
+   notary key and the provisioning profile into `0600` files; all are deleted
+   when the job ends. A tag build with a missing or partial set fails before
+   anything is built. A manual build accepts the complete set or none of it, so
+   no Developer ID app is ever signed without the profile. `APPLE_TEAM_ID` must
+   equal the pinned Team, and the profile must fit the imported identity (see
+   **Provisioning profile**).
 2. **Runtime.** `build-runtime-bundle.py` signs every Mach-O of the private
    Runtime with the hardened runtime and a secure timestamp after compiling its
    bytecode, and before the startup probe, `runtime.zip`, its manifest, and the
@@ -247,7 +251,11 @@ notarize on its own.
    without a reviewed identity fails the build. Signatures are embedded in each
    file, so first-launch extraction is unchanged: the archive and tree hashes
    simply cover the signed bytes.
-3. **App.** The Cua Driver helper and then Avibe.app are signed, the app is
+3. **App.** The Cua Driver helper is signed, the profile is copied to
+   `Avibe.app/Contents/embedded.provisionprofile`, and Avibe.app is signed with
+   `entitlements/app-developer-id.plist`; the signer then checks the exact
+   entitlements and that the embedded profile is byte-identical to the input
+   and lists the certificate the app is actually signed with. The app is
    notarized with `notarytool` through the API key, and its ticket is stapled.
    The launch smoke test, the DMG, and the updater archive all use this final
    app. A notary request that times out, loses its connection, or meets a 5xx
@@ -280,7 +288,33 @@ Ad-hoc builds had a per-build DR, so macOS treats the first signed build as a ne
 program: users grant Computer Use permissions and Keychain access once more, and
 later signed updates keep them.
 
-**Entitlements.** The app keeps only microphone input (`src-tauri/Entitlements.plist`).
+**Provisioning profile.** WKWebView offers passkeys (WebAuthn) only for a site
+the app is associated with, through the `webcredentials:` associated domains
+`sandbox.avibe.bot` (the Protected Vault) and `avibe.bot` (the account).
+`com.apple.developer.associated-domains` is a restricted entitlement: macOS
+kills, at launch, an app that claims it without an embedded provisioning
+profile authorizing it. The profile is a Developer ID (direct distribution)
+profile for `68B2SQ6YK3.bot.avibe.desktop` with the Associated Domains
+capability, and it lists the Developer ID Application certificates allowed to
+sign the app. Before signing, the signer refuses a profile that is for another
+Team or application identifier, is not a macOS Developer ID profile for all
+devices, does not allow every restricted entitlement the app claims, has
+expired (it warns 30 days before), or does not list the certificate of the
+signing identity in use (compared by fingerprint). **A new signing certificate
+needs a new profile listing it, updated in `APPLE_PROVISIONING_PROFILE` in the
+same change**, or every signed build fails. The profile does not change the
+code identity below: the designated requirement depends only on the identifier
+and the certificate chain. Each host's `apple-app-site-association` file must
+also name `68B2SQ6YK3.bot.avibe.desktop` for macOS to associate the app.
+
+**Entitlements.** Only the Developer ID app signature claims the restricted
+keys: `entitlements/app-developer-id.plist` is `src-tauri/Entitlements.plist`
+plus `com.apple.developer.associated-domains`,
+`com.apple.application-identifier`, and `com.apple.developer.team-identifier`.
+Every build without the profile (a manual build without credentials, the cache
+warm-up, a local `tauri build`) keeps the entitlements Tauri seals the bundle
+with, `src-tauri/Entitlements.plist`, which must never hold a restricted key.
+That file keeps only microphone input.
 Node needs a code-generation exception (`allow-jit` on Apple silicon,
 `allow-unsigned-executable-memory` on Intel, whose V8 does not use `MAP_JIT`) and
 `disable-library-validation`, because the Show Runtime and npm-installed Agent
