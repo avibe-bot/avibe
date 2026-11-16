@@ -3,45 +3,40 @@
  *
  * One rejected call is not proof that the app has stopped: the page keeps its
  * starting state and tries again. It calls the app stuck only when the app has
- * not answered at all for `stuckAfterMs`, measured from the page load or the
+ * not answered at all for `STUCK_AFTER_MS`, measured from the page load or the
  * last answer, so a call that never settles counts as well as one that keeps
  * failing. A successful subscription, a successful status read and any status
  * event are answers; an answer after the page said "stuck" takes that back.
  */
-export interface ConnectOptions {
+interface ConnectOptions {
   /** Subscribes to status events. Called until it succeeds once. */
   subscribe: () => Promise<unknown>
   /** Reads and shows the current status. Skipped once an event has arrived. */
   snapshot: () => Promise<unknown>
   /** Whether a status event has arrived since the page loaded. */
   heardFromApp: () => boolean
-  /** No answer for `stuckAfterMs`: the app really is not responding. */
+  /** No answer for `STUCK_AFTER_MS`: the app really is not responding. */
   onStuck: (error: unknown) => void
   /** An answer came after `onStuck`. */
   onRecovered: () => void
-  /** Runs `callback` after `ms`; returns a cancel function. */
-  schedule?: (callback: () => void, ms: number) => () => void
-  stuckAfterMs?: number
 }
 
 /** Long enough that a slow first start never reaches it. */
-export const STUCK_AFTER_MS = 60_000
+const STUCK_AFTER_MS = 60_000
 
 const FIRST_RETRY_MS = 250
 const MAX_RETRY_MS = 5_000
 
-export function retryDelay(attempt: number): number {
+function retryDelay(attempt: number): number {
   return Math.min(FIRST_RETRY_MS * 2 ** Math.min(attempt, 10), MAX_RETRY_MS)
 }
 
-const realSchedule = (callback: () => void, ms: number): (() => void) => {
+const schedule = (callback: () => void, ms: number): (() => void) => {
   const id = setTimeout(callback, ms)
   return () => clearTimeout(id)
 }
 
 export async function connect(options: ConnectOptions): Promise<void> {
-  const schedule = options.schedule ?? realSchedule
-  const stuckAfterMs = options.stuckAfterMs ?? STUCK_AFTER_MS
   const sleep = (ms: number) => new Promise<void>((resolve) => schedule(resolve, ms))
 
   let done = false
@@ -73,7 +68,7 @@ export async function connect(options: ConnectOptions): Promise<void> {
         stuck = true
         options.onStuck(lastError)
       }
-    }, stuckAfterMs)
+    }, STUCK_AFTER_MS)
   }
   const answered = (): void => {
     if (stuck) {

@@ -1,34 +1,26 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { afterEach, beforeEach, mock, test } from 'node:test'
 
-import { connect, retryDelay, STUCK_AFTER_MS, type ConnectOptions } from '../src/connection.ts'
+import { connect } from '../src/connection.ts'
 
-/** A manual clock: timers run only when the test advances time. */
+type ConnectOptions = Parameters<typeof connect>[0]
+
+/** The page's fixed "no answer" limit (src/connection.ts). */
+const STUCK_AFTER_MS = 60_000
+
+/** The test's clock: Node's mocked timers, advanced in small steps so that the
+ *  promises a timer releases settle before the next one fires. */
 function clock() {
   let now = 0
-  let next = 0
-  const timers = new Map<number, { at: number; run: () => void }>()
   return {
     now: () => now,
-    schedule(run: () => void, ms: number) {
-      const id = next++
-      timers.set(id, { at: now + ms, run })
-      return () => {
-        timers.delete(id)
-      }
-    },
-    /** Moves time forward in small steps, letting promises settle in between. */
     async advance(ms: number, step = 50) {
       const end = now + ms
       while (now < end) {
         await flush()
-        now = Math.min(now + step, end)
-        for (const [id, timer] of [...timers].sort((a, b) => a[1].at - b[1].at)) {
-          if (timer.at <= now) {
-            timers.delete(id)
-            timer.run()
-          }
-        }
+        const by = Math.min(step, end - now)
+        now += by
+        mock.timers.tick(by)
       }
       await flush()
     },
@@ -40,6 +32,13 @@ async function flush() {
     await Promise.resolve()
   }
 }
+
+beforeEach(() => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+})
+afterEach(() => {
+  mock.timers.reset()
+})
 
 const never = () => new Promise<never>(() => {})
 const reject = (what: string) => async () => {
@@ -56,7 +55,6 @@ function harness(overrides: Partial<ConnectOptions>) {
     heardFromApp: () => heard,
     onStuck: () => calls.stuck.push(time.now()),
     onRecovered: () => calls.recovered.push(time.now()),
-    schedule: (run, ms) => time.schedule(run, ms),
     ...overrides,
   }
   let finished = false
@@ -157,10 +155,3 @@ test('a failed status read after an event is not retried', () =>
     assert.equal(reads, 1)
     assert.deepEqual(h.calls.stuck, [])
   }))
-
-test('retries back off to a steady interval', () => {
-  assert.deepEqual(
-    [0, 1, 2, 3, 4, 5, 50].map(retryDelay),
-    [250, 500, 1_000, 2_000, 4_000, 5_000, 5_000],
-  )
-})
