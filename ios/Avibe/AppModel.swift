@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import UserNotifications
 import WebKit
 
 enum AppRoute: Equatable {
@@ -86,6 +88,11 @@ final class AppModel: ObservableObject {
     private let pushGenerationStore: PushGenerationStoring
     private let pushInstallationMarker: PushInstallationMarkerStoring
     private let pushNotificationCenter: PushNotificationCentering?
+    /// The system's APNs registration and notification authorization; a
+    /// test supplies its own so an open really sends a provider update.
+    private let pushRemoteRegistration: NativePushCoordinator.RemoteRegistration
+    private let pushAuthorizationStatus:
+        NativePushCoordinator.NotificationAuthorizationStatus
     private let pushOpenedNow: () -> Date
     private let pushOpenedLifetime: TimeInterval
     /// The App icon badge: the selected instance's Inbox total, which its Web
@@ -137,6 +144,8 @@ final class AppModel: ObservableObject {
         accountProvider: { [weak self] in
             self?.mobileSessionCoordinator.currentAccount
         },
+        registerForRemoteNotifications: pushRemoteRegistration,
+        notificationAuthorizationStatus: pushAuthorizationStatus,
         installationMarker: pushInstallationMarker,
         notificationCenter: pushNotificationCenter,
         onTap: { [weak self] tap in
@@ -206,6 +215,9 @@ final class AppModel: ObservableObject {
         pushInstallationMarker: PushInstallationMarkerStoring =
             UserDefaultsPushInstallationMarkerStore(),
         pushNotificationCenter: PushNotificationCentering? = nil,
+        pushRemoteRegistration: NativePushCoordinator.RemoteRegistration? = nil,
+        pushAuthorizationStatus:
+            NativePushCoordinator.NotificationAuthorizationStatus? = nil,
         pushOpenedNow: @escaping () -> Date = Date.init,
         pushOpenedLifetime: TimeInterval = 120,
         badgeCenter: AppBadgeCentering? = nil
@@ -229,6 +241,20 @@ final class AppModel: ObservableObject {
         self.pushGenerationStore = pushGenerationStore
         self.pushInstallationMarker = pushInstallationMarker
         self.pushNotificationCenter = pushNotificationCenter
+        let systemRegistration: NativePushCoordinator.RemoteRegistration = {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+        let systemAuthorizationStatus:
+            NativePushCoordinator.NotificationAuthorizationStatus = {
+                await withCheckedContinuation { continuation in
+                    UNUserNotificationCenter.current().getNotificationSettings {
+                        continuation.resume(returning: $0.authorizationStatus)
+                    }
+                }
+            }
+        self.pushRemoteRegistration = pushRemoteRegistration ?? systemRegistration
+        self.pushAuthorizationStatus = pushAuthorizationStatus
+            ?? systemAuthorizationStatus
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
         nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())

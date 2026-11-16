@@ -1208,6 +1208,252 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    // MARK: Product checks with notifications on
+
+    // Each open below really resumes push registration: the stubbed APNs
+    // registration returns a device token, and the App's own push
+    // coordinator sends the provider update through the account
+    // coordinator. The control plane holds that update in flight while the
+    // open settles and the root view's WebView registers.
+
+    @MainActor
+    func testColdStartRestoresLastInstanceWithNotificationsOnWithATransport() async throws {
+        try await assertColdStartRestoresInstanceOne(directTransport: StandInDirectTransport())
+    }
+
+    @MainActor
+    func testColdStartRestoresLastInstanceWithNotificationsOnWithoutATransport() async throws {
+        try await assertColdStartRestoresInstanceOne(directTransport: nil)
+    }
+
+    @MainActor
+    func testTenConsecutiveSwitchesOpenWithNotificationsOnWithATransport() async throws {
+        try await assertTenSwitchesOpen(directTransport: StandInDirectTransport())
+    }
+
+    @MainActor
+    func testTenConsecutiveSwitchesOpenWithNotificationsOnWithoutATransport() async throws {
+        try await assertTenSwitchesOpen(directTransport: nil)
+    }
+
+    /// The fault exists only with a transport; the launch after it has none.
+    @MainActor
+    func testListenerFaultFallsBackToPublicPathOnNextLaunchWithNotificationsOn() async throws {
+        try assertSocketScanSeesListeners()
+        let notifications = try NotificationsOn()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(
+            directTransport: StandInDirectTransport(),
+            notifications: notifications
+        ) {
+            listening = try listeningSockets()
+        }
+        let defaults = try XCTUnwrap(appDefaults)
+        let first = try await openWithNotificationsOn(
+            "instance-1",
+            in: app,
+            notifications: notifications
+        ) {
+            _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        }
+        XCTAssertFalse(app.directFaultCovers(first.runtime))
+
+        // The App's port is taken while it is in the background: the return
+        // cannot bind it again, which is the listener fault.
+        let socket = try XCTUnwrap(try newListeners(since: listening).first)
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: socket.port,
+            reuseAddress: true
+        )
+        defer { squatter.close() }
+        enterForeground()
+        try await eventually { app.directListenerFault }
+        // The reopen message covers the runtime, and the next launch is marked.
+        XCTAssertTrue(app.directFaultCovers(first.runtime))
+        XCTAssertNotNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
+
+        // Opened again under the fault, with its provider update in flight:
+        // the reopen message alone.
+        let before = notifications.providerPatches.arrivals
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await eventually { notifications.providerPatches.arrivals > before }
+        try await eventually { app.route != .loading }
+        guard case .browser(let reopened) = app.route else {
+            notifications.providerPatches.releaseAll()
+            return XCTFail("The reopen under the fault ended at \(app.route).")
+        }
+        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return app.mobileSessionCoordinator.isCurrentRuntime(reopened)
+        }
+        XCTAssertEqual(app.route, .browser(reopened))
+        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
+
+        // The next launch, with the same preferences and the same device:
+        // no transport, so the restored instance loads on the public path.
+        let nextTransport = StandInDirectTransport()
+        let arrivals = notifications.providerPatches.arrivals
+        let next = try await makeApp(
+            directTransport: nextTransport,
+            reusingDefaults: defaults,
+            notifications: notifications
+        )
+        XCTAssertNil(next.directStatusProvider)
+        XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
+        let restored = try await openWithNotificationsOn(
+            "instance-1",
+            in: next,
+            notifications: notifications,
+            afterArrivals: arrivals
+        ) {}
+        XCTAssertFalse(next.directListenerFault)
+        XCTAssertEqual(next.directLoadGate(for: restored.runtime), .open)
+        XCTAssertFalse(next.presentsDirectFaultOnly(restored.runtime))
+        XCTAssertEqual(nextTransport.selections.count, 0)
+        first.page.close()
+        restored.page.close()
+    }
+
+    @MainActor
+    private func assertColdStartRestoresInstanceOne(
+        directTransport: StandInDirectTransport?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let notifications = try NotificationsOn()
+        let app = try await makeApp(
+            directTransport: directTransport,
+            launchesWithInstanceOneSelected: true,
+            notifications: notifications
+        )
+        let opened = try await openWithNotificationsOn(
+            "instance-1",
+            in: app,
+            notifications: notifications,
+            afterArrivals: 0,
+            file: file,
+            line: line
+        ) {}
+        if let directTransport {
+            XCTAssertEqual(
+                directTransport.selections.last?.runtime,
+                opened.runtime,
+                file: file,
+                line: line
+            )
+        }
+        XCTAssertGreaterThanOrEqual(notifications.registrations, 1, file: file, line: line)
+        opened.page.close()
+    }
+
+    @MainActor
+    private func assertTenSwitchesOpen(
+        directTransport: StandInDirectTransport?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let notifications = try NotificationsOn()
+        let app = try await makeApp(
+            directTransport: directTransport,
+            notifications: notifications
+        )
+        var pages: [RuntimePage] = []
+        defer {
+            for page in pages {
+                page.close()
+            }
+        }
+        for index in 0..<10 {
+            let instanceID = index.isMultiple(of: 2) ? "instance-1" : "instance-2"
+            let arrivals = notifications.providerPatches.arrivals
+            let opened = try await openWithNotificationsOn(
+                instanceID,
+                in: app,
+                notifications: notifications,
+                afterArrivals: arrivals,
+                file: file,
+                line: line
+            ) {
+                _ = try app.mobileSessionCoordinator.selectInstance(id: instanceID)
+            }
+            pages.append(opened.page)
+            if let directTransport {
+                XCTAssertEqual(
+                    directTransport.selections.last?.runtime,
+                    opened.runtime,
+                    "switch \(index + 1)",
+                    file: file,
+                    line: line
+                )
+            }
+        }
+        // Each of the ten opens sent its own provider update.
+        XCTAssertGreaterThanOrEqual(
+            notifications.providerPatches.arrivals,
+            10,
+            file: file,
+            line: line
+        )
+    }
+
+    /// Runs `open` and checks that its provider update reaches the control
+    /// plane and stays in flight while the open of `instanceID` settles at
+    /// `.browser` and the root view's WebView registers and is kept; then
+    /// releases it and checks again once the account coordinator is idle.
+    @MainActor
+    private func openWithNotificationsOn(
+        _ instanceID: String,
+        in app: AppModel,
+        notifications: NotificationsOn,
+        afterArrivals arrivals: Int? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ open: () throws -> Void
+    ) async throws -> (runtime: MobileRuntimeContext, page: RuntimePage) {
+        let before = arrivals ?? notifications.providerPatches.arrivals
+        try open()
+        try await eventually { notifications.providerPatches.arrivals > before }
+        try await eventually { app.route != .loading }
+        guard
+            case .browser(let runtime) = app.route,
+            runtime.instance.id == instanceID
+        else {
+            notifications.providerPatches.releaseAll()
+            XCTFail(
+                "The open of \(instanceID) ended at \(app.route) while its provider update was in flight.",
+                file: file,
+                line: line
+            )
+            throw DirectTestTimeout()
+        }
+        XCTAssertFalse(
+            app.mobileSessionCoordinator.isCurrentRuntime(runtime),
+            "the provider update is in flight",
+            file: file,
+            line: line
+        )
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+
+        // Released, including any follow-up update the coordinator sends.
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return app.mobileSessionCoordinator.isCurrentRuntime(runtime)
+        }
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+        return (runtime, page)
+    }
+
     // MARK: A runtime abandoned when its WebView registers
 
     @MainActor
@@ -2101,10 +2347,19 @@ final class DirectPathAppTests: XCTestCase {
         pushInstallationMarker: InMemoryPushInstallationMarkerStore? = nil,
         pushNotificationCenter: PushNotificationCentering? = nil,
         launchesWithInstanceOneSelected: Bool = false,
+        reusingDefaults: UserDefaults? = nil,
+        notifications: NotificationsOn? = nil,
         beforeTheAppExists: () throws -> Void = {},
         whenTheAppExists: (AppModel) -> Void = { _ in }
     ) async throws -> AppModel {
+        let providerPatches = notifications?.providerPatches
         let server = try LocalHTTPServer { request in
+            if let providerPatches,
+               request.method == "PATCH",
+               request.path == providerPatches.path
+            {
+                return providerPatches.response()
+            }
             if request.method == "POST",
                let hold = pushHolds.first(where: { $0.path == request.path })
             {
@@ -2152,12 +2407,23 @@ final class DirectPathAppTests: XCTestCase {
         addTeardownBlock {
             server.stop()
         }
-        let suiteName = "DirectPathAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        appDefaults = defaults
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
+        if let providerPatches {
+            addTeardownBlock {
+                providerPatches.releaseAll()
+            }
         }
+        let defaults: UserDefaults
+        if let reusingDefaults {
+            // The next launch of the same App, with its preferences.
+            defaults = reusingDefaults
+        } else {
+            let suiteName = "DirectPathAppTests.\(UUID().uuidString)"
+            defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            addTeardownBlock {
+                defaults.removePersistentDomain(forName: suiteName)
+            }
+        }
+        appDefaults = defaults
         addTeardownBlock { @MainActor [self] in
             await self.removeTrackedStores()
         }
@@ -2181,10 +2447,15 @@ final class DirectPathAppTests: XCTestCase {
                 controlPlane: controlPlane,
                 directTransport: directTransport,
                 directFaultMarker: directFaultMarker,
-                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushKeychain: notifications?.keychain
+                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
+                pushGenerationStore: notifications?.generationStore
+                    ?? InMemoryPushGenerationStore(),
+                pushInstallationMarker: notifications?.marker
+                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                pushRemoteRegistration: notifications?.remoteRegistration,
+                pushAuthorizationStatus: notifications?.authorizationStatus,
                 badgeCenter: SilentBadgeCenter()
             )
         } else if let directTransport {
@@ -2192,23 +2463,34 @@ final class DirectPathAppTests: XCTestCase {
                 defaults: defaults,
                 controlPlane: controlPlane,
                 directTransport: directTransport,
-                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushKeychain: notifications?.keychain
+                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
+                pushGenerationStore: notifications?.generationStore
+                    ?? InMemoryPushGenerationStore(),
+                pushInstallationMarker: notifications?.marker
+                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                pushRemoteRegistration: notifications?.remoteRegistration,
+                pushAuthorizationStatus: notifications?.authorizationStatus,
                 badgeCenter: SilentBadgeCenter()
             )
         } else {
             app = AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
-                pushKeychain: pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: InMemoryPushGenerationStore(),
-                pushInstallationMarker: pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                pushKeychain: notifications?.keychain
+                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
+                pushGenerationStore: notifications?.generationStore
+                    ?? InMemoryPushGenerationStore(),
+                pushInstallationMarker: notifications?.marker
+                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                pushRemoteRegistration: notifications?.remoteRegistration,
+                pushAuthorizationStatus: notifications?.authorizationStatus,
                 badgeCenter: SilentBadgeCenter()
             )
         }
+        notifications?.app = app
         whenTheAppExists(app)
         trackStore(of: app)
         releaseFixtureApps.append { [weak app] in
@@ -2218,7 +2500,7 @@ final class DirectPathAppTests: XCTestCase {
         addTeardownBlock { @MainActor [self] in
             server.requests.attach(to: self, name: "direct App bootstrap requests")
         }
-        if launchesWithInstanceOneSelected {
+        if launchesWithInstanceOneSelected || reusingDefaults != nil {
             return app
         }
         try await WebKitReadiness.waitForSignedInFixture(
@@ -2997,5 +3279,116 @@ private final class FaultMarkerSpy: DirectFaultMarkerStoring {
         takes += 1
         defer { isMarked = false }
         return isMarked
+    }
+}
+
+/// A device with notifications on for account-1: the system reports alerts
+/// authorized, and the push keychain holds an active registration for the
+/// account. Every open then resumes push registration, the stubbed APNs
+/// registration answers with a device token, and the coordinator sends a
+/// provider update that `providerPatches` holds in flight.
+@MainActor
+private final class NotificationsOn {
+    let keychain = InMemoryPushKeychainStore()
+    let generationStore = InMemoryPushGenerationStore()
+    let marker = InMemoryPushInstallationMarkerStore()
+    let providerPatches: ProviderPatchGate
+    /// The App whose push coordinator receives the device token.
+    weak var app: AppModel?
+    private(set) var registrations = 0
+
+    init() throws {
+        let installationID = UUID()
+        marker.installationID = installationID
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 12, count: 32),
+            accountID: "account-1",
+            bindGeneration: 1,
+            providerGeneration: 0,
+            provider: nil,
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "fixture-active-key",
+            instanceOrigin: "https://instance-one.example",
+            accountID: "account-1",
+            accountGeneration: generationStore.generation,
+            bindGeneration: 1,
+            privateKey: Data(),
+            authSecret: Data(repeating: 3, count: 16),
+            vapidKeyHash: "fixture",
+            state: .active,
+            pendingRevoke: false,
+            replacementRegistrationIDs: []
+        ))
+        providerPatches = ProviderPatchGate(
+            path: "/api/push/apns/installations/\(installationID.uuidString)/provider"
+        )
+    }
+
+    var remoteRegistration: NativePushCoordinator.RemoteRegistration {
+        { [weak self] in
+            self?.registerForRemoteNotifications()
+        }
+    }
+
+    var authorizationStatus: NativePushCoordinator.NotificationAuthorizationStatus {
+        { .authorized }
+    }
+
+    /// As APNs does: the token arrives after the registration call returns.
+    private func registerForRemoteNotifications() {
+        registrations += 1
+        Task { @MainActor [weak self] in
+            self?.app?.pushCoordinator.didRegister(
+                deviceToken: Data(repeating: 9, count: 32),
+                environment: "sandbox"
+            )
+        }
+    }
+}
+
+/// Answers each provider update with its headers at once and its body only
+/// when released, so the request stays in flight until then.
+private final class ProviderPatchGate: @unchecked Sendable {
+    let path: String
+    private let lock = NSLock()
+    private var arrived = 0
+    private var held: [DispatchSemaphore] = []
+
+    init(path: String) {
+        self.path = path
+    }
+
+    /// How many provider updates have reached the control plane.
+    var arrivals: Int {
+        lock.withLock { arrived }
+    }
+
+    func response() -> LocalHTTPResponse {
+        let release = DispatchSemaphore(value: 0)
+        lock.withLock {
+            arrived += 1
+            held.append(release)
+        }
+        return LocalHTTPResponse(
+            status: 200,
+            headers: [("Content-Type", "application/json")],
+            body: Data(
+                ("{\"pad\":\"" + String(repeating: "x", count: 100_000) + "\"}").utf8
+            ),
+            bodyRelease: release
+        )
+    }
+
+    func releaseAll() {
+        let released: [DispatchSemaphore] = lock.withLock {
+            defer { held.removeAll() }
+            return held
+        }
+        for release in released {
+            release.signal()
+        }
     }
 }
