@@ -12,6 +12,7 @@ for (const [lang, theme, width, height] of [['en', 'light', 880, 600], ['en', 'd
     });
     await page.addInitScript((lng) => localStorage.setItem('i18nextLng', lng), lang);
     const state = clientState(); signIn(state);
+    state.remote_auxiliary = 'disabled_incomplete';
     state.account.identity!.email = 'international-design-and-engineering-account@cross-region-research-and-development-workstations.example.test';
     state.local.remote_access = 'on'; state.local.remote_access_url = 'https://local-fixture-app.avibe.bot';
     state.catalog.instances[1].available = true;
@@ -33,6 +34,8 @@ for (const [lang, theme, width, height] of [['en', 'light', 880, 600], ['en', 'd
     await page.getByRole('button', { name: lang === 'en' ? 'Refresh instances' : '刷新实例' }).focus();
     for (let i = 0; i < 8; i += 1) { await page.keyboard.press('Tab'); await expect(offline.getByRole('button')).not.toBeFocused(); }
     expect(requests.filter((r) => r.action.type === 'select_instance')).toEqual([]);
+    await expect(page.getByText(/Mini and native notifications are unavailable|第一阶段暂不支持远程实例/)).toHaveCount(0);
+    await expect(page.locator('footer')).toHaveCount(0);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('shared-current.png') });
     const entry = page.getByRole('region', { name: lang === 'en' ? 'Account' : '账户', exact: true });
     const emailButton = entry.getByRole('button', { name: state.account.identity!.email, exact: true });
@@ -58,6 +61,8 @@ for (const [lang, theme, width, height] of [['en', 'light', 880, 600], ['en', 'd
     await expect(page.getByRole('heading', { name: lang === 'en' ? 'Account' : '账户' })).toBeVisible();
     await expect(page.getByRole('link', { name: state.local.remote_access_url })).toHaveAttribute('href', state.local.remote_access_url);
     await expect(page.getByText(state.account.identity!.email)).toBeVisible();
+    await expect(page.getByText(/Mini and native notifications are unavailable|第一阶段暂不支持远程实例/)).toHaveCount(0);
+    await expect(page.locator('footer')).toHaveCount(0);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('account.png') });
     await page.getByRole('button', { name: lang === 'en' ? 'Instances' : '实例', exact: true }).click();
     await page.getByRole('button', { name: lang === 'en' ? 'Add instance' : '添加实例' }).click();

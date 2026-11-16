@@ -29,6 +29,41 @@ function mount(initial: unknown, response: (request: DesktopClientRequest) => un
   return invoke;
 }
 
+// Remote restrictions remain native-owned; the retired static notice must not
+// consume space in either complete account route. View-only frames miss it.
+it.each([['en', 'instances'], ['en', 'account'], ['zh', 'instances'], ['zh', 'account']] as const)('remote account routes omit the retired auxiliary notice (%s/%s)', async (lng, view) => {
+  window.history.replaceState(null, '', `/account/index.html?view=${view}`);
+  await i18n.changeLanguage(lng);
+  const item = states.signed_in.catalog.instances[0];
+  const state = { ...states.signed_in, remote_auxiliary: 'disabled_incomplete',
+    connection: { status: 'remote_connected', pending: null,
+      committed: { kind: 'remote', name: item.name, instance_id: item.id, canonical_origin: item.url } },
+    catalog: { ...states.signed_in.catalog, instances: [...states.signed_in.catalog.instances,
+      { ...item, id: 'offline-control', name: 'Offline control', available: false }] } };
+  const invoke = mount(state, (request) => ({ ...replies.success, state, request_id: request.request_id }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
+  const notice = /Mini and native notifications are unavailable|第一阶段暂不支持远程实例/;
+  expect(screen.queryByText(notice)).toBeNull();
+  if (view === 'account') {
+    fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Instances' : '实例', exact: true }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  }
+  const beforeNavigation = invoke.mock.calls.length;
+  expect(document.querySelector('[data-instance-id="offline-control"] button')?.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
+  expect(document.querySelector('[data-account-details]')).toBeTruthy();
+  expect(screen.queryByText(notice)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Instances' : '实例', exact: true }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 1));
+  expect(screen.queryByText(notice)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Back to Workbench' : '返回工作台' }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 2));
+  expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(
+    view === 'account' ? ['get_state', 'refresh_instances', 'refresh_instances', 'cancel'] : ['get_state', 'refresh_instances', 'cancel']);
+  expect(state.remote_auxiliary).toBe('disabled_incomplete');
+  expect(state.connection.committed.kind).toBe('remote');
+});
+
 it('AUTH-SETUP-177 consumes the native UTF-8 catalog and sends its opaque instance id', async () => {
   const invoke = mount(states.signed_in, (request) => ({ ...replies.success, request_id: request.request_id }));
   expect(await screen.findByText('工作室 Studio')).toBeTruthy();
