@@ -273,7 +273,7 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
               {t('vaults.hd.wallet.agentUsage')}
             </span>
             <div className="flex min-w-0 items-center gap-2">
-              <code className="block min-w-0 flex-1 break-words rounded-md bg-surface-2 px-2.5 py-1.5 font-mono text-[11.5px] text-foreground">{t('vaults.hd.signCommand', { name: secret.name, account: usage })}</code>
+              <code className="block min-w-0 break-words rounded-md bg-surface-2 px-2.5 py-1.5 font-mono text-[11.5px] text-foreground">{t('vaults.hd.signCommand', { name: secret.name, account: usage })}</code>
               <CopyButton value={command} label={null} variant="ghost" />
             </div>
           </div>

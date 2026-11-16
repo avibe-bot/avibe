@@ -233,7 +233,7 @@ const SignMessage: React.FC<{ messageHex: string; scheme: string; address?: stri
               });
             }}
             aria-label={t('vaults.approval.copyMessage')}
-            className="ml-auto shrink-0 text-muted transition-colors hover:text-foreground"
+            className="shrink-0 text-muted transition-colors hover:text-foreground"
           >
             {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
           </button>

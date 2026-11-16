@@ -32,7 +32,9 @@ export const SigningAddressRow: React.FC<{ label: string; value: string; hint?: 
         {label}
         {hint}
       </span>
-      <code className="min-w-0 flex-1 truncate rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11.5px] text-foreground" title={value}>
+      {/* Sized to the address (not the row), so its copy button sits right after it; still shrinks
+          and truncates when the row is narrower than the address (owner, 2026-11-16). */}
+      <code className="min-w-0 truncate rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[11.5px] text-foreground" title={value}>
         {value}
       </code>
       <button
