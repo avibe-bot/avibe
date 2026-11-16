@@ -27,7 +27,8 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
   const isSign = type === 'sign';
   const isProvision = type === 'provision';
   const isDelete = type === 'delete';
-  const isProtected = card.protection === 'protected';
+  // A summary row has no card; it names the tier itself.
+  const isProtected = card.protection === 'protected' || r.protection === 'protected';
   const Icon = isDelete ? Trash2 : isSign || card.kind === 'keypair' ? Wallet : KeyRound;
   const session = vaultRequestSessionDisplay(r);
   const reviewInBrowser = !isProvision && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(r);
