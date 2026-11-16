@@ -1447,7 +1447,7 @@ final class DirectPathAppTests: XCTestCase {
                 line: line
             )
         }
-        XCTAssertGreaterThanOrEqual(notifications.registrations, 1, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(notifications.tokensDelivered, 1, file: file, line: line)
     }
 
     @MainActor
@@ -2574,8 +2574,6 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
-                pushRemoteRegistration: notifications?.remoteRegistration,
-                pushAuthorizationStatus: notifications?.authorizationStatus,
                 badgeCenter: SilentBadgeCenter()
             )
         } else if let directTransport {
@@ -2590,8 +2588,6 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
-                pushRemoteRegistration: notifications?.remoteRegistration,
-                pushAuthorizationStatus: notifications?.authorizationStatus,
                 badgeCenter: SilentBadgeCenter()
             )
         } else {
@@ -2605,8 +2601,6 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
-                pushRemoteRegistration: notifications?.remoteRegistration,
-                pushAuthorizationStatus: notifications?.authorizationStatus,
                 badgeCenter: SilentBadgeCenter()
             )
         }
@@ -3402,20 +3396,30 @@ private final class FaultMarkerSpy: DirectFaultMarkerStoring {
     }
 }
 
-/// A device with notifications on for account-1: the system reports alerts
-/// authorized, and the push keychain holds an active registration for the
-/// account. Every open then resumes push registration, the stubbed APNs
-/// registration answers with a device token, and the coordinator sends a
-/// provider update that `providerPatches` holds in flight.
+/// A device with notifications on for account-1: the push keychain holds an
+/// active registration for the account, and each open's push-registration
+/// resume is answered with a device token, as APNs answers
+/// `registerForRemoteNotifications` (the App delegate hands it to the push
+/// coordinator's `didRegister`). The App's own push coordinator then sends
+/// the provider update, which `providerPatches` holds in flight.
 @MainActor
 private final class NotificationsOn {
     let keychain = InMemoryPushKeychainStore()
     let generationStore = InMemoryPushGenerationStore()
     let marker = InMemoryPushInstallationMarkerStore()
     let providerPatches: ProviderPatchGate
-    /// The App whose push coordinator receives the device token.
-    weak var app: AppModel?
-    private(set) var registrations = 0
+    private(set) var tokensDelivered = 0
+    private var opens: AnyCancellable?
+
+    /// The App whose opens are answered: each open (a new runtime identity,
+    /// set right after `openRuntime` resumes push registration) gets a token.
+    weak var app: AppModel? {
+        didSet {
+            opens = app?.$runtimeIdentity.dropFirst().sink { [weak self] _ in
+                self?.deliverToken()
+            }
+        }
+    }
 
     init() throws {
         let installationID = UUID()
@@ -3447,19 +3451,9 @@ private final class NotificationsOn {
         )
     }
 
-    var remoteRegistration: NativePushCoordinator.RemoteRegistration {
-        { [weak self] in
-            self?.registerForRemoteNotifications()
-        }
-    }
-
-    var authorizationStatus: NativePushCoordinator.NotificationAuthorizationStatus {
-        { .authorized }
-    }
-
-    /// As APNs does: the token arrives after the registration call returns.
-    private func registerForRemoteNotifications() {
-        registrations += 1
+    /// As APNs does, after the registration call has returned.
+    private func deliverToken() {
+        tokensDelivered += 1
         Task { @MainActor [weak self] in
             self?.app?.pushCoordinator.didRegister(
                 deviceToken: Data(repeating: 9, count: 32),
