@@ -369,6 +369,16 @@ describe('the secure window opens at a fixed size, centered over the Avibe windo
     vi.stubGlobal('outerWidth', 400);
     vi.stubGlobal('outerHeight', 500);
     expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=0,top=0');
+    // A display left of the primary one has negative coordinates: the window stays on it.
+    vi.stubGlobal('screen', { availLeft: -1440, availTop: 0, availWidth: 1440, availHeight: 900 });
+    vi.stubGlobal('screenX', -1440);
+    vi.stubGlobal('screenY', 0);
+    vi.stubGlobal('outerWidth', 1440);
+    vi.stubGlobal('outerHeight', 900);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=-980,top=70');
+    // Kept within that screen, not pushed off its right edge.
+    vi.stubGlobal('screenX', -400);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=-520,top=70');
     vi.unstubAllGlobals();
   });
 });

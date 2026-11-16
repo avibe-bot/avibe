@@ -150,6 +150,8 @@ it('protected: a name taken just before launch opens nothing in the window and m
   expect(vault.sealHdWallet).not.toHaveBeenCalled();
   expect(api.createVaultSecret).not.toHaveBeenCalled();
   expect((screen.getByRole('button', { name: p.launchCreate }) as HTMLButtonElement).disabled).toBe(true);
+  // Nothing was handed back to land on: focus is not moved to an empty notice.
+  expect(document.activeElement?.getAttribute('tabindex')).not.toBe('-1');
 });
 
 it.each(['secret_exists', 'secret_name_case_conflict'])('protected create refused for its name (%s): not saved, new words next time, still Protected', async (code) => {

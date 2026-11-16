@@ -215,14 +215,21 @@ export type VaultAuthorizationWindow = {
 
 const AUTHORIZATION_WINDOW = { width: 520, height: 760 };
 
-/** The secure window's size and place: always the same size, centered over the Avibe window (a
- *  browser may still move it to stay on screen), so it opens where the person looks. */
+/** The secure window's size and place: always the same size, centered over the Avibe window and kept
+ *  on that window's screen (screen coordinates are negative on a display left of or above the primary
+ *  one), so it opens where the person looks. A browser may still nudge it. */
 export function authorizationWindowFeatures(): string {
   const { width, height } = AUTHORIZATION_WINDOW;
   const outerWidth = window.outerWidth || window.innerWidth || width;
   const outerHeight = window.outerHeight || window.innerHeight || height;
-  const left = Math.max(0, Math.round((window.screenX ?? 0) + (outerWidth - width) / 2));
-  const top = Math.max(0, Math.round((window.screenY ?? 0) + (outerHeight - height) / 2));
+  const screen = window.screen as Screen & { availLeft?: number; availTop?: number };
+  const minX = screen?.availLeft ?? 0;
+  const minY = screen?.availTop ?? 0;
+  const maxX = screen?.availWidth ? minX + screen.availWidth - width : Number.POSITIVE_INFINITY;
+  const maxY = screen?.availHeight ? minY + screen.availHeight - height : Number.POSITIVE_INFINITY;
+  const clamp = (value: number, min: number, max: number) => Math.round(Math.max(min, Math.min(value, Math.max(min, max))));
+  const left = clamp((window.screenX ?? 0) + (outerWidth - width) / 2, minX, maxX);
+  const top = clamp((window.screenY ?? 0) + (outerHeight - height) / 2, minY, maxY);
   return `popup,width=${width},height=${height},left=${left},top=${top}`;
 }
 

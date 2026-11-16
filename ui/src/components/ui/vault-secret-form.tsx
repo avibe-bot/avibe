@@ -2051,7 +2051,7 @@ export const VaultSecretForm: React.FC<{
                 info={t('vaults.hd.protected.info')}
               />
               {/* Why a separate window, said before it opens (owner, 2026-11-16). */}
-              <ProtectedHdWindowLine />
+              {protectedHdSupported !== false ? <ProtectedHdWindowLine /> : null}
             </>
           ) : signingSource === 'generate' ? (
             <>
