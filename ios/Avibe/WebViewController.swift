@@ -563,10 +563,12 @@ final class WebViewController: UIViewController {
     private let didStartLoading: () -> Void
     private let didFinishLoading: () -> Void
     private let didFailLoading: () -> Void
+    private let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
     private let accountFallbackVisibilityChanged: (Bool) -> Void
     private let pageColorSchemeChanged: (PageColorScheme?) -> Void
     private var reportedPageColorScheme: PageColorScheme?
     private var primaryLoadFailed = false
+    private var primaryNavigationDestination: NavigationDestination?
     /// The scheme of the primary page on screen, or nil while it is unknown
     /// or the load-failure view covers it. It drives the status bar and the
     /// native chrome only; the WebViews keep the system appearance, so a page
@@ -687,6 +689,7 @@ final class WebViewController: UIViewController {
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
+        runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -711,6 +714,7 @@ final class WebViewController: UIViewController {
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
+        self.runtimeNavigationChanged = runtimeNavigationChanged
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1228,6 +1232,16 @@ final class WebViewController: UIViewController {
             : .popupMainFrame
     }
 
+    private func runtimeDestination(in webView: WKWebView) -> NavigationDestination? {
+        guard isPrimaryWebView(webView) else {
+            return nil
+        }
+        if let url = webView.url {
+            return navigationPolicy.destination(for: url)
+        }
+        return primaryNavigationDestination
+    }
+
     private func mainFrameNavigationDecision(
         for url: URL,
         in webView: WKWebView
@@ -1269,6 +1283,12 @@ final class WebViewController: UIViewController {
             primaryLoadFailed = true
             updatePageColorScheme()
             didFailLoading()
+            runtimeNavigationChanged(
+                RuntimeNavigationEvent(
+                    stage: .failed,
+                    destination: runtimeDestination(in: webView)
+                )
+            )
         }
     }
 
@@ -1817,7 +1837,11 @@ extension WebViewController: WKNavigationDelegate {
             return
         }
 
-        decisionHandler(mainFrameNavigationDecision(for: url, in: webView))
+        let decision = mainFrameNavigationDecision(for: url, in: webView)
+        if isPrimaryWebView(webView), decision == .allow {
+            primaryNavigationDestination = navigationPolicy.destination(for: url)
+        }
+        decisionHandler(decision)
     }
 
     func webView(
@@ -1900,6 +1924,13 @@ extension WebViewController: WKNavigationDelegate {
             accountFallbackVisibilityChanged(false)
             primaryLoadFailed = false
             updatePageColorScheme()
+            runtimeNavigationChanged(
+                RuntimeNavigationEvent(
+                    stage: .started,
+                    destination: primaryNavigationDestination
+                        ?? runtimeDestination(in: webView)
+                )
+            )
             didStartLoading()
         }
     }
@@ -1910,6 +1941,17 @@ extension WebViewController: WKNavigationDelegate {
         }
         retainedWebViewFactory?.resetForNavigationCommit(in: webView)
         if isPrimaryWebView(webView) {
+            if let url = webView.url {
+                primaryNavigationDestination = navigationPolicy.destination(
+                    for: url
+                )
+            }
+            runtimeNavigationChanged(
+                RuntimeNavigationEvent(
+                    stage: .committed,
+                    destination: runtimeDestination(in: webView)
+                )
+            )
             blockedBackForwardNavigation = false
             resetAccountActionForNavigationCommit()
             updateBackNavigationGesture(in: webView)
@@ -1931,6 +1973,12 @@ extension WebViewController: WKNavigationDelegate {
             primaryNavigationInProgress = false
             updateBackNavigationGesture(in: webView)
             scheduleAccountFallbackIfNeeded()
+            runtimeNavigationChanged(
+                RuntimeNavigationEvent(
+                    stage: .finished,
+                    destination: runtimeDestination(in: webView)
+                )
+            )
             didFinishLoading()
         }
     }

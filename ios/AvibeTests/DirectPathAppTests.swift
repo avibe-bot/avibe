@@ -405,6 +405,43 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(marker.marks, 1)
     }
 
+    @MainActor
+    func testListenerRebindFailureDoesNotFailAnUnroutedRuntimeAttempt() async throws {
+        let marker = FaultMarkerSpy(marked: false)
+        let transport = StandInDirectTransport()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(
+            directTransport: transport,
+            directFaultMarker: marker
+        ) {
+            listening = try listeningSockets()
+        }
+        _ = try await select("instance-1", in: app)
+        let socket = try XCTUnwrap(try newListeners(since: listening).first)
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: socket.port,
+            reuseAddress: true
+        )
+        defer { squatter.close() }
+
+        let ordinary = try await select("instance-2", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        XCTAssertFalse(app.directFaultCovers(ordinary))
+
+        enterForeground()
+        try await eventually { app.directListenerFault }
+        XCTAssertEqual(app.route, .browser(ordinary))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, attemptID)
+        XCTAssertNotEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertEqual(marker.marks, 1)
+    }
+
     /// Without a transport nothing is gated: Retry reloads at once, and the
     /// runtime's WebView is given no gate at all, as before.
     @MainActor
@@ -420,6 +457,413 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(app.mayReload(runtime))
         enterForeground()
         XCTAssertTrue(app.mayReload(runtime))
+    }
+
+    @MainActor
+    func testRuntimeOpenBudgetShowsLongWaitThenTimesOutToThePickerAndCanRetry() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let notifications = NotificationCenter()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing,
+            runtimeOpenNotificationCenter: notifications
+        )
+        let storeIdentifier = app.websiteDataStore.identifier
+        let runtime = try await select("instance-1", in: app)
+        let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
+
+        XCTAssertEqual(attempt.id, app.runtimeIdentity)
+        XCTAssertEqual(attempt.runtime, runtime)
+        XCTAssertEqual(attempt.phase, .connecting)
+        XCTAssertFalse(attempt.isTakingLong)
+
+        timing.advance(by: .seconds(8))
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
+        XCTAssertEqual(app.route, .browser(runtime))
+
+        timing.advance(by: .seconds(22))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertNil(app.runtimeOpenAttempt)
+        XCTAssertEqual(app.mobileSessionCoordinator.currentAccount?.id, "account-1")
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+        XCTAssertEqual(app.websiteDataStore.identifier, storeIdentifier)
+        XCTAssertEqual(app.runtimeOpenNotice?.instanceName, "One")
+        XCTAssertEqual(app.runtimeOpenNotice?.lastPhase, .connecting)
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
+
+        XCTAssertTrue(app.retryRuntimeOpenNotice())
+        let retry = try XCTUnwrap(app.runtimeOpenAttempt)
+        XCTAssertGreaterThan(retry.id, attempt.id)
+        XCTAssertEqual(retry.phase, .connecting)
+        XCTAssertNil(app.runtimeOpenNotice)
+    }
+
+    @MainActor
+    func testRuntimeOpenNavigationStillSettlesDuringOrdinaryAccountWork() async throws {
+        let hold = PushHold(path: "/api/push/hold-runtime-open")
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(
+            directTransport: nil,
+            pushHolds: [hold],
+            runtimeOpenTiming: timing
+        )
+        let runtime = try await select("instance-1", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        let management = try await holdPushManagement(hold, in: app)
+        XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .authentication),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .awaitingUser)
+        XCTAssertNil(app.runtimeOpenAttempt?.deadline)
+
+        hold.release.signal()
+        try await management.value
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .started, destination: .instance),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .instance),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
+    }
+
+    @MainActor
+    func testRuntimeOpenRetryDuringOrdinaryAccountWorkCreatesAndRegistersANewAttempt()
+        async throws
+    {
+        let hold = PushHold(path: "/api/push/hold-runtime-retry")
+        let timing = RuntimeOpenManualTiming()
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(
+            directTransport: transport,
+            pushHolds: [hold],
+            runtimeOpenTiming: timing
+        )
+        let runtime = try await select("instance-1", in: app)
+        let firstID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: firstID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+
+        let management = try await holdPushManagement(hold, in: app)
+        XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+
+        XCTAssertTrue(app.retryRuntimeOpen(attemptID: firstID))
+        let retry = try XCTUnwrap(app.runtimeOpenAttempt)
+        XCTAssertGreaterThan(retry.id, firstID)
+        XCTAssertEqual(retry.runtime, runtime)
+        let reopened = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(reopened, runtime)
+
+        let controller = try makeRuntimeController(app, runtime)
+        let deselected = transport.deselectCount
+        app.registerRuntimeController(
+            controller,
+            for: runtime,
+            attemptID: retry.id
+        )
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, retry.id)
+        XCTAssertEqual(transport.deselectCount, deselected)
+
+        hold.release.signal()
+        try await management.value
+        XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        withExtendedLifetime(controller) {}
+    }
+
+    @MainActor
+    func testRuntimeOpenFailureStaysTerminalUntilExplicitRetry() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing
+        )
+        let runtime = try await select("instance-1", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertNil(app.runtimeOpenAttempt?.deadline)
+
+        for stage in [
+            RuntimeNavigationStage.started,
+            .committed,
+            .finished,
+        ] {
+            app.handleRuntimeNavigation(
+                RuntimeNavigationEvent(stage: stage, destination: .instance),
+                attemptID: attemptID,
+                runtime: runtime
+            )
+        }
+        timing.advance(by: .seconds(120))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertNil(app.runtimeOpenAttempt?.deadline)
+    }
+
+    @MainActor
+    func testRuntimeOpenFailureAfterLegacyDocumentKeepsNativeRecovery() async throws {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .instance),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertTrue(app.retryRuntimeOpen(attemptID: attemptID))
+        XCTAssertGreaterThan(
+            try XCTUnwrap(app.runtimeOpenAttempt?.id),
+            attemptID
+        )
+    }
+
+    @MainActor
+    func testContinuousRuntimeOpenTimerUsesTheScheduleCallAsItsDeadlineOrigin() async throws {
+        let timing = ContinuousRuntimeOpenTiming()
+        var fired = false
+        let timer = timing.schedule(after: .milliseconds(80)) {
+            fired = true
+        }
+        let holdUntil = ContinuousClock.now.advanced(by: .milliseconds(120))
+        while ContinuousClock.now < holdUntil {
+            _ = 1 + 1
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertTrue(fired)
+        withExtendedLifetime(timer) {}
+    }
+
+    @MainActor
+    func testRuntimeOpenCancelAndNewSelectionFenceEveryLateCallback() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing
+        )
+        let first = try await select("instance-1", in: app)
+        let firstID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .committed, destination: .instance),
+            attemptID: firstID,
+            runtime: first
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .loadingPage)
+
+        app.cancelRuntimeOpen(attemptID: firstID)
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertNil(app.runtimeOpenAttempt)
+        XCTAssertNil(app.runtimeOpenNotice)
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .cancelled)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .instance),
+            attemptID: firstID,
+            runtime: first
+        )
+        XCTAssertTrue(isOnInstancePicker(app))
+
+        let second = try await select("instance-2", in: app)
+        let secondID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: firstID,
+            runtime: first
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, secondID)
+        XCTAssertEqual(app.runtimeOpenAttempt?.runtime, second)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
+    }
+
+    @MainActor
+    func testRuntimeOpenAuthDocumentPausesAndResumesOnlyTheRemainingBudget() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let notifications = NotificationCenter()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing,
+            runtimeOpenNotificationCenter: notifications
+        )
+        let runtime = try await select("instance-1", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+
+        timing.advance(by: .seconds(5))
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .authentication),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        let awaiting = try XCTUnwrap(app.runtimeOpenAttempt)
+        XCTAssertEqual(awaiting.phase, .awaitingUser)
+        XCTAssertEqual(awaiting.remainingAutomaticBudget, .seconds(25))
+        XCTAssertNil(awaiting.deadline)
+
+        timing.elapseWithoutFiring(by: .seconds(60))
+        notifications.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .awaitingUser)
+        XCTAssertEqual(app.route, .browser(runtime))
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .started, destination: .instance),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
+        XCTAssertEqual(
+            app.runtimeOpenAttempt?.deadline,
+            timing.now + .seconds(25)
+        )
+
+        timing.advance(by: .seconds(24))
+        XCTAssertEqual(app.route, .browser(runtime))
+        timing.elapseWithoutFiring(by: .seconds(1))
+        notifications.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
+    }
+
+    @MainActor
+    func testLegacyDocumentFinishEndsTheAutomaticBudgetWithoutClaimingReady() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing
+        )
+        let runtime = try await select("instance-1", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .instance),
+            attemptID: attemptID,
+            runtime: runtime
+        )
+
+        let loaded = try XCTUnwrap(app.runtimeOpenAttempt)
+        XCTAssertEqual(loaded.phase, .documentLoaded)
+        XCTAssertNil(loaded.deadline)
+        XCTAssertFalse(loaded.isVerifiedReady)
+        timing.advance(by: .seconds(120))
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertNil(app.runtimeOpenNotice)
+    }
+
+    @MainActor
+    func testRuntimeOpenFailureRetryCreatesANewAttemptAndBudget() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(
+            directTransport: nil,
+            runtimeOpenTiming: timing
+        )
+        let runtime = try await select("instance-1", in: app)
+        let firstID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        timing.advance(by: .seconds(12))
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: firstID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertNil(app.runtimeOpenAttempt?.deadline)
+
+        XCTAssertTrue(app.retryRuntimeOpen(attemptID: firstID))
+        let retry = try XCTUnwrap(app.runtimeOpenAttempt)
+        XCTAssertGreaterThan(retry.id, firstID)
+        XCTAssertEqual(retry.remainingAutomaticBudget, .seconds(30))
+        XCTAssertEqual(retry.phase, .connecting)
+    }
+
+    /// The real WKNavigationDelegate seam reports a primary slow document as
+    /// started/committed and does not invent a finish while its body is held.
+    /// Releasing the body produces the one legacy-document finish AppModel
+    /// consumes. This is the isolated fixture counterpart to the manual-clock
+    /// budget tests above.
+    @MainActor
+    func testRuntimeOpenNavigationEventsFollowASlowPrimaryDocument() async throws {
+        let headersSent = FixtureEvent(description: "slow document headers sent")
+        let releaseBody = DispatchSemaphore(value: 0)
+        let html = "<html><body>" + String(repeating: "x", count: 131_072)
+            + "</body></html>"
+        let server = try LocalHTTPServer { _ in
+            LocalHTTPResponse(
+                status: 200,
+                headers: [("Content-Type", "text/html; charset=utf-8")],
+                body: Data(html.utf8),
+                headersSentEvent: headersSent,
+                bodyRelease: releaseBody
+            )
+        }
+        let url = try await server.start()
+        defer {
+            releaseBody.signal()
+            server.stop()
+        }
+        let origin = try XCTUnwrap(
+            WebOrigin(url: url, requiresHTTPS: false)
+        )
+        var events: [RuntimeNavigationEvent] = []
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            runtimeNavigationChanged: { events.append($0) },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        controller.loadViewIfNeeded()
+
+        await fulfillment(of: [headersSent.expectation], timeout: 30)
+        try await eventually {
+            events.contains {
+                $0.stage == .committed && $0.destination == .instance
+            }
+        }
+        XCTAssertTrue(events.contains {
+            $0.stage == .started && $0.destination == .instance
+        })
+        XCTAssertFalse(events.contains { $0.stage == .finished })
+        XCTAssertFalse(events.contains { $0.stage == .failed })
+
+        releaseBody.signal()
+        try await eventually {
+            events.contains {
+                $0.stage == .finished && $0.destination == .instance
+            }
+        }
+        XCTAssertFalse(events.contains { $0.stage == .failed })
+        _ = controller.invalidateForAccountTransition()
     }
 
     /// The WebView's own automatic loads (its first load, and the reload
@@ -744,6 +1188,13 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(
             BrowserOverlay(isLoading: true, failed: false, directFault: false),
             .loading
+        )
+        XCTAssertEqual(
+            BrowserOverlay(
+                attemptPhase: .awaitingUser,
+                directFault: false
+            ),
+            .awaitingUser
         )
         XCTAssertEqual(
             BrowserOverlay(isLoading: false, failed: false, directFault: false),
@@ -1295,7 +1746,7 @@ final class DirectPathAppTests: XCTestCase {
         // That operation is in flight when the root view's WebView arrives:
         // the App refuses it and returns to the instance picker, without the
         // usual stop of a runtime. (A push-management request keeps the
-        // selection and does not; see the opens across one below.)
+        // selection and does not; see the next check.)
         app.mobileSessionCoordinator.activateAccountSurface()
         let operation = Task { @MainActor in
             _ = try await app.mobileSessionCoordinator.verifySecondFactor(
@@ -1313,7 +1764,6 @@ final class DirectPathAppTests: XCTestCase {
             for: runtime
         )
         XCTAssertTrue(isOnInstancePicker(app))
-        // The selection ended with the browser.
         XCTAssertEqual(transport.deselectCount, deselected + 1)
 
         // The operation ends without changing the account. It still has its
@@ -1346,6 +1796,60 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testRuntimeControllerRegistrationSurvivesOrdinaryAccountWork() async throws {
+        let transport = StandInDirectTransport()
+        let hold = PushHold(path: "/api/push/hold-1")
+        let app = try await makeApp(
+            directTransport: transport,
+            pushHolds: [hold]
+        )
+
+        let runtime = try await select("instance-1", in: app)
+        let target = try XCTUnwrap(transport.selections.last)
+        XCTAssertEqual(target.runtime, runtime)
+
+        // A push-management request preserves the account, store, and
+        // selected runtime. A controller that arrives during it therefore
+        // still belongs to the current attempt and must not close that
+        // browser or its direct selection.
+        let management = try await holdPushManagement(hold, in: app)
+        XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.keepsSelectedRuntime(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+        let deselected = transport.deselectCount
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(transport.deselectCount, deselected)
+
+        hold.release.signal()
+        try await management.value
+        try await reportUsableWhileTheAccountIsIdle(
+            transport,
+            for: target,
+            generation: "g1",
+            runtime: runtime,
+            in: app
+        )
+        XCTAssertEqual(directStatus(app, instance)?.preferred, .direct)
+
+        // A background return re-establishes transport for the same browser;
+        // it does not send the user to the picker.
+        NotificationCenter.default.post(
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        try await eventually { app.directLoadGate(for: runtime) != .held }
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
+        withExtendedLifetime(controller) {}
+    }
+
+    @MainActor
     func testALateControllerForAnOlderRuntimeLeavesTheNewerSelectionAlone() async throws {
         let transport = StandInDirectTransport()
         let app = try await makeApp(directTransport: transport)
@@ -1374,6 +1878,42 @@ final class DirectPathAppTests: XCTestCase {
             }
             return self.directStatus(app, second)?.preferred == .direct
         }
+    }
+
+    @MainActor
+    func testALateControllerForAnOlderAttemptOfTheSameRuntimeLeavesTheRetryAlone()
+        async throws
+    {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        let olderAttemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        let olderController = try makeRuntimeController(app, runtime)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: olderAttemptID,
+            runtime: runtime
+        )
+        XCTAssertTrue(app.retryRuntimeOpen(attemptID: olderAttemptID))
+        _ = try await waitForBrowser("instance-1", in: app)
+        let retryID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        XCTAssertGreaterThan(retryID, olderAttemptID)
+
+        // The old BrowserScreen captured the old attempt id. Its controller
+        // arriving now is rejected and released, but it cannot retire the
+        // newer attempt merely because both attempts name the same runtime.
+        let deselected = transport.deselectCount
+        app.registerRuntimeController(
+            olderController,
+            for: runtime,
+            attemptID: olderAttemptID
+        )
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, retryID)
+        XCTAssertEqual(app.runtimeOpenAttempt?.runtime, runtime)
+        XCTAssertEqual(transport.deselectCount, deselected)
+        withExtendedLifetime(olderController) {}
     }
 
     // MARK: The transport's rendezvous WebView
@@ -2167,6 +2707,8 @@ final class DirectPathAppTests: XCTestCase {
         pushKeychain: InMemoryPushKeychainStore? = nil,
         pushInstallationMarker: InMemoryPushInstallationMarkerStore? = nil,
         pushNotificationCenter: PushNotificationCentering? = nil,
+        runtimeOpenTiming: RuntimeOpenTiming? = nil,
+        runtimeOpenNotificationCenter: NotificationCenter = .default,
         launchesWithInstanceOneSelected: Bool = false,
         notifications: NotificationsOn? = nil,
         // Before `beforeTheAppExists`: an unlabeled trailing closure at a
@@ -2270,6 +2812,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
         } else if let directTransport {
@@ -2284,6 +2828,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
         } else {
@@ -2297,6 +2843,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushInstallationMarker: notifications?.marker
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
         }
@@ -2510,6 +3058,62 @@ final class DirectPathAppTests: XCTestCase {
             print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
         }
         storeIdentifiers.removeAll()
+    }
+}
+
+private final class RuntimeOpenManualTiming: RuntimeOpenTiming {
+    private final class Timer: RuntimeOpenTimer {
+        let id: UUID
+        weak var owner: RuntimeOpenManualTiming?
+
+        init(id: UUID, owner: RuntimeOpenManualTiming) {
+            self.id = id
+            self.owner = owner
+        }
+
+        @MainActor
+        func cancel() {
+            owner?.entries.removeValue(forKey: id)
+        }
+    }
+
+    private struct Entry {
+        let deadline: Duration
+        let action: @MainActor () -> Void
+    }
+
+    private(set) var now: Duration = .zero
+    private var entries: [UUID: Entry] = [:]
+
+    @MainActor
+    func schedule(
+        after delay: Duration,
+        _ action: @escaping @MainActor () -> Void
+    ) -> any RuntimeOpenTimer {
+        let id = UUID()
+        entries[id] = Entry(deadline: now + delay, action: action)
+        return Timer(id: id, owner: self)
+    }
+
+    @MainActor
+    func advance(by duration: Duration) {
+        let target = now + duration
+        while let next = entries.min(by: {
+            if $0.value.deadline == $1.value.deadline {
+                return $0.key.uuidString < $1.key.uuidString
+            }
+            return $0.value.deadline < $1.value.deadline
+        }), next.value.deadline <= target {
+            entries.removeValue(forKey: next.key)
+            now = next.value.deadline
+            next.value.action()
+        }
+        now = target
+    }
+
+    @MainActor
+    func elapseWithoutFiring(by duration: Duration) {
+        now += duration
     }
 }
 
