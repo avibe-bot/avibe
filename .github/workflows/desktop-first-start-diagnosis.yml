@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUILD_REF: fix/desktop-first-start-not-responding
+  BUILD_REF: diag/combined-fsnr
   RELEASE_BASE: https://dl.avibe.bot/releases/v3.2.6
   MAC_ASSET: Avibe_3.2.6_aarch64-apple-darwin.dmg
   MAC_SUMS: Avibe_3.2.6_aarch64-apple-darwin.SHA256SUMS
