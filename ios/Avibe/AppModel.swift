@@ -274,9 +274,12 @@ final class AppModel: ObservableObject {
         _ controller: WebViewController,
         for runtime: MobileRuntimeContext
     ) {
+        // The view makes its WebView right after the open, while the push
+        // update that open started may still be running: that request keeps
+        // the selection, so it does not abandon the browser.
         guard
             route == .browser(runtime),
-            sessionCoordinator.isCurrentRuntime(runtime)
+            sessionCoordinator.keepsSelectedRuntime(runtime)
         else {
             recordRuntimeReleaseBarrier(
                 controller.invalidateForAccountTransition()
@@ -431,6 +434,10 @@ final class AppModel: ObservableObject {
         // Preparing it waits at most the listener bound; an open that
         // something newer replaced while it waited loads nothing. Whether
         // the WebView may be made then is the load gate's decision.
+        // The push update `resumeAfterAccountActivation` starts above runs
+        // during this wait. It keeps the selection, so it does not end the
+        // open; a reset, a sign-out, an account change, or any other
+        // operation does.
         let identity = runtimeIdentity
         route = .loading
         let stillWanted = { [weak self] () -> Bool in
@@ -439,7 +446,7 @@ final class AppModel: ObservableObject {
             }
             return self.runtimeIdentity == identity
                 && self.route == .loading
-                && self.sessionCoordinator.isCurrentRuntime(runtime)
+                && self.sessionCoordinator.keepsSelectedRuntime(runtime)
         }
         Task { [weak self] in
             await directPathController.prepareRoute(
@@ -450,7 +457,7 @@ final class AppModel: ObservableObject {
                 // Something newer took the route while this one waited.
                 return
             }
-            guard self.sessionCoordinator.isCurrentRuntime(runtime) else {
+            guard self.sessionCoordinator.keepsSelectedRuntime(runtime) else {
                 // The selection ended underneath; do not leave the spinner.
                 self.route = .onboarding(.instances)
                 return
