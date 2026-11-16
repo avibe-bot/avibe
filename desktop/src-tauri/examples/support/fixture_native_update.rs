@@ -1,7 +1,10 @@
 //! Archived-assembly-only updater harness; never declared by the shipped lib.
 //! Derived from instance_client_probe + fixture_shell, without account/backend
 //! fixtures. Production panel commands, scheduler, verifier and installer run.
-use super::*;
+use super::{
+    instance_client, notifications, pet, updater, BootstrapLog, DeepLinks, PendingDesktopUpdateOpen, Shell,
+    ACTIVITY_MONITOR, MAIN_WINDOW,
+};
 use async_trait::async_trait;
 use avibe_runtime_host::{
     instance_client::{
@@ -10,7 +13,8 @@ use avibe_runtime_host::{
         storage::{ConnectionStore, Credentials},
         transport::{Epoch, Request, Response, Transport},
     },
-    HealthProbe, LaunchError, Presence, ResolvedRuntimeLauncher, RuntimeHostSettings, RuntimeLauncher,
+    HealthProbe, LaunchError, LoopbackOrigin, Presence, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings,
+    RuntimeLauncher,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -18,11 +22,11 @@ use std::{
     collections::HashMap,
     io::Write,
     path::PathBuf,
-    sync::OnceLock,
+    sync::{atomic::Ordering, Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tauri::utils::config::AppDirectoriesOverride;
-use tauri::{Listener, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
 #[derive(Clone, Deserialize)]
@@ -141,7 +145,7 @@ impl Passkeys for NoPasskey {
 
 #[tauri::command]
 async fn desktop_client_request(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     app: AppHandle,
     request: ClientRequest,
 ) -> Result<ClientReply, String> {
