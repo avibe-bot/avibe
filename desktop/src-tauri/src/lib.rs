@@ -2219,8 +2219,7 @@ fn main_document_finished(webview: &tauri::Webview) {
     // readiness after its listener and updater state are both available.
     // Preserve the existing guarded account/remote route, whose native owner
     // handles its own admission; never replay into a loading local Workbench.
-    if instance_client::active_webview(webview.app_handle()).is_some_and(|window| !pet::is_workbench(&window))
-    {
+    if instance_client::active_webview(webview.app_handle()).is_some_and(|window| !pet::is_workbench(&window)) {
         let _ = present_pending_desktop_updates(webview.app_handle());
     }
     // Settings become available the moment a Workbench is on
