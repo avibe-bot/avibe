@@ -159,9 +159,10 @@ or Runtime lifecycle permission is granted.
 Workbench pages, advertised by `__AVIBE_DESKTOP_FOCUS__`. The Workbench calls it
 when a Protected Vault step it handed to the system browser has finished there
 (`ui/src/lib/vaultHandoffReturn.ts`). The command takes no arguments, rechecks
-that the caller is the Workbench, does nothing while the window is in front,
-answers at most one call per few seconds, and only shows and focuses the main
-window. Where the platform refuses a background activation (macOS 14 and later
+that the caller is the Workbench, does nothing while the window is in front, and
+only shows and focuses the main window. As with `window-drag`, a same-origin
+Show Page can reach it through its parent; the shell itself therefore activates
+the window at most once a minute, however often it is asked. Where the platform refuses a background activation (macOS 14 and later
 may; Windows foreground rules), it asks for attention instead: a Dock bounce or
 a taskbar flash. A Workbench on a remote instance has no grant and simply stays
 where it is.

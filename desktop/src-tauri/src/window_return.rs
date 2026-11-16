@@ -6,9 +6,12 @@
 //! forward. The decision of *which* steps qualify stays in the page
 //! (`ui/src/lib/vaultHandoffReturn.ts`); this command only shows and focuses the
 //! main window. It takes no arguments, does nothing while the window is already
-//! in front, answers at most one call per interval, and is reachable only from
-//! the main window's loopback Workbench (`capabilities/main-window-focus.json`
-//! and the `is_workbench` check below).
+//! in front, and is granted only to the main window's loopback Workbench pages
+//! (`capabilities/main-window-focus.json` and the `is_workbench` check below).
+//! A same-origin Show Page inside the Workbench can still reach it through its
+//! parent, as it can the `window-drag` commands. The shell therefore does not
+//! rest "once per finished step" on page code: it activates the window at most
+//! once per [`MIN_INTERVAL`], however often it is asked.
 //!
 //! The platforms may refuse to activate an app from the background (macOS 14+
 //! treats activation as a request; Windows has foreground-lock rules). When the
@@ -27,9 +30,10 @@ use tauri::{UserAttentionType, WebviewWindow};
 pub(crate) const DESKTOP_FOCUS_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_FOCUS__', { value: true });";
 
-/// Calls closer together than this are dropped. A finished step needs one
-/// activation; anything faster is a page misbehaving.
-const MIN_INTERVAL: Duration = Duration::from_secs(5);
+/// Activations closer together than this are dropped. A user completes a
+/// handed-off step in the browser at most every so often; a page asking more
+/// often is misbehaving, and the shell, not the page, is what holds that line.
+const MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How long the platform gets to complete an activation before the shell asks
 /// for attention instead.
@@ -103,6 +107,7 @@ mod tests {
         let now = Instant::now();
         assert_eq!(plan(false, None, now), Plan::Activate);
         assert_eq!(plan(false, Some(now - Duration::from_secs(1)), now), Plan::TooSoon);
+        assert_eq!(plan(false, Some(now - Duration::from_secs(59)), now), Plan::TooSoon);
         assert_eq!(plan(false, Some(now - MIN_INTERVAL), now), Plan::Activate);
     }
 }

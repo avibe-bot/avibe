@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkbenchEventHandlers } from '@/context/ApiContext';
 
 // Contract: the desktop app comes forward only for a step this window handed to the browser, once,
-// when that step has finished there, within the hand-off window, and never while the user is
-// already in the app. In-memory state is per module instance, so every case loads a fresh one.
+// when the user completed it there, within the hand-off window, and never while the user is already
+// in the app. A request that ends without the user (expired, withdrawn) is only forgotten. In-memory state is per module instance, so every case loads a fresh one.
 
 const T0 = Date.parse('2026-11-16T10:00:00Z');
 const MINUTE = 60_000;
@@ -65,6 +65,9 @@ describe('bringing the desktop app back after a browser hand-off', () => {
     { status: 'fulfilled', returns: true },
     { status: 'completed', returns: true },
     { status: 'failed', returns: true },
+    // Ended without the user: forgotten, and the app stays where it is.
+    { status: 'expired', returns: false },
+    { status: 'cancelled', returns: false },
     // Still the browser's turn: a sign request is producing the signature it was just allowed.
     { status: 'signing', returns: false },
     { status: 'pending', returns: false },
@@ -118,17 +121,49 @@ describe('bringing the desktop app back after a browser hand-off', () => {
     expect(s.bringForward).not.toHaveBeenCalled();
   });
 
-  it('brings the app back when a handed-off request expires, though expiry sends no event', async () => {
+  it('never comes back for a request the user gave up on, even after it expires', async () => {
     const { noteVaultHandoff, watchVaultHandoffs } = await load();
     const s = setup();
-    // The server sweeps lazily: still `pending` on read, but past its expiry.
     s.requests.set('vrq_1', { id: 'vrq_1', status: 'pending', expires_at: iso(T0 + 10 * MINUTE) });
     watchVaultHandoffs(s.api, s.bringForward);
     noteVaultHandoff({ kind: 'request', requestId: 'vrq_1' });
     await settle();
-    await vi.advanceTimersByTimeAsync(10 * MINUTE - 1);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE + 5_000);
+    s.requests.set('vrq_1', { id: 'vrq_1', status: 'expired', expires_at: iso(T0 + 10 * MINUTE) });
+    s.connected();
+    await settle();
+    // Forgotten, so a later answer to the same id cannot pull the app over the user's work either.
+    s.requests.set('vrq_1', { id: 'vrq_1', status: 'approved', expires_at: null });
+    s.vaults({ scope: 'request', request_id: 'vrq_1', request_status: 'approved' });
+    await settle();
     expect(s.bringForward).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(5_000);
+  });
+
+  it('comes back once when the same request was handed off twice', async () => {
+    const { noteVaultHandoff, watchVaultHandoffs } = await load();
+    const s = setup();
+    s.requests.set('vrq_1', { id: 'vrq_1', status: 'pending', expires_at: null });
+    watchVaultHandoffs(s.api, s.bringForward);
+    noteVaultHandoff({ kind: 'request', requestId: 'vrq_1' });
+    noteVaultHandoff({ kind: 'request', requestId: 'vrq_1' });
+    await settle();
+    s.requests.set('vrq_1', { id: 'vrq_1', status: 'approved', expires_at: null });
+    s.vaults({ scope: 'request', request_id: 'vrq_1', request_status: 'approved' });
+    s.vaults({ scope: 'grant', request_id: 'vrq_1', request_status: 'approved' });
+    await settle();
+    expect(s.bringForward).toHaveBeenCalledTimes(1);
+  });
+
+  it('notices a provision answered with an existing secret, announced without the request id', async () => {
+    const { noteVaultHandoff, watchVaultHandoffs } = await load();
+    const s = setup();
+    s.requests.set('vrq_1', { id: 'vrq_1', status: 'pending', expires_at: null });
+    watchVaultHandoffs(s.api, s.bringForward);
+    noteVaultHandoff({ kind: 'request', requestId: 'vrq_1', startProtected: true });
+    await settle();
+    s.requests.set('vrq_1', { id: 'vrq_1', status: 'fulfilled', expires_at: null });
+    s.vaults({ scope: 'secret', secret_name: 'WALLET_PASSWORD', request_status: 'fulfilled' });
+    await settle();
     expect(s.bringForward).toHaveBeenCalledTimes(1);
   });
 
@@ -162,7 +197,8 @@ describe('bringing the desktop app back after a browser hand-off', () => {
   it.each([
     { added: 'API_KEY', handedOff: 'API_KEY', returns: true },
     { added: 'OTHER_KEY', handedOff: 'API_KEY', returns: false },
-    { added: 'ANY_NEW_KEY', handedOff: undefined, returns: true },
+    // An Add with no name is not followed: an Agent's generated secret would look just the same.
+    { added: 'GENERATED_KEY', handedOff: undefined, returns: false },
   ])('an Add handed off for $handedOff and $added created brings the app back: $returns', async ({ added, handedOff, returns }) => {
     const { noteVaultHandoff, watchVaultHandoffs } = await load();
     const s = setup();

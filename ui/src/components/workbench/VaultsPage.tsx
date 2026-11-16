@@ -466,8 +466,9 @@ const PendingRequestsSection: React.FC<{
 };
 
 /**
- * One line for a step the desktop app handed to this tab, once it is done here: the app comes back by
- * itself, so this tab can be closed. A step handed off from a conversation also links back to it.
+ * One line for a step the desktop app handed to this tab, once it is done here: this tab can be closed,
+ * and the app comes back by itself where it can tell. A step handed off from a conversation also
+ * links back to it.
  */
 const DesktopHandoffDone: React.FC<{ session: string | null }> = ({ session }) => {
   const { t } = useTranslation();

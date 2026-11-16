@@ -5,42 +5,45 @@ import type { VaultBrowserStep } from './vaultBrowserHandoff';
 
 /**
  * Bringing the desktop app back after a Vaults step it handed to the browser
- * (`openVaultsInBrowser`) has finished there.
+ * (`openVaultsInBrowser`) has been completed there by the user.
  *
  * The app remembers, in memory, the steps this window handed off. Its own
- * Workbench connection reports Vault changes; when one finishes a remembered
- * step, the step is forgotten and, unless the user is already in the app, the
- * shell brings its window forward on whatever page it shows. A step counts only
- * once and only for {@link HANDOFF_RETURN_WINDOW_MS} after the hand-off; a
- * reload forgets them all.
+ * Workbench connection reports Vault changes; when one shows the user completed
+ * a remembered step, the step is forgotten and, unless the user is already in
+ * the app, the shell brings its window forward on whatever page it shows. A step
+ * counts only once and only for {@link HANDOFF_RETURN_WINDOW_MS} after the
+ * hand-off; a reload forgets them all.
  *
  * Which steps are remembered:
- * - a request (approve, deny, sign, provide): finished once the server no
- *   longer has it pending, or once it is past its expiry (expiry sends no event,
- *   so a timer checks it then);
- * - an Add: finished when a secret (of the requested name, if any) appears
- *   that was created after the hand-off.
- * An edit and a reveal are not: a secret's update time also moves when it is
- * used, so it cannot tell an edit apart, and a reveal changes nothing on the
- * server. A revealed value is also exactly what the user is reading in the
- * browser, so pulling the app over it would be wrong.
+ * - a request (approve, deny, sign, provide): the app comes back for an outcome
+ *   the user produced (approved, denied, fulfilled, completed, failed). A request
+ *   that expired or was withdrawn is only forgotten: the user did nothing that
+ *   calls for the app, and the browser tab already shows that state;
+ * - an Add for a name an agent asked for: the app comes back when a secret of
+ *   that name appears that was created after the hand-off.
+ * Not remembered: an Add with no name (any new secret, an Agent's generated one
+ * included, would look the same), an edit (a secret's update time also moves
+ * when it is used), and a reveal (it changes nothing on the server, and the
+ * revealed value is what the user is reading in the browser). The browser tab
+ * still says when those are done.
  */
 
 /** Requests live 30 minutes on the server; a step not finished by then is not coming back. */
 export const HANDOFF_RETURN_WINDOW_MS = 30 * 60_000;
 /** Server and app share this machine's clock; this absorbs only rounding. */
 const CLOCK_TOLERANCE_MS = 5_000;
-/** A pending request is re-read this long after its expiry, once the server has swept it. */
-const EXPIRY_GRACE_MS = 1_500;
+
+/** Request states the user's own answer in the browser produces. */
+const USER_OUTCOMES = new Set(['approved', 'denied', 'fulfilled', 'completed', 'failed']);
 
 type Handoff =
-  | { kind: 'request'; requestId: string; at: number; expiresAt?: number }
-  | { kind: 'add'; name?: string; at: number };
+  | { kind: 'request'; requestId: string; at: number }
+  | { kind: 'add'; name: string; at: number };
 
 const handoffs = new Map<string, Handoff>();
 const listeners = new Set<() => void>();
 
-const keyOf = (handoff: Handoff) => (handoff.kind === 'request' ? `request:${handoff.requestId}` : `add:${handoff.name ?? ''}`);
+const keyOf = (handoff: Handoff) => (handoff.kind === 'request' ? `request:${handoff.requestId}` : `add:${handoff.name}`);
 
 /**
  * Remember a step this window is handing to the browser. Only a shell that can
@@ -51,7 +54,7 @@ export function noteVaultHandoff(step: VaultBrowserStep, now = Date.now()): void
   const handoff: Handoff | null =
     step.kind === 'request'
       ? { kind: 'request', requestId: step.requestId, at: now }
-      : step.kind === 'add'
+      : step.kind === 'add' && step.name
         ? { kind: 'add', name: step.name, at: now }
         : null;
   if (!handoff) return;
@@ -59,22 +62,24 @@ export function noteVaultHandoff(step: VaultBrowserStep, now = Date.now()): void
   for (const listener of listeners) listener();
 }
 
-/** Whether `request` no longer waits on the user: answered, failed, or past its expiry. */
-export function vaultRequestHandoffFinished(request: Pick<VaultRequest, 'status' | 'expires_at'>, now: number): boolean {
-  // `signing` is the browser still producing the signature it was just allowed.
-  if (request.status === 'signing') return false;
-  if (request.status !== 'pending') return true;
-  const expiresAt = request.expires_at ? Date.parse(request.expires_at) : NaN;
-  return !Number.isNaN(expiresAt) && expiresAt <= now;
+/**
+ * What a handed-off request's current state means for the app: `return` for an
+ * outcome the user produced, `forget` for one they did not (expired, withdrawn),
+ * `wait` while it is still the browser's turn (pending, or `signing`, the
+ * signature the user just allowed being made).
+ */
+export function vaultRequestHandoffState(request: Pick<VaultRequest, 'status'>): 'return' | 'forget' | 'wait' {
+  if (request.status === 'pending' || request.status === 'signing') return 'wait';
+  return USER_OUTCOMES.has(request.status) ? 'return' : 'forget';
 }
 
-/** The secret an Add handed off at `at` produced, if it exists yet. */
+/** Whether the secret a named Add handed off at `at` exists yet. */
 export function vaultAddHandoffFinished(
   secrets: Pick<VaultSecret, 'name' | 'created_at'>[],
-  handoff: { name?: string; at: number },
+  handoff: { name: string; at: number },
 ): boolean {
   return secrets.some((secret) => {
-    if (handoff.name && secret.name !== handoff.name) return false;
+    if (secret.name !== handoff.name) return false;
     const created = secret.created_at ? Date.parse(secret.created_at) : NaN;
     return !Number.isNaN(created) && created >= handoff.at - CLOCK_TOLERANCE_MS;
   });
@@ -84,7 +89,7 @@ type ReturnApi = Pick<ApiContextType, 'connectWorkbenchEvents' | 'getVaultReques
 
 /**
  * Follow the remembered hand-offs until `stop` is called. `bringForward` runs
- * once per finished step while this document does not have focus.
+ * once per completed step while this document does not have focus.
  */
 export function watchVaultHandoffs(
   api: ReturnApi,
@@ -92,22 +97,21 @@ export function watchVaultHandoffs(
   clock: () => number = Date.now,
 ): () => void {
   let stopped = false;
-  const timers = new Map<string, number>();
 
-  const finish = (key: string, handoff: Handoff) => {
-    if (handoffs.get(key) !== handoff) return;
+  const forget = (key: string, handoff: Handoff) => {
+    if (handoffs.get(key) !== handoff) return false;
     handoffs.delete(key);
-    window.clearTimeout(timers.get(key));
-    timers.delete(key);
-    if (!document.hasFocus()) bringForward();
+    return true;
   };
 
-  // A step not finished within the window is forgotten, and its timer with it.
+  const finish = (key: string, handoff: Handoff) => {
+    if (forget(key, handoff) && !document.hasFocus()) bringForward();
+  };
+
+  // A step not completed within the window is forgotten.
   const live = (key: string, handoff: Handoff) => {
     if (clock() - handoff.at <= HANDOFF_RETURN_WINDOW_MS) return true;
-    if (handoffs.get(key) === handoff) handoffs.delete(key);
-    window.clearTimeout(timers.get(key));
-    timers.delete(key);
+    forget(key, handoff);
     return false;
   };
 
@@ -120,18 +124,14 @@ export function watchVaultHandoffs(
     } catch {
       return;
     }
-    if (stopped || handoffs.get(key) !== handoff || !request || request.id !== handoff.requestId) return;
-    if (vaultRequestHandoffFinished(request, clock())) {
-      finish(key, handoff);
-      return;
-    }
-    // Expiry sends no event: look again just after it, if that falls inside the window.
-    const expiresAt = request.expires_at ? Date.parse(request.expires_at) : NaN;
-    if (Number.isNaN(expiresAt) || timers.has(key) || expiresAt > handoff.at + HANDOFF_RETURN_WINDOW_MS) return;
-    timers.set(key, window.setTimeout(() => {
-      timers.delete(key);
-      void checkRequest(key, handoff);
-    }, Math.max(0, expiresAt - clock() + EXPIRY_GRACE_MS)));
+    if (stopped || !request || request.id !== handoff.requestId) return;
+    const state = vaultRequestHandoffState(request);
+    if (state === 'return') finish(key, handoff);
+    else if (state === 'forget') forget(key, handoff);
+  };
+
+  const checkRequests = () => {
+    for (const [key, handoff] of handoffs) if (handoff.kind === 'request') void checkRequest(key, handoff);
   };
 
   const checkAdds = async () => {
@@ -150,22 +150,19 @@ export function watchVaultHandoffs(
   };
 
   const checkAll = () => {
-    for (const [key, handoff] of handoffs) if (handoff.kind === 'request') void checkRequest(key, handoff);
+    checkRequests();
     void checkAdds();
   };
 
-  // A new hand-off is read at once: that also learns its expiry.
   const onNoted = () => checkAll();
   listeners.add(onNoted);
   const disconnect = api.connectWorkbenchEvents({
     // Whatever a gap in the stream hid is read again here.
     onConnected: checkAll,
     onVaultsUpdated: (data) => {
-      if (data.request_id) {
-        const key = `request:${data.request_id}`;
-        const handoff = handoffs.get(key);
-        if (handoff?.kind === 'request') void checkRequest(key, handoff);
-      }
+      // Any request change is read for every remembered request: a provision answered with an
+      // existing secret is announced by the secret, with a status but without the request's id.
+      if (data.request_id || data.request_status || data.scope === 'request') checkRequests();
       if (data.scope === 'secret' && data.secret_name) void checkAdds();
     },
   });
@@ -174,9 +171,6 @@ export function watchVaultHandoffs(
   return () => {
     stopped = true;
     listeners.delete(onNoted);
-    for (const timer of timers.values()) window.clearTimeout(timer);
-    timers.clear();
     disconnect();
   };
 }
-
