@@ -3947,6 +3947,11 @@
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       },
       "navUnread": "收件箱，{{count}} 条未读",
+      "navRequests_one": "收件箱，{{count}} 个待处理请求",
+      "navRequests_other": "收件箱，{{count}} 个待处理请求",
+      "pendingRequestCount_one": "{{count}} 个待处理请求",
+      "pendingRequestCount_other": "{{count}} 个待处理请求",
+      "navUnreadAndRequests": "收件箱，{{count}} 条未读，{{requests}}",
       "sections": {
         "bots": "伙伴",
         "sessions": "会话",
@@ -6456,7 +6461,7 @@
     },
     "requests": {
       "title": "待处理请求",
-      "subtitle": "有 Agent 正在等待——在本设备上批准或拒绝。",
+      "subtitle": "Agent 在等你批准。",
       "reviewTitle": "审阅请求",
       "review": "审阅",
       "reviewInBrowser": "在浏览器中审阅",
@@ -6511,7 +6516,7 @@
       "grantDuration": "Agent 授权时长",
       "grantOneTime": "一次性",
       "grantMinutes": "{{count}} 分钟",
-      "grantDurationHelp": "批准后 Agent 可以使用该保护档的时长。",
+      "grantDurationHelp": "批准后 Agent 可以使用这个密钥多久。",
       "grantOneTimeHelp": "Agent 完成这一次投递后,访问即结束。",
       "grantOneShotHelp": "此请求为一次性——Agent 只获得单次投递,时长固定。",
       "thisSessionOnly": "仅限本会话",

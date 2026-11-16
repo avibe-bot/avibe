@@ -495,7 +495,7 @@
       "avibe/localized-user-text": 1
     },
     "src/components/workbench/VaultsPage.tsx": {
-      "avibe/localized-user-text": 8,
+      "avibe/localized-user-text": 7,
       "react-hooks/immutability": 1,
       "react-hooks/set-state-in-effect": 3
     },

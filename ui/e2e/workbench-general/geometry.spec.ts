@@ -271,6 +271,8 @@ test.describe('workbench home geometry', () => {
         '/api/sessions/main',
         // The home's Getting started and tip, answered by the shared harness.
         '/api/home/preferences', '/api/remote-access/status', '/api/web-push/status',
+        // The shell's pending Vault requests, answered empty by the shared harness.
+        '/api/vault/requests',
       ]);
       await page.route('**/api/**', (route) => {
         const request = route.request();

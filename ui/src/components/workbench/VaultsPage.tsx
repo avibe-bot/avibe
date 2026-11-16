@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, ChevronRight, Clock, Copy, ExternalLink, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
+import { AlertTriangle, ChevronRight, Copy, ExternalLink, Eye, Globe, History, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -35,11 +35,8 @@ import {
   type VaultSecret,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import type { ApprovalOutcome } from '../ui/vault-approval-card';
 import { KeyAddressList } from '../ui/btc-address-row';
-import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
-import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
-import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
+import { VaultPendingRequests } from '../ui/vault-pending-requests';
 import { VaultGeneratedOriginBadge } from '../ui/vault-generated-origin';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
@@ -47,11 +44,9 @@ import { useProtectedVault, useVaultSandboxWarm } from '../../lib/useProtectedVa
 import {
   openVaultsInBrowser,
   readVaultBrowserStep,
-  vaultPasskeyNeedsBrowser,
   withoutVaultBrowserStep,
 } from '../../lib/vaultBrowserHandoff';
-import { vaultApprovalNeedsPasskey } from '../../lib/vaultRequestPlacement';
-import { readFullVaultRequest, vaultRequestNeedsFullRead } from '../../lib/vaultFullRequest';
+import { isReviewableVaultRequest } from '../../lib/vaultPendingRequests';
 import { usePreparedRequest } from '../../lib/usePreparedRequest';
 import { vaultEntryIssue } from '../../lib/vaultEntry';
 import { VaultEntryNotice } from '../ui/vault-entry-notice';
@@ -407,65 +402,11 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
   );
 };
 
-/** A compact pending-request row: who is asking, for what, with a Review action. */
-const requestReviewType = (request: VaultRequest) => (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
-
-const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultRequest) => void }> = ({ request: r, onReview }) => {
-  const { t } = useTranslation();
-  const card = (r.card ?? {}) as { request_type?: string; kind?: string; protection?: string; session_id?: string };
-  const type = requestReviewType(r);
-  const isSign = type === 'sign';
-  const isProvision = type === 'provision';
-  const isDelete = type === 'delete';
-  const isProtected = card.protection === 'protected';
-  const Icon = isDelete ? Trash2 : isSign || card.kind === 'keypair' ? Wallet : KeyRound;
-  const session = vaultRequestSessionDisplay(r);
-  const reviewInBrowser = !isProvision && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(r);
-  return (
-    <div className="flex items-center gap-3.5 rounded-xl border border-gold/40 bg-gold/[0.06] px-4 py-3">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gold/10 text-gold-ink">
-        <Icon className="size-4" />
-      </div>
-      <div className="flex min-w-0 flex-col gap-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate font-mono text-sm font-semibold">{r.secret_name ?? (vaultRequestNeedsFullRead(r) ? t('vaults.requests.detailsOnReview') : '')}</span>
-          <Badge variant="info">
-            {isProvision ? t('vaults.requests.provision') : isSign ? t('vaults.requests.sign') : isDelete ? t('vaults.requests.delete') : t('vaults.requests.access')}
-          </Badge>
-          {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
-        </div>
-        <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted">
-          <Clock className="size-3" />
-          {isProvision ? t('vaults.requests.waitingForValue') : t('vaults.requests.waiting')}
-          {session ? (
-            <>
-              <span aria-hidden>·</span>
-              <VaultRequestSessionLink session={session} />
-            </>
-          ) : null}
-        </span>
-      </div>
-      <div className="ml-auto">
-        {reviewInBrowser ? (
-          <Button size="sm" onClick={() => openVaultsInBrowser({ kind: 'request', requestId: r.id })}>
-            {t('vaults.requests.reviewInBrowser')}
-            <ExternalLink className="size-3.5" />
-          </Button>
-        ) : (
-          <Button size="sm" onClick={() => onReview(r)}>
-            {isProvision ? t('vaults.request.provide') : t('vaults.requests.review')}
-          </Button>
-        )}
-      </div>
-    </div>
-  );
-};
-
 /**
- * Pending approvals strip for the hub: lists requests an agent is waiting on,
- * follows Vault events with disconnected polling as a fallback, and opens the
- * full {@link VaultApprovalCard} in a dialog to approve or deny. Best-effort —
- * a requests fetch failure must not surface an error or blank the rest of the hub.
+ * Pending approvals strip for the hub: lists requests an agent is waiting on, follows Vault events
+ * with disconnected polling as a fallback, and hands the rows and their dialogs to
+ * {@link VaultPendingRequests}. Best-effort — a requests fetch failure must not surface an error or
+ * blank the rest of the hub.
  */
 const PendingRequestsSection: React.FC<{
   onResolved: () => void;
@@ -474,24 +415,15 @@ const PendingRequestsSection: React.FC<{
   focusStartProtected?: boolean;
   onFocusRequestOpened?: () => void;
 }> = ({ onResolved, focusRequestId, focusStartProtected = false, onFocusRequestOpened }) => {
-  const { t } = useTranslation();
   const api = useApi();
-  const { showToast } = useToast();
   const [requests, setRequests] = useState<VaultRequest[]>([]);
-  const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
-  const [provisioning, setProvisioning] = useState<VaultRequest | null>(null);
-  const [provisionStartsProtected, setProvisionStartsProtected] = useState(false);
 
   const load = useCallback(async () => {
     try {
       // Best-effort with suppressed errors so an older backend without the route
       // does not spam global toasts while fallback polling is active.
       const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
-      const pending = (res.requests ?? []).filter((r) => {
-        const type = requestReviewType(r);
-        return type === 'access' || type === 'sign' || type === 'provision' || type === 'delete';
-      });
-      setRequests(pending);
+      setRequests((res.requests ?? []).filter(isReviewableVaultRequest));
     } catch {
       // Keep the last successful snapshot. A transient poll failure should not
       // unmount an active approval/provision dialog for a still-pending request.
@@ -513,125 +445,22 @@ const PendingRequestsSection: React.FC<{
     return () => window.clearTimeout(timer);
   }, [requests, load]);
 
-  const openRequest = useCallback((request: VaultRequest, startProtected = false) => {
-    const type = requestReviewType(request);
-    if (type === 'provision') {
-      setProvisioning(request);
-      setProvisionStartsProtected(startProtected);
-    } else {
-      setReviewing(request);
-    }
-  }, []);
-
-  // A focused or handed-off request is read in full by its id (rev0.4 §4.3), whether or not any
-  // list has it yet; the full request decides which dialog opens.
-  useEffect(() => {
-    if (!focusRequestId) return undefined;
-    const controller = new AbortController();
-    void readFullVaultRequest(api, focusRequestId, controller.signal).then((read) => {
-      if (controller.signal.aborted) return;
-      if (read.phase === 'ready') {
-        openRequest(read.request, focusStartProtected);
-        onFocusRequestOpened?.();
-      } else if (read.code === 'request_not_pending' || read.code === 'request_not_found') {
-        // Settled or gone: say so and let the hand-off go.
-        showToast(t('vaults.approval.errors.loadFailed'), 'warning');
-        onFocusRequestOpened?.();
-      } else {
-        // Could not read it now: the hand-off stays, so a reload tries again.
-        showToast(t('vaults.requests.loadFullFailed'), 'warning');
-      }
-    });
-    return () => controller.abort();
-  }, [api, focusRequestId, focusStartProtected, onFocusRequestOpened, openRequest, showToast, t]);
-
-  const handleOutcome = useCallback(
-    (outcome: ApprovalOutcome) => {
-      // Drop the row immediately so it doesn't linger behind the poll; the next load
-      // reconciles against the server.
-      if (reviewing) setRequests((prev) => prev.filter((r) => r.id !== reviewing.id));
-      setReviewing(null);
-      const key =
-        outcome.kind === 'denied'
-          ? 'vaults.requests.denied'
-          : outcome.requestType === 'delete'
-            ? 'vaults.deleted'
-            : outcome.requestType === 'sign'
-            ? 'vaults.requests.signed'
-            : 'vaults.requests.approved';
-      showToast(
-        outcome.requestType === 'delete' && reviewing?.secret_name
-          ? t(key, { name: reviewing.secret_name })
-          : t(key),
-        outcome.kind === 'denied' ? 'warning' : 'success',
-      );
-      load();
-      onResolved();
-    },
-    [reviewing, showToast, t, load, onResolved],
-  );
-
-  const denyProvisionRequest = useCallback(
-    async (request: VaultRequest) => {
-      try {
-        const result = await api.denyVaultRequest(request.id);
-        if (!result?.ok) return false;
-        setProvisioning(null);
-        setRequests((prev) => prev.filter((r) => r.id !== request.id));
-        showToast(t('vaults.requests.denied'), 'warning');
-        load();
-        onResolved();
-        return true;
-      } catch (err: unknown) {
-        showToast(messageFromError(t, err), 'warning');
-        return false;
-      }
-    },
-    [api, showToast, t, load, onResolved],
-  );
-
-  // A focused request may open before (or without) any list showing it.
-  if (requests.length === 0 && !reviewing && !provisioning) return null;
+  // Drop the row immediately so it doesn't linger behind the poll; the next load
+  // reconciles against the server.
+  const onSettled = useCallback((requestId: string) => {
+    setRequests((prev) => prev.filter((r) => r.id !== requestId));
+    void load();
+    onResolved();
+  }, [load, onResolved]);
 
   return (
-    <div className="flex flex-col gap-2">
-      {requests.length > 0 ? <div className="flex items-center gap-2 px-1">
-        <Inbox className="size-4 text-gold-ink" />
-        <span className="text-sm font-semibold">{t('vaults.requests.title')}</span>
-        <Badge variant="warning">{requests.length}</Badge>
-        <span className="hidden text-xs text-muted sm:inline">{t('vaults.requests.subtitle')}</span>
-      </div> : null}
-      {requests.map((r) => (
-        <RequestRow
-          key={r.id}
-          request={r}
-          onReview={(request) => openRequest(request)}
-        />
-      ))}
-      <VaultApprovalDialog request={reviewing} onResolved={handleOutcome} onClose={() => setReviewing(null)} />
-      {provisioning != null ? (
-        <VaultSecretDialog
-          open
-          onOpenChange={(o) => {
-            if (!o) setProvisioning(null);
-          }}
-          request={provisioning}
-          startProtected={provisionStartsProtected}
-          onCancel={() => setProvisioning(null)}
-          cancelLabel={t('vaults.approval.close')}
-          onDeny={() => denyProvisionRequest(provisioning)}
-          onCreated={(name, reason) => {
-            setProvisioning(null);
-            if (reason !== 'already_exists') {
-              showToast(t('vaults.created', { name }), 'success');
-            }
-            setRequests((prev) => prev.filter((r) => r.id !== provisioning.id));
-            load();
-            onResolved();
-          }}
-        />
-      ) : null}
-    </div>
+    <VaultPendingRequests
+      requests={requests}
+      onSettled={onSettled}
+      focusRequestId={focusRequestId}
+      focusStartProtected={focusStartProtected}
+      onFocusRequestOpened={onFocusRequestOpened}
+    />
   );
 };
 

@@ -3947,6 +3947,11 @@
         "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       },
       "navUnread": "Inbox, {{count}} unread",
+      "navRequests_one": "Inbox, {{count}} pending request",
+      "navRequests_other": "Inbox, {{count}} pending requests",
+      "pendingRequestCount_one": "{{count}} pending request",
+      "pendingRequestCount_other": "{{count}} pending requests",
+      "navUnreadAndRequests": "Inbox, {{count}} unread, {{requests}}",
       "sections": {
         "bots": "Bots",
         "sessions": "Sessions",
@@ -6456,7 +6461,7 @@
     },
     "requests": {
       "title": "Pending requests",
-      "subtitle": "An agent is waiting — approve or deny from this device.",
+      "subtitle": "Agents are waiting for your approval.",
       "reviewTitle": "Review request",
       "review": "Review",
       "reviewInBrowser": "Review in browser",
