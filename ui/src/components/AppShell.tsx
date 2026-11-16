@@ -428,6 +428,8 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
           <DesktopClientPresentation />
           <Outlet />
         </SettingsOverlayNavigationBoundary>
+        {/* Settings › General is reachable over setup too, and its Voice input switch asks. */}
+        <VoiceConsentSlot />
       </ShellSidebarContext.Provider>
     );
   }

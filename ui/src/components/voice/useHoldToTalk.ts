@@ -19,7 +19,7 @@ import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voi
 import { isVoiceCaptureActive, prewarmVoiceCapture, type VoiceCaptureState } from '../../lib/voiceRecording';
 import { emitVoiceTelemetry, type VoiceTelemetryEvent, type VoiceTelemetryOutcome } from '../../lib/voiceTelemetry';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
-import { gateVoicePress, noteVoiceStatus, voiceConsentForPress } from '../../lib/voiceConsent';
+import { noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
 
 // Press and hold to talk (ui/design: mobile/main-bot-voice/*, composer/hold-*): one gesture
 // and one take, from the press to the sent message. A press that reaches `holdMs` opens the
@@ -144,7 +144,7 @@ type Take = {
 };
 
 /** A hold's outcome as the reliability log names it. */
-const TELEMETRY_OUTCOME: Record<HoldOutcome, VoiceTelemetryOutcome> = {
+const TELEMETRY_OUTCOME: Record<Exclude<HoldOutcome, 'voice-off'>, VoiceTelemetryOutcome> = {
   sent: 'sent',
   cancelled: 'cancelled',
   kept: 'kept',
@@ -156,7 +156,6 @@ const TELEMETRY_OUTCOME: Record<HoldOutcome, VoiceTelemetryOutcome> = {
   asking: 'asking',
   denied: 'denied',
   unavailable: 'unavailable',
-  'voice-off': 'unavailable',
 };
 
 /** How a hold ended, for the reliability log (`dictation_finalized`, entry `hold`), with what its
@@ -235,7 +234,7 @@ const permissionState = async (): Promise<PermissionState | null> => {
   }
 };
 
-const microphoneFailure = (error: unknown): HoldOutcome => {
+const microphoneFailure = (error: unknown): 'denied' | 'no-device' | 'mic-busy' | 'mic-failed' => {
   switch (micErrorName(error)) {
     case 'NotAllowedError':
     case 'SecurityError':
@@ -374,7 +373,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   /** The press is over with nothing to keep: back to rest, saying how it ended. */
   const end = useCallback((how: HoldOutcome | null) => {
     if (how !== 'asking') permissionAsk.current = null;
-    if (how) reportHold(TELEMETRY_OUTCOME[how], take.current);
+    // A press this account's "no" refused is a choice, not a reliability outcome: not logged.
+    if (how && how !== 'voice-off') reportHold(TELEMETRY_OUTCOME[how], take.current);
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
     take.current = null;
@@ -554,7 +554,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Voice goes to a third-party AI service: nothing is recorded before this account said yes
     // (ui/design: composer/voice-consent/*). The question takes this press, as the system's
     // microphone question does.
-    const consent = gateVoicePress();
+    const consent = await resolveVoicePress();
+    if (press.current !== current) return;
     if (consent !== 'granted') {
       end(consent === 'declined' ? 'voice-off' : null);
       return;

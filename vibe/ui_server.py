@@ -13792,6 +13792,10 @@ def asr_consent():
     if user_key is None:
         return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
     set_voice_consent(user_key, choice)
+    from vibe.sse_broker import broker
+
+    # The account's other tabs and devices re-read the answer: a "no" stops their sends at once.
+    broker.publish("voice.consent.updated", {"user_key": user_key})
     return jsonify({"ok": True, "consent": choice})
 
 
@@ -14643,7 +14647,7 @@ def _inbox_row_hidden_from(context, payload: str) -> bool:
 
 
 def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
-    if event_type == "notifications.preferences.updated":
+    if event_type in {"notifications.preferences.updated", "voice.consent.updated"}:
         data = _workbench_event_data(payload)
         return bool(
             data is not None

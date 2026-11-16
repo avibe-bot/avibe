@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { SettingsPanel, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiFetch';
+import { primeCloudToken } from '../../lib/avibeFetch';
 import {
   answerVoiceConsent,
   askVoiceConsent,
@@ -98,31 +99,44 @@ export function VoiceConsentDialog({
  *  (`gateVoicePress`, `askVoiceConsent`). */
 export function VoiceConsentHost() {
   const asking = useVoiceConsentAsking();
+  const consent = useVoiceConsent();
   const { showToast } = useToast();
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
-  // Put up before the answer was read: read it, and say nothing more to a reader who said yes.
+  // Put up before the answer was read: read it first, so a reader who said yes is not shown the
+  // question at all. A read that fails shows it (its answer is saved when given).
+  const [readFailed, setReadFailed] = useState(false);
   useEffect(() => {
     if (!asking || knownVoiceConsent() !== undefined) return;
     let alive = true;
-    void refreshVoiceConsent().then((consent) => {
-      if (alive && consent === 'granted') closeVoiceConsent();
+    void refreshVoiceConsent().then((read) => {
+      if (!alive) return;
+      if (read === 'granted') closeVoiceConsent();
+      else if (read === undefined) setReadFailed(true);
     });
     return () => {
       alive = false;
     };
   }, [asking]);
+  // Said yes elsewhere (another tab or device) while the question was up: nothing left to ask.
+  useEffect(() => {
+    if (asking && consent === 'granted') closeVoiceConsent();
+  }, [asking, consent]);
   const answer = (choice: 'granted' | 'declined') => {
     setBusy(true);
     void answerVoiceConsent(choice).then((saved) => {
       setBusy(false);
-      if (saved) closeVoiceConsent();
-      else showToast(t('voice.consent.saveFailed'), 'error');
+      if (!saved) {
+        showToast(t('voice.consent.saveFailed'), 'error');
+        return;
+      }
+      closeVoiceConsent();
+      if (choice === 'granted') primeCloudToken();
     });
   };
   return (
     <VoiceConsentDialog
-      open={asking}
+      open={asking && consent !== 'granted' && (consent !== undefined || readFailed)}
       busy={busy}
       onAllow={() => answer('granted')}
       onDeny={() => answer('declined')}

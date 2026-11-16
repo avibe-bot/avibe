@@ -11,7 +11,6 @@
 import { useSyncExternalStore } from 'react';
 
 import { apiFetch } from './apiFetch';
-import { primeCloudToken } from './avibeFetch';
 import { subscribeLocalSnapshotPrincipal } from './localSnapshots';
 
 export type VoiceConsent = 'granted' | 'declined' | null;
@@ -30,8 +29,20 @@ const set = (next: VoiceConsent | undefined) => {
   emit();
 };
 
-// The answer belongs to the reader it was read for.
-subscribeLocalSnapshotPrincipal(() => set(undefined));
+/** The instance refused voice because this account has not allowed it (`voice_consent_required`
+ *  from `/api/cloud/token` or `/api/asr/transcribe`): the answer here is stale, so read it again. */
+export const VOICE_CONSENT_REQUIRED_EVENT = 'avibe:voice-consent-required';
+
+// The answer belongs to the reader it was read for: a new reader reads its own.
+subscribeLocalSnapshotPrincipal((next) => {
+  set(undefined);
+  if (next) void refreshVoiceConsent();
+});
+if (typeof window !== 'undefined') {
+  window.addEventListener(VOICE_CONSENT_REQUIRED_EVENT, () => {
+    void refreshVoiceConsent();
+  });
+}
 
 /** Take the answer from a `/api/asr/status` body. A body without the field comes from an
  *  instance that asks no question and refuses nothing, so voice goes on as before. */
@@ -74,6 +85,14 @@ export function closeVoiceConsent(): void {
   emit();
 }
 
+/** Whether speech may leave this device now. Every upload and the realtime socket ask this
+ *  (lib/avibeFetch, lib/voiceTranscription), so a take recorded under a yes that has since been
+ *  taken back, here or on another device, is not sent. An answer not read yet does not refuse:
+ *  a press never records before the answer is read (`resolveVoicePress`). */
+export function voiceSendAllowed(): boolean {
+  return known !== 'declined' && known !== null;
+}
+
 /** What a press may do now; `ask` when the answer is not known yet (the question reads it first). */
 export function voiceConsentForPress(): VoicePress {
   if (known === 'granted') return 'granted';
@@ -89,6 +108,13 @@ export function gateVoicePress(): VoicePress {
   return press;
 }
 
+/** Before a voice control opens the microphone, with the answer read first when it is not known
+ *  yet (so a reader who said yes is not asked, and one who said no gets the off note). */
+export async function resolveVoicePress(): Promise<VoicePress> {
+  if (known === undefined) await refreshVoiceConsent();
+  return gateVoicePress();
+}
+
 /** Read the answer now (the question does when it opens on an unknown answer). */
 export async function refreshVoiceConsent(): Promise<VoiceConsent | undefined> {
   try {
@@ -100,7 +126,8 @@ export async function refreshVoiceConsent(): Promise<VoiceConsent | undefined> {
   return known;
 }
 
-/** Save the answer; resolves whether the instance took it. */
+/** Save the answer; resolves whether the instance took it. Other tabs and devices of this
+ *  account hear of it from the event stream (`voice.consent.updated`). */
 export async function answerVoiceConsent(choice: 'granted' | 'declined'): Promise<boolean> {
   try {
     const response = await apiFetch('/api/asr/consent', {
@@ -113,7 +140,6 @@ export async function answerVoiceConsent(choice: 'granted' | 'declined'): Promis
     return false;
   }
   set(choice);
-  if (choice === 'granted') primeCloudToken();
   return true;
 }
 

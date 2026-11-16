@@ -448,3 +448,28 @@ def test_voice_consent_is_asked_answered_and_enforced_per_account(monkeypatch):
     response = client.post("/api/asr/transcribe", json=body, headers=csrf_headers(client))
     assert response.status_code == 200
     assert len(sent) == 1
+
+
+def test_a_changed_answer_reaches_only_the_same_accounts_other_tabs_and_devices(monkeypatch):
+    """Saving an answer announces it so the account's other open pages stop sending at once
+    on a "no"; the frame reaches only that account, at the voice routes' Editor role."""
+    import json
+
+    from vibe.authorization import AuthorizationContext, can_receive_workbench_event
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _workbench_event_visible_to_context
+
+    published: list[tuple[str, object]] = []
+    monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
+    client = app.test_client()
+    client.put("/api/asr/consent", json={"choice": "declined"}, headers=csrf_headers(client))
+    assert published == [("voice.consent.updated", {"user_key": "local"})]
+
+    payload = json.dumps({"type": "voice.consent.updated", "data": {"user_key": "remote:alice"}})
+    alice = AuthorizationContext(instance_role="editor", is_remote=True, subject="alice")
+    bob = AuthorizationContext(instance_role="editor", is_remote=True, subject="bob")
+    viewer = AuthorizationContext(instance_role="viewer", is_remote=True, subject="alice")
+    assert _workbench_event_visible_to_context(alice, "voice.consent.updated", payload)
+    assert not _workbench_event_visible_to_context(bob, "voice.consent.updated", payload)
+    assert can_receive_workbench_event(alice, "voice.consent.updated")
+    assert not can_receive_workbench_event(viewer, "voice.consent.updated")
