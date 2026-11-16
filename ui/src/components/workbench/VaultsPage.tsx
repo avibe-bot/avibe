@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, ChevronRight, Copy, ExternalLink, Eye, Globe, History, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
+import { AlertTriangle, ChevronRight, Copy, ExternalLink, Eye, Globe, History, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -36,6 +36,7 @@ import {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { KeyAddressList } from '../ui/btc-address-row';
+import { VaultHandoffDone } from '../ui/vault-handoff-done';
 import { VaultPendingRequests } from '../ui/vault-pending-requests';
 import { VaultGeneratedOriginBadge } from '../ui/vault-generated-origin';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
@@ -465,26 +466,6 @@ const PendingRequestsSection: React.FC<{
   );
 };
 
-/**
- * One line for a step the desktop app handed to this tab, once it is done here: this tab can be closed,
- * and the app comes back by itself where it can tell. A step handed off from a conversation also
- * links back to it.
- */
-const DesktopHandoffDone: React.FC<{ session: string | null }> = ({ session }) => {
-  const { t } = useTranslation();
-  return (
-    <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-mint/40 bg-mint/10 px-4 py-3 text-sm text-mint-ink">
-      <CheckCircle2 className="size-4 shrink-0" />
-      <span className="min-w-0 flex-1">{t('vaults.handoff.done')}</span>
-      {session ? (
-        <a href={`avibe://session/${session}`} className="shrink-0 font-semibold underline underline-offset-2">
-          {t('vaults.handoff.openApp')}
-        </a>
-      ) : null}
-    </div>
-  );
-};
-
 const QUICK_FILTERS = ['all', 'protected', 'signing', 'unused'] as const;
 // Most recent activity first is the default (owner decision, 2026-11-12): last used, or added when never used.
 const SORT_ORDERS = ['recent', 'name', 'added'] as const;
@@ -897,7 +878,7 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
-      {desktopHandoffDone ? <DesktopHandoffDone session={desktopHandoff?.session ?? null} /> : null}
+      {desktopHandoffDone ? <VaultHandoffDone session={desktopHandoff?.session ?? null} /> : null}
       {canReadVaultState ? <AvaultAuthorizationNotice /> : null}
       {canUseVaultSecrets ? (
         <PendingRequestsSection
