@@ -62,10 +62,7 @@ FORBIDDEN = re.compile(
 # "<catalog>:<key>" -> why the match may stay for now. Every entry is a
 # tracked exception, not a precedent: rewrite the copy and delete the entry.
 _DEFERRED = "owner 2026-11-16 deferred; not in Desktop/iOS scope"
-_REMOVED_ELSEWHERE = "removed by #3850; left untouched here to avoid a conflicting edit"
 ALLOWED: dict[str, str] = {
-    "ui/src/i18n/en.json:desktopClient.auxiliaryIncomplete": _REMOVED_ELSEWHERE,
-    "ui/src/i18n/zh.json:desktopClient.auxiliaryIncomplete": _REMOVED_ELSEWHERE,
     "ui/src/i18n/en.json:vaults.dialog.solanaImportHint": _DEFERRED,
     "ui/src/i18n/zh.json:vaults.dialog.solanaImportHint": _DEFERRED,
     "ui/src/i18n/en.json:vaults.askOff.legacyRegistration": _DEFERRED,
