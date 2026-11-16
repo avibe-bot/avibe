@@ -1110,6 +1110,96 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(atOpen.routes.last, .onboarding(.instances))
     }
 
+    /// A notification tap from the background: the routed instance opens
+    /// while its listener is closed, so the open is held, and the push
+    /// update the open started is still in flight when the return to the
+    /// foreground releases it. The request keeps the selection, so the
+    /// held open settles at its browser.
+    @MainActor
+    func testAHeldOpenSettlesAcrossThePushUpdateOnTheReturnToTheForeground() async throws {
+        let transport = StandInDirectTransport()
+        let hold = PushHold(path: "/api/push/apns/installations/hold/provider")
+        defer { hold.release.signal() }
+        let app = try await makeApp(directTransport: transport, pushHolds: [hold])
+        // Both hosts are routed; instance-2 is shown.
+        _ = try await select("instance-1", in: app)
+        _ = try await select("instance-2", in: app)
+
+        enterBackground()
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.pushManagementRequest(
+                    PushManagementRequest(
+                        method: "POST",
+                        path: hold.path,
+                        headers: [:],
+                        body: nil
+                    )
+                )
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 60)
+        try await settle()
+        // Held: the listener is closed for the background.
+        XCTAssertEqual(app.route, .loading)
+
+        enterForeground()
+        try await eventually { app.route != .loading }
+        guard case .browser(let runtime) = app.route else {
+            return XCTFail("The held open ended at \(app.route) while a push request ran.")
+        }
+        XCTAssertEqual(runtime.instance.id, "instance-1")
+        XCTAssertEqual(atOpen.routes, [.loading, .browser(runtime)])
+        // Still in flight when it settled.
+        XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        if !app.directListenerFault {
+            XCTAssertEqual(transport.selections.last?.runtime, runtime)
+        }
+
+        hold.release.signal()
+        try await XCTUnwrap(atOpen.started).value
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+    }
+
+    /// The same held open, released while an exclusive operation that does
+    /// not keep the selection runs: it returns to the list.
+    @MainActor
+    func testAHeldOpenReleasedDuringANonKeepingOperationReturnsToTheList() async throws {
+        let transport = StandInDirectTransport()
+        let hold = PushHold(path: "/api/two-factor/verify")
+        defer { hold.release.signal() }
+        let app = try await makeApp(directTransport: transport, pushHolds: [hold])
+        _ = try await select("instance-1", in: app)
+        _ = try await select("instance-2", in: app)
+
+        enterBackground()
+        let atOpen = AtTheOpen(app) { _ in nil }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await settle()
+        XCTAssertEqual(app.route, .loading)
+
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let operation = Task { @MainActor in
+            _ = try await app.mobileSessionCoordinator.verifySecondFactor(
+                method: .totp,
+                code: "123456"
+            )
+        }
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 60)
+
+        enterForeground()
+        try await eventually { app.route != .loading }
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+
+        hold.release.signal()
+        _ = await operation.result
+        app.mobileSessionCoordinator.deactivateAccountSurface()
+        XCTAssertEqual(app.route, .onboarding(.instances))
+    }
+
     /// Opens instance-1 by a tap on the list, or by the restore of a launch
     /// whose stored selection names it, and starts a push-management
     /// request at the open's first route, as the App's own resume of push
