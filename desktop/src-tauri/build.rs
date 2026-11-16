@@ -7,7 +7,8 @@ fn main() {
     // commands only to the shell's own local page, `pet.json` gives the pet
     // commands only to the pet window, `main-pet-bind.json` gives the
     // Workbench `pet_bind` alone, and `main-computer-use.json` gives it the
-    // two Computer Use guide actions on macOS.
+    // two Computer Use guide actions on macOS, and `main-window-focus.json`
+    // lets it bring its own window forward.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "desktop_client_request",
         "bootstrap_status",
@@ -43,6 +44,7 @@ fn main() {
         "pet_bind",
         "pet_unbind",
         "pet_open",
+        "focus_main_window",
     ]);
     let mut attributes = tauri_build::Attributes::new().app_manifest(manifest);
     // tauri-build embeds its Windows application manifest, which binds Common

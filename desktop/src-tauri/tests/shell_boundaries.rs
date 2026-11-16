@@ -167,7 +167,8 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-desktop-update",
             "main-app-windows",
             "main-desktop-notifications",
-            "main-instance-client"
+            "main-instance-client",
+            "main-window-focus"
         ])
     );
     let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
@@ -649,6 +650,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_bind",
         "pet_unbind",
         "pet_open",
+        "focus_main_window",
     ];
     let declared: Vec<&str> = commands
         .into_iter()
@@ -964,6 +966,10 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(marker.contains("Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true })"));
     assert!(builder.contains(".initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)"));
     assert!(builder.contains(".initialization_script(DESKTOP_NOTIFICATIONS_MARKER)"));
+    assert!(builder.contains(".initialization_script(window_return::DESKTOP_FOCUS_MARKER)"));
+    assert!(shipping_source("src/window_return.rs").contains(
+        "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_FOCUS__', { value: true })"
+    ));
     let settings_marker = pet_source
         .split("const DESKTOP_PET_SETTINGS_MARKER: &str =")
         .nth(1)
@@ -989,6 +995,10 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(
         reader.contains("window.__AVIBE_DESKTOP_NOTIFICATIONS__ === true"),
         "the Workbench must probe the native notification marker"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_DESKTOP_FOCUS__ === true"),
+        "the Workbench must probe the window-focus marker before calling it"
     );
     assert!(
         shipping_source("src/app_windows.rs").contains("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true })"),
@@ -1676,5 +1686,57 @@ fn desktop_notifications_are_main_only_and_loopback_scoped() {
                 path.display()
             );
         }
+    }
+}
+
+#[test]
+fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() {
+    let grant = read_json(crate_dir().join("capabilities/main-window-focus.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(grant["local"], false);
+    assert!(
+        grant.get("platforms").is_none(),
+        "macOS and Windows both return from the browser"
+    );
+    assert_eq!(grant["permissions"], serde_json::json!(["allow-focus-main-window"]));
+    let patterns = loopback_patterns(&grant);
+    for allowed in ["http://127.0.0.1:5123/chat/ses_1", "http://[::1]:6174/vaults"] {
+        let url = url::Url::parse(allowed).unwrap();
+        assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for rejected in [
+        "https://example.com/chat/ses_1",
+        "http://127.0.0.1.example.com/",
+        "http://192.168.1.2:5123/vaults",
+        "http://localhost:5123/vaults",
+    ] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for entry in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().is_some_and(|name| name != "main-window-focus.json") {
+            assert!(
+                !read_to_string(&path).contains("allow-focus-main-window"),
+                "{} must not grant the window-focus command",
+                path.display()
+            );
+        }
+    }
+
+    // The page names no window and passes nothing: the command acts on the
+    // caller, and only after the shell has confirmed the caller is its Workbench.
+    let source = shipping_source("src/window_return.rs");
+    let command = source
+        .split("#[tauri::command]")
+        .nth(1)
+        .expect("focus command")
+        .split("\n}\n")
+        .next()
+        .expect("focus command body");
+    assert!(command.contains("pub fn focus_main_window(window: WebviewWindow) -> Result<(), String>"));
+    assert!(command.contains("if !crate::pet::is_workbench(&window)"));
+    for forbidden in ["navigate", "eval(", "emit", "get_webview_window"] {
+        assert!(!command.contains(forbidden), "the focus command must not {forbidden}");
     }
 }
