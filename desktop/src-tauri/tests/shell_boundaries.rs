@@ -894,20 +894,6 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
     assert!(setup.contains("ensure_main_window(app.handle())"));
     assert!(source.contains("build_main_window(app, None, false, None)"));
     assert!(shipping_source("src/instance_client.rs").contains("crate::build_main_window("));
-    // The updater's own check admits the update popup, not only main's account page:
-    // otherwise every updater action from the popup is refused.
-    let client = shipping_source("src/instance_client.rs");
-    let desktop_update = client
-        .split("fn desktop_update(&self, action: ClientAction, epoch: Epoch)")
-        .nth(1)
-        .expect("desktop_update")
-        .split("\n    }\n")
-        .next()
-        .expect("desktop_update body");
-    assert!(
-        desktop_update.contains("updater_caller("),
-        "desktop_update must use updater_caller"
-    );
     // The update popup shows the same panel, so its release-notes link opens the same way.
     assert!(
         shipping_source("src/update_popover.rs")

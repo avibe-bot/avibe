@@ -95,14 +95,14 @@ pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> boo
         return false;
     }
     let window = app.get_webview_window(UPDATE_POPOVER);
+    // Never call a window getter under OPENING: off the main thread it waits for
+    // the event loop, which may itself be waiting for OPENING (page_loaded, Destroyed).
+    let visible = window.as_ref().map(|window| window.is_visible().unwrap_or(false));
     // Decide and record under the lock, act after releasing it: destroying a
     // window may run its Destroyed handler, which takes the lock too.
     let (next, initialization) = {
         let mut opening = opening();
-        let next = step(
-            window.as_ref().map(|window| window.is_visible().unwrap_or(false)),
-            opening.since.map(|since| since.elapsed()),
-        );
+        let next = step(visible, opening.since.map(|since| since.elapsed()));
         if matches!(next, Step::Replace | Step::Build) {
             opening.since = Some(Instant::now());
         }

@@ -62,7 +62,8 @@ const designFrames = frames((['zh', 'en'] as const).map((lang): FrameSpec => ({
         </Route>
       </Routes>
       {/* The popup window: `fixed` inside UpdatePopoverView resolves to this transformed box. */}
-      <div className="absolute bottom-10 left-2 z-50 h-[520px] w-[336px] [transform:translateZ(0)]">
+      {/* Spacing-scale sizes: w-84 is 336 px and h-130 is 520 px, the shell's window. */}
+      <div className="absolute bottom-10 left-2 z-50 h-130 w-84 transform-gpu">
         <UpdatePopoverView label={lang === 'en' ? en.dashboard.versionAndUpdate : zh.dashboard.versionAndUpdate} onClose={() => {}}>
           <DesktopUpdatePanel state={state} act={async () => true} busy={false} install={install} close={() => {}} />
         </UpdatePopoverView>
