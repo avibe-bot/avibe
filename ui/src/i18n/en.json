@@ -22,7 +22,9 @@
       "runtime_stop_failed": "Avibe could not confirm that the Runtime stopped, so some or all of it may still be running. Choose Try again to reconnect to it, then stop it again if you need to.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
-      "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
+      "workbench_navigation_failed": "Avibe could not open the Workbench in this window.",
+      "database_disk_full": "Avibe couldn't update its database because the disk is full. Nothing was changed. Free some space on the disk that holds your Avibe data, then choose Try again.",
+      "database_disk_full_unconfirmed": "Avibe couldn't update its database because the disk is full. Free some space on the disk that holds your Avibe data, then choose Try again."
     },
     "tray": {
       "open": "Open Avibe",

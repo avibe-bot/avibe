@@ -28,6 +28,10 @@ pub enum StartupReceiptReason {
     HandoverFailed,
     RuntimeClaimRefused,
     RuntimeNotReady,
+    /// The database update ran out of disk and rolled back (verified).
+    DatabaseDiskFull,
+    /// The database update ran out of disk; the rollback could not be verified.
+    DatabaseDiskFullUnconfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -48,7 +52,7 @@ pub enum ReceiptEvent {
     TransportError,
 }
 
-const EXIT_DRAIN: Duration = Duration::from_millis(100);
+pub(crate) const EXIT_DRAIN: Duration = Duration::from_millis(100);
 
 // At most three messages: one verdict, EOF after a verdict, and helper exit.
 enum TransportEvent {
@@ -77,6 +81,12 @@ impl Default for StartupReceiptStream {
 }
 
 impl StartupReceiptStream {
+    /// A verdict the helper writes later, as the reader thread would deliver it.
+    #[cfg(test)]
+    pub(crate) fn deliver(&self, event: ReceiptEvent) {
+        self.sender.try_send(TransportEvent::Verdict(event)).unwrap();
+    }
+
     #[cfg(test)]
     pub(crate) fn from_events(events: impl IntoIterator<Item = ReceiptEvent>) -> Self {
         let stream = Self::default();
@@ -143,10 +153,6 @@ impl StartupReceiptStream {
 
     pub fn finish(&self) {
         let _ = self.sender.try_send(TransportEvent::Exited(Instant::now()));
-    }
-
-    pub fn cancel(&self) {
-        let _ = self.terminal.set(ReceiptEvent::TransportError);
     }
 
     pub async fn changed(&self, remaining: Duration) {
@@ -258,6 +264,25 @@ mod tests {
         let receipt = parse_frame(frame.as_bytes()).expect("valid ready frame");
         assert_eq!(receipt.outcome, StartupReceiptOutcome::Ready);
         assert_eq!(receipt.reason, None);
+    }
+
+    #[test]
+    fn database_update_failures_reach_the_shell_as_their_own_reasons() {
+        for (reason, expected) in [
+            ("database_disk_full", StartupReceiptReason::DatabaseDiskFull),
+            (
+                "database_disk_full_unconfirmed",
+                StartupReceiptReason::DatabaseDiskFullUnconfirmed,
+            ),
+        ] {
+            let frame = format!(
+                "{START_RECEIPT_PREFIX}{{\"schema_version\":1,\"outcome\":\"failed\",\"origin\":\"http://127.0.0.1:5123\",\"reason\":\"{reason}\"}}\n"
+            );
+            let receipt = parse_frame(frame.as_bytes()).expect("valid failed frame");
+            assert_eq!(receipt.reason, Some(expected.clone()));
+            let code = crate::bootstrap::receipt_failure_notice(Some(expected));
+            assert_eq!(serde_json::to_value(code).expect("code serializes"), reason);
+        }
     }
 
     #[test]

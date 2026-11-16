@@ -1349,6 +1349,16 @@ class Controller:
             logger.error("Failed to start Vibey's model supply seed: %s", e, exc_info=True)
 
         try:
+            # A notice the database update left (no backup kept on a nearly full
+            # disk). Only the service delivers it, and only once.
+            if current_process_owns_service_instance() and getattr(self, "storage_notice_task", None) is None:
+                from core.storage_notices import deliver_storage_notices
+
+                self.storage_notice_task = asyncio.create_task(deliver_storage_notices(self._t))
+        except Exception as e:
+            logger.error("Failed to start the storage notice delivery: %s", e, exc_info=True)
+
+        try:
             if self.cleanup_task is None or self.cleanup_task.done():
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:

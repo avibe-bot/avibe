@@ -137,6 +137,9 @@ def test_gh_rate_limits_never_retry_ahead_of_server_or_beyond_budget(fake_gh, re
 
 @pytest.mark.parametrize("failure", [None, "digest", "reader", "changed"])
 def test_predecessor_download_replaces_partial_file_but_never_retries_contract(fake_gh, retry_clock, monkeypatch, failure):
+    # This fake release/reader proves epoch 2. Pin its source proof too rather
+    # than accidentally coupling download/retry behavior to the current build.
+    monkeypatch.setattr("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", 2)
     content = b"complete wheel fixture"
     digest = "0" * 64 if failure == "digest" else hashlib.sha256(content).hexdigest()
     release = {**PREDECESSOR, "assets": [{"name": "avibe_os-3.2.4-py3-none-any.whl", "digest": f"sha256:{digest}"}]}

@@ -29,6 +29,8 @@ type NoticeCode =
   | 'launcher_exited'
   | 'ready_timeout'
   | 'workbench_navigation_failed'
+  | 'database_disk_full'
+  | 'database_disk_full_unconfirmed'
 
 interface BootstrapNotice {
   code: string
@@ -73,6 +75,8 @@ const NOTICE_CODES: ReadonlySet<string> = new Set<NoticeCode>([
   'launcher_exited',
   'ready_timeout',
   'workbench_navigation_failed',
+  'database_disk_full',
+  'database_disk_full_unconfirmed',
 ])
 
 const root = document.documentElement
