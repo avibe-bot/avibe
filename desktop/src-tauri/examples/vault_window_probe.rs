@@ -6,9 +6,11 @@
 //! system browser is involved, and nothing outside the test root is written.
 //! Run it through `tests/run_cookie_probe.py`.
 //!
-//! By default the windows are never activated, so the probe does not take the
-//! keyboard on a desktop in use. `AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` also
-//! activates the app and checks which window is key.
+//! There are three runs. By default the app is never activated, so the probe
+//! does not take the keyboard on a desktop in use; the shell then closes a
+//! sandbox window instead of showing it, and that is what this run checks.
+//! `AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` activates the app and checks everything a
+//! window on screen must satisfy, including which window is key.
 //!
 //! The shell's module is compiled into this executable from its source file, so
 //! the probe runs the shipping code without the library exporting anything for
@@ -55,7 +57,7 @@ mod probe {
 
     use crate::macos_vault_window;
 
-    const RESERVE_DEADLINE: Duration = Duration::from_secs(3);
+    const RESERVE_DEADLINE: Duration = Duration::from_secs(5);
     const CHILD_CLASS: &std::ffi::CStr = c"AvibeVaultSandboxWebView";
     /// Stands in for the shell's own init scripts: it must run once per
     /// Workbench document and never in a child.
@@ -127,6 +129,8 @@ addEventListener('message', (event) => {
     ipcFetch: await settle(fetch('ipc://localhost/probe', { method: 'POST', body: '{}' })),
     tauriFetch: await settle(fetch('tauri://localhost/index.html')),
     tauriImage: await image('tauri://localhost/favicon.ico'),
+    fullscreen: document.fullscreenEnabled === true || document.webkitFullscreenEnabled === true,
+    pictureInPicture: document.pictureInPictureEnabled === true,
   });
   if (window.opener) {
     const targets = [window.opener];
@@ -147,13 +151,31 @@ addEventListener('message', (event) => {
 })();
 </script>"#;
 
+    /// A sandbox page that cannot paint until its stylesheet arrives, which the
+    /// server holds back. Its own colour is green.
+    const SLOW_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>slow</title>
+<link rel="stylesheet" href="/slow.css"><body>
+<script>fetch('/report', { method: 'POST', body: JSON.stringify({ case: 'slow-loaded' }) });</script>"#;
+    const SLOW_STYLE: &str = "html, body { margin: 0; height: 100%; background: #00ff00; }";
+    const STYLE_HOLD: Duration = Duration::from_secs(2);
+    /// The same page with a stylesheet that outlasts the shell's deadline.
+    const STUCK_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>stuck</title>
+<link rel="stylesheet" href="/never.css"><body>"#;
+    const STUCK_HOLD: Duration = Duration::from_secs(8);
+
+    /// A sandbox page that reports nothing, for windows the shell must close.
+    const QUIET_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>quiet</title><p>sandbox</p>"#;
+
     const ELSEWHERE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>elsewhere</title>
 <script>fetch('/report', { method: 'POST', body: JSON.stringify({ case: 'elsewhere', top: window.self === window.top }) });</script>"#;
 
     /// One native child window, as AppKit and WebKit describe it.
     #[derive(Debug, Clone)]
     struct Seen {
+        /// The native window is on screen.
         visible: bool,
+        /// Its webview is drawn and it takes clicks.
+        revealed: bool,
         key: bool,
         attached: bool,
         title: String,
@@ -164,6 +186,15 @@ addEventListener('message', (event) => {
         persistent: bool,
         own_controller: bool,
         scripts: usize,
+        own_preferences: bool,
+        fullscreen: bool,
+    }
+
+    impl Seen {
+        /// On screen and showing its page.
+        fn shown(&self) -> bool {
+            self.visible && self.revealed
+        }
     }
 
     pub fn run() {
@@ -202,7 +233,7 @@ addEventListener('message', (event) => {
             if let tauri::RunEvent::Ready = event {
                 let (browser_tx, browser_rx) = mpsc::channel();
                 let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::External("about:blank".parse().unwrap()))
-                    .visible(focus)
+                    .visible(true)
                     .incognito(true)
                     .data_directory(root.join("webview"))
                     .initialization_script(SHELL_SCRIPT)
@@ -248,8 +279,10 @@ addEventListener('message', (event) => {
                         };
                         if shipping {
                             probe.run_without_the_signed_association();
+                        } else if focus {
+                            probe.run_active();
                         } else {
-                            probe.run();
+                            probe.run_inactive();
                         }
                     }));
                     handle.exit(if outcome.is_ok() { 0 } else { 1 });
@@ -269,75 +302,25 @@ addEventListener('message', (event) => {
     }
 
     impl Probe {
-        fn run(mut self) {
+        /// The app is active and its main window is on screen, as when the user
+        /// has just clicked in the Workbench: sandbox windows may appear.
+        fn run_active(mut self) {
             let sandbox = format!("http://localhost:{}", self.port);
             let workbench = format!("http://127.0.0.1:{}", self.port);
             if self.focus {
-                self.on_main(|mtm| {
-                    #[allow(deprecated)]
-                    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-                });
+                self.activate();
             }
+            self.open_workbench();
+            self.reserve_and_draw();
 
-            // The Workbench's top-level document gets the marker and the
-            // shell's script; the sandbox iframe inside it gets neither.
-            self.main
-                .navigate(format!("{workbench}/workbench").parse().unwrap())
-                .unwrap();
-            let ready = self.report("workbench-ready");
-            assert_eq!(ready["marker"], true, "{ready}");
-            assert_eq!(ready["shell"], 1, "{ready}");
-            assert_eq!(ready["handler"], "object", "{ready}");
-            let frame = self.report("frame-ready");
-            assert_eq!(frame["marker"], "undefined", "{frame}");
-            assert_eq!(frame["shell"], "undefined", "{frame}");
-            assert!(self.children().is_empty());
-
-            // The Workbench reserves a blank window and writes into it, as any
-            // page of its origin could. The window exists but is not on screen,
-            // and the page's requests to the shell's URL schemes fail.
-            self.eval(
-                r#"(async () => {
-                    const child = probe.windows.reserved = window.open('about:blank', '_blank', 'popup,width=520,height=760');
-                    child.document.write('<title>not the sandbox</title><h1 id="mark">drawn by the opener</h1><img src="tauri://localhost/x">');
-                    const settle = (request) => request.then(() => 'loaded', () => 'failed');
-                    probe.report({
-                        case: 'reserved',
-                        drawn: !!child.document.getElementById('mark'),
-                        ipcFetch: await settle(child.fetch('ipc://localhost/probe', { method: 'POST', body: '{}' })),
-                        tauriFetch: await settle(child.fetch('tauri://localhost/index.html')),
-                        shell: typeof child.__PROBE_SHELL__,
-                        handler: typeof (child.webkit && child.webkit.messageHandlers && child.webkit.messageHandlers.ipc),
-                    });
-                })()"#,
-            );
-            let reserved = self.report("reserved");
-            assert_eq!(reserved["drawn"], true, "{reserved}");
-            assert_eq!(reserved["ipcFetch"], "failed", "{reserved}");
-            assert_eq!(reserved["tauriFetch"], "failed", "{reserved}");
-            assert_eq!(reserved["shell"], "undefined", "{reserved}");
-            assert_eq!(reserved["handler"], "undefined", "{reserved}");
-            std::thread::sleep(Duration::from_millis(700));
-            let hidden = self.children();
-            assert_eq!(hidden.len(), 1, "{hidden:?}");
-            assert!(!hidden[0].visible && !hidden[0].attached, "{hidden:?}");
-            assert_eq!(hidden[0].title, format!("localhost:{}", self.port));
-            assert_no_shell_state(&hidden[0]);
-
-            // Pointed at the sandbox, it appears once that document commits,
-            // linked to its opener in both directions.
+            // Pointed at the sandbox, the reserved window appears once that
+            // document has been presented, linked to its opener both ways.
             self.eval(&format!(
                 "probe.windows.reserved.location.replace('{sandbox}/window#case=reserved')"
             ));
-            let child = self.report("child");
-            assert_child_page(&child, "reserved", 1);
-            let heard = self.report("frame-message");
-            assert_eq!(heard["from"], "reserved", "{heard}");
-            assert_eq!(heard["origin"], sandbox, "{heard}");
-            let reply = self.report("child-reply");
-            assert_eq!(reply["origin"], sandbox, "{reply}");
+            self.a_window_opened_by_the_workbench_loaded("reserved");
             let shown = self.wait_children("the committed sandbox window", |children| {
-                children.len() == 1 && children[0].visible
+                children.len() == 1 && children[0].shown()
             });
             assert!(shown[0].attached, "{shown:?}");
             assert_eq!(shown[0].title, format!("localhost:{}", self.port));
@@ -368,8 +351,13 @@ addEventListener('message', (event) => {
             assert_eq!(view["closed"], false, "{view}");
             let still = self.children();
             assert_eq!(still.len(), 1, "{still:?}");
-            assert!(still[0].visible, "{still:?}");
+            assert!(still[0].shown(), "{still:?}");
             assert_eq!(still[0].url, format!("{sandbox}/window#case=reserved"));
+
+            // One sandbox window on screen at a time: a second one is closed,
+            // not shown beside or after the first.
+            self.eval(&format!("probe.windows.second = window.open('{sandbox}/quiet')"));
+            self.never_on_screen("a second sandbox window", "second", 1);
 
             // `window.close()` closes the native window, and the opener's own
             // script and message handler are untouched.
@@ -396,6 +384,27 @@ addEventListener('message', (event) => {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
+            self.let_the_quiet_interval_pass();
+
+            // A page keeps a window in reserve and points it at the sandbox
+            // the moment the one on screen closes, so that a click meant for
+            // the first would land on the second. The second is closed.
+            self.eval(&format!(
+                "probe.windows.first = window.open('{sandbox}/window#case=first'); probe.windows.next = window.open('about:blank')"
+            ));
+            self.a_window_opened_by_the_workbench_loaded("first");
+            self.wait_children("the first window and the one in reserve", |children| {
+                children.len() == 2 && children.iter().filter(|child| child.shown()).count() == 1
+            });
+            self.eval(&format!(
+                "probe.windows.first.close(); probe.windows.next.location.replace('{sandbox}/quiet')"
+            ));
+            self.wait_children("the first window to leave the screen", |children| {
+                children.iter().all(|child| !child.visible)
+            });
+            self.never_on_screen("a window in the place of one that just closed", "next", 0);
+            // After the interval a window appears again.
+            self.let_the_quiet_interval_pass();
 
             // The sandbox iframe opens its own window. The request comes from a
             // message handler, without a user gesture: on macOS WebKit lets
@@ -409,7 +418,7 @@ addEventListener('message', (event) => {
             assert_eq!(heard["from"], "own", "{heard}");
             assert_eq!(heard["opened"], true, "the frame hears its own window: {heard}");
             let shown = self.wait_children("the frame's own window", |children| {
-                children.len() == 1 && children[0].visible
+                children.len() == 1 && children[0].shown()
             });
             assert_requested_size(&shown[0], 440.0, 620.0);
             assert_no_shell_state(&shown[0]);
@@ -417,37 +426,26 @@ addEventListener('message', (event) => {
             self.close_child_as_the_user();
             self.report("frame-saw-closed");
             assert!(self.children().is_empty());
+            self.let_the_quiet_interval_pass();
 
-            // A sandbox address that redirects elsewhere never shows anything,
-            // and the unanswered window is closed at the deadline.
-            self.eval(&format!("probe.windows.redirect = window.open('{sandbox}/redirect')"));
-            let pending = self.wait_children("the redirecting window", |children| children.len() == 1);
-            assert!(!pending[0].visible, "{pending:?}");
-            std::thread::sleep(Duration::from_millis(1200));
-            let pending = self.children();
-            assert!(pending.len() == 1 && !pending[0].visible, "{pending:?}");
-            self.wait_children("the deadline to close an unanswered window", |children| {
-                children.is_empty()
-            });
-            self.eval("probe.report({ case: 'redirect-closed', closed: probe.windows.redirect.closed })");
-            let redirect = self.report("redirect-closed");
-            assert_eq!(redirect["closed"], true, "{redirect}");
+            self.a_redirect_never_shows();
 
             // The sandbox page itself cannot leave, open a window, or reach
-            // the browser.
+            // the browser. The size it is given stays within fixed bounds.
             self.eval(&format!(
-                "probe.windows.escape = window.open('{sandbox}/window#case=escape')"
+                "probe.windows.escape = window.open('{sandbox}/window#case=escape', '_blank', 'popup,width=5000,height=5000')"
             ));
-            let child = self.report("child");
-            assert_child_page(&child, "escape", 1);
+            self.a_window_opened_by_the_workbench_loaded("escape");
             let escape = self.report("escape-result");
             assert_eq!(escape["href"], format!("{sandbox}/window#case=escape"), "{escape}");
             assert_eq!(escape["nested"], false, "{escape}");
             assert_eq!(escape["web"], false, "{escape}");
-            let stays = self.children();
-            assert_eq!(stays.len(), 1, "{stays:?}");
-            assert!(stays[0].visible, "{stays:?}");
+            let stays = self.wait_children("the page that tried to leave", |children| {
+                children.len() == 1 && children[0].shown()
+            });
             assert_eq!(stays[0].url, format!("{sandbox}/window#case=escape"));
+            assert_eq!(stays[0].width, 900.0, "{stays:?}");
+            assert!(stays[0].height <= 1000.0, "{stays:?}");
             assert!(
                 self.browser.try_recv().is_err(),
                 "a child reached the new-window handler"
@@ -462,9 +460,308 @@ addEventListener('message', (event) => {
             assert_eq!(ready["handler"], "object", "{ready}");
             self.report("frame-ready");
             assert!(self.children().is_empty(), "a reload closes the children");
+            self.let_the_quiet_interval_pass();
 
-            // Every other request for a window still reaches the shell's
-            // handler, which hands web links to the browser and drops the rest.
+            // What the opener drew in the reserved page is never displayed, not
+            // even between the sandbox document's commit and its first paint.
+            // The opener paints the page magenta. The sandbox page is green and
+            // cannot paint until the server releases its stylesheet.
+            self.eval(
+                r#"(() => {
+                    const child = probe.windows.painted = window.open('about:blank', '_blank', 'popup,width=520,height=760');
+                    child.document.write('<body style="margin:0;background:#ff00ff"><div style="height:3000px"></div>');
+                })()"#,
+            );
+            std::thread::sleep(Duration::from_millis(1500));
+            self.eval(&format!(
+                "probe.windows.painted.location.replace('{sandbox}/slow-window')"
+            ));
+            let started = Instant::now();
+            let (mut before_release, mut after_release) = (0usize, 0usize);
+            let mut released = false;
+            loop {
+                released = released || self.arrived("style-released");
+                if let Some(colours) = self.child_pixels() {
+                    assert!(
+                        !colours.iter().any(|colour| is_magenta(*colour)),
+                        "the opener's page was displayed {:?} after the navigation: {colours:?}",
+                        started.elapsed()
+                    );
+                    if released {
+                        after_release += 1;
+                        if colours.iter().all(|colour| is_green(*colour)) {
+                            break;
+                        }
+                    } else {
+                        before_release += 1;
+                    }
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "the sandbox page was never displayed ({before_release} + {after_release} samples)"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The window was on screen, and was looked at, while the sandbox
+            // page could not paint.
+            assert!(
+                before_release >= 10,
+                "only {before_release} samples before the first paint"
+            );
+            let painted = self.children();
+            assert!(painted.len() == 1 && painted[0].shown(), "{painted:?}");
+            self.eval("probe.windows.painted.close()");
+            self.wait_children("the painted window to close", |children| children.is_empty());
+            self.let_the_quiet_interval_pass();
+
+            // A sandbox page that never paints: the window stays empty, takes
+            // neither clicks nor keys, never shows what the opener drew, and is
+            // closed at the deadline.
+            self.eval(&format!(
+                r#"(() => {{
+                    const child = probe.windows.stuck = window.open('about:blank');
+                    child.document.write('<body style="margin:0;background:#ff00ff">');
+                    setTimeout(() => child.location.replace('{sandbox}/stuck-window'), 500);
+                }})()"#
+            ));
+            self.wait_children("the stuck window to come on screen", |children| {
+                children.len() == 1 && children[0].visible
+            });
+            let mut samples = 0usize;
+            loop {
+                let children = self.children();
+                if children.is_empty() {
+                    break;
+                }
+                assert!(
+                    !children[0].revealed && !children[0].key,
+                    "a page that was never displayed took input: {children:?}"
+                );
+                if let Some(colours) = self.child_pixels() {
+                    samples += 1;
+                    assert!(
+                        !colours.iter().any(|colour| is_magenta(*colour)),
+                        "the opener's page was displayed: {colours:?}"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(samples >= 10, "only {samples} samples of the stuck window");
+            self.eval("probe.report({ case: 'stuck-closed', closed: probe.windows.stuck.closed })");
+            let stuck = self.report("stuck-closed");
+            assert_eq!(stuck["closed"], true, "{stuck}");
+            self.let_the_quiet_interval_pass();
+
+            // While the main window is hidden, nothing appears; the window is
+            // closed, not kept for later.
+            self.main.hide().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self.on_main_window(|window, _| window.isVisible()) {
+                assert!(Instant::now() < deadline, "the main window did not hide");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            self.eval(&format!("probe.windows.unseen = window.open('{sandbox}/quiet')"));
+            self.never_on_screen("a sandbox window over a hidden main window", "unseen", 0);
+            self.main.show().unwrap();
+            if self.focus {
+                self.activate();
+            }
+
+            self.other_requests_keep_their_handler();
+            self.reservations_are_bounded();
+
+            // No child outlives the main window: not when the user closes it,
+            // which the shell answers by hiding it, and not when it is destroyed.
+            for last in ["closed", "destroyed"] {
+                self.eval(&format!(
+                    "window.open('about:blank'); window.open('{sandbox}/window#case={last}')"
+                ));
+                self.a_window_opened_by_the_workbench_loaded(last);
+                self.wait_children("a shown and a reserved window", |children| {
+                    children.len() == 2 && children.iter().filter(|child| child.shown()).count() == 1
+                });
+                if last == "closed" {
+                    self.main.close().unwrap();
+                    self.wait_children("the closed main window to take its children along", |children| {
+                        children.is_empty()
+                    });
+                    self.let_the_quiet_interval_pass();
+                }
+            }
+            self.the_main_window_takes_its_children_along();
+
+            println!(
+                "vault window probe (app active{}): marker scope, hidden reservation, reveal only after the \
+                 sandbox document is presented, opener link, empty content controller and own preferences, \
+                 URL scheme guard, navigation refusals, one window at a time, quiet interval, hidden main \
+                 window, size bounds, close paths, deadline, cap, reload and main-window teardown passed",
+                if self.focus { ", with focus" } else { "" }
+            );
+        }
+
+        /// The app is not the active one, as when the user has gone elsewhere:
+        /// a sandbox window is closed instead of appearing. Nothing here takes
+        /// the keyboard, so this run is safe on a desktop in use.
+        fn run_inactive(mut self) {
+            let sandbox = format!("http://localhost:{}", self.port);
+            assert!(
+                !self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()),
+                "this run needs the app not to be active"
+            );
+            assert!(self.on_main_window(|window, _| window.isVisible()));
+            self.open_workbench();
+            self.reserve_and_draw();
+
+            self.eval(&format!("probe.windows.reserved.location.replace('{sandbox}/quiet')"));
+            self.never_on_screen("a sandbox window while the app is not active", "reserved", 0);
+
+            self.a_redirect_never_shows();
+            self.other_requests_keep_their_handler();
+            self.reservations_are_bounded();
+
+            self.eval("window.open('about:blank'); window.open('about:blank')");
+            self.wait_children("two reserved windows", |children| children.len() == 2);
+            self.main.close().unwrap();
+            self.wait_children("the closed main window to take its children along", |children| {
+                children.is_empty()
+            });
+            self.eval("window.open('about:blank')");
+            self.wait_children("a reserved window", |children| children.len() == 1);
+            self.the_main_window_takes_its_children_along();
+
+            println!(
+                "vault window probe (app not active): marker scope, hidden reservation, URL scheme guard, no \
+                 window while the app is not active, redirect refusal, deadline, cap and main-window teardown \
+                 passed"
+            );
+        }
+
+        /// The sandbox page in `probe.windows[name]` ran: it has nothing of the
+        /// shell, reaches the sandbox iframe through its opener, and hears back.
+        fn a_window_opened_by_the_workbench_loaded(&mut self, name: &str) {
+            let sandbox = format!("http://localhost:{}", self.port);
+            let child = self.report("child");
+            assert_child_page(&child, name, 1);
+            let heard = self.report("frame-message");
+            assert_eq!(heard["from"], name, "{heard}");
+            assert_eq!(heard["origin"], sandbox, "{heard}");
+            let reply = self.report("child-reply");
+            assert_eq!(reply["origin"], sandbox, "{reply}");
+        }
+
+        fn activate(&self) {
+            self.on_main(|mtm| {
+                #[allow(deprecated)]
+                NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+            });
+        }
+
+        /// The Workbench's top-level document gets the marker and the shell's
+        /// script; the sandbox iframe inside it gets neither.
+        fn open_workbench(&mut self) {
+            self.main
+                .navigate(format!("http://127.0.0.1:{}/workbench", self.port).parse().unwrap())
+                .unwrap();
+            let ready = self.report("workbench-ready");
+            assert_eq!(ready["marker"], true, "{ready}");
+            assert_eq!(ready["shell"], 1, "{ready}");
+            assert_eq!(ready["handler"], "object", "{ready}");
+            let frame = self.report("frame-ready");
+            assert_eq!(frame["marker"], "undefined", "{frame}");
+            assert_eq!(frame["shell"], "undefined", "{frame}");
+            assert!(self.children().is_empty());
+        }
+
+        /// The Workbench reserves a blank window and writes into it, as any
+        /// page of its origin could. The window exists but is not on screen,
+        /// and the page's requests to the shell's URL schemes fail.
+        fn reserve_and_draw(&mut self) {
+            self.eval(
+                r#"(async () => {
+                    const child = probe.windows.reserved = window.open('about:blank', '_blank', 'popup,width=520,height=760');
+                    child.document.write('<title>not the sandbox</title><h1 id="mark">drawn by the opener</h1><img src="tauri://localhost/x">');
+                    const settle = (request) => request.then(() => 'loaded', () => 'failed');
+                    probe.report({
+                        case: 'reserved',
+                        drawn: !!child.document.getElementById('mark'),
+                        ipcFetch: await settle(child.fetch('ipc://localhost/probe', { method: 'POST', body: '{}' })),
+                        tauriFetch: await settle(child.fetch('tauri://localhost/index.html')),
+                        shell: typeof child.__PROBE_SHELL__,
+                        handler: typeof (child.webkit && child.webkit.messageHandlers && child.webkit.messageHandlers.ipc),
+                    });
+                })()"#,
+            );
+            let reserved = self.report("reserved");
+            assert_eq!(reserved["drawn"], true, "{reserved}");
+            assert_eq!(reserved["ipcFetch"], "failed", "{reserved}");
+            assert_eq!(reserved["tauriFetch"], "failed", "{reserved}");
+            assert_eq!(reserved["shell"], "undefined", "{reserved}");
+            assert_eq!(reserved["handler"], "undefined", "{reserved}");
+            std::thread::sleep(Duration::from_millis(700));
+            let hidden = self.children();
+            assert_eq!(hidden.len(), 1, "{hidden:?}");
+            assert!(!hidden[0].visible && !hidden[0].attached, "{hidden:?}");
+            assert_eq!(hidden[0].title, format!("localhost:{}", self.port));
+            assert_no_shell_state(&hidden[0]);
+        }
+
+        /// The window `probe.windows[name]`, whose sandbox document commits
+        /// now, is closed by the shell without ever being on screen. `others`
+        /// is how many windows are on screen meanwhile and stay.
+        fn never_on_screen(&mut self, what: &str, name: &str, others: usize) {
+            let started = Instant::now();
+            loop {
+                let children = self.children();
+                assert_eq!(
+                    children.iter().filter(|child| child.visible).count(),
+                    others,
+                    "{what} appeared: {children:?}"
+                );
+                if children.len() == others && started.elapsed() > Duration::from_millis(1500) {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "{what} was not closed: {children:?}"
+                );
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            self.eval(&format!(
+                "probe.report({{ case: 'refused', name: '{name}', closed: probe.windows['{name}'].closed }})"
+            ));
+            let refused = self.report("refused");
+            assert_eq!(refused["closed"], true, "{what}: {refused}");
+        }
+
+        /// Longer than the shell's quiet interval after a window leaves the screen.
+        fn let_the_quiet_interval_pass(&self) {
+            std::thread::sleep(Duration::from_millis(1000));
+        }
+
+        /// A sandbox address that redirects elsewhere never shows anything, and
+        /// the unanswered window is closed at the deadline.
+        fn a_redirect_never_shows(&mut self) {
+            self.eval(&format!(
+                "probe.windows.redirect = window.open('http://localhost:{}/redirect')",
+                self.port
+            ));
+            let pending = self.wait_children("the redirecting window", |children| children.len() == 1);
+            assert!(!pending[0].visible, "{pending:?}");
+            std::thread::sleep(Duration::from_millis(1200));
+            let pending = self.children();
+            assert!(pending.len() == 1 && !pending[0].visible, "{pending:?}");
+            self.wait_children("the deadline to close an unanswered window", |children| {
+                children.is_empty()
+            });
+            self.eval("probe.report({ case: 'redirect-closed', closed: probe.windows.redirect.closed })");
+            let redirect = self.report("redirect-closed");
+            assert_eq!(redirect["closed"], true, "{redirect}");
+        }
+
+        /// Every other request for a window still reaches the shell's handler,
+        /// which hands web links to the browser and drops the rest.
+        fn other_requests_keep_their_handler(&mut self) {
+            let workbench = format!("http://127.0.0.1:{}", self.port);
             self.eval(&format!(
                 r#"probe.report({{ case: 'others', opened: [
                     'https://example.com/docs', '{workbench}/show/page', 'https://sandbox.avibe.bot/',
@@ -496,9 +793,11 @@ addEventListener('message', (event) => {
                 "{handed:?}"
             );
             assert!(self.children().is_empty());
+        }
 
-            // A page cannot hold more than a few hidden windows, and they do
-            // not outlive the deadline.
+        /// The main webview's pages cannot hold more than a few hidden windows,
+        /// and those do not outlive the deadline.
+        fn reservations_are_bounded(&mut self) {
             self.eval(
                 "probe.report({ case: 'many', opened: [0, 1, 2, 3, 4, 5].map(() => !!window.open('about:blank')) })",
             );
@@ -508,25 +807,9 @@ addEventListener('message', (event) => {
             assert_eq!(held.len(), 4, "{held:?}");
             assert!(held.iter().all(|child| !child.visible), "{held:?}");
             self.wait_children("the deadline to close reserved windows", |children| children.is_empty());
+        }
 
-            // No child outlives the main window: not when the user closes it,
-            // which the shell answers by hiding it, and not when it is destroyed.
-            for last in ["closed", "destroyed"] {
-                self.eval(&format!(
-                    "window.open('about:blank'); window.open('{sandbox}/window#case={last}')"
-                ));
-                let child = self.report("child");
-                assert_child_page(&child, last, 1);
-                self.wait_children("a shown and a reserved window", |children| {
-                    children.len() == 2 && children.iter().filter(|child| child.visible).count() == 1
-                });
-                if last == "closed" {
-                    self.main.close().unwrap();
-                    self.wait_children("the closed main window to take its children along", |children| {
-                        children.is_empty()
-                    });
-                }
-            }
+        fn the_main_window_takes_its_children_along(&mut self) {
             self.main.destroy().unwrap();
             let deadline = Instant::now() + Duration::from_secs(15);
             while self.child_windows() > 0 {
@@ -539,13 +822,22 @@ addEventListener('message', (event) => {
                 self.backlog
             );
             assert!(self.reports.try_iter().all(|report| report["case"] != "elsewhere"));
+        }
 
-            println!(
-                "vault window probe: marker scope, hidden reservation, show on sandbox commit, opener link, \
-                 empty content controller, URL scheme guard, navigation refusals, close paths, deadline, cap, \
-                 reload and main-window teardown passed{}",
-                if self.focus { " (with focus)" } else { "" }
+        /// Whether a report named `case` has arrived, without waiting for it.
+        fn arrived(&mut self, case: &str) -> bool {
+            self.backlog.extend(self.reports.try_iter());
+            assert!(
+                self.backlog.iter().all(|report| report["case"] != "elsewhere"),
+                "a page outside the sandbox loaded"
             );
+            match self.backlog.iter().position(|report| report["case"] == case) {
+                Some(index) => {
+                    self.backlog.remove(index);
+                    true
+                }
+                None => false,
+            }
         }
 
         /// The shell's own install on a build whose signature does not
@@ -644,21 +936,21 @@ addEventListener('message', (event) => {
                     let main_configuration = main_webview.configuration();
                     let main_store = main_configuration.websiteDataStore();
                     let main_controller = main_configuration.userContentController();
+                    let main_preferences = main_configuration.preferences();
                     NSApplication::sharedApplication(mtm)
                         .windows()
                         .iter()
                         .filter_map(|window| {
-                            let view = window.contentView()?;
-                            if !is_child_view(&view) {
-                                return None;
-                            }
+                            let view = child_view(&window)?;
                             let webview = Retained::retain(Retained::as_ptr(&view) as *mut WKWebView)?;
                             let configuration = webview.configuration();
                             let store = configuration.websiteDataStore();
                             let controller = configuration.userContentController();
+                            let preferences = configuration.preferences();
                             let size = window.contentRectForFrameRect(window.frame()).size;
                             Some(Seen {
                                 visible: window.isVisible(),
+                                revealed: view.alphaValue() == 1.0 && !window.ignoresMouseEvents(),
                                 key: window.isKeyWindow(),
                                 attached: window
                                     .parentWindow()
@@ -675,6 +967,8 @@ addEventListener('message', (event) => {
                                 persistent: store.isPersistent(),
                                 own_controller: !std::ptr::eq(&*controller, &*main_controller),
                                 scripts: controller.userScripts().len(),
+                                own_preferences: !std::ptr::eq(&*preferences, &*main_preferences),
+                                fullscreen: preferences.isElementFullscreenEnabled(),
                             })
                         })
                         .collect()
@@ -694,6 +988,15 @@ addEventListener('message', (event) => {
             }
         }
 
+        /// A grid of colours from the first child window that is on screen, as
+        /// its own views draw it. `None` while no child is on screen.
+        fn child_pixels(&self) -> Option<Vec<(u8, u8, u8)>> {
+            self.on_main(|mtm| {
+                let window = child_windows(mtm).into_iter().find(|window| window.isVisible())?;
+                window_pixels(&window)
+            })
+        }
+
         fn close_child_as_the_user(&self) {
             self.on_main(|mtm| {
                 for window in child_windows(mtm) {
@@ -708,12 +1011,68 @@ addEventListener('message', (event) => {
         }
     }
 
+    fn is_magenta((red, green, blue): (u8, u8, u8)) -> bool {
+        red > 200 && blue > 200 && green < 80
+    }
+
+    fn is_green((red, green, blue): (u8, u8, u8)) -> bool {
+        green > 200 && red < 80 && blue < 80
+    }
+
+    /// What the window's own layer tree draws, rendered in this process; no
+    /// screen capture is involved and nothing is saved. A 9 x 9 grid over the
+    /// content area. Rendering starts at the window's frame view, so the
+    /// opacity and order of everything inside the window apply.
+    fn window_pixels(window: &NSWindow) -> Option<Vec<(u8, u8, u8)>> {
+        let content = window.contentView()?;
+        // SAFETY: Main thread; AppKit objects that live for this call.
+        unsafe {
+            let frame_view = content.superview()?;
+            let bounds = frame_view.bounds();
+            let bitmap: Option<Retained<AnyObject>> =
+                objc2::msg_send![&*frame_view, bitmapImageRepForCachingDisplayInRect: bounds];
+            let bitmap = bitmap?;
+            let _: () = objc2::msg_send![&*frame_view, cacheDisplayInRect: bounds, toBitmapImageRep: &*bitmap];
+            let data: *const u8 = objc2::msg_send![&*bitmap, bitmapData];
+            let (width, height, row, samples): (isize, isize, isize, isize) = (
+                objc2::msg_send![&*bitmap, pixelsWide],
+                objc2::msg_send![&*bitmap, pixelsHigh],
+                objc2::msg_send![&*bitmap, bytesPerRow],
+                objc2::msg_send![&*bitmap, samplesPerPixel],
+            );
+            if data.is_null() || samples < 3 || width < 40 || height < 80 {
+                return None;
+            }
+            let (width, height, row, samples) = (width as usize, height as usize, row as usize, samples as usize);
+            let bytes = std::slice::from_raw_parts(data, row * height);
+            // The bitmap's first row is the top of the window; skip the title bar.
+            let scale = height as f64 / bounds.size.height;
+            let title_bar = bounds.size.height - content.frame().size.height;
+            let top = ((title_bar + 4.0) * scale) as usize;
+            let mut colours = Vec::new();
+            for grid_y in 1..10 {
+                for grid_x in 1..10 {
+                    let x = width * grid_x / 10;
+                    let y = top + (height - top) * grid_y / 10;
+                    let pixel = &bytes[y * row + x * samples..y * row + x * samples + 3];
+                    colours.push((pixel[0], pixel[1], pixel[2]));
+                }
+            }
+            Some(colours)
+        }
+    }
+
     fn child_windows(mtm: MainThreadMarker) -> Vec<Retained<NSWindow>> {
         NSApplication::sharedApplication(mtm)
             .windows()
             .iter()
-            .filter(|window| window.contentView().is_some_and(|view| is_child_view(&view)))
+            .filter(|window| child_view(window).is_some())
             .collect()
+    }
+
+    /// The child webview a window holds, inside its plain content view.
+    fn child_view(window: &NSWindow) -> Option<Retained<objc2_app_kit::NSView>> {
+        window.contentView()?.subviews().iter().find(|view| is_child_view(view))
     }
 
     /// Whether a view is a child's webview. WebKit observes its webviews, so
@@ -753,6 +1112,9 @@ addEventListener('message', (event) => {
         for refused in ["ipcFetch", "tauriFetch", "tauriImage"] {
             assert_eq!(child[refused], "failed", "{refused}: {child}");
         }
+        for off in ["fullscreen", "pictureInPicture"] {
+            assert_eq!(child[off], false, "{off}: {child}");
+        }
     }
 
     /// The size the page asked for; AppKit shortens a window the screen cannot hold.
@@ -767,6 +1129,7 @@ addEventListener('message', (event) => {
         assert!(!child.persistent, "the probe's store is disposable: {child:?}");
         assert!(child.own_controller, "{child:?}");
         assert_eq!(child.scripts, 0, "{child:?}");
+        assert!(child.own_preferences && !child.fullscreen, "{child:?}");
     }
 
     fn serve(listener: TcpListener, port: u16, reports: Sender<Value>) {
@@ -812,7 +1175,29 @@ addEventListener('message', (event) => {
                     body
                 )
             };
+            if path == "/slow.css" || path == "/never.css" {
+                let reports = reports.clone();
+                let hold = if path == "/slow.css" { STYLE_HOLD } else { STUCK_HOLD };
+                std::thread::spawn(move || {
+                    std::thread::sleep(hold);
+                    if hold == STYLE_HOLD {
+                        let _ = reports.send(json!({ "case": "style-released" }));
+                    }
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            SLOW_STYLE.len(),
+                            SLOW_STYLE
+                        )
+                        .as_bytes(),
+                    );
+                });
+                continue;
+            }
             let response = match path {
+                "/slow-window" => page(SLOW_PAGE),
+                "/stuck-window" => page(STUCK_PAGE),
+                "/quiet" => page(QUIET_PAGE),
                 "/workbench" => page(&WORKBENCH_PAGE.replace("PORT", &port.to_string())),
                 "/frame" => page(FRAME_PAGE),
                 "/window" => page(&WINDOW_PAGE.replace("PORT", &port.to_string())),

@@ -15,34 +15,58 @@
 //!
 //! What holds for a child:
 //!
-//! - **Only the sandbox.** It is created for a request to the sandbox origin, or
-//!   for `about:blank` (the Workbench reserves the window in the approval click
-//!   and points it at the sandbox once the pinned release is verified). Every
-//!   navigation in it, by the opener, the page, a redirect or a nested request
-//!   for a window, is refused unless it stays on the sandbox origin. Every
-//!   other request for a window still goes to wry, and so to the browser.
-//! - **Never a window the opener draws in.** The Workbench origin also serves
-//!   Agent-authored Show Pages, and an opener can script the `about:blank` it
-//!   reserved. The native window is therefore created ordered out and is shown
-//!   only when a sandbox document commits in it. From then on the document is
-//!   cross-origin to the opener and can only be replaced by another sandbox
-//!   document. A child that commits anything else is closed; one that commits
-//!   nothing within [`RESERVE_DEADLINE`] is closed too.
+//! - **Only the sandbox origin.** It is created for a request to the sandbox
+//!   origin, or for `about:blank` (the Workbench reserves the window in the
+//!   approval click and points it at the sandbox once the pinned release is
+//!   verified). Every navigation in it, by the opener, the page, a redirect or
+//!   a nested request for a window, is refused unless it stays on the sandbox
+//!   origin. Every other request for a window still goes to wry, and so to the
+//!   browser. The shell enforces the origin, not which sandbox release loads;
+//!   pinning the release is the Workbench's check, as in a browser.
+//! - **Never the opener's pixels.** The Workbench origin also serves
+//!   Agent-authored Show Pages, and an opener can draw in the `about:blank` it
+//!   reserved. The native window is created ordered out. When a sandbox
+//!   document commits it comes on screen empty: its webview is transparent and
+//!   it takes neither clicks nor keys. WebKit goes on displaying the previous
+//!   document's layers until the new one has something to show, so the
+//!   webview is revealed only by the first presentation update WebKit delivers
+//!   after that commit, which carries the sandbox document's layers. From then
+//!   on the document is cross-origin to the opener and can only be replaced by
+//!   another sandbox document. A child that commits anything else is closed;
+//!   one that has displayed nothing within [`RESERVE_DEADLINE`] is closed too.
+//! - **Not without the user's attention.** WebKit on macOS lets scripts open
+//!   windows without a user gesture, which a browser would require, so a page
+//!   of the Workbench origin can ask for the sandbox's real window at any
+//!   moment. The shell bounds that: a child comes on screen only while this app
+//!   is active and the opener's window is on screen, only one at a time, and
+//!   not within [`QUIET_AFTER_CLOSE`] of another leaving the screen; one that
+//!   may not appear is closed, never kept for later. Its size is clamped. The
+//!   title names the allowed host and ignores the page's own title, but it is
+//!   not proof of identity: other native windows of this app can carry any
+//!   title.
 //! - **Nothing of the shell inside it.** It gets a `WKUserContentController` of
 //!   its own with no scripts and no message handler, so nothing wry registered
-//!   reaches it and closing it removes nothing from the opener. WebKit also
-//!   copies the opener's custom URL schemes (`ipc`, `tauri`) into the child's
-//!   configuration and offers no way to remove them; wry's handler for them
-//!   reads fields that only its own webview class has. Every such handler is
-//!   therefore guarded: a request from a child fails before the handler runs.
-//!   Tauri never learns the child exists, so it has no label, no capability and
-//!   no page Tauri could classify.
+//!   reaches it and closing it removes nothing from the opener, and default
+//!   `WKPreferences` of its own with element fullscreen, picture in picture and
+//!   video presentation modes off. WebKit also copies the opener's custom URL
+//!   schemes (`ipc`, `tauri`) into the child's configuration and offers no way
+//!   to remove them; wry's handler for them reads fields that only its own
+//!   webview class has. Every such handler is therefore guarded: a request
+//!   from a child fails before the handler runs. Tauri never learns the child
+//!   exists, so it has no label, no capability and no page Tauri could
+//!   classify.
 //! - **Opener and lifetime.** The child is created from the configuration WebKit
 //!   hands over, which carries the opener link and the opener's website data
 //!   store, persistent or not. `window.close()` closes the native window;
 //!   closing the native window destroys the page, which the opener sees as a
-//!   closed popup. A committed navigation of the opener, or the end of its
-//!   window, closes its children.
+//!   closed popup. A committed navigation of the opener, or its window being
+//!   closed or destroyed, closes its children.
+//!
+//! Three of these rest on WebKit methods outside its public API: the
+//! presentation update (`_doAfterNextPresentationUpdate:`), destroying the page
+//! (`_close`), and the feature list of `WKPreferences`. Each is checked to
+//! exist before anything is installed; without one there is no child and no
+//! marker.
 //!
 //! The Workbench learns that this works from
 //! `window.__AVIBE_DESKTOP_VAULT_PASSKEY__`, defined only when the hooks above
@@ -51,18 +75,21 @@
 //! with the sandbox's passkeys. Without all three nothing here is installed and
 //! every window request is handled as before.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_void};
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use block2::{DynBlock, RcBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, NSObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask};
+use objc2::{define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSView, NSWindow, NSWindowDelegate,
+    NSWindowOrderingMode, NSWindowStyleMask,
+};
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_foundation::{
     ns_string, NSArray, NSError, NSNotification, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
@@ -71,8 +98,8 @@ use objc2_foundation::{
 use objc2_security::SecTask;
 use objc2_web_kit::{
     WKFrameInfo, WKMediaCaptureType, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKNavigationResponse, WKNavigationResponsePolicy, WKPermissionDecision, WKSecurityOrigin, WKUIDelegate,
-    WKURLSchemeTask, WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
+    WKNavigationResponse, WKNavigationResponsePolicy, WKPermissionDecision, WKPreferences, WKSecurityOrigin,
+    WKUIDelegate, WKURLSchemeTask, WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
     WKWebViewConfiguration, WKWindowFeatures,
 };
 use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
@@ -89,12 +116,23 @@ const SANDBOX_CREDENTIALS: &str = "webcredentials:sandbox.avibe.bot";
 /// Passkey PRF, which the protected tier derives its key from, starts here.
 const FIRST_MACOS_WITH_PASSKEY_PRF: isize = 15;
 
-/// How long a child may exist without a sandbox document. The Workbench
-/// verifies the pinned release (15 s at most) before it navigates a reserved
-/// window, and the sandbox gives up pairing after 30 s.
+/// How long a child may exist without displaying a sandbox document. The
+/// Workbench verifies the pinned release (15 s at most) before it navigates a
+/// reserved window, and the sandbox gives up pairing after 30 s.
 const RESERVE_DEADLINE: Duration = Duration::from_secs(60);
-/// The flows open one window at a time; this bounds what a page can hold.
+/// The flows open one window at a time; this bounds what the main webview's
+/// pages can hold, hidden ones included.
 const MAX_CHILDREN: usize = 4;
+/// After a child leaves the screen, no other appears for this long. Longer than
+/// the default double-click interval (half a second), so a click meant for the
+/// window that just closed never meets a new one in its place; shorter than a
+/// person needs to go back to the Workbench, approve another request and have
+/// its sandbox release verified and loaded.
+const QUIET_AFTER_CLOSE: Duration = Duration::from_millis(750);
+/// The size of a child's content, whatever the opener asks for.
+const DEFAULT_SIZE: (f64, f64) = (520.0, 760.0);
+const LEAST_SIZE: (f64, f64) = (360.0, 400.0);
+const MOST_SIZE: (f64, f64) = (900.0, 1000.0);
 
 /// The one origin a child may show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,7 +172,7 @@ impl Origin {
 #[derive(Clone)]
 pub(crate) struct Policy {
     pub(crate) origin: Origin,
-    /// How long a child may exist without a document of `origin`.
+    /// How long a child may exist without displaying a document of `origin`.
     pub(crate) reserve_deadline: Duration,
 }
 
@@ -194,6 +232,43 @@ fn commit_outcome(origin: &Origin, url: Option<&Url>, committed: bool) -> Commit
         Some(url) if !committed && is_blank(url) => Commit::Wait,
         _ => Commit::Close,
     }
+}
+
+/// What decides whether a child whose sandbox document just committed may come
+/// on screen. WebKit lets scripts open windows without a user gesture, so these
+/// stand in for the attention a browser would demand.
+#[derive(Clone, Copy, Debug)]
+struct Attention {
+    /// The user is in this app.
+    app_active: bool,
+    /// The opener's window is on screen, not hidden or minimized.
+    opener_on_screen: bool,
+    /// Another child of this opener is on screen.
+    sibling_on_screen: bool,
+    /// How long ago a child of this opener last left the screen.
+    since_sibling_left: Option<Duration>,
+}
+
+/// A child that may not appear is closed, never kept to appear later.
+fn may_appear(attention: Attention) -> bool {
+    attention.app_active
+        && attention.opener_on_screen
+        && !attention.sibling_on_screen
+        && attention
+            .since_sibling_left
+            .is_none_or(|since| since >= QUIET_AFTER_CLOSE)
+}
+
+/// The content size of a child for the size its opener asked for.
+fn child_size(width: Option<f64>, height: Option<f64>) -> (f64, f64) {
+    let clamp = |asked: Option<f64>, fallback: f64, least: f64, most: f64| match asked {
+        Some(asked) if asked.is_finite() => asked.clamp(least, most),
+        _ => fallback,
+    };
+    (
+        clamp(width, DEFAULT_SIZE.0, LEAST_SIZE.0, MOST_SIZE.0),
+        clamp(height, DEFAULT_SIZE.1, LEAST_SIZE.1, MOST_SIZE.1),
+    )
 }
 
 /// Whether this build may tell the Workbench that Vault passkeys work in-app.
@@ -279,6 +354,7 @@ pub(crate) fn install_with(window: &WebviewWindow, policy: Policy) {
                 key,
                 webview: Weak::from_retained(&webview),
                 app: app.clone(),
+                child_left_screen: None,
             });
         });
         // Only now is the claim true for this webview. Its controller is the
@@ -349,16 +425,23 @@ struct Opener {
     /// Proves the address still belongs to the webview that was installed.
     webview: Weak<WKWebView>,
     app: AppHandle,
+    /// When a child of this opener last left the screen.
+    child_left_screen: Option<Instant>,
 }
 
 struct Child {
     id: u64,
     opener: usize,
-    window: Retained<NSWindow>,
+    window: Retained<SandboxWindow>,
     webview: Retained<SandboxWebView>,
     delegate: Retained<ChildDelegate>,
-    /// A sandbox document has committed, so the window may be on screen.
+    /// A sandbox document has committed. Before that the main frame may hold
+    /// the reserved blank page; after it, only sandbox documents.
     committed: bool,
+    /// The native window is on screen. Its webview stays transparent, and the
+    /// window takes neither clicks nor keys, until the sandbox document has
+    /// been presented.
+    on_screen: bool,
 }
 
 #[derive(Default)]
@@ -380,6 +463,33 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     #[name = "AvibeVaultSandboxWebView"]
     struct SandboxWebView;
+);
+
+struct WindowFields {
+    /// The sandbox document has been presented; see `appear` and `reveal`.
+    revealed: Cell<bool>,
+}
+
+define_class!(
+    /// A child's window. Until its page is displayed it cannot take the
+    /// keyboard, so no key can reach a page the user cannot see.
+    #[unsafe(super(NSWindow))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AvibeVaultSandboxWindow"]
+    #[ivars = WindowFields]
+    struct SandboxWindow;
+
+    impl SandboxWindow {
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key(&self) -> bool {
+            self.ivars().revealed.get()
+        }
+
+        #[unsafe(method(canBecomeMainWindow))]
+        fn can_become_main(&self) -> bool {
+            self.ivars().revealed.get()
+        }
+    }
 );
 
 struct ChildFields {
@@ -532,66 +642,127 @@ fn committed(id: u64, url: Option<&Url>) {
         let origin = state.policy.as_ref()?.origin.clone();
         let child = state.children.iter_mut().find(|child| child.id == id)?;
         let outcome = commit_outcome(&origin, url, child.committed);
-        if outcome != Commit::Show {
-            return Some((outcome, None));
+        let first = outcome == Commit::Show && !child.committed;
+        if outcome == Commit::Show {
+            child.committed = true;
         }
-        let first = !child.committed;
-        child.committed = true;
-        let opener = child.opener;
-        let handles = first.then(|| (child.window.clone(), child.webview.clone()));
-        let opener = state
-            .openers
-            .iter()
-            .find(|candidate| candidate.key == opener)
-            .and_then(|opener| opener.webview.load());
-        Some((outcome, handles.map(|(window, webview)| (window, webview, opener))))
+        Some((outcome, first))
     });
     match outcome {
         Some((Commit::Close, _)) => close(id, false),
-        Some((Commit::Show, Some((window, webview, opener)))) => {
-            // The window belongs to the opener's window; without one there is
-            // nothing to show it over.
-            let Some(parent) = opener.and_then(|opener| opener.window()) else {
-                close(id, false);
-                return;
-            };
-            show(&parent, &window, &webview);
-        }
+        Some((Commit::Show, true)) => appear(id),
         _ => {}
     }
 }
 
-/// Puts a child on screen over its opener's window and gives it the keyboard:
-/// a passkey ceremony needs a focused document.
-fn show(parent: &NSWindow, window: &NSWindow, webview: &SandboxWebView) {
+/// Puts a child whose first sandbox document just committed on screen over its
+/// opener's window, or closes it when it may not appear now.
+///
+/// What comes on screen is the window with a transparent webview, taking no
+/// input. WebKit keeps displaying the previous document's layers until the new
+/// one has something to show, and the previous document here is a blank page
+/// its opener could draw in. The webview is revealed by the first presentation
+/// update WebKit delivers after this point, which carries the sandbox
+/// document's layers.
+fn appear(id: u64) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let found = STATE.with_borrow(|state| {
+        let child = state.children.iter().find(|child| child.id == id)?;
+        let opener = state.openers.iter().find(|opener| opener.key == child.opener)?;
+        let sibling_on_screen = state
+            .children
+            .iter()
+            .any(|other| other.opener == child.opener && other.id != id && other.on_screen);
+        Some((
+            child.window.clone(),
+            child.webview.clone(),
+            opener.webview.load(),
+            sibling_on_screen,
+            opener.child_left_screen.map(|left| left.elapsed()),
+        ))
+    });
+    let Some((window, webview, opener, sibling_on_screen, since_sibling_left)) = found else {
+        close(id, false);
+        return;
+    };
+    let parent = opener.and_then(|opener| opener.window());
+    let attention = Attention {
+        app_active: NSApplication::sharedApplication(mtm).isActive(),
+        opener_on_screen: parent
+            .as_ref()
+            .is_some_and(|parent| parent.isVisible() && !parent.isMiniaturized()),
+        sibling_on_screen,
+        since_sibling_left,
+    };
+    let Some(parent) = parent.filter(|_| may_appear(attention)) else {
+        close(id, false);
+        return;
+    };
+    STATE.with_borrow_mut(|state| {
+        if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
+            child.on_screen = true;
+        }
+    });
     let over = parent.frame();
     let size = window.frame().size;
     window.setFrameOrigin(NSPoint::new(
         over.origin.x + (over.size.width - size.width) / 2.0,
         over.origin.y + (over.size.height - size.height) / 2.0,
     ));
+    // Attaching orders the window in above its parent, without making it key.
     // SAFETY: Both windows are live and distinct; the child is detached again
     // before it closes.
-    unsafe { parent.addChildWindow_ordered(window, NSWindowOrderingMode::Above) };
-    window.makeKeyAndOrderFront(None);
-    window.makeFirstResponder(Some(webview));
+    unsafe { parent.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
+    let presented = RcBlock::new(move || reveal(id));
+    // SAFETY: `adopt` checked that the webview class has this method, which
+    // takes one block and calls it on the main thread.
+    let _: () = unsafe { msg_send![&*webview, _doAfterNextPresentationUpdate: &*presented] };
 }
 
-/// Ends a child: the native window closes and the page is destroyed, which its
-/// opener sees as a closed popup. `window_closing` is set when AppKit is
+/// The sandbox document is what the webview now displays: show it, and give
+/// the window the keyboard, which a passkey ceremony needs.
+fn reveal(id: u64) {
+    let found = STATE.with_borrow(|state| {
+        let child = state.children.iter().find(|child| child.id == id)?;
+        (child.committed && child.on_screen).then(|| (child.window.clone(), child.webview.clone()))
+    });
+    let Some((window, webview)) = found else {
+        return;
+    };
+    window.ivars().revealed.set(true);
+    webview.setAlphaValue(1.0);
+    window.setIgnoresMouseEvents(false);
+    window.makeKeyAndOrderFront(None);
+    window.makeFirstResponder(Some(&webview));
+}
+
+/// Ends a child: the page is destroyed, which its opener sees as a closed
+/// popup, and the native window closes. `window_closing` is set when AppKit is
 /// already closing the window.
 fn close(id: u64, window_closing: bool) {
     let child = STATE.with_borrow_mut(|state| {
         let index = state.children.iter().position(|child| child.id == id)?;
-        Some(state.children.remove(index))
+        let child = state.children.remove(index);
+        if child.on_screen {
+            if let Some(opener) = state.openers.iter_mut().find(|opener| opener.key == child.opener) {
+                opener.child_left_screen = Some(Instant::now());
+            }
+        }
+        Some(child)
     });
     let Some(child) = child else {
         return;
     };
-    // SAFETY: Main thread; every object is live and owned by `child`.
+    // SAFETY: Main thread; every object is live and owned by `child`. `adopt`
+    // checked that the webview class has `_close`, which takes no argument.
     unsafe {
         child.webview.setNavigationDelegate(None);
         child.webview.setUIDelegate(None);
+        // Destroys the page now. Releasing the webview would do the same, but
+        // WebKit keeps it alive while a presentation update is still awaited.
+        let _: () = msg_send![&*child.webview, _close];
     }
     child.window.setDelegate(None);
     let was_key = child.window.isKeyWindow();
@@ -603,15 +774,14 @@ fn close(id: u64, window_closing: bool) {
         child.window.close();
     }
     child.window.makeFirstResponder(None);
-    child.window.setContentView(None);
+    child.webview.removeFromSuperview();
     if was_key {
         if let Some(parent) = &parent {
             parent.makeKeyWindow();
         }
     }
     // WebKit or AppKit may be in the middle of a callback on these objects.
-    // They are released when the current event has been handled; the webview's
-    // release is what destroys the page.
+    // They are released when the current event has been handled.
     let _ = Retained::autorelease_ptr(child.webview);
     let _ = Retained::autorelease_ptr(child.window);
     let _ = Retained::autorelease_ptr(child.delegate);
@@ -654,6 +824,20 @@ fn adopt(webview: &WKWebView) -> bool {
             (class, wry_create)
         });
         if hooked.0 != class {
+            return false;
+        }
+        // A child is revealed by WebKit's presentation update and by nothing
+        // else, and its page is destroyed by `_close`; without either method
+        // there is no child.
+        if !webview.respondsToSelector(sel!(_doAfterNextPresentationUpdate:))
+            || !webview.respondsToSelector(sel!(_close))
+        {
+            return false;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        if child_preferences(mtm).is_none() {
             return false;
         }
         if !guard_url_schemes() {
@@ -725,42 +909,60 @@ fn open_child(
     // made for this request.
     let (window, webview) = unsafe {
         // The copy still points at the opener's controller, with every script
-        // and message handler wry registered. The child gets an empty one.
-        let shell = configuration.userContentController();
+        // and message handler wry registered, and at the opener's preferences.
+        // The child gets an empty controller and preferences of its own.
+        let shell_controller = configuration.userContentController();
+        let shell_preferences = configuration.preferences();
         let empty = WKUserContentController::new(mtm);
         configuration.setUserContentController(&empty);
-        let dimension = |value: Option<Retained<objc2_foundation::NSNumber>>, fallback: f64, least: f64, most: f64| {
-            value.map_or(fallback, |value| value.doubleValue()).clamp(least, most)
-        };
-        let size = NSSize::new(
-            dimension(features.width(), 520.0, 360.0, 900.0),
-            dimension(features.height(), 760.0, 400.0, 1000.0),
+        let preferences = child_preferences(mtm)?;
+        configuration.setPreferences(&preferences);
+        let (width, height) = child_size(
+            features.width().map(|width| width.doubleValue()),
+            features.height().map(|height| height.doubleValue()),
         );
-        let frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
         let webview: Retained<SandboxWebView> = msg_send![
             super(SandboxWebView::alloc(mtm).set_ivars(())),
             initWithFrame: frame,
             configuration: configuration
         ];
-        let held = webview.configuration().userContentController();
-        if !std::ptr::eq(&*held, &*empty) || std::ptr::eq(&*held, &*shell) {
+        let held = webview.configuration();
+        let (held_controller, held_preferences) = (held.userContentController(), held.preferences());
+        if !std::ptr::eq(&*held_controller, &*empty)
+            || std::ptr::eq(&*held_controller, &*shell_controller)
+            || std::ptr::eq(&*held_preferences, &*shell_preferences)
+            || held_preferences.isElementFullscreenEnabled()
+        {
             return None;
         }
-        let window = NSWindow::initWithContentRect_styleMask_backing_defer(
-            mtm.alloc(),
-            frame,
-            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable,
-            NSBackingStoreType::Buffered,
-            false,
-        );
+        let window: Retained<SandboxWindow> = msg_send![
+            super(SandboxWindow::alloc(mtm).set_ivars(WindowFields {
+                revealed: Cell::new(false),
+            })),
+            initWithContentRect: frame,
+            styleMask: NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable,
+            backing: NSBackingStoreType::Buffered,
+            defer: false
+        ];
         // This module owns the window; AppKit must not release it on close.
         window.setReleasedWhenClosed(false);
         let _: () = msg_send![&window, setRestorable: false];
         (window, webview)
     };
-    // The title names the only origin the window can show, never the page's.
+    // The title names the only origin the window can load. It is the page's
+    // title that is ignored; it is not proof of what the window is.
     window.setTitle(&NSString::from_str(&policy.origin.title()));
-    window.setContentView(Some(&webview));
+    // Until the sandbox document has been presented, the webview draws
+    // nothing and the window passes clicks through. See `appear`.
+    webview.setAlphaValue(0.0);
+    webview.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    window.setIgnoresMouseEvents(true);
+    let content = NSView::initWithFrame(mtm.alloc(), webview.frame());
+    content.addSubview(&webview);
+    window.setContentView(Some(&content));
     let id = STATE.with_borrow_mut(|state| {
         state.next_id += 1;
         state.next_id
@@ -780,20 +982,71 @@ fn open_child(
             webview: webview.clone(),
             delegate,
             committed: false,
+            on_screen: false,
         });
     });
     let deadline = policy.reserve_deadline;
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(deadline).await;
         let _ = app.run_on_main_thread(move || {
-            let waiting =
-                STATE.with_borrow(|state| state.children.iter().any(|child| child.id == id && !child.committed));
+            let waiting = STATE.with_borrow(|state| {
+                state
+                    .children
+                    .iter()
+                    .any(|child| child.id == id && !child.window.ivars().revealed.get())
+            });
             if waiting {
                 close(id, false);
             }
         });
     });
     Some(webview)
+}
+
+/// WebKit features a child is created without: the sandbox's window uses
+/// neither picture in picture nor a video presentation mode, and both can put
+/// content on screen outside the window.
+const FEATURES_OFF: [&str; 3] = [
+    "AllowsPictureInPictureMediaPlayback",
+    "PictureInPictureAPIEnabled",
+    "VideoPresentationModeAPIEnabled",
+];
+
+/// Default preferences, not the opener's, with element fullscreen and the
+/// features above off. `None` when WebKit does not confirm each one is off;
+/// a child is not created then.
+fn child_preferences(mtm: MainThreadMarker) -> Option<Retained<WKPreferences>> {
+    // SAFETY: Main thread. The feature list and its two accessors are WebKit's
+    // own, checked to exist before they are called.
+    unsafe {
+        let preferences = WKPreferences::new(mtm);
+        preferences.setElementFullscreenEnabled(false);
+        if preferences.isElementFullscreenEnabled()
+            || WKPreferences::class().class_method(sel!(_features)).is_none()
+            || !preferences.respondsToSelector(sel!(_setEnabled:forFeature:))
+            || !preferences.respondsToSelector(sel!(_isEnabledForFeature:))
+        {
+            return None;
+        }
+        let features: Retained<NSArray> = msg_send![WKPreferences::class(), _features];
+        let mut off = 0;
+        for feature in features.iter() {
+            let key: Option<Retained<NSString>> = msg_send![&*feature, key];
+            let Some(key) = key.map(|key| key.to_string()) else {
+                continue;
+            };
+            if !FEATURES_OFF.contains(&key.as_str()) {
+                continue;
+            }
+            let _: () = msg_send![&*preferences, _setEnabled: false, forFeature: &*feature];
+            let enabled: bool = msg_send![&*preferences, _isEnabledForFeature: &*feature];
+            if enabled {
+                return None;
+            }
+            off += 1;
+        }
+        (off == FEATURES_OFF.len()).then_some(preferences)
+    }
 }
 
 type SchemeImp = unsafe extern "C-unwind" fn(&AnyObject, Sel, &WKWebView, &ProtocolObject<dyn WKURLSchemeTask>);
@@ -1051,6 +1304,58 @@ mod tests {
             );
             assert_eq!(commit_outcome(&sandbox, None, committed), Commit::Close);
         }
+    }
+
+    #[test]
+    fn a_child_appears_only_with_the_users_attention_and_alone() {
+        let attentive = Attention {
+            app_active: true,
+            opener_on_screen: true,
+            sibling_on_screen: false,
+            since_sibling_left: None,
+        };
+        assert!(may_appear(attentive));
+        // The user is in another app, or the Workbench is hidden or minimized.
+        assert!(!may_appear(Attention {
+            app_active: false,
+            ..attentive
+        }));
+        assert!(!may_appear(Attention {
+            opener_on_screen: false,
+            ..attentive
+        }));
+        // One sandbox window at a time.
+        assert!(!may_appear(Attention {
+            sibling_on_screen: true,
+            ..attentive
+        }));
+        // Not in the place of one that just closed.
+        for (since, allowed) in [
+            (Duration::ZERO, false),
+            (Duration::from_millis(500), false),
+            (Duration::from_millis(749), false),
+            (Duration::from_millis(750), true),
+            (Duration::from_secs(60), true),
+        ] {
+            assert_eq!(
+                may_appear(Attention {
+                    since_sibling_left: Some(since),
+                    ..attentive
+                }),
+                allowed,
+                "{since:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_has_a_size_within_fixed_bounds_whatever_is_asked() {
+        assert_eq!(child_size(None, None), (520.0, 760.0));
+        assert_eq!(child_size(Some(440.0), Some(620.0)), (440.0, 620.0));
+        assert_eq!(child_size(Some(5000.0), Some(5000.0)), (900.0, 1000.0));
+        assert_eq!(child_size(Some(1.0), Some(0.0)), (360.0, 400.0));
+        assert_eq!(child_size(Some(-300.0), None), (360.0, 760.0));
+        assert_eq!(child_size(Some(f64::INFINITY), Some(f64::NAN)), (520.0, 760.0));
     }
 
     #[test]

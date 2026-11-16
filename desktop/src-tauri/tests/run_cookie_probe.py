@@ -40,17 +40,22 @@ def main() -> int:
         log.write(f"probe root: {root}\n")
         log.flush()
         # subprocess.run terminates only this owned process on timeout.
-        completed = subprocess.run(
-            [str(args.executable.resolve())],
-            env=environment,
-            cwd=root,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            timeout=args.timeout,
-            check=False,
-        )
+        try:
+            returncode = subprocess.run(
+                [str(args.executable.resolve())],
+                env=environment,
+                cwd=root,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                timeout=args.timeout,
+                check=False,
+            ).returncode
+        except subprocess.TimeoutExpired:
+            # A stuck probe still says how far it got.
+            log.write(f"probe timed out after {args.timeout} seconds\n")
+            returncode = 124
     print(args.log.read_text(), end="")
-    return completed.returncode
+    return returncode
 
 
 if __name__ == "__main__":

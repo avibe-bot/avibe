@@ -165,33 +165,55 @@ as a native child window of the main window. `src-tauri/src/macos_vault_window.r
 answers WebKit's request before wry does and builds the window by hand; the
 rules are stated at the top of that file. In short:
 
-- **Only the sandbox.** A window is opened for a request to exactly
+- **Only the sandbox origin.** A window is opened for a request to exactly
   `https://sandbox.avibe.bot` (that scheme and host, default port), or for the
   `about:blank` the Workbench reserves before it points the window there. Inside
   the window every navigation that leaves that origin is refused: by the
   opener, by the page, by a redirect, or as another window. Requests for any
   other address are untouched: web links open in the browser, the rest are
-  dropped.
-- **Never a window the opener draws in.** The Workbench origin also serves
-  Show Pages, and an opener can script the blank page it reserved. The native
-  window stays off screen until a sandbox document has committed in it, and its
-  title is the host, not the page's title. A window with no sandbox document
-  after 60 seconds is closed. On macOS WebKit lets scripts open windows without
-  a user gesture, so none of this relies on one; a page can hold at most four.
+  dropped. The shell enforces the origin, not which sandbox release loads: as
+  in a browser tab, an older retained release or the origin's root would load
+  too. Pinning the release is the Workbench's check before it navigates.
+- **Never the opener's pixels.** The Workbench origin also serves Show Pages,
+  and an opener can draw in the blank page it reserved. The native window stays
+  off screen until a sandbox document has committed in it. It then appears
+  empty, taking neither clicks nor keys, and its content is revealed only by
+  the first presentation update WebKit delivers after that commit; until then
+  WebKit would still be displaying the previous page. A window that has
+  displayed no sandbox document after 60 seconds is closed.
+- **Not without the user's attention.** On macOS WebKit lets scripts open
+  windows without a user gesture, which a browser would require, so a page of
+  the Workbench origin can ask for the sandbox's real window at any moment. The
+  shell bounds what that can do. A sandbox window appears only while Avibe is
+  the active app and the main window is on screen, only one at a time, and not
+  within 0.75 seconds of another one closing; a window that may not appear is
+  closed, never shown later. Its size is clamped to between 360 x 400 and
+  900 x 1000 points. The main webview's pages can hold at most four windows,
+  hidden ones included. The title bar shows the host and ignores the page's
+  title, but it is not proof of what a window is: the Workbench can open other
+  native windows with any title.
 - **Nothing of the shell inside it.** The window has an empty
   `WKUserContentController`: no init script, no marker, no `ipc` message
-  handler, and closing it removes nothing from the main window. WebKit copies
-  the main webview's custom URL schemes (`ipc`, `tauri`) into the window and
-  offers no way to remove them, so each scheme handler is guarded: a request
-  from the window fails before wry's handler runs. Tauri never learns the
-  window exists, so it has no label, no capability, and no page Tauri could
+  handler, and closing it removes nothing from the main window. It has default
+  `WKPreferences` of its own, with element fullscreen, picture in picture and
+  video presentation modes off, and it is refused camera and microphone.
+  WebKit copies the main webview's custom URL schemes (`ipc`, `tauri`) into the
+  window and offers no way to remove them, so each scheme handler is guarded: a
+  request from the window fails before wry's handler runs. Tauri never learns
+  the window exists, so it has no label, no capability, and no page Tauri could
   take for the shell's own or the Workbench's.
 - **Opener, data and lifetime.** The window keeps the opener link and the
   opener's website data store, including the disposable store of a remote
   instance. `window.close()` closes it; the user closing it destroys the page,
   which the opener sees as a closed popup. Reloading, closing or destroying the
-  main window closes it. It becomes the key window when shown, and the main
-  window is key again when it closes.
+  main window closes it. It becomes the key window when its content is
+  revealed, and the main window is key again when it closes.
+
+The passkey prompt, the review and the cryptography stay in sandbox code. None
+of the shell's own code handles the passkey result. WebKit's passkey code does
+run in the app's process, so the result, including the PRF output, crosses that
+process as it crosses a browser's; the app, like a browser, is trusted to run
+the sandbox unmodified.
 
 The Workbench learns that passkey steps can stay in the app from
 `window.__AVIBE_DESKTOP_VAULT_PASSKEY__`, which the same code defines on the
@@ -204,13 +226,22 @@ development or ad-hoc build, or one signed without that entitlement, installs
 nothing and behaves exactly as before. Windows and Linux do not compile the
 module.
 
+Three rules rest on WebKit methods outside its public API: the presentation
+update, destroying a page at once, and turning off the picture-in-picture
+features. Each is checked to exist before anything is installed; if one is
+missing there is no window and no marker.
+
 The pure rules are unit-tested in the module. The behavior is checked with
 real WebKit windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs
 on macOS. The probe plays the Workbench and the sandbox from two loopback
-origins with a disposable data store. It compiles the module's source file into
-itself, so the library exports nothing for it, and enters one step below the
-signature check, which no test executable can pass; a second run goes through
-the shell's own install and expects no marker and no window. Locally:
+origins with a disposable data store, and reads back what a window's own views
+draw to check that an opener's page is never displayed. It compiles the
+module's source file into itself, so the library exports nothing for it, and
+enters one step below the signature check, which no test executable can pass.
+It has three runs: with the app active (windows appear); with the app not
+active (a sandbox window is closed instead, and nothing takes the keyboard, so
+this is the run for a desktop in use); and through the shell's own install on
+the unsigned executable (no marker, no window). Locally:
 
 ```sh
 cargo build -p avibe-desktop --example vault_window_probe
@@ -218,15 +249,20 @@ python3 src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_p
   --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log /tmp/vault-window-probe.log
 ```
 
+Add `--set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` for the active run, which takes
+the keyboard, or `--set AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1` for the third.
+
 The two calls that connect the module to the main window (`install` after the
 window is built, `opener_navigated` when its page starts loading) are in
 `build_main_window` and have no automated check of their own. Without the
 first there is no marker and the browser hand-off stays; without the second a
 sandbox window stays open across a Workbench reload.
 
-Without `--set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` the probe never activates the
-app. A real passkey ceremony in this window is not covered by any automated
-test; it is checked by hand on a signed build.
+Only a signed build can show the rest: the shell's install passing its own
+admission; the real origin and how long its first paint takes; the passkey
+sheet from this window and passkey PRF from the sandbox iframe; focus with a
+real system sheet on screen; a release build and macOS 15; and the association
+being fetched after first launch.
 
 ## Product packages
 
