@@ -129,6 +129,19 @@ final class InstanceSheetGestureUITests: XCTestCase {
         XCTAssertFalse(SheetFixtureReadiness.isLandscapeTransition(orientationOnly, from: portrait))
         XCTAssertTrue(SheetFixtureReadiness.isLandscapeTransition(landscape, from: portrait))
         XCTAssertFalse(SheetFixtureReadiness.isRestoredPortrait(unchanged, from: portrait))
+
+        // Each way a gesture can fail to dismiss names itself.
+        XCTAssertTrue(SheetFixtureReadiness.dismissalFailure(from: [:])
+            .hasPrefix("The gesture never reached the window"))
+        XCTAssertTrue(SheetFixtureReadiness.dismissalFailure(
+            from: ["stages": ["native-touch-began", "native-touch-ended"]]
+        ).hasPrefix("The gesture reached the window but the sheet did not begin"))
+        XCTAssertTrue(SheetFixtureReadiness.dismissalFailure(
+            from: ["stages": ["native-touch-began", "sheet-will-dismiss"]]
+        ).hasPrefix("The sheet began to dismiss but did not finish"))
+        XCTAssertTrue(SheetFixtureReadiness.dismissalFailure(
+            from: ["stages": ["native-touch-began", "sheet-dismiss-refused"]]
+        ).hasPrefix("The sheet refused the dismissal"))
     }
 
     func testMidListDownwardDragScrollsBeforeTheSheetDismisses() throws {
@@ -179,7 +192,7 @@ final class InstanceSheetGestureUITests: XCTestCase {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9))
         start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
-        XCTAssertFalse(close.waitForExistence(timeout: 3))
+        SheetFixtureReadiness.requireGestureDismissal(of: close, in: app)
     }
 
     func testFastFlickAtTheTopDismissesTheSheet() {
@@ -193,7 +206,7 @@ final class InstanceSheetGestureUITests: XCTestCase {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
         start.press(forDuration: 0.01, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
-        XCTAssertFalse(close.waitForExistence(timeout: 3))
+        SheetFixtureReadiness.requireGestureDismissal(of: close, in: app)
     }
 
     func testSheetSurvivesCompactHeightRotation() throws {
@@ -247,6 +260,70 @@ enum SheetFixtureReadiness {
         )
         XCTAssertEqual(XCTWaiter.wait(for: [receipt], timeout: 10), .completed,
                        "Expected native rejection and rendered row error receipts; receipt=\(surface.label)")
+    }
+
+    /// After a dismissing gesture: the native receipt shows the sheet
+    /// dismissed, and then its Close button is gone. `waitForExistence`
+    /// cannot assert this: it returns at once when the element exists and
+    /// never waits for it to go. A failure names what the gesture did.
+    static func requireGestureDismissal(
+        of close: XCUIElement,
+        in app: XCUIApplication,
+        timeout: TimeInterval = 5,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        var last: [String: Any] = [:]
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                last = dismissalEvidence(in: app)
+                return (last["stages"] as? [String])?.contains("sheet-did-dismiss") == true
+            }, object: nil
+        )
+        guard XCTWaiter.wait(for: [dismissed], timeout: timeout) == .completed else {
+            XCTFail(dismissalFailure(from: last), file: file, line: line)
+            return
+        }
+        let gone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: close
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [gone], timeout: 3), .completed,
+            "The sheet reported its dismissal but its Close button is still in the tree",
+            file: file, line: line
+        )
+    }
+
+    /// The fixture's dismissal receipt: on the root view once the sheet is
+    /// gone, on the sheet's surface while it is up.
+    static func dismissalEvidence(in app: XCUIApplication) -> [String: Any] {
+        for identifier in ["fixture-root", "fixture-document-surface"] {
+            let element = app.otherElements[identifier]
+            guard element.exists,
+                  let data = element.label.data(using: .utf8),
+                  let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let dismissal = evidence["dismissal"] as? [String: Any]
+            else { continue }
+            return dismissal
+        }
+        return [:]
+    }
+
+    /// What a gesture that did not dismiss the sheet did, in words.
+    static func dismissalFailure(from evidence: [String: Any]) -> String {
+        let stages = evidence["stages"] as? [String] ?? []
+        let receipt = (try? JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        if stages.contains("sheet-dismiss-refused") {
+            return "The sheet refused the dismissal; receipt=\(receipt)"
+        }
+        if stages.contains("sheet-will-dismiss") {
+            return "The sheet began to dismiss but did not finish (it snapped back); receipt=\(receipt)"
+        }
+        if stages.contains("native-touch-began") {
+            return "The gesture reached the window but the sheet did not begin to dismiss; receipt=\(receipt)"
+        }
+        return "The gesture never reached the window (not delivered); receipt=\(receipt)"
     }
 
     static func hasBridgeStages(_ stages: [String], in label: String) -> Bool {
