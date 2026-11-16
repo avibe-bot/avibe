@@ -34,6 +34,25 @@ const request = {
 } satisfies VaultRequest;
 const noop = () => {};
 
+// A protected key's Bitcoin request: the card names the input from the persisted context (type, the
+// requester's network label) and says the amounts are checked in the secure window. In the browser
+// the card starts the vault sandbox, which no frame may load, so these are the desktop app's card
+// (finished in the browser); in the browser only the bottom note and button differ.
+const digest = '9c2e4b7a1f30d58e6a4b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f';
+const protectedBtc = (scheme: string, signing_context: Record<string, unknown>): VaultRequest => ({
+  ...request,
+  id: `vrq_design_${String(signing_context.kind)}`,
+  secret_name: 'PROTECTED_BTC_KEY',
+  delivery: { digest, scheme, signing_context },
+  card: { request_type: 'sign', secret_name: 'PROTECTED_BTC_KEY', kind: 'keypair', protection: 'protected' },
+});
+const ecdsaContext = (type: 'p2pkh' | 'p2wpkh', network: string) => ({
+  kind: `bitcoin-${type}-v1`, addressType: type, network, sighashType: 1, digest,
+  digestAlgorithm: type === 'p2pkh' ? 'bitcoin-legacy-sighash-all' : 'bitcoin-bip143-sighash-all',
+});
+const desktopFixtures = { ...fixtures, desktopShell: true };
+const protectedCard = (r: VaultRequest) => () => <div className="p-6"><VaultApprovalCard onResolved={noop} onCancel={noop} request={r} /></div>;
+
 const designFrames = frames([
   {
     name: 'capabilities', title: 'Vault · Bitcoin signing limitations',
@@ -55,6 +74,23 @@ const designFrames = frames([
     name: 'raw', title: 'Vault · Raw BIP340 is not the Taproot address',
     width: 640, height: 460, status: 'shipped', fixtures,
     render: () => <div className="p-6"><VaultApprovalCard onResolved={noop} onCancel={noop} request={{ ...request, delivery: { ...request.delivery, scheme: 'schnorr-secp256k1-bip340' } }} /></div>,
+  },
+  {
+    name: 'protected-btc-legacy', title: 'Vault · Protected Legacy (P2PKH) request: input type, network label, secure-window review (desktop app)',
+    width: 640, height: 480, status: 'shipped', fixtures: desktopFixtures,
+    render: protectedCard(protectedBtc('ecdsa-secp256k1-der', ecdsaContext('p2pkh', 'testnet'))),
+  },
+  {
+    name: 'protected-btc-segwit', title: 'Vault · Protected SegWit (P2WPKH) request: input type, network label, secure-window review (desktop app)',
+    width: 640, height: 480, status: 'shipped', fixtures: desktopFixtures,
+    render: protectedCard(protectedBtc('ecdsa-secp256k1-der', ecdsaContext('p2wpkh', 'bitcoin'))),
+  },
+  {
+    name: 'protected-btc-taproot', title: 'Vault · Protected Taproot request: input type, network label, secure-window review (desktop app)',
+    width: 640, height: 480, status: 'shipped', fixtures: desktopFixtures,
+    render: protectedCard(protectedBtc('schnorr-secp256k1-bip341-keypath', {
+      kind: 'bitcoin-taproot-keypath-v1', network: 'signet', digestAlgorithm: 'bip341-sighash-default-keypath', digest,
+    })),
   },
 ]);
 
