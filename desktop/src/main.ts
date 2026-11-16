@@ -99,10 +99,18 @@ messageEl.textContent = catalog.notices.preparing
 hintEl.textContent = catalog.slowStart
 retryEl.textContent = catalog.retry
 helpEl.textContent = catalog.installationHelp
-window.setTimeout(() => {
-  slow = true
-  showSlowHint()
-}, SLOW_START_MS)
+let slowTimer = 0
+startSlowClock()
+
+/** Times the wait from the start of this attempt: page load, or a new start after a failure. */
+function startSlowClock(): void {
+  window.clearTimeout(slowTimer)
+  slow = false
+  slowTimer = window.setTimeout(() => {
+    slow = true
+    showSlowHint()
+  }, SLOW_START_MS)
+}
 
 function requireElement<T extends HTMLElement = HTMLElement>(id: string): T {
   const element = document.getElementById(id)
@@ -114,6 +122,9 @@ function requireElement<T extends HTMLElement = HTMLElement>(id: string): T {
 
 function render(status: BootstrapStatus): void {
   unavailable = false
+  if (root.dataset.phase === 'failed' && status.phase !== 'failed') {
+    startSlowClock()
+  }
   root.dataset.phase = status.phase
   messageEl.textContent = localizeNotice(status.notice)
   originEl.textContent = status.origin
@@ -201,8 +212,10 @@ retryEl.addEventListener('click', () => {
       }
     })
     .catch((error: unknown) => {
+      // The app answered a moment ago with the failure on screen; one refused
+      // call does not make it unresponsive. Keep that failure and its actions.
+      console.error('bootstrap retry failed', error)
       retryEl.disabled = false
-      reportUnavailable(error)
     })
 })
 

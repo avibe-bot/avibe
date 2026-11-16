@@ -4,7 +4,7 @@
     "installationHelp": "Installation help",
     "notRunningTitle": "Avibe — not running",
     "shellUnavailable": "Avibe isn't responding. Quit Avibe and open it again.",
-    "slowStart": "Still starting. This can take up to a minute.",
+    "slowStart": "Still starting. This can take a little while.",
     "genericFailure": "Avibe could not connect to its Runtime.",
     "notices": {
       "preparing": "Getting Avibe ready…",

@@ -3,127 +3,160 @@ import { test } from 'node:test'
 
 import { connect, retryDelay, STUCK_AFTER_MS, type ConnectOptions } from '../src/connection.ts'
 
-/** A fake clock: `sleep` advances time instead of waiting. */
-function harness(overrides: Partial<ConnectOptions> & { failSubscribe?: number; failSnapshot?: number }) {
-  let time = 0
-  let subscribeFailures = overrides.failSubscribe ?? 0
-  let snapshotFailures = overrides.failSnapshot ?? 0
-  const calls = { subscribe: 0, snapshot: 0, stuck: 0, recovered: 0, sleeps: [] as number[] }
-  const options: ConnectOptions = {
-    subscribe: async () => {
-      calls.subscribe += 1
-      if (subscribeFailures > 0) {
-        subscribeFailures -= 1
-        throw new Error('listen rejected')
+/** A manual clock: timers run only when the test advances time. */
+function clock() {
+  let now = 0
+  let next = 0
+  const timers = new Map<number, { at: number; run: () => void }>()
+  return {
+    now: () => now,
+    schedule(run: () => void, ms: number) {
+      const id = next++
+      timers.set(id, { at: now + ms, run })
+      return () => {
+        timers.delete(id)
       }
     },
-    snapshot: async () => {
-      calls.snapshot += 1
-      if (snapshotFailures > 0) {
-        snapshotFailures -= 1
-        throw new Error('bootstrap_status rejected')
+    /** Moves time forward in small steps, letting promises settle in between. */
+    async advance(ms: number, step = 50) {
+      const end = now + ms
+      while (now < end) {
+        await flush()
+        now = Math.min(now + step, end)
+        for (const [id, timer] of [...timers].sort((a, b) => a[1].at - b[1].at)) {
+          if (timer.at <= now) {
+            timers.delete(id)
+            timer.run()
+          }
+        }
       }
+      await flush()
     },
-    heardFromApp: () => false,
-    onStuck: () => {
-      calls.stuck += 1
-    },
-    onRecovered: () => {
-      calls.recovered += 1
-    },
-    now: () => time,
-    sleep: async (ms) => {
-      calls.sleeps.push(ms)
-      time += ms
-    },
-    ...overrides,
   }
-  return { options, calls, elapsed: () => time }
 }
 
-const quiet = () => {
+async function flush() {
+  for (let i = 0; i < 20; i += 1) {
+    await Promise.resolve()
+  }
+}
+
+const never = () => new Promise<never>(() => {})
+const reject = (what: string) => async () => {
+  throw new Error(what)
+}
+
+function harness(overrides: Partial<ConnectOptions>) {
+  const time = clock()
+  const calls = { stuck: [] as number[], recovered: [] as number[] }
+  let heard = false
+  const options: ConnectOptions = {
+    subscribe: async () => {},
+    snapshot: async () => {},
+    heardFromApp: () => heard,
+    onStuck: () => calls.stuck.push(time.now()),
+    onRecovered: () => calls.recovered.push(time.now()),
+    schedule: (run, ms) => time.schedule(run, ms),
+    ...overrides,
+  }
+  let finished = false
+  const run = connect(options).then(() => {
+    finished = true
+  })
+  return {
+    time,
+    calls,
+    options,
+    run,
+    finished: () => finished,
+    hear: () => {
+      heard = true
+    },
+  }
+}
+
+const quietly = async (body: () => Promise<void>) => {
   const original = console.error
   console.error = () => {}
-  return () => {
+  try {
+    await body()
+  } finally {
     console.error = original
   }
 }
 
 test('a start that answers at once never reports a stuck app', async () => {
-  const { options, calls } = harness({})
-  await connect(options)
-  assert.deepEqual([calls.subscribe, calls.snapshot, calls.stuck, calls.recovered], [1, 1, 0, 0])
+  const h = harness({})
+  await h.time.advance(STUCK_AFTER_MS * 2)
+  assert.ok(h.finished())
+  assert.deepEqual(h.calls.stuck, [])
 })
 
-test('early failures on a slow start are retried without a failure message', async () => {
-  const restore = quiet()
-  try {
-    // Ten failed subscriptions and three failed snapshots: about 30 seconds.
-    const { options, calls, elapsed } = harness({ failSubscribe: 10, failSnapshot: 3 })
-    await connect(options)
-    restore()
-    assert.equal(calls.stuck, 0)
-    assert.equal(calls.subscribe, 11, 'subscribes until it succeeds once, never again after')
-    assert.equal(calls.snapshot, 4)
-    assert.ok(elapsed() < STUCK_AFTER_MS, `took ${elapsed()} ms`)
-  } finally {
-    restore()
-  }
-})
-
-test('the stuck message appears only after a minute without any answer, and clears on the next answer', async () => {
-  const restore = quiet()
-  try {
-    const { options, calls, elapsed } = harness({ failSubscribe: 1_000 })
-    let stuckAt = -1
-    options.onStuck = () => {
-      calls.stuck += 1
-      stuckAt = elapsed()
-      // The app answers again a little later.
-      options.subscribe = async () => {}
-    }
-    await connect(options)
-    restore()
-    assert.equal(calls.stuck, 1)
-    assert.ok(stuckAt >= STUCK_AFTER_MS && stuckAt < STUCK_AFTER_MS + 5_000, `stuck at ${stuckAt} ms`)
-    assert.equal(calls.recovered, 1)
-  } finally {
-    restore()
-  }
-})
-
-test('a status event is an answer: a failed snapshot after it is not retried', async () => {
-  const restore = quiet()
-  try {
-    let heard = false
-    const { options, calls } = harness({
-      failSnapshot: 1_000,
-      heardFromApp: () => heard,
+test('failures on a slow start are retried for as long as the app keeps answering', () =>
+  quietly(async () => {
+    // The subscription fails for 50 s, then the status read fails for another 50 s.
+    const at = { now: () => 0 }
+    const h = harness({
+      subscribe: async () => {
+        if (at.now() < 50_000) throw new Error('listen rejected')
+      },
+      snapshot: async () => {
+        if (at.now() < 100_000) throw new Error('bootstrap_status rejected')
+      },
     })
-    options.subscribe = async () => {
-      calls.subscribe += 1
-      heard = true
-    }
-    await connect(options)
-    restore()
-    // The snapshot is skipped because an event already arrived.
-    assert.deepEqual([calls.snapshot, calls.stuck], [0, 0])
+    at.now = h.time.now
+    await h.time.advance(110_000)
+    assert.ok(h.finished())
+    // The successful subscription at 50 s restarted the clock, so the failing
+    // status read until 100 s never reached a full minute without an answer.
+    assert.deepEqual(h.calls.stuck, [])
+  }))
 
-    heard = false
-    const second = harness({ failSnapshot: 1_000, heardFromApp: () => heard })
-    second.options.snapshot = async () => {
-      second.calls.snapshot += 1
-      heard = true
+test('a minute without any answer reports a stuck app, and the next answer takes it back', () =>
+  quietly(async () => {
+    const h = harness({ subscribe: reject('listen rejected') })
+    await h.time.advance(STUCK_AFTER_MS - 1_000)
+    assert.deepEqual(h.calls.stuck, [])
+    await h.time.advance(2_000)
+    assert.equal(h.calls.stuck.length, 1)
+    assert.equal(h.calls.stuck[0], STUCK_AFTER_MS)
+
+    h.options.subscribe = async () => {}
+    await h.time.advance(10_000)
+    assert.ok(h.finished())
+    assert.equal(h.calls.recovered.length, 1)
+  }))
+
+test('a call that never settles is reported too', async () => {
+  const h = harness({ subscribe: never })
+  await h.time.advance(STUCK_AFTER_MS + 1_000)
+  assert.deepEqual(h.calls.stuck, [STUCK_AFTER_MS])
+  assert.ok(!h.finished())
+})
+
+test('a status event is an answer, even while a call hangs', async () => {
+  const h = harness({ snapshot: never })
+  await h.time.advance(5_000)
+  h.hear()
+  await h.time.advance(STUCK_AFTER_MS * 2)
+  assert.deepEqual(h.calls.stuck, [])
+  assert.ok(!h.finished(), 'the hung call itself never returns')
+})
+
+test('a failed status read after an event is not retried', () =>
+  quietly(async () => {
+    let reads = 0
+    const h = harness({})
+    h.options.snapshot = async () => {
+      reads += 1
+      h.hear()
       throw new Error('bootstrap_status rejected')
     }
-    quiet()
-    await connect(second.options)
-    restore()
-    assert.deepEqual([second.calls.snapshot, second.calls.stuck], [1, 0])
-  } finally {
-    restore()
-  }
-})
+    await h.time.advance(10_000)
+    assert.ok(h.finished())
+    assert.equal(reads, 1)
+    assert.deepEqual(h.calls.stuck, [])
+  }))
 
 test('retries back off to a steady interval', () => {
   assert.deepEqual(

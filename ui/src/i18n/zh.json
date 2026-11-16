@@ -4,7 +4,7 @@
     "installationHelp": "安装帮助",
     "notRunningTitle": "Avibe — 未运行",
     "shellUnavailable": "Avibe 没有响应。请退出 Avibe 后重新打开。",
-    "slowStart": "仍在启动，最多可能需要一分钟。",
+    "slowStart": "仍在启动，可能还需要一会儿。",
     "genericFailure": "Avibe 无法连接到 Runtime。",
     "notices": {
       "preparing": "正在准备 Avibe…",

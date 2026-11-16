@@ -1379,7 +1379,13 @@ fn is_bootstrap_page_url(url: &Url) -> bool {
         "" => url.scheme() == "tauri",
         _ => false,
     };
-    page && is_shell_ui_url(url) && url.query().is_none() && url.fragment().is_none()
+    // The bundled origins carry no credentials and no port; only the debug
+    // dev server (`http://localhost:1420`) has one, and `is_shell_ui_url`
+    // fixes it.
+    let authority = url.username().is_empty()
+        && url.password().is_none()
+        && (url.port().is_none() || (url.scheme() == "http" && url.host_str() == Some("localhost")));
+    page && authority && is_shell_ui_url(url) && url.query().is_none() && url.fragment().is_none()
 }
 
 /// The bundled bootstrap may always navigate within its own origin. Once the
@@ -3973,6 +3979,12 @@ mod tests {
             "tauri://localhost#x",
             "tauri://example.com",
             "tauri://example.com/",
+            "tauri://localhost:443",
+            "tauri://localhost:8080/",
+            "tauri://user@localhost",
+            "tauri://user:pass@localhost/",
+            "http://tauri.localhost:5123/",
+            "http://user@tauri.localhost/",
             "avibe://localhost",
             "http://tauri.localhost/account/index.html",
             "https://tauri.localhost/",
@@ -4010,7 +4022,8 @@ mod tests {
         let other = window("pet", "tauri://localhost");
         assert!(ensure_shell_ui(&other).is_err(), "only the main window");
 
-        let source = include_str!("lib.rs");
+        // A Windows checkout may carry CRLF line endings.
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
         for command in [
             "fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<BootstrapStatus>, String> {\n    ensure_shell_ui(&window)?;",
             "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {\n    ensure_shell_ui(&window)?;",
