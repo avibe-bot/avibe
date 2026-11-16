@@ -81,7 +81,7 @@ or a full transaction packet. For an ordinary key:
 
 ```bash
 vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX" \
-  --command "sign the prepared durable-nonce payment"
+  --command 'sign the prepared durable-nonce payment'
 ```
 
 For a protected key add the exact matching context:
