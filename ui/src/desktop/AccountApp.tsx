@@ -54,6 +54,16 @@ export function UpdatePopoverView({ label, onClose, panelRef, children }: {
 function UpdatePopover({ label, children }: { label: string; children?: ReactNode }) {
   const panel = useRef<HTMLDivElement>(null);
   const ready = Boolean(children);
+  // The shell's injected style makes the page transparent before first paint; this
+  // keeps it transparent should that script not have run.
+  useEffect(() => {
+    const root = document.documentElement;
+    const rootBackground = root.style.background;
+    const bodyBackground = document.body.style.background;
+    root.style.background = 'transparent';
+    document.body.style.background = 'transparent';
+    return () => { root.style.background = rootBackground; document.body.style.background = bodyBackground; };
+  }, []);
   useEffect(() => { if (ready) panel.current?.focus(); }, [ready]);
   return <UpdatePopoverView label={label} onClose={closeUpdatePopover} panelRef={panel}>{children}</UpdatePopoverView>;
 }
@@ -161,10 +171,11 @@ export function AccountApp() {
   const errorMessage = error && t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
   const failure = errorMessage && <Notice warning>{errorMessage}</Notice>;
   if (popover) {
+    // Nothing is drawn until the state arrives; a failure to get it is still shown.
     return <UpdatePopover label={t('dashboard.versionAndUpdate')}>
-      {state && <>
-        <DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />
-        {failure && <div className="p-4 pt-0">{failure}</div>}
+      {(state || failure) && <>
+        {state && <DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />}
+        {failure && <div className={state ? 'p-4 pt-0' : 'p-4'}>{failure}</div>}
       </>}
     </UpdatePopover>;
   }

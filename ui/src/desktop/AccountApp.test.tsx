@@ -8,8 +8,9 @@ import { AccountApp } from './AccountApp';
 
 const send = vi.hoisted(() => vi.fn(async () => null));
 const update = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
+const bridge = vi.hoisted(() => ({ failed: false }));
 vi.mock('./useAccountClient', () => ({
-  useAccountClient: () => ({
+  useAccountClient: () => bridge.failed ? { error: 'bridge_unavailable', send, state: null } : ({
     error: null,
     send,
     state: {
@@ -28,7 +29,7 @@ vi.mock('./useAccountClient', () => ({
     },
   }),
 }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); update.value = {}; window.history.replaceState(null, '', '/'); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); update.value = {}; bridge.failed = false; window.history.replaceState(null, '', '/'); });
 
 // ui/design: update/panel/trusted-view
 it('AUTH-SETUP-178 the trusted update view acts on this computer\'s desktop app with the same panel', async () => {
@@ -88,4 +89,12 @@ it('AUTH-SETUP-178 the update popup is the same panel, closed by Escape or a cli
   fireEvent.click(document.querySelector('[data-update-popover]')!);
   expect(invoke).toHaveBeenCalledWith('plugin:window|close', { label: 'update-popover' });
   expect(send).not.toHaveBeenCalledWith({ type: 'cancel' });
+});
+
+it('AUTH-SETUP-178 the update popup still shows why it cannot reach the desktop app', () => {
+  window.history.replaceState(null, '', '/account/index.html?view=update-popover');
+  bridge.failed = true;
+  render(<AccountApp />);
+  expect(screen.getByRole('dialog', { name: 'dashboard.versionAndUpdate' })).toBeTruthy();
+  expect(screen.getByText('desktopClient.errors.bridge')).toBeTruthy();
 });

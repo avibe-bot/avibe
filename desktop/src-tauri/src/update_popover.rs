@@ -45,14 +45,21 @@ static OPENING: AtomicBool = AtomicBool::new(false);
 
 /// The popup's page is transparent from its first paint: the account page's own
 /// background would otherwise flash as a solid box over the remote sidebar.
-const TRANSPARENT: &str = "(()=>{const s=document.createElement('style');s.textContent='html,body{background:transparent!important}';document.documentElement.appendChild(s);})();";
+/// WebKit runs it once the document element exists; WebView2 runs it before the
+/// parser starts, so it waits for the root when there is none yet. The page sets
+/// the same transparency itself as a fallback (AccountApp's UpdatePopover).
+const TRANSPARENT: &str = "(()=>{const s=document.createElement('style');s.textContent='html,body{background:transparent!important}';const add=()=>(document.head||document.documentElement).appendChild(s);if(document.documentElement){add();}else{new MutationObserver((_,o)=>{if(document.documentElement){o.disconnect();add();}}).observe(document,{childList:true});}})();";
 
 /// Show the popup over the main window, or bring an open one forward. Called from
 /// navigation and menu handlers: the window is built off the handler's own thread,
 /// since building one inside them deadlocks on Windows.
 pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
     if let Some(window) = app.get_webview_window(UPDATE_POPOVER) {
-        return window.set_focus().is_ok();
+        if window.is_visible().unwrap_or(false) {
+            return window.set_focus().is_ok();
+        }
+        // Built but never shown: its page did not finish loading. Replace it.
+        let _ = window.destroy();
     }
     if app.get_webview_window(crate::MAIN_WINDOW).is_none() || page_url(bundle).is_none() {
         return false;
