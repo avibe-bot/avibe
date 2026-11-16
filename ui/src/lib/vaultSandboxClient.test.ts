@@ -40,7 +40,7 @@ type TestVaultSandboxClient = {
   request: <T>(
     op: string,
     payload: unknown,
-    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string },
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string; rearmOnUnlock?: boolean },
   ) => Promise<T>;
 };
 
@@ -676,5 +676,59 @@ describe('the secure window opens at a fixed size, centered over the Avibe windo
     vi.stubGlobal('screenX', -400);
     expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=-520,top=70');
     vi.unstubAllGlobals();
+  });
+});
+
+// Contract v1.2: a secure-window seal on a locked vault has two steps, the unlock and the input, each
+// with the window's own 5-minute limit. The page's wait restarts on every "unlocked" event while the
+// seal is pending; any other request keeps its single limit.
+describe('VaultSandboxClient secure-window seal timing (contract v1.2)', () => {
+  const setup = () => {
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    const client = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient & {
+      handleEvent: (message: { kind: 'event'; event: 'vault.state'; payload: unknown }) => void;
+    };
+    Object.assign(client, {
+      iframe, backdrop: null, pending: new Map(), readyPromise: Promise.resolve({}), handshaken: true,
+      modalVisible: false, interactiveRequests: new Set(), surfaceRefreshTimer: null,
+    });
+    vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+    return client;
+  };
+  const unlocked = { kind: 'event' as const, event: 'vault.state' as const, payload: { state: 'unlocked', reason: 'renew', expiresAt: null } };
+
+  it('restarts the wait on each unlock, so the unlock and the input each get the full limit', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = setup();
+      const settled = vi.fn();
+      const seal = client.request('status', {}, { timeoutMs: 305_000, rearmOnUnlock: true }).then(settled, settled);
+      const other = vi.fn();
+      const plain = client.request('status', {}, { timeoutMs: 305_000 }).then(other, other);
+      await vi.advanceTimersByTimeAsync(300_000);
+      client.handleEvent(unlocked);
+      await vi.advanceTimersByTimeAsync(300_000);
+      // 600 s in: the seal is still waiting (its input step began at 300 s); the plain request is not.
+      expect(settled).not.toHaveBeenCalled();
+      expect(other).toHaveBeenCalledWith(expect.objectContaining({ code: 'sandbox_request_timeout' }));
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(settled).toHaveBeenCalledWith(expect.objectContaining({ code: 'sandbox_request_timeout' }));
+      await Promise.all([seal, plain]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('asks for that restart on the secure-window seal, with the 305 s limit', async () => {
+    const instance = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    const request = vi.spyOn(instance, 'request').mockResolvedValue({ fields: [{ record: 'TOKEN', envelope: { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' }, generated: false }], establishingVmk: false } as never);
+    await (instance as unknown as VaultSandboxClient).sealInWindow(
+      { secret: 'TOKEN', mode: 'create', wrapMeta: 'w', fields: [{ record: 'TOKEN', label: 'value', required: true }] },
+      'win1',
+    );
+    expect(request).toHaveBeenCalledExactlyOnceWith('seal', {
+      kind: 'static', inputMode: 'secure-window', secret: 'TOKEN', mode: 'create', wrapMeta: 'w',
+      fields: [{ record: 'TOKEN', label: 'value', required: true }],
+    }, { timeoutMs: 305_000, interactive: true, authorizationWindow: 'win1', rearmOnUnlock: true });
   });
 });

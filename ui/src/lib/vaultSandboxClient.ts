@@ -115,6 +115,10 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timer: number;
+  /** Restart the request's timer (a new step of the same operation began). */
+  rearm?: () => void;
+  /** Restarted on every `vault.state` "unlocked" event while pending (contract v1.2). */
+  rearmOnUnlock?: boolean;
 };
 
 type SandboxBuild = {
@@ -762,6 +766,11 @@ export class VaultSandboxClient {
     }
     const state = parseVaultStateEvent(message.payload);
     if (!state) return;
+    // An unlock (or the renew that starts a secure window's input step) begins a new step of a
+    // pending secure-window seal, with its own full limit (contract v1.2).
+    if (state.state === 'unlocked') {
+      for (const pending of this.pending.values()) if (pending.rearmOnUnlock) pending.rearm?.();
+    }
     for (const listener of [...vaultStateListeners]) listener(state);
   }
 
@@ -814,7 +823,7 @@ export class VaultSandboxClient {
   private async request<T>(
     op: VaultSandboxOp,
     payload?: unknown,
-    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string } = {},
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string; rearmOnUnlock?: boolean } = {},
   ): Promise<T> {
     if (!PASSKEY_OPS.has(op)) return this.send<T>(op, payload, options);
     // The page already moved to the browser: never start a step that can only fail again.
@@ -836,7 +845,7 @@ export class VaultSandboxClient {
   private async send<T>(
     op: VaultSandboxOp,
     payload: unknown,
-    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string },
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string; rearmOnUnlock?: boolean },
   ): Promise<T> {
     await this.readyPromise;
     this.assertLive();
@@ -872,17 +881,24 @@ export class VaultSandboxClient {
     }
     this.assertLive();
     const promise = new Promise<T>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
+      const expire = () => {
         this.pending.delete(id);
         this.interactiveRequests.delete(id);
         if (this.pending.size === 0 && this.modalVisible) this.setModalVisible(false);
         reject(new VaultSandboxError('sandbox_request_timeout', `Sandbox ${op} request timed out`, true));
-      }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      this.pending.set(id, {
+      };
+      const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const entry: PendingRequest = {
         resolve: (value) => resolve(value as T),
         reject,
-        timer,
-      });
+        timer: window.setTimeout(expire, timeoutMs),
+        rearmOnUnlock: options.rearmOnUnlock,
+      };
+      entry.rearm = () => {
+        window.clearTimeout(entry.timer);
+        entry.timer = window.setTimeout(expire, timeoutMs);
+      };
+      this.pending.set(id, entry);
     });
     try {
       this.target.postMessage(
@@ -1035,8 +1051,10 @@ export class VaultSandboxClient {
     authorizationWindow: string,
   ): Promise<SecureWindowSealResult> {
     const reply = await this.request<unknown>('seal', { kind: 'static', inputMode: 'secure-window', ...payload }, {
-      // The window's own 5-minute limit plus a short grace, so its own timeout answer normally wins.
+      // The window's own 5-minute limit plus a short grace, so its own timeout answer normally wins;
+      // a locked vault's unlock step and the input step each get it (re-armed on "unlocked").
       timeoutMs: SECURE_WINDOW_SEAL_TIMEOUT_MS,
+      rearmOnUnlock: true,
       interactive: true,
       authorizationWindow,
     });
