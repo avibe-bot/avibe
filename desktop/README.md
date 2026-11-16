@@ -189,21 +189,27 @@ rules are stated at the top of that file. In short:
 - **Never the opener's pixels.** The Workbench origin also serves Show Pages,
   and an opener can draw in the blank page it reserved. The native window stays
   off screen until a sandbox document has committed in it. It then appears
-  empty, taking neither clicks nor keys, and its content is revealed only by
-  the first presentation update WebKit delivers after that commit; until then
-  WebKit would still be displaying the previous page. A window that has
-  displayed no sandbox document after 60 seconds is closed.
+  empty: it cannot take the keyboard, and clicks pass through it to whatever
+  is underneath. Its content is revealed only by the first presentation update
+  WebKit delivers after that commit; until then WebKit would still be
+  displaying the previous page. The empty window stays until the sandbox's
+  first paint. A window that has displayed no sandbox document 60 seconds
+  after it was created is closed.
 - **Not without the user's attention.** On macOS WebKit lets scripts open
-  windows without a user gesture, which a browser would require, so a page of
-  the Workbench origin can ask for the sandbox's real window at any moment. The
-  shell bounds what that can do. A sandbox window appears only while Avibe is
-  the active app and the main window is on screen, only one at a time, and not
-  within 0.75 seconds of another one closing; a window that may not appear is
-  closed, never shown later. Its size is clamped to between 360 x 400 and
-  900 x 1000 points. The main webview's pages can hold at most four windows,
-  hidden ones included. The title bar shows the host and ignores the page's
-  title, but it is not proof of what a window is: the Workbench can open other
-  native windows with any title.
+  windows without a user gesture, which a browser would require. So a page of
+  the Workbench origin can make the sandbox's real window, showing a real
+  pending request, appear at a moment it chooses; it cannot put content of its
+  own into that window. The shell bounds the moment. A sandbox window is on
+  screen only while Avibe is the active app and the main window is visible, on
+  the current Space and not minimized. It waits until two seconds after Avibe
+  became the active app or the main window came back, whatever caused that.
+  Only one is on screen at a time, and none appears within 0.75 seconds of
+  another closing. The same is checked again before the content is revealed.
+  A window that may not appear is closed, never shown later. Its size is
+  clamped to between 360 x 400 and 900 x 1000 points. The main webview's pages
+  can hold at most four windows, hidden ones included. The title bar shows the
+  host and ignores the page's title, but it is not proof of what a window is:
+  the Workbench can open other native windows with any title.
 - **Nothing of the shell inside it.** The window has an empty
   `WKUserContentController`: no init script, no marker, no `ipc` message
   handler, and closing it removes nothing from the main window. It has default
@@ -230,8 +236,9 @@ the sandbox unmodified.
 The Workbench learns that passkey steps can stay in the app from
 `window.__AVIBE_DESKTOP_VAULT_PASSKEY__`, which the same code defines on the
 top-level document only when all of this holds: the hooks above are installed
-on that webview; the system is macOS 15 or later, the first with passkey PRF;
-and the running app's own code signature carries
+on that webview; the system is a macOS version on which the probe below has
+passed in CI, today 15 (the first with passkey PRF) and 26; and the running
+app's own code signature carries
 `com.apple.developer.associated-domains` with
 `webcredentials:sandbox.avibe.bot`, read from the process with `SecTask`. A
 development or ad-hoc build, or one signed without that entitlement, installs
@@ -241,11 +248,14 @@ module.
 Three rules rest on WebKit methods outside its public API: the presentation
 update, destroying a page at once, and turning off the picture-in-picture
 features. Each is checked to exist before anything is installed; if one is
-missing there is no window and no marker.
+missing there is no window and no marker. That a method exists says nothing
+about what it does. Their behaviour is checked only by the probe, on the macOS
+versions CI runs it on, which is why the marker is limited to those versions
+(`PROBED_MACOS` in the module). When CI moves to a new macOS, add it there.
 
 The pure rules are unit-tested in the module. The behavior is checked with
 real WebKit windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs
-on macOS. The probe plays the Workbench and the sandbox from two loopback
+on macOS 26 and on macOS 15. The probe plays the Workbench and the sandbox from two loopback
 origins with a disposable data store, and reads back what a window's own views
 draw to check that an opener's page is never displayed. It compiles the
 module's source file into itself, so the library exports nothing for it, and
@@ -273,8 +283,8 @@ sandbox window stays open across a Workbench reload.
 Only a signed build can show the rest: the shell's install passing its own
 admission; the real origin and how long its first paint takes; the passkey
 sheet from this window and passkey PRF from the sandbox iframe; focus with a
-real system sheet on screen; a release build and macOS 15; and the association
-being fetched after first launch.
+real system sheet on screen, including the two-second wait after the sheet
+closes; a release build; and the association being fetched after first launch.
 
 ## Product packages
 

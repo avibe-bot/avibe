@@ -26,24 +26,29 @@
 //! - **Never the opener's pixels.** The Workbench origin also serves
 //!   Agent-authored Show Pages, and an opener can draw in the `about:blank` it
 //!   reserved. The native window is created ordered out. When a sandbox
-//!   document commits it comes on screen empty: its webview is transparent and
-//!   it takes neither clicks nor keys. WebKit goes on displaying the previous
-//!   document's layers until the new one has something to show, so the
-//!   webview is revealed only by the first presentation update WebKit delivers
-//!   after that commit, which carries the sandbox document's layers. From then
-//!   on the document is cross-origin to the opener and can only be replaced by
-//!   another sandbox document. A child that commits anything else is closed;
-//!   one that has displayed nothing within [`RESERVE_DEADLINE`] is closed too.
+//!   document commits it comes on screen empty: its webview is transparent, it
+//!   cannot become key, and it ignores clicks, which pass to whatever is under
+//!   it. WebKit goes on displaying the previous document's layers until the
+//!   new one has something to show, so the webview is revealed only by the
+//!   first presentation update WebKit delivers after that commit, which
+//!   carries the sandbox document's layers. The empty window stays until
+//!   then, at most [`RESERVE_DEADLINE`]. From the reveal on the document is
+//!   cross-origin to the opener and can only be replaced by another sandbox
+//!   document. A child that commits anything else is closed; one that has
+//!   displayed nothing within the deadline is closed too.
 //! - **Not without the user's attention.** WebKit on macOS lets scripts open
 //!   windows without a user gesture, which a browser would require, so a page
-//!   of the Workbench origin can ask for the sandbox's real window at any
-//!   moment. The shell bounds that: a child comes on screen only while this app
-//!   is active and the opener's window is on screen, only one at a time, and
-//!   not within [`QUIET_AFTER_CLOSE`] of another leaving the screen; one that
-//!   may not appear is closed, never kept for later. Its size is clamped. The
-//!   title names the allowed host and ignores the page's own title, but it is
-//!   not proof of identity: other native windows of this app can carry any
-//!   title.
+//!   of the Workbench origin can make the sandbox's real window, with a real
+//!   pending request's card, appear at a moment it chooses. It cannot put
+//!   content of its own into the card. The shell bounds the moment: a child is
+//!   on screen only while this app is active and the opener's window is on
+//!   screen; not within [`SETTLE_AFTER_ARRIVAL`] of the app becoming active or
+//!   that window coming back, whatever caused either (it waits); only one at a
+//!   time; and not within [`QUIET_AFTER_CLOSE`] of another leaving the screen.
+//!   The same is asked again before the reveal. A child that may not appear is
+//!   closed, never kept for later. Its size is clamped. The title names the
+//!   allowed host and ignores the page's own title, but it is not proof of
+//!   identity: other native windows of this app can carry any title.
 //! - **Nothing of the shell inside it.** It gets a `WKUserContentController` of
 //!   its own with no scripts and no message handler, so nothing wry registered
 //!   reaches it and closing it removes nothing from the opener, and default
@@ -66,14 +71,15 @@
 //! presentation update (`_doAfterNextPresentationUpdate:`), destroying the page
 //! (`_close`), and the feature list of `WKPreferences`. Each is checked to
 //! exist before anything is installed; without one there is no child and no
-//! marker.
+//! marker. That they exist says nothing about what they do: their behaviour is
+//! checked only by the WebView probe, on the macOS versions CI runs it on.
 //!
 //! The Workbench learns that this works from
 //! `window.__AVIBE_DESKTOP_VAULT_PASSKEY__`, defined only when the hooks above
-//! are installed on this webview, the system is macOS 15 or later (the first
-//! with passkey PRF), and the running app's own code signature associates it
-//! with the sandbox's passkeys. Without all three nothing here is installed and
-//! every window request is handled as before.
+//! are installed on this webview, the system is one of [`PROBED_MACOS`], and
+//! the running app's own code signature associates it with the sandbox's
+//! passkeys. Without all three nothing here is installed and every window
+//! request is handled as before.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_void};
@@ -87,13 +93,14 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, NSObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSView, NSWindow, NSWindowDelegate,
-    NSWindowOrderingMode, NSWindowStyleMask,
+    NSApplication, NSApplicationDidBecomeActiveNotification, NSAutoresizingMaskOptions, NSBackingStoreType, NSView,
+    NSWindow, NSWindowDelegate, NSWindowDidChangeOcclusionStateNotification, NSWindowDidDeminiaturizeNotification,
+    NSWindowDidMiniaturizeNotification, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_foundation::{
-    ns_string, NSArray, NSError, NSNotification, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
-    NSURL,
+    ns_string, NSArray, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol, NSOperationQueue, NSPoint,
+    NSProcessInfo, NSRect, NSSize, NSString, NSURL,
 };
 use objc2_security::SecTask;
 use objc2_web_kit::{
@@ -113,8 +120,12 @@ const DESKTOP_VAULT_PASSKEY_MARKER: &str =
 /// The entitlement that lets WebKit ask the system for a site's passkeys.
 const ASSOCIATED_DOMAINS: &str = "com.apple.developer.associated-domains";
 const SANDBOX_CREDENTIALS: &str = "webcredentials:sandbox.avibe.bot";
-/// Passkey PRF, which the protected tier derives its key from, starts here.
-const FIRST_MACOS_WITH_PASSKEY_PRF: isize = 15;
+/// The macOS major versions on which the WebView probe has passed in CI.
+/// Passkey PRF, which the protected tier derives its key from, starts with 15.
+/// Above that the list is not a range: what a child may display rests on WebKit
+/// methods outside its public API, whose behaviour only the probe checks, so a
+/// system it has not run on gets no marker. Add a version when CI runs on it.
+const PROBED_MACOS: [isize; 2] = [15, 26];
 
 /// How long a child may exist without displaying a sandbox document. The
 /// Workbench verifies the pinned release (15 s at most) before it navigates a
@@ -129,6 +140,12 @@ const MAX_CHILDREN: usize = 4;
 /// person needs to go back to the Workbench, approve another request and have
 /// its sandbox release verified and loaded.
 const QUIET_AFTER_CLOSE: Duration = Duration::from_millis(750);
+/// After this app becomes the active one, or the opener's window comes back
+/// from hidden or minimized, no child is on screen for this long. Whatever
+/// brought the app forward (a notification the user clicked, a link, a page
+/// asking for the window), the user gets time to see where they are before a
+/// card can appear. A child whose document commits meanwhile waits.
+const SETTLE_AFTER_ARRIVAL: Duration = Duration::from_secs(2);
 /// The size of a child's content, whatever the opener asks for.
 const DEFAULT_SIZE: (f64, f64) = (520.0, 760.0);
 const LEAST_SIZE: (f64, f64) = (360.0, 400.0);
@@ -234,29 +251,56 @@ fn commit_outcome(origin: &Origin, url: Option<&Url>, committed: bool) -> Commit
     }
 }
 
-/// What decides whether a child whose sandbox document just committed may come
+/// What decides whether a child whose sandbox document has committed may be
 /// on screen. WebKit lets scripts open windows without a user gesture, so these
 /// stand in for the attention a browser would demand.
 #[derive(Clone, Copy, Debug)]
 struct Attention {
     /// The user is in this app.
     app_active: bool,
-    /// The opener's window is on screen, not hidden or minimized.
+    /// How long ago this app last became the active one.
+    since_app_active: Option<Duration>,
+    /// The opener's window is on screen: visible, on the active Space, not
+    /// minimized.
     opener_on_screen: bool,
+    /// How long ago the opener's window last came back on screen.
+    since_opener_on_screen: Option<Duration>,
     /// Another child of this opener is on screen.
     sibling_on_screen: bool,
     /// How long ago a child of this opener last left the screen.
     since_sibling_left: Option<Duration>,
 }
 
-/// A child that may not appear is closed, never kept to appear later.
-fn may_appear(attention: Attention) -> bool {
-    attention.app_active
-        && attention.opener_on_screen
-        && !attention.sibling_on_screen
-        && attention
+#[derive(Debug, PartialEq, Eq)]
+enum Appearance {
+    Now,
+    /// Not yet: ask again after this long.
+    After(Duration),
+    /// The child is closed, never kept for a later moment.
+    Never,
+}
+
+fn appearance(attention: Attention) -> Appearance {
+    if !attention.app_active || !attention.opener_on_screen {
+        return Appearance::Never;
+    }
+    let arrived = [attention.since_app_active, attention.since_opener_on_screen]
+        .into_iter()
+        .flatten()
+        .min();
+    if let Some(remaining) = arrived.and_then(|since| SETTLE_AFTER_ARRIVAL.checked_sub(since)) {
+        if !remaining.is_zero() {
+            return Appearance::After(remaining);
+        }
+    }
+    if attention.sibling_on_screen
+        || attention
             .since_sibling_left
-            .is_none_or(|since| since >= QUIET_AFTER_CLOSE)
+            .is_some_and(|since| since < QUIET_AFTER_CLOSE)
+    {
+        return Appearance::Never;
+    }
+    Appearance::Now
 }
 
 /// The content size of a child for the size its opener asked for.
@@ -273,7 +317,7 @@ fn child_size(width: Option<f64>, height: Option<f64>) -> (f64, f64) {
 
 /// Whether this build may tell the Workbench that Vault passkeys work in-app.
 fn advertises_passkeys(macos_major: isize, associated_domains: Option<&[String]>) -> bool {
-    macos_major >= FIRST_MACOS_WITH_PASSKEY_PRF
+    PROBED_MACOS.contains(&macos_major)
         && associated_domains.is_some_and(|domains| domains.iter().any(|domain| domain == SANDBOX_CREDENTIALS))
 }
 
@@ -345,6 +389,11 @@ pub(crate) fn install_with(window: &WebviewWindow, policy: Policy) {
             eprintln!("the webview changed shape; Vault sandbox windows stay in the system browser");
             return;
         }
+        let Some(window) = webview.window() else {
+            return;
+        };
+        let observers = observe_arrivals(key, &window);
+        let on_screen = is_on_screen(&window);
         STATE.with_borrow_mut(|state| {
             state.policy.get_or_insert(policy);
             state
@@ -353,8 +402,12 @@ pub(crate) fn install_with(window: &WebviewWindow, policy: Policy) {
             state.openers.push(Opener {
                 key,
                 webview: Weak::from_retained(&webview),
+                window: Weak::from_retained(&window),
                 app: app.clone(),
+                on_screen,
+                on_screen_since: None,
                 child_left_screen: None,
+                observers,
             });
         });
         // Only now is the claim true for this webview. Its controller is the
@@ -401,8 +454,91 @@ pub fn opener_navigated(window: &WebviewWindow) {
 fn opener_closed(key: usize, gone: bool) {
     close_children_of(key);
     if gone {
-        STATE.with_borrow_mut(|state| state.openers.retain(|opener| opener.key != key));
+        let observers = STATE.with_borrow_mut(|state| {
+            let index = state.openers.iter().position(|opener| opener.key == key)?;
+            Some(state.openers.remove(index).observers)
+        });
+        let center = NSNotificationCenter::defaultCenter();
+        for observer in observers.into_iter().flatten() {
+            let observer: &AnyObject = observer.as_ref();
+            // SAFETY: The token `addObserverForName` returned, removed once.
+            unsafe { center.removeObserver(observer) };
+        }
     }
+}
+
+/// Whether a window is where the user can see it.
+fn is_on_screen(window: &NSWindow) -> bool {
+    window.isVisible() && window.isOnActiveSpace() && !window.isMiniaturized()
+}
+
+type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
+
+/// Records the two arrivals [`SETTLE_AFTER_ARRIVAL`] counts from: this app
+/// becoming the active one, whatever caused it, and the opener's window coming
+/// back on screen. Returns the window's observers, which end with the opener.
+fn observe_arrivals(opener: usize, window: &NSWindow) -> Vec<Observer> {
+    let center = NSNotificationCenter::defaultCenter();
+    let watching_app = STATE.with_borrow(|state| state.app_observer.is_some());
+    if !watching_app {
+        let became_active = RcBlock::new(|_: NonNull<NSNotification>| {
+            STATE.with_borrow_mut(|state| state.app_active_since = Some(Instant::now()));
+        });
+        // SAFETY: Main thread; the block is called on the posting thread,
+        // which for AppKit's notifications is the main thread.
+        let observer = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidBecomeActiveNotification),
+                None,
+                None,
+                &became_active,
+            )
+        };
+        // Kept for the life of the process.
+        STATE.with_borrow_mut(|state| state.app_observer = Some(observer));
+    }
+    // SAFETY: As above; the statics are AppKit's notification names.
+    unsafe {
+        [
+            NSWindowDidChangeOcclusionStateNotification,
+            NSWindowDidDeminiaturizeNotification,
+            NSWindowDidMiniaturizeNotification,
+        ]
+        .into_iter()
+        .map(|name| {
+            let changed = RcBlock::new(move |_: NonNull<NSNotification>| opener_window_changed(opener));
+            center.addObserverForName_object_queue_usingBlock(Some(name), Some(window), None, &changed)
+        })
+        .collect()
+    }
+}
+
+/// The opener's window was shown, hidden, minimized, restored or moved between
+/// Spaces: note the moment it comes back on screen.
+fn opener_window_changed(key: usize) {
+    let window = STATE.with_borrow(|state| {
+        state
+            .openers
+            .iter()
+            .find(|opener| opener.key == key)
+            .and_then(|opener| opener.window.load())
+    });
+    note_opener_on_screen(key, window.is_some_and(|window| is_on_screen(&window)));
+}
+
+/// Records whether the opener's window is on screen, and returns how long ago
+/// it last came back. AppKit reports some of these changes late, so every
+/// decision about a child also passes what it sees through here: a window found
+/// on screen that was last seen off it has, at the latest, come back now.
+fn note_opener_on_screen(key: usize, on_screen: bool) -> Option<Duration> {
+    STATE.with_borrow_mut(|state| {
+        let opener = state.openers.iter_mut().find(|opener| opener.key == key)?;
+        if on_screen && !opener.on_screen {
+            opener.on_screen_since = Some(Instant::now());
+        }
+        opener.on_screen = on_screen;
+        opener.on_screen_since.map(|since| since.elapsed())
+    })
 }
 
 fn close_children_of(opener: usize) {
@@ -424,9 +560,15 @@ struct Opener {
     key: usize,
     /// Proves the address still belongs to the webview that was installed.
     webview: Weak<WKWebView>,
+    window: Weak<NSWindow>,
     app: AppHandle,
+    /// Whether its window was on screen when last looked at, and when it last
+    /// came back.
+    on_screen: bool,
+    on_screen_since: Option<Instant>,
     /// When a child of this opener last left the screen.
     child_left_screen: Option<Instant>,
+    observers: Vec<Observer>,
 }
 
 struct Child {
@@ -434,7 +576,8 @@ struct Child {
     opener: usize,
     window: Retained<SandboxWindow>,
     webview: Retained<SandboxWebView>,
-    delegate: Retained<ChildDelegate>,
+    /// WebKit and AppKit hold their delegates weakly; this keeps it alive.
+    _delegate: Retained<ChildDelegate>,
     /// A sandbox document has committed. Before that the main frame may hold
     /// the reserved blank page; after it, only sandbox documents.
     committed: bool,
@@ -450,6 +593,9 @@ struct State {
     openers: Vec<Opener>,
     children: Vec<Child>,
     next_id: u64,
+    /// When this app last became the active one, and what tells us.
+    app_active_since: Option<Instant>,
+    app_observer: Option<Observer>,
 }
 
 thread_local! {
@@ -655,20 +801,10 @@ fn committed(id: u64, url: Option<&Url>) {
     }
 }
 
-/// Puts a child whose first sandbox document just committed on screen over its
-/// opener's window, or closes it when it may not appear now.
-///
-/// What comes on screen is the window with a transparent webview, taking no
-/// input. WebKit keeps displaying the previous document's layers until the new
-/// one has something to show, and the previous document here is a blank page
-/// its opener could draw in. The webview is revealed by the first presentation
-/// update WebKit delivers after this point, which carries the sandbox
-/// document's layers.
-fn appear(id: u64) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let found = STATE.with_borrow(|state| {
+/// What the user's attention is on, for one child. `None` when the child or its
+/// opener is gone.
+fn attention(id: u64, mtm: MainThreadMarker) -> Option<(Attention, Retained<NSWindow>, AppHandle)> {
+    let (key, opener, sibling_on_screen, since_app_active, since_sibling_left, app) = STATE.with_borrow(|state| {
         let child = state.children.iter().find(|child| child.id == id)?;
         let opener = state.openers.iter().find(|opener| opener.key == child.opener)?;
         let sibling_on_screen = state
@@ -676,71 +812,136 @@ fn appear(id: u64) {
             .iter()
             .any(|other| other.opener == child.opener && other.id != id && other.on_screen);
         Some((
-            child.window.clone(),
-            child.webview.clone(),
-            opener.webview.load(),
+            opener.key,
+            opener.window.load()?,
             sibling_on_screen,
+            state.app_active_since.map(|since| since.elapsed()),
             opener.child_left_screen.map(|left| left.elapsed()),
+            opener.app.clone(),
         ))
-    });
-    let Some((window, webview, opener, sibling_on_screen, since_sibling_left)) = found else {
-        close(id, false);
-        return;
-    };
-    let parent = opener.and_then(|opener| opener.window());
+    })?;
+    let opener_on_screen = is_on_screen(&opener);
     let attention = Attention {
         app_active: NSApplication::sharedApplication(mtm).isActive(),
-        opener_on_screen: parent
-            .as_ref()
-            .is_some_and(|parent| parent.isVisible() && !parent.isMiniaturized()),
+        since_app_active,
+        opener_on_screen,
+        since_opener_on_screen: note_opener_on_screen(key, opener_on_screen),
         sibling_on_screen,
         since_sibling_left,
     };
-    let Some(parent) = parent.filter(|_| may_appear(attention)) else {
+    Some((attention, opener, app))
+}
+
+/// Calls `step(id)` on the main thread after `wait`.
+fn later(app: AppHandle, wait: Duration, id: u64, step: fn(u64)) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(wait).await;
+        let _ = app.run_on_main_thread(move || step(id));
+    });
+}
+
+/// Puts a child whose sandbox document has committed on screen over its
+/// opener's window, waits when the user has only just arrived, or closes it
+/// when it may not appear.
+///
+/// What comes on screen is the window with a transparent webview. It ignores
+/// clicks, which pass to whatever is under it, and cannot become key. WebKit
+/// keeps displaying the previous document's layers until the new one has
+/// something to show, and the previous document here is a blank page its
+/// opener could draw in. The webview is revealed by the first presentation
+/// update WebKit delivers after this point, which carries the sandbox
+/// document's layers.
+fn appear(id: u64) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let waiting = STATE.with_borrow(|state| {
+        state
+            .children
+            .iter()
+            .find(|child| child.id == id)
+            .filter(|child| child.committed && !child.on_screen)
+            .map(|child| (child.window.clone(), child.webview.clone()))
+    });
+    let Some((window, webview)) = waiting else {
+        return;
+    };
+    let Some((attention, parent, app)) = attention(id, mtm) else {
         close(id, false);
         return;
     };
-    STATE.with_borrow_mut(|state| {
-        if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
-            child.on_screen = true;
+    match appearance(attention) {
+        Appearance::Never => close(id, false),
+        Appearance::After(wait) => later(app, wait, id, appear),
+        Appearance::Now => {
+            STATE.with_borrow_mut(|state| {
+                if let Some(child) = state.children.iter_mut().find(|child| child.id == id) {
+                    child.on_screen = true;
+                }
+            });
+            let over = parent.frame();
+            let size = window.frame().size;
+            window.setFrameOrigin(NSPoint::new(
+                over.origin.x + (over.size.width - size.width) / 2.0,
+                over.origin.y + (over.size.height - size.height) / 2.0,
+            ));
+            // Attaching orders the window in above its parent.
+            // SAFETY: Both windows are live and distinct; the child is
+            // detached again before it closes.
+            unsafe { parent.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
+            let presented = RcBlock::new(move || reveal(id));
+            // SAFETY: `adopt` checked that the webview class has this method,
+            // which takes one block and calls it on the main thread.
+            let _: () = unsafe { msg_send![&*webview, _doAfterNextPresentationUpdate: &*presented] };
         }
-    });
-    let over = parent.frame();
-    let size = window.frame().size;
-    window.setFrameOrigin(NSPoint::new(
-        over.origin.x + (over.size.width - size.width) / 2.0,
-        over.origin.y + (over.size.height - size.height) / 2.0,
-    ));
-    // Attaching orders the window in above its parent, without making it key.
-    // SAFETY: Both windows are live and distinct; the child is detached again
-    // before it closes.
-    unsafe { parent.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
-    let presented = RcBlock::new(move || reveal(id));
-    // SAFETY: `adopt` checked that the webview class has this method, which
-    // takes one block and calls it on the main thread.
-    let _: () = unsafe { msg_send![&*webview, _doAfterNextPresentationUpdate: &*presented] };
+    }
 }
 
-/// The sandbox document is what the webview now displays: show it, and give
-/// the window the keyboard, which a passkey ceremony needs.
+/// The sandbox document is what the webview now displays. If the user is still
+/// here, show it and give the window the keyboard, which a passkey ceremony
+/// needs; if they have only just come back, wait; if they left, close it.
 fn reveal(id: u64) {
-    let found = STATE.with_borrow(|state| {
-        let child = state.children.iter().find(|child| child.id == id)?;
-        (child.committed && child.on_screen).then(|| (child.window.clone(), child.webview.clone()))
-    });
-    let Some((window, webview)) = found else {
+    let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    window.ivars().revealed.set(true);
-    webview.setAlphaValue(1.0);
-    window.setIgnoresMouseEvents(false);
-    window.makeKeyAndOrderFront(None);
-    window.makeFirstResponder(Some(&webview));
+    let veiled = STATE.with_borrow(|state| {
+        state
+            .children
+            .iter()
+            .find(|child| child.id == id)
+            .filter(|child| child.committed && child.on_screen && !child.window.ivars().revealed.get())
+            .map(|child| (child.window.clone(), child.webview.clone()))
+    });
+    let Some((window, webview)) = veiled else {
+        return;
+    };
+    let Some((attention, _, app)) = attention(id, mtm) else {
+        close(id, false);
+        return;
+    };
+    // This child is the one on screen; the rules about others do not apply.
+    let attention = Attention {
+        sibling_on_screen: false,
+        since_sibling_left: None,
+        ..attention
+    };
+    match appearance(attention) {
+        Appearance::Never => close(id, false),
+        Appearance::After(wait) => later(app, wait, id, reveal),
+        Appearance::Now => {
+            window.ivars().revealed.set(true);
+            webview.setAlphaValue(1.0);
+            window.setIgnoresMouseEvents(false);
+            window.makeKeyAndOrderFront(None);
+            window.makeFirstResponder(Some(&webview));
+        }
+    }
 }
 
-/// Ends a child: the page is destroyed, which its opener sees as a closed
-/// popup, and the native window closes. `window_closing` is set when AppKit is
-/// already closing the window.
+/// Ends a child. Its opener can no longer reach it and the native window
+/// closes now; the page is destroyed on the next turn of the main run loop,
+/// which the opener sees as a closed popup. `window_closing` is set when AppKit
+/// is already closing the window.
 fn close(id: u64, window_closing: bool) {
     let child = STATE.with_borrow_mut(|state| {
         let index = state.children.iter().position(|child| child.id == id)?;
@@ -755,14 +956,10 @@ fn close(id: u64, window_closing: bool) {
     let Some(child) = child else {
         return;
     };
-    // SAFETY: Main thread; every object is live and owned by `child`. `adopt`
-    // checked that the webview class has `_close`, which takes no argument.
+    // SAFETY: Main thread; every object is live and owned by `child`.
     unsafe {
         child.webview.setNavigationDelegate(None);
         child.webview.setUIDelegate(None);
-        // Destroys the page now. Releasing the webview would do the same, but
-        // WebKit keeps it alive while a presentation update is still awaited.
-        let _: () = msg_send![&*child.webview, _close];
     }
     child.window.setDelegate(None);
     let was_key = child.window.isKeyWindow();
@@ -780,11 +977,21 @@ fn close(id: u64, window_closing: bool) {
             parent.makeKeyWindow();
         }
     }
-    // WebKit or AppKit may be in the middle of a callback on these objects.
-    // They are released when the current event has been handled.
-    let _ = Retained::autorelease_ptr(child.webview);
-    let _ = Retained::autorelease_ptr(child.window);
-    let _ = Retained::autorelease_ptr(child.delegate);
+    // This may be running inside one of WebKit's own callbacks on this
+    // webview (a commit, `window.close()`, a crashed process). The page is
+    // destroyed, and the objects released, once that callback has returned.
+    // Releasing the webview alone would not destroy the page while WebKit
+    // still awaits a presentation update for it.
+    let remains = Cell::new(Some(child));
+    let destroy = RcBlock::new(move || {
+        if let Some(child) = remains.take() {
+            // SAFETY: Main thread. `adopt` checked that the webview class has
+            // `_close`, which takes no argument.
+            let _: () = unsafe { msg_send![&*child.webview, _close] };
+        }
+    });
+    // SAFETY: The block runs once, on the main thread.
+    unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&destroy) };
 }
 
 type CreateImp = unsafe extern "C-unwind" fn(
@@ -980,7 +1187,7 @@ fn open_child(
             opener,
             window,
             webview: webview.clone(),
-            delegate,
+            _delegate: delegate,
             committed: false,
             on_screen: false,
         });
@@ -1328,42 +1535,109 @@ mod tests {
     fn a_child_appears_only_with_the_users_attention_and_alone() {
         let attentive = Attention {
             app_active: true,
+            since_app_active: None,
             opener_on_screen: true,
+            since_opener_on_screen: None,
             sibling_on_screen: false,
             since_sibling_left: None,
         };
-        assert!(may_appear(attentive));
-        // The user is in another app, or the Workbench is hidden or minimized.
-        assert!(!may_appear(Attention {
-            app_active: false,
-            ..attentive
-        }));
-        assert!(!may_appear(Attention {
-            opener_on_screen: false,
-            ..attentive
-        }));
-        // One sandbox window at a time.
-        assert!(!may_appear(Attention {
-            sibling_on_screen: true,
-            ..attentive
-        }));
-        // Not in the place of one that just closed.
-        for (since, allowed) in [
-            (Duration::ZERO, false),
-            (Duration::from_millis(500), false),
-            (Duration::from_millis(749), false),
-            (Duration::from_millis(750), true),
-            (Duration::from_secs(60), true),
+        assert_eq!(appearance(attentive), Appearance::Now);
+        // The user is in another app, or the Workbench is hidden, minimized or
+        // on another Space: closed, however long ago they were here.
+        for elsewhere in [
+            Attention {
+                app_active: false,
+                ..attentive
+            },
+            Attention {
+                opener_on_screen: false,
+                ..attentive
+            },
+            Attention {
+                app_active: false,
+                since_app_active: Some(Duration::from_millis(100)),
+                ..attentive
+            },
+        ] {
+            assert_eq!(appearance(elsewhere), Appearance::Never, "{elsewhere:?}");
+        }
+        // One sandbox window at a time, and not in the place of one that just
+        // closed.
+        assert_eq!(
+            appearance(Attention {
+                sibling_on_screen: true,
+                ..attentive
+            }),
+            Appearance::Never
+        );
+        for (since, expected) in [
+            (Duration::ZERO, Appearance::Never),
+            (Duration::from_millis(749), Appearance::Never),
+            (Duration::from_millis(750), Appearance::Now),
+            (Duration::from_secs(60), Appearance::Now),
         ] {
             assert_eq!(
-                may_appear(Attention {
+                appearance(Attention {
                     since_sibling_left: Some(since),
                     ..attentive
                 }),
-                allowed,
+                expected,
                 "{since:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_child_waits_while_the_user_has_only_just_arrived() {
+        let attentive = Attention {
+            app_active: true,
+            since_app_active: None,
+            opener_on_screen: true,
+            since_opener_on_screen: None,
+            sibling_on_screen: false,
+            since_sibling_left: None,
+        };
+        let ms = Duration::from_millis;
+        // The app became active, or its window came back: wait out the rest.
+        for (since_app_active, since_opener_on_screen, expected) in [
+            (Some(ms(0)), None, Appearance::After(ms(2000))),
+            (Some(ms(500)), None, Appearance::After(ms(1500))),
+            (None, Some(ms(1999)), Appearance::After(ms(1))),
+            (Some(ms(2000)), None, Appearance::Now),
+            (Some(ms(60_000)), Some(ms(60_000)), Appearance::Now),
+            // The more recent arrival counts.
+            (Some(ms(60_000)), Some(ms(300)), Appearance::After(ms(1700))),
+            (Some(ms(300)), Some(ms(60_000)), Appearance::After(ms(1700))),
+        ] {
+            assert_eq!(
+                appearance(Attention {
+                    since_app_active,
+                    since_opener_on_screen,
+                    ..attentive
+                }),
+                expected,
+                "{since_app_active:?} {since_opener_on_screen:?}"
+            );
+        }
+        // Waiting comes first: the other rules are judged when it is over.
+        assert_eq!(
+            appearance(Attention {
+                since_app_active: Some(ms(100)),
+                sibling_on_screen: true,
+                since_sibling_left: Some(ms(0)),
+                ..attentive
+            }),
+            Appearance::After(ms(1900))
+        );
+        // A user who left is not waited for.
+        assert_eq!(
+            appearance(Attention {
+                app_active: false,
+                since_opener_on_screen: Some(ms(100)),
+                ..attentive
+            }),
+            Appearance::Never
+        );
     }
 
     #[test]
@@ -1377,14 +1651,17 @@ mod tests {
     }
 
     #[test]
-    fn the_marker_needs_passkey_prf_and_the_signed_association() {
+    fn the_marker_needs_a_probed_macos_and_the_signed_association() {
         let signed = vec![
             "webcredentials:avibe.bot".to_owned(),
             "webcredentials:sandbox.avibe.bot".to_owned(),
         ];
         assert!(advertises_passkeys(15, Some(&signed)));
         assert!(advertises_passkeys(26, Some(&signed)));
-        assert!(!advertises_passkeys(14, Some(&signed)));
+        // No passkey PRF before 15; no probe run on a later system yet.
+        for unproven in [13, 14, 16, 25, 27, 99] {
+            assert!(!advertises_passkeys(unproven, Some(&signed)), "{unproven}");
+        }
         assert!(!advertises_passkeys(15, None));
         assert!(!advertises_passkeys(15, Some(&[])));
         for other in [
@@ -1403,10 +1680,9 @@ mod tests {
         // The test binary is signed ad hoc, like a development build: whatever
         // the system, its real signature carries no associated domain.
         assert_eq!(signed_associated_domains(), None);
-        assert!(!advertises_passkeys(
-            i32::MAX as isize,
-            signed_associated_domains().as_deref()
-        ));
+        for macos in PROBED_MACOS {
+            assert!(!advertises_passkeys(macos, signed_associated_domains().as_deref()));
+        }
     }
 
     #[test]

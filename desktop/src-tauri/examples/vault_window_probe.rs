@@ -554,14 +554,90 @@ addEventListener('message', (event) => {
 
             // While the main window is hidden, nothing appears; the window is
             // closed, not kept for later.
-            self.main.hide().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while self.on_main_window(|window, _| window.isVisible()) {
-                assert!(Instant::now() < deadline, "the main window did not hide");
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            self.hide_the_main_window();
             self.eval(&format!("probe.windows.unseen = window.open('{sandbox}/quiet')"));
             self.never_on_screen("a sandbox window over a hidden main window", "unseen", 0);
+
+            // When the main window comes back, the user has only just arrived:
+            // a window asked for at once waits two seconds, and then appears.
+            let back = Instant::now();
+            self.main.show().unwrap();
+            if self.focus {
+                self.activate();
+            }
+            self.eval(&format!(
+                "probe.windows.returned = window.open('{sandbox}/window#case=returned')"
+            ));
+            self.appears_no_sooner_than_the_settle_interval("after the main window came back", back);
+            self.a_window_opened_by_the_workbench_loaded("returned");
+            self.eval("probe.windows.returned.close()");
+            self.wait_children("the returned window to close", |children| children.is_empty());
+            self.let_the_quiet_interval_pass();
+
+            if self.focus {
+                // The same when the app itself comes forward, whatever brought
+                // it: here it is hidden and activated again.
+                self.on_main(|mtm| NSApplication::sharedApplication(mtm).hide(None));
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
+                    assert!(Instant::now() < deadline, "the app did not leave the front");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let forward = Instant::now();
+                self.activate();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
+                    assert!(Instant::now() < deadline, "the app did not come forward");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                self.eval(&format!(
+                    "probe.windows.forward = window.open('{sandbox}/window#case=forward')"
+                ));
+                self.appears_no_sooner_than_the_settle_interval("after the app came forward", forward);
+                self.a_window_opened_by_the_workbench_loaded("forward");
+                self.eval("probe.windows.forward.close()");
+                self.wait_children("the forward window to close", |children| children.is_empty());
+                self.let_the_quiet_interval_pass();
+            }
+
+            // The user leaves while a window is still empty: when the sandbox
+            // page is ready the window is closed, not revealed. With focus the
+            // user goes to another app and the windows stay where they are;
+            // without it the probe can only hide the main window.
+            self.eval(&format!("probe.windows.left = window.open('{sandbox}/slow-window')"));
+            self.wait_children("the window to come on screen, still empty", |children| {
+                children.len() == 1 && children[0].visible && !children[0].revealed
+            });
+            if self.focus {
+                self.on_main(|mtm| NSApplication::sharedApplication(mtm).deactivate());
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
+                    assert!(Instant::now() < deadline, "the app did not leave the front");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            } else {
+                self.hide_the_main_window();
+            }
+            let started = Instant::now();
+            loop {
+                let children = self.children();
+                if children.is_empty() {
+                    break;
+                }
+                assert!(
+                    !children[0].revealed && !children[0].key,
+                    "a window was revealed after the user left: {children:?}"
+                );
+                assert!(
+                    started.elapsed() < Duration::from_secs(12),
+                    "the window was not closed: {children:?}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            self.eval("probe.report({ case: 'left-closed', closed: probe.windows.left.closed })");
+            let left = self.report("left-closed");
+            assert_eq!(left["closed"], true, "{left}");
+            self.arrived("style-released");
             self.main.show().unwrap();
             if self.focus {
                 self.activate();
@@ -594,7 +670,8 @@ addEventListener('message', (event) => {
                 "vault window probe (app active{}): marker scope, hidden reservation, reveal only after the \
                  sandbox document is presented, opener link, empty content controller and own preferences, \
                  URL scheme guard, navigation refusals, one window at a time, quiet interval, hidden main \
-                 window, size bounds, close paths, deadline, cap, reload and main-window teardown passed",
+                 window, waiting after an arrival, leaving before the reveal, size bounds, close paths, \
+                 deadline, cap, reload and main-window teardown passed",
                 if self.focus { ", with focus" } else { "" }
             );
         }
@@ -731,6 +808,41 @@ addEventListener('message', (event) => {
             ));
             let refused = self.report("refused");
             assert_eq!(refused["closed"], true, "{what}: {refused}");
+        }
+
+        fn hide_the_main_window(&self) {
+            self.main.hide().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self.on_main_window(|window, _| window.isVisible()) {
+                assert!(Instant::now() < deadline, "the main window did not hide");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        /// The one child, asked for right after the user arrived at `arrived`
+        /// (taken before the arrival), is on screen no sooner than the shell's
+        /// two seconds later, and then is shown: deferred, not refused.
+        fn appears_no_sooner_than_the_settle_interval(&mut self, what: &str, arrived: Instant) {
+            loop {
+                let children = self.children();
+                let waited = arrived.elapsed();
+                if children.iter().any(|child| child.visible) {
+                    assert!(
+                        waited >= Duration::from_secs(2),
+                        "a window appeared {waited:?} {what}: {children:?}"
+                    );
+                    break;
+                }
+                assert!(
+                    children.len() == 1 || waited < Duration::from_secs(1),
+                    "the window was refused, not deferred, {what}: {children:?}"
+                );
+                assert!(waited < Duration::from_secs(15), "no window appeared {what}");
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            self.wait_children("the deferred window to be shown", |children| {
+                children.len() == 1 && children[0].shown()
+            });
         }
 
         /// Longer than the shell's quiet interval after a window leaves the screen.

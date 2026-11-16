@@ -63,16 +63,21 @@ the sandbox unmodified.
    an older retained release or the origin's root loads too, as in a browser
    tab. Pinning the release stays the Workbench's check before it navigates.
 3. **When it is displayed.** The native window is created ordered out. When a
-   sandbox document commits it comes on screen with a transparent webview,
-   taking neither clicks nor keys. Its content is revealed by the first
-   presentation update WebKit delivers after that commit. If anything but a
-   sandbox document commits, the window is closed. If it has displayed nothing
-   60 seconds after it was created, it is closed.
+   sandbox document commits it comes on screen with a transparent webview. It
+   cannot become key, and clicks pass through it to whatever is under it. Its
+   content is revealed by the first presentation update WebKit delivers after
+   that commit, so the empty window stays until the sandbox's first paint. If
+   anything but a sandbox document commits, the window is closed. If it has
+   displayed nothing 60 seconds after it was created, it is closed.
 4. **When it may appear.** Only while the app is active and the opener's window
-   is on screen; only one per main window at a time; not within 0.75 seconds of
-   another leaving the screen. A window that may not appear when its sandbox
-   document commits is closed, never kept for later. Its content size is
-   clamped to 360-900 by 400-1000 points.
+   is visible, on the active Space and not minimized. Not within 2 seconds of
+   the app becoming active or of that window coming back on screen, whatever
+   caused either: a window whose sandbox document commits in that time waits,
+   and is judged when the time is over. Only one per main window at a time, and
+   not within 0.75 seconds of another leaving the screen. A window that may not
+   appear is closed, never kept for later. The first two conditions are asked
+   again when the presentation update arrives, before the reveal. Its content
+   size is clamped to 360-900 by 400-1000 points.
 5. **What it holds.** A new, empty `WKUserContentController` and default
    `WKPreferences` of its own with element fullscreen, picture in picture and
    video presentation modes off. Before the webview is returned to WebKit, the
@@ -115,34 +120,56 @@ the reveal on, what is displayed is a sandbox document.
 
 The presentation update (`_doAfterNextPresentationUpdate:`) and destroying a
 page at once (`_close`) are WebKit methods outside its public API, as is the
-feature list used for rule 5. WebKit has no public equivalent for the first.
-Each is checked to exist before anything is installed.
+feature list used for rule 5. Each is checked to exist before anything is
+installed. Existence says nothing about behaviour: that is checked only by the
+probe, on the macOS versions CI runs it on, and the marker is limited to those
+versions. The public snapshot call with `afterScreenUpdates` waits on the same
+update and is a possible later replacement for the first; it has not been
+tested. The page is destroyed one turn of the main run loop after the window
+closes, so that the shell does not depend on what WebKit does after one of its
+own callbacks returns.
 
 ### Why a window needs the user's attention
 
 On macOS WebKit's default lets scripts open windows without a user gesture. A
 browser requires one. Changing that default would also change every link the
 Workbench and its Show Pages open from script. So a page of the Workbench
-origin can ask for the sandbox's real window at any moment. It cannot put a
-request into it, because the window and the iframe speak only to documents of
-the sandbox origin, and a confirmation still needs the user's click on a
-truthful card. What it could do without rule 4 is choose when and where real
-cards appear: over a hidden main window, several at once, or in the place of a
-card the user has just confirmed, so that a second click lands on the next
-request.
+origin can make the sandbox's real window appear, showing the card of a real
+pending request, at a moment it chooses. It cannot put content of its own into
+the card, because the window and the iframe speak only to documents of the
+sandbox origin, and a confirmation still needs the user's click on a truthful
+card. What it could do without rule 4 is choose when and where real cards
+appear: over a hidden main window, several at once, in the place of a card the
+user has just confirmed, or in front of what the user is doing in another app
+after pulling Avibe forward.
 
-Rule 4 is the smallest set of bounds that takes those choices away. The
-interval is 0.75 seconds: longer than the default double-click interval of half
-a second, so a click aimed at the window that just closed meets nothing; shorter
-than a person needs to return to the Workbench, approve another request and
-have its release verified and loaded. With the sandbox's own half-second delay
-before Confirm is armed, a second card cannot be confirmed sooner than 1.25
-seconds after the first one's window closed.
+Rule 4 takes those choices away:
 
-The remaining difference from a browser is that a card can still appear without
-a gesture while the user is in the app. The complete answer belongs to the
-sandbox (arming Confirm only after its document has been focused and visible
-for the arming time) and is not part of this change.
+- **Active app and visible main window.** A card never appears while the user
+  is elsewhere.
+- **Two seconds after an arrival.** The app can be brought forward without the
+  user choosing it: a Workbench page can ask for the main window or open an app
+  window, another app can open an `avibe:` link, an Agent can launch the app.
+  So "the app is active" is believed only after two seconds, counted from the
+  system's own notification, not from any of those commands. The window waits
+  instead of being refused, because the ordinary case is a user who clicks a
+  notification, lands in Avibe and approves at once. If a passkey sheet makes
+  the app resign active, the wait starts again when the sheet closes.
+- **One at a time, and 0.75 seconds after one closes.** Longer than the default
+  double-click interval of half a second, so a click aimed at the window that
+  just closed meets nothing; shorter than a person needs to return to the
+  Workbench, approve another request and have its release verified and loaded.
+  With the sandbox's own half-second delay before Confirm is armed, a card in
+  another window cannot be confirmed sooner than 1.25 seconds after the first
+  one's window closed.
+
+What remains. The opener may navigate the window that is on screen to another
+sandbox document, as in a browser, so a second card can follow the first in the
+same window with only the sandbox's own arming delay between them. And a card
+can still appear without a gesture while the user is in the app; a user who
+does not notice a new window for half a second can click into it. The complete
+answer belongs to the sandbox (arming Confirm only after its document has been
+focused and visible for the arming time) and is not part of this change.
 
 ### Why the URL schemes are guarded
 
@@ -165,12 +192,18 @@ feature is not installed at all.
 
 `window.__AVIBE_DESKTOP_VAULT_PASSKEY__` is defined on the main webview's
 top-level document by the same call that installs the hooks, and only after
-they are in place. That call returns before doing anything unless the system is
-macOS 15 or later and the running process's own code signature carries
-`com.apple.developer.associated-domains` with `webcredentials:sandbox.avibe.bot`
-(read with `SecTask`, which reports what the kernel holds for the process). A
-build flag is not consulted. macOS refuses to start an ad-hoc build that claims
-this entitlement, so a development build can only be without it.
+they are in place. That call returns before doing anything unless both hold:
+
+- The system is a macOS major version on which the probe has passed in CI.
+  Today that is 15, the first with passkey PRF, and 26. It is a list, not a
+  floor: on a version the probe has not run on, nothing says the non-public
+  calls behave as rule 3 needs.
+- The running process's own code signature carries
+  `com.apple.developer.associated-domains` with
+  `webcredentials:sandbox.avibe.bot` (read with `SecTask`, which reports what
+  the kernel holds for the process). A build flag is not consulted. macOS
+  refuses to start an ad-hoc build that claims this entitlement, so a
+  development build can only be without it.
 
 A shell without the marker is the shell as it was: nothing is installed, and
 the sandbox's window goes to the browser with every other link.
@@ -199,8 +232,9 @@ the sandbox's window goes to the browser with every other link.
 - Unit tests in the module: the origin rule, which requests open a window, what
   a child may load, the commit rule, the attention rule and its interval, the
   size bounds, and the marker's two conditions.
-- `desktop/src-tauri/examples/vault_window_probe.rs`, run by CI on macOS: real
-  WebKit windows on two loopback origins with a disposable data store. The
+- `desktop/src-tauri/examples/vault_window_probe.rs`, run by CI on macOS 26 and
+  on macOS 15: real WebKit windows on two loopback origins with a disposable
+  data store. The
   probe compiles the module's source file into itself and enters one step below
   the signature check, so the library exports nothing for tests and has no
   test-only feature. Three runs:
@@ -214,14 +248,21 @@ the sandbox's window goes to the browser with every other link.
     paints stays empty and without input and is closed at the deadline. For
     rule 4: a second window while one is on screen, a window pointed at the
     sandbox the moment another closes, and a window opened while the main
-    window is hidden are each closed without ever being on screen.
+    window is hidden are each closed without ever being on screen. A window
+    asked for right after the main window comes back, or right after the app
+    comes forward, is on screen no sooner than two seconds later and is then
+    shown. A window still empty when the user goes to another app is closed
+    when its page is ready, not revealed.
   - **App not active.** A sandbox window is closed instead of appearing. This
     run takes no keyboard focus.
   - **The shell's own install** on the unsigned test executable: no marker and
     no window.
-- Each rule was also removed once by hand to see the probe fail: the opener's
-  content controller kept, no URL scheme guard, reveal on the commit, no
-  interval, two windows on screen, a window over a hidden main window.
+- Each of these rules was also removed once by hand to see the probe fail: the
+  opener's content controller kept, no URL scheme guard, reveal on the commit,
+  no interval after a close, two windows on screen, a window over a hidden main
+  window, no wait after the main window comes back. The second check before the
+  reveal was not tried this way: the run that exercises it needs the app
+  activated.
 - The two calls in `build_main_window` that connect the module to the main
   window have no automated check. Removing the install leaves the browser
   hand-off; removing the navigation hook leaves a sandbox window open across a
@@ -236,6 +277,7 @@ Only a signed build with a real passkey can show these:
 - The real origin, and how long its first paint takes in the window.
 - The passkey sheet from the window, and passkey PRF from the sandbox iframe
   inside the app.
-- Focus while a real system sheet is on screen.
-- A release build, and macOS 15. Tests run a debug build on macOS 26.
+- Focus while a real system sheet is on screen, and the two-second wait after
+  it closes.
+- A release build. Tests run debug builds.
 - The association being fetched after the app's first launch.
