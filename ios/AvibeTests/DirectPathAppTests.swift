@@ -4142,6 +4142,88 @@ final class DirectPathAppTests: XCTestCase {
     }
 
 
+    // MARK: Review captures (draft only, not for merge)
+
+    /// Renders the real `RootView` over a real `AppModel` (no transport, as
+    /// shipped) at the two runtime-open screens #3848 added, for review:
+    /// the long wait (8 s into the open) and the timeout notice over the
+    /// instance list (30 s). Time is the manual open clock; nothing else is
+    /// stubbed beyond the fixture control plane. Fixture data only.
+    @MainActor
+    func testCaptureRuntimeOpenScreensForReview() async throws {
+        let studioSession = """
+            {"account":{"id":"account-1","email":"alex@example.invalid"},"instances":[
+              {"id":"instance-1","name":"Studio","host":"studio.example.invalid",
+               "url":"https://10.255.255.1","relationship":"owner","available":true},
+              {"id":"instance-2","name":"Lab","host":"lab.example.invalid",
+               "url":"https://instance-two.example","relationship":"owner","available":true}
+            ]}
+            """
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { .json(studioSession) },
+            runtimeOpenTiming: timing,
+            runtimeOpenNotificationCenter: NotificationCenter()
+        )
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.screen.bounds
+        window.windowLevel = .normal + 1
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = UIHostingController(
+            rootView: RootView().environmentObject(app)
+        )
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        try await Task.sleep(for: .seconds(4))
+        capture(window, app, "00-instances-before-open")
+
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await Task.sleep(for: .milliseconds(800))
+        timing.advance(by: .seconds(8))
+        try await Task.sleep(for: .milliseconds(1200))
+        capture(window, app, "01-long-wait-light")
+        window.overrideUserInterfaceStyle = .dark
+        try await Task.sleep(for: .milliseconds(1200))
+        capture(window, app, "01-long-wait-dark")
+        window.overrideUserInterfaceStyle = .light
+
+        timing.advance(by: .seconds(22))
+        try await Task.sleep(for: .seconds(6))
+        capture(window, app, "02-timeout-light")
+        window.overrideUserInterfaceStyle = .dark
+        try await Task.sleep(for: .seconds(2))
+        capture(window, app, "02-timeout-dark")
+    }
+
+    @MainActor
+    private func capture(_ window: UIWindow, _ app: AppModel, _ name: String) {
+        let language = Bundle.main.preferredLocalizations.first ?? "unknown"
+        let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
+        let image = renderer.image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let shot = XCTAttachment(image: image)
+        shot.name = "runtime-open-\(language)-\(name)"
+        shot.lifetime = .keepAlways
+        add(shot)
+        let state = XCTAttachment(string: """
+            \(name): language=\(language) route=\(app.route)
+            attempt=\(String(describing: app.runtimeOpenAttempt))
+            notice=\(String(describing: app.runtimeOpenNotice))
+            """)
+        state.name = "runtime-open-\(language)-\(name)-state"
+        state.lifetime = .keepAlways
+        add(state)
+        print("[review capture] \(name) language=\(language) route=\(app.route) phase=\(String(describing: app.runtimeOpenAttempt?.phase)) long=\(String(describing: app.runtimeOpenAttempt?.isTakingLong)) notice=\(String(describing: app.runtimeOpenNotice))")
+    }
+
     // MARK: The App as shipped, with notifications on
 
     // Release checks for the App as it ships (no direct transport). Each
