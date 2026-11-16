@@ -2,8 +2,9 @@
 """S2 acceptance on one explicitly authorized, bounded non-cloning Incus disk.
 
 Uses the existing measurement manifest/prepare phase. Run copy, no-copy and
-transaction-full once, in order. Only synthetic databases owned by that manifest
-are retired between trials; the immutable predecessor backup is kept. No service
+transaction-full once, in order, or transaction-full-only after fresh prepare.
+Only synthetic databases owned by that manifest are retired between trials; the
+immutable predecessor backup is kept. No service
 or instance operations, network access, production paths or implicit retries.
 """
 from __future__ import annotations
@@ -92,6 +93,20 @@ def _consume_remaining_space(path: Path, *, timeout: float = 30) -> dict:
         os.close(fd)
 
 
+def _open_rollback_keeper(db: Path) -> sqlite3.Connection:
+    """Keep the transaction fixture readable while its migrating writer exits."""
+    keeper = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+    try:
+        if keeper.execute("PRAGMA journal_mode").fetchone() != ("wal",):
+            raise RuntimeError("transaction-full keeper requires migration-established WAL")
+        keeper.execute("BEGIN")
+        keeper.execute("SELECT version_num FROM alembic_version").fetchall()
+    except BaseException:
+        keeper.close()
+        raise
+    return keeper
+
+
 def _transaction_full(home: Path, quota_bytes: int) -> dict:
     from sqlalchemy import event
     from sqlalchemy.engine import Engine
@@ -111,21 +126,24 @@ def _transaction_full(home: Path, quota_bytes: int) -> dict:
     if filler.exists():
         raise RuntimeError("a prior transaction filler exists; do not replay the phase")
     exhausted = None
+    keeper = None
     def fill(conn, cursor, statement, parameters, context, executemany):
-        nonlocal exhausted
+        nonlocal exhausted, keeper
         if statement.startswith("CREATE INDEX ix_agent_events_catalog_ref"):
-            assert exhausted is None and conn.connection.driver_connection.in_transaction
+            raw = conn.connection.driver_connection
+            assert exhausted is None and keeper is None and raw.in_transaction
+            assert raw.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+            # The snapshot is DELETE-mode. Let the real migration establish WAL
+            # before holding a reader, otherwise this test blocks its own writer.
+            keeper = _open_rollback_keeper(db)
             exhausted = _consume_remaining_space(filler)
     event.listen(Engine, "before_cursor_execute", fill)
     caught = None
     outcome = None
     free_before_reporting = None
-    # Keep the WAL/SHM readable while the last writer rolls back. This also
-    # models an existing reader; it never mutates the fixture or its schema.
-    keeper = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+    # The hook acquires a WAL reader only after the real migration starts; keep
+    # it through rollback and outcome reporting, then release it in all cases.
     try:
-        keeper.execute("BEGIN")
-        keeper.execute("SELECT version_num FROM alembic_version").fetchall()
         try:
             migrations.run_migrations(db)
         except migrations.DatabaseDiskFullError as exc:
@@ -149,7 +167,8 @@ def _transaction_full(home: Path, quota_bytes: int) -> dict:
             raise AssertionError("actual full filesystem did not fail the conversion")
     finally:
         event.remove(Engine, "before_cursor_execute", fill)
-        keeper.close()
+        if keeper is not None:
+            keeper.close()
         # Only a file exclusively created by this worker can exist here.
         if exhausted is not None:
             filler.unlink(missing_ok=True)
@@ -241,7 +260,7 @@ def _verify_workload_contract(root: Path, manifest: dict, previous: Path, phase:
     if (type(target) is not int or not 4_500_000_000 <= target <= 4_600_000_000
             or type(operations) is not int or operations < 1000):
         raise RuntimeError("S2 acceptance requires the prepared4.5GB/>=1000-operation workload")
-    if phase == "copy":
+    if phase in {"copy", "transaction-full-only"}:
         database = root / "large" / "state" / "vibe.sqlite"
     else:
         receipt = json.loads((root / "s2-copy.json").read_text())
@@ -270,7 +289,7 @@ def main(argv=None) -> int:
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--previous-python", required=True, type=Path)
     parser.add_argument("--quota-bytes", required=True, type=int)
-    parser.add_argument("--phase", required=True, choices=("copy", "no-copy", "transaction-full"))
+    parser.add_argument("--phase", required=True, choices=("copy", "no-copy", "transaction-full", "transaction-full-only"))
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
     require_guest(root, args.quota_bytes)
@@ -281,13 +300,41 @@ def main(argv=None) -> int:
             or manifest["capacity"]["quota_bytes"] != args.quota_bytes
             or subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain"], text=True).strip()):
         raise RuntimeError("S2 must use the clean exact head and predecessor from prepare")
-    predecessor_phase = {"copy": "prepare", "no-copy": "s2-copy", "transaction-full": "s2-no-copy"}[args.phase]
+    predecessor_phase = {"copy": "prepare", "no-copy": "s2-copy", "transaction-full": "s2-no-copy",
+                         "transaction-full-only": "prepare"}[args.phase]
     if not (root / f"{predecessor_phase}.complete").exists():
         raise RuntimeError(f"{predecessor_phase} must finish first")
     _verify_workload_contract(root, manifest, previous, args.phase)
     durable_write(root / f"s2-{args.phase}.started", str(time.time()), exclusive=True)
     python = Path(sys.executable)
-    if args.phase == "copy":
+    if args.phase == "transaction-full-only":
+        from storage.backups import create_sqlite_migration_backup
+
+        # Fresh preparation, not fabricated copy/no-copy completion receipts.
+        # The real backup publishes DELETE-mode bytes, just as in the composed run.
+        large = root / "large"
+        before = _fixture_state(large)
+        assert before["revision"] == "20261112_0088" and before["epoch"] == 2 and before["notice"] is None
+        snapshot = create_sqlite_migration_backup(
+            large / "state" / "vibe.sqlite", to_revisions=["20261114_0089"],
+        )
+        copy = {"copies": [{"path": str(snapshot), "manifest": json.loads((snapshot / "manifest.json").read_text())}]}
+        assert copy["copies"][0]["manifest"]["from_revisions"] == ["20261112_0088"]
+        durable_write(root / "s2-transaction-only-snapshot.json", json.dumps(copy, indent=2))
+        _retire_database(large)
+        home = _copy_predecessor(root, "full", copy)
+        with closing(sqlite3.connect(f"{(home / 'state' / 'vibe.sqlite').as_uri()}?mode=ro", uri=True)) as conn:
+            assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+        filler = _prefill(root, 64 * MIB, args.quota_bytes)
+        try:
+            result = probe(python, "transaction-full", home, root / "s2-transaction-full.json", current=True)
+            assert result["transaction_failed"] and result["rollback_verified"]
+            _assert_history(root, probe(previous, "history", home, root / "s2-full-old-history.json"))
+        finally:
+            filler.unlink(missing_ok=True)
+        result = probe(python, "repair", home, root / "s2-full-retry.json", current=True)
+        assert result["state"]["epoch"] == 3
+    elif args.phase == "copy":
         from storage.backups import _clone_file
 
         # Prove this actual destination filesystem cannot clone, independently

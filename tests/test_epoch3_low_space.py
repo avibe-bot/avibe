@@ -204,6 +204,36 @@ def test_incomplete_imports_still_repair_after_clone_or_omission(predecessor, tm
     assert (marker(predecessor) is not None) is (not cloned)
 
 
+@pytest.mark.parametrize("copy_available", [True, False])
+def test_external_reader_on_restored_delete_database_fails_closed(predecessor, monkeypatch, tmp_path, copy_available):
+    # Product edge, not our acceptance keeper: a real read transaction on a
+    # restored DELETE-mode database must not mutate it or masquerade as ENOSPC.
+    restored = tmp_path / "restored" / "vibe.sqlite"
+    restored.parent.mkdir()
+    with closing(sqlite3.connect(predecessor)) as source, closing(sqlite3.connect(restored)) as destination:
+        source.backup(destination)
+        assert destination.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+    capacity(monkeypatch, 10**12 if copy_available else 1)
+    monkeypatch.setattr(backups, "_clone_file", unsupported)
+    before = restored.read_bytes()
+    facts = migrations._epoch3_transaction_state(restored)
+    with closing(sqlite3.connect(f"{restored.as_uri()}?mode=ro", uri=True)) as reader:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM agent_events").fetchall()
+        with pytest.raises(SQLAlchemyOperationalError, match="database is locked") as caught:
+            migrations.run_migrations(restored)
+        assert not isinstance(caught.value, migrations.DatabaseDiskFullError)
+        assert not migrations._is_disk_full_error(caught.value)
+        assert restored.read_bytes() == before
+        assert migrations._epoch3_transaction_state(restored) == facts
+        assert marker(restored) is None
+    # Once the external reader leaves, the unchanged DB can be migrated normally.
+    migrations.run_migrations(restored)
+    with closing(sqlite3.connect(restored)) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261114_0089",)
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+
+
 @pytest.mark.parametrize("failure", ["full", "io"])
 def test_partial_conversion_rolls_back_schema_epoch_and_notice(predecessor, monkeypatch, failure):
     capacity(monkeypatch, 1)
