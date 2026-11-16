@@ -23,6 +23,7 @@ function lockedVault(status: 'needs-setup' | 'locked'): Vault {
     setupPasskey: forbidden,
     unlockPasskey: forbidden,
     sealValue: forbidden,
+    sealSecretInWindow: forbidden,
     signProtectedRequest: forbidden,
     approveProtectedRelease: forbidden,
     revealProtectedValue: forbidden,

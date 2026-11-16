@@ -17,13 +17,21 @@ const api = vi.hoisted(() => ({
 }));
 const box = vi.hoisted(() => ({ scheme: 'test', enc: 'enc', ct: 'ciphertext' }));
 const sealBlindBox = vi.hoisted(() => vi.fn(async () => box));
-const vault = vi.hoisted(() => ({ status: 'unlocked', refresh: vi.fn(), sealValue: vi.fn() }));
+const vault = vi.hoisted(() => ({ status: 'unlocked', refresh: vi.fn(), sealValue: vi.fn(), sealSecretInWindow: vi.fn() }));
+const popup = vi.hoisted(() => ({ opened: 0, blocked: false, close: vi.fn() }));
 vi.mock('@/context/ApiContext', async (original) => ({
   ...await original<typeof import('@/context/ApiContext')>(),
   useApi: () => api,
 }));
-vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
+vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useVaultSandboxWarm: () => true }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
+vi.mock('@/lib/vaultSandboxClient', async (original) => ({
+  ...await original<typeof import('@/lib/vaultSandboxClient')>(),
+  openVaultAuthorizationWindow: () => {
+    popup.opened += 1;
+    return popup.blocked ? null : { id: 'window-1', close: popup.close };
+  },
+}));
 vi.mock('@/lib/vaultCrypto', async (original) => ({
   ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox,
 }));
@@ -514,37 +522,95 @@ it('revalidates capacity before resealing on a record-mismatch retry', async () 
 });
 
 // Entry gating must stop ciphertext writes, not metadata management.
-it('blocks protected value writes before refresh but permits a metadata-only rename on LAN HTTP', async () => {
-  vi.stubGlobal('location', new URL('http://192.0.2.1:5123'));
-  vi.stubGlobal('isSecureContext', false);
-  const protectedSecret = { ...secret, protection: 'protected' };
-  api.updateVaultSecretFields.mockResolvedValue({ ok: true, secret: { ...protectedSecret, default_field: 'credential', fields: ['credential', 'username'] } });
-  renderEditor(protectedSecret);
-  change('Value for password', 'public-test-draft');
-  expect(lastState().valid).toBe(false);
-  expect(vault.refresh).not.toHaveBeenCalled();
-  change('Value for password', '');
+// Protected values are typed only in the secure window: the page has no value inputs, and Save opens
+// the window only when values change or a field is added (contract v1.1).
+const envelope = { ciphertext: 'ciphertext', nonce: 'nonce', wrap_meta: '{}' };
+const protectedLogin = { ...secret, protection: 'protected' } as VaultSecret;
+const resetWindow = () => { popup.opened = 0; popup.blocked = false; popup.close.mockReset(); vault.sealSecretInWindow.mockReset(); };
+
+it('protected: no value inputs on the page; a metadata-only rename saves without opening the window', async () => {
+  resetWindow();
+  api.updateVaultSecretFields.mockResolvedValue({ ok: true, secret: { ...protectedLogin, default_field: 'credential', fields: ['credential', 'username'] } });
+  renderEditor(protectedLogin);
+  expect(screen.queryByLabelText('Value for password')).toBeNull();
+  expect(screen.getAllByText(en.vaults.dialog.window.saved)).toHaveLength(2);
   change('Default field name', 'credential');
   expect(lastState().valid).toBe(true);
   expect(await save()).toBe(true);
   expect(batch()[1]).toEqual({ expected_updated_at: 'version-1', default_field: 'credential', values: [], remove: [] });
+  expect(popup.opened).toBe(0);
+  expect(vault.sealSecretInWindow).not.toHaveBeenCalled();
+});
+
+it('protected: changing values opens the window from Save, sends every kept field as optional, and saves only what was typed', async () => {
+  resetWindow();
+  vault.sealSecretInWindow.mockResolvedValue({
+    fields: [{ record: 'LOGIN', generated: false }, { record: 'LOGIN.username', envelope, generated: false }],
+    establishingVmk: false,
+  });
+  api.updateVaultSecretFields.mockResolvedValue({ ok: true, secret: protectedLogin });
+  renderEditor(protectedLogin);
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.window.changeValues }));
+  expect(screen.getAllByText(en.vaults.dialog.window.replacing)).toHaveLength(2);
+  expect(lastState()).toEqual({ dirty: true, valid: true });
+  expect(await save()).toBe(true);
+  expect(popup.opened).toBe(1);
+  const [name, mode, fields, windowId] = vault.sealSecretInWindow.mock.calls[0];
+  expect([name, mode, windowId]).toEqual(['LOGIN', 'edit', 'window-1']);
+  expect(fields.map((field: { record: string; label: string; required: boolean }) => [field.record, field.label, field.required]))
+    .toEqual([['LOGIN', 'password', false], ['LOGIN.username', 'username', false]]);
+  // The field left empty in the window keeps its value: nothing is sent for it.
+  expect(batch()[1].values).toEqual([{ field: 'username', record: 'LOGIN.username', sealed: envelope }]);
+  expect(popup.close).toHaveBeenCalled();
+  expect(sealBlindBox).not.toHaveBeenCalled();
   expect(vault.sealValue).not.toHaveBeenCalled();
 });
 
-it('seals protected values in the sandbox under their records and drops the page copies', async () => {
-  const envelope = { ciphertext: 'ciphertext', nonce: 'nonce', wrap_meta: '{}' };
-  vault.sealValue.mockImplementation(async (_name, _kind, value) => { value.clear(); return { envelope }; });
-  renderEditor({ ...secret, protection: 'protected' });
-  change('Value for password', 'secret-pass');
-  change('Value for username', '私密用户');
+it('protected: an added field is typed in the window (required), under its record', async () => {
+  resetWindow();
+  vault.sealSecretInWindow.mockResolvedValue({ fields: [{ record: 'LOGIN.totp', envelope, generated: true }], establishingVmk: false });
+  api.updateVaultSecretFields.mockResolvedValue({ ok: true, secret: { ...protectedLogin, fields: ['password', 'username', 'totp'] } });
+  renderEditor(protectedLogin);
+  fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
+  change('New field name', 'totp');
+  expect(screen.getByText(en.vaults.dialog.window.slot)).toBeTruthy();
+  expect(lastState().valid).toBe(true);
   expect(await save()).toBe(true);
-  expect(vault.sealValue.mock.calls.map((call) => (call as unknown[]).slice(0, 2))).toEqual([['LOGIN', 'static'], ['LOGIN.username', 'static']]);
-  expect(batch()[1].values).toEqual([
-    { field: 'password', record: 'LOGIN', sealed: envelope },
-    { field: 'username', record: 'LOGIN.username', sealed: envelope },
-  ]);
-  expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('');
-  expect(sealBlindBox).not.toHaveBeenCalled();
+  const fields = vault.sealSecretInWindow.mock.calls[0][2];
+  expect(fields.map((field: { record: string; required: boolean }) => [field.record, field.required])).toEqual([['LOGIN.totp', true]]);
+  expect(batch()[1].values).toEqual([{ field: 'totp', record: 'LOGIN.totp', sealed: envelope }]);
+});
+
+it('protected: a window that was closed saves nothing and says so; a blocked one opens nothing', async () => {
+  resetWindow();
+  const { VaultSandboxError } = await import('@/lib/vaultSandboxClient');
+  vault.sealSecretInWindow.mockRejectedValue(new VaultSandboxError('authorization_window_closed', 'closed', true));
+  renderEditor(protectedLogin);
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.window.changeValues }));
+  expect(await save()).toBe(false);
+  expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
+  expect((await screen.findByRole('alert')).textContent).toBe(en.vaults.dialog.window.closed);
+  cleanup();
+  resetWindow();
+  popup.blocked = true;
+  renderEditor(protectedLogin);
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.window.changeValues }));
+  expect(await save()).toBe(false);
+  expect(vault.sealSecretInWindow).not.toHaveBeenCalled();
+  expect((await screen.findByRole('alert')).textContent).toBe(en.vaults.dialog.window.blocked);
+});
+
+it('protected: a record mismatch does not reuse what was typed: it asks to save again', async () => {
+  resetWindow();
+  vault.sealSecretInWindow.mockResolvedValue({ fields: [{ record: 'LOGIN', envelope, generated: false }, { record: 'LOGIN.username', generated: false }], establishingVmk: false });
+  api.updateVaultSecretFields.mockResolvedValueOnce({ ok: false, code: 'record_mismatch', message: 'stale record' });
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [protectedLogin] });
+  renderEditor(protectedLogin);
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.window.changeValues }));
+  expect(await save()).toBe(false);
+  expect(vault.sealSecretInWindow).toHaveBeenCalledOnce();
+  expect(api.updateVaultSecretFields).toHaveBeenCalledOnce();
+  expect((await screen.findByRole('alert')).textContent).toBe(en.vaults.fields.recordConflict);
 });
 
 it('re-reads metadata and re-seals exactly once after a record mismatch', async () => {

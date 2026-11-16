@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useApi, type VaultFieldsBatchPayload, type VaultSecret } from '@/context/ApiContext';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
-import { useProtectedVault } from '@/lib/useProtectedVault';
+import { useProtectedVault, useVaultSandboxWarm } from '@/lib/useProtectedVault';
+import { openVaultAuthorizationWindow, type SecureWindowSealField, type VaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
+import { secureWindowFailure } from '@/lib/vaultSecureWindow';
+import { ProtectedHdDesignState } from '@/lib/protectedHdDesign';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { MAX_VAULT_FIELDS, vaultDefaultField, vaultFieldNameIssue, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
@@ -20,6 +23,7 @@ import {
   VaultFieldsHeader,
 } from './vault-field-list';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
+import { SecureWindowCell } from './vault-secure-window-slot';
 import { VaultGenerateControl, VaultGeneratedBadge } from './vault-generate';
 import { VaultGeneratedOrigins } from './vault-generated-origin';
 import { DEFAULT_PASSWORD_RECIPE, type GenerateRecipe } from '@/lib/vaultGenerate';
@@ -148,6 +152,8 @@ export function VaultSecretFieldsEditor({
   const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
   const [saved, setSaved] = useState(false);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  // Protected: values are changed only in the secure window, opened by Save when asked for here.
+  const [changeValues, setChangeValues] = useState(false);
   const fields = vaultFieldNames(current);
   const defaultField = vaultDefaultField(current);
   const isProtected = current.protection === 'protected';
@@ -157,11 +163,16 @@ export function VaultSecretFieldsEditor({
   const locked = disabled || busy;
   const fieldsCorrupt = current.fields_state === 'corrupt';
   const fieldMutationLocked = locked || fieldsCorrupt;
-  const canWriteValue = !isProtected || (!entryIssue && vault.status === 'unlocked');
+  // A Protected value is typed in the secure window, which unlocks the vault itself. Design frames
+  // draw a locked vault with the window ready (lib/protectedHdDesign).
+  const design = useContext(ProtectedHdDesignState) !== null;
+  const windowWarm = useVaultSandboxWarm(isProtected && !entryIssue && !design) || design;
+  const vaultStatus = design ? 'locked' : vault.status;
+  const canWriteValue = !isProtected || (!entryIssue && windowWarm && (vaultStatus === 'unlocked' || vaultStatus === 'locked'));
 
   useEffect(() => {
-    if (isProtected && !entryIssue) void refresh();
-  }, [isProtected, entryIssue, refresh]);
+    if (isProtected && !entryIssue && !design) void refresh();
+  }, [isProtected, entryIssue, design, refresh]);
 
   const hasErrorCode = (result: unknown, code: string): boolean =>
     typeof result === 'object' && result !== null && 'code' in result && result.code === code;
@@ -306,7 +317,10 @@ export function VaultSecretFieldsEditor({
         }
       }
     } catch (err) {
-      if (hasErrorCode(err, 'secret_conflict')) {
+      const windowMessage = secureWindowFailure(t, err);
+      if (windowMessage !== null) {
+        if (windowMessage) setError(windowMessage);
+      } else if (hasErrorCode(err, 'secret_conflict')) {
         try {
           const refreshed = await refetch();
           if (refreshed.status === 'missing') {
@@ -347,13 +361,29 @@ export function VaultSecretFieldsEditor({
     if (fieldsCorrupt || locked || !valid) return false;
     const captured = new Map<string, string>();
     for (const [field, value] of draftsRef.current) if (value && !removed.includes(field)) captured.set(field, value);
-    const adding = newField !== null && newValue ? { field: newField, value: newValue } : null;
+    const adding = newField !== null && (newValue || isProtected) ? { field: newField, value: newValue } : null;
+    // Protected values are typed in the secure window, opened by this click before anything is
+    // awaited (protocol v2 §6.6): only when values change or a field is added.
+    let secureWindow: VaultAuthorizationWindow | null = null;
+    if (isProtected && (changeValues || adding)) {
+      try {
+        secureWindow = openVaultAuthorizationWindow();
+      } catch (err: unknown) {
+        setError(vaultErrorMessage(t, err, t('vaults.dialog.errors.updateFailed')));
+        return false;
+      }
+      if (!secureWindow) {
+        setError(t('vaults.dialog.window.blocked'));
+        return false;
+      }
+    }
+    let windowUsed = false;
     // The default field as the user saw it: its draft follows the default, any other draft must
     // stay an extra field (if another write made it the default meanwhile, that is a conflict).
     const capturedDefault = vaultDefaultField(currentRef.current);
     const renameTo = defaultLabel !== capturedDefault ? defaultLabel : null;
     const removing = [...removed];
-    if (!captured.size && !adding && !renameTo && !removing.length) return true;
+    if (!captured.size && !adding && !renameTo && !removing.length && !secureWindow) return true;
     const clearAll = () => {
       updateDrafts(new Map());
       setNewValue('');
@@ -378,10 +408,31 @@ export function VaultSecretFieldsEditor({
           entries.push([field, value]);
         }
       }
-      if (adding) entries.push([adding.field, adding.value]);
-      for (const [field, value] of entries) {
-        const record = vaultRecordName(truth.name, field, finalDefault);
-        values.push({ field, record, ...(await sealFor(record, value, clearAll)) });
+      if (secureWindow) {
+        // One window per Save: a write that must be redone (a record name changed meanwhile) asks
+        // the person to save again rather than reusing what was typed.
+        if (windowUsed) throw conflict();
+        windowUsed = true;
+        const kept = names.filter((field) => !removing.includes(field)).map((field) => (field === oldDefault ? finalDefault : field));
+        const windowFields: SecureWindowSealField[] = [
+          ...(changeValues ? kept.map((field) => ({
+            record: vaultRecordName(truth.name, field, finalDefault),
+            label: field,
+            required: false,
+            generate: recipesRef.current.get(field === finalDefault ? oldDefault : field) ?? DEFAULT_PASSWORD_RECIPE,
+          })) : []),
+          ...(adding ? [{ record: vaultRecordName(truth.name, adding.field, finalDefault), label: adding.field, required: true, generate: newRecipe }] : []),
+        ];
+        const sealed = await vault.sealSecretInWindow(truth.name, 'edit', windowFields, secureWindow.id);
+        for (const [index, field] of sealed.fields.entries()) {
+          if (field.envelope) values.push({ field: windowFields[index].label, record: field.record, sealed: field.envelope });
+        }
+      } else {
+        if (adding) entries.push([adding.field, adding.value]);
+        for (const [field, value] of entries) {
+          const record = vaultRecordName(truth.name, field, finalDefault);
+          values.push({ field, record, ...(await sealFor(record, value, clearAll)) });
+        }
       }
       try {
         return await api.updateVaultSecretFields(truth.name, {
@@ -412,11 +463,13 @@ export function VaultSecretFieldsEditor({
           clearAll();
           setNewField(null);
           setRemoved([]);
+          setChangeValues(false);
         }
         return result;
       }, Boolean(renameTo), () => refetchedForRetry);
     } finally {
       captured.clear();
+      secureWindow?.close();
     }
   };
 
@@ -448,13 +501,13 @@ export function VaultSecretFieldsEditor({
   const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
   const renaming = defaultLabel !== defaultField;
   const hasValues = [...drafts].some(([field, value]) => Boolean(value) && !removed.includes(field));
-  const dirty = hasValues || renaming || removed.length > 0 || (newField !== null && (Boolean(newValue) || Boolean(newField)));
+  const dirty = hasValues || renaming || removed.length > 0 || changeValues || (newField !== null && (Boolean(newValue) || Boolean(newField)));
   // Corrupt field metadata blocks field changes, not the dialog: with nothing drafted here its
   // Save still saves description, tags and policy.
   const valid = !dirty || (!fieldsCorrupt
     && layout.valid
-    && (newField === null || Boolean(newValue))
-    && (!(hasValues || (newField !== null && newValue)) || canWriteValue));
+    && (newField === null || isProtected || Boolean(newValue))
+    && (!(hasValues || changeValues || (newField !== null && (newValue || isProtected))) || canWriteValue));
   // The latest commit for the dialog's Save, refreshed after every render.
   useLayoutEffect(() => {
     commitRef.current = { dirty: () => dirty, commit: commitAll };
@@ -501,7 +554,7 @@ export function VaultSecretFieldsEditor({
                 onFocus: () => setFocusedName('default'),
                 onBlur: () => setFocusedName(null),
               } : { editable: false, title: t('vaults.fields.extraNotRenamable') }}
-              value={{
+              value={isProtected ? undefined : {
                 value: draft,
                 label: t('vaults.fields.value', { field }),
                 placeholder: t('vaults.fields.replacePlaceholder'),
@@ -509,6 +562,9 @@ export function VaultSecretFieldsEditor({
                 forceReveal: generatorOpen === field,
                 generated: Boolean(draft) && generated.has(field),
               }}
+              valueNote={changeValues
+                ? <SecureWindowCell tone="mint" label={t('vaults.dialog.window.replacing')} />
+                : <SecureWindowCell label={t('vaults.dialog.window.saved')} />}
               note={draft && generated.has(field) && generatorOpen !== field ? <VaultGeneratedBadge /> : undefined}
               wrapValue={(input) => (
                 <VaultGenerateControl
@@ -547,7 +603,7 @@ export function VaultSecretFieldsEditor({
               onBlur: () => setFocusedName(null),
               autoFocus: true,
             }}
-            value={{
+            value={isProtected ? undefined : {
               value: newValue,
               label: t('vaults.fields.newValue'),
               placeholder: t('vaults.dialog.valuePlaceholder'),
@@ -558,6 +614,7 @@ export function VaultSecretFieldsEditor({
               forceReveal: generatorOpen === NEW_FIELD,
               generated: Boolean(newValue) && newGenerated,
             }}
+            valueNote={<SecureWindowCell tone="mint" label={t('vaults.dialog.window.slot')} />}
             note={newValue && newGenerated && generatorOpen !== NEW_FIELD ? <VaultGeneratedBadge /> : undefined}
             wrapValue={(input) => (
               <VaultGenerateControl
@@ -579,7 +636,7 @@ export function VaultSecretFieldsEditor({
             // An empty new row is skipped by Save only while nothing else changed; then its blank
             // name is no error, and leaving it says nothing (and moves nothing). Once it blocks Save
             // (it has a value, or other changes make it count), the error shows at once, not on blur.
-            issue={newIssue === 'nameRequired' && !newValue && !dirty ? null : newIssue}
+            issue={newIssue === 'nameRequired' && !newValue && !dirty && !isProtected ? null : newIssue}
             disabled={fieldMutationLocked}
           />
         )}
@@ -593,8 +650,17 @@ export function VaultSecretFieldsEditor({
         </p>
       ) : null}
       <VaultFieldNameRule shown={showNameRule} />
+      {isProtected ? (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Button type="button" variant="secondary" size="xs" disabled={fieldMutationLocked} aria-pressed={changeValues}
+            onClick={() => setChangeValues((on) => !on)}>
+            {t(changeValues ? 'vaults.dialog.window.keep' : 'vaults.dialog.window.changeValues')}
+          </Button>
+          <span className="text-[11.5px] leading-snug text-muted">{t('vaults.dialog.window.editHint')}</span>
+        </div>
+      ) : null}
       <VaultFieldReferences secretName={current.name} fields={fields} defaultField={defaultField} />
-      {isProtected && <VaultProtectedUnlock warnDraftDiscard vault={vault} secretName={current.name}
+      {isProtected && (entryIssue || (vaultStatus !== 'locked' && vaultStatus !== 'unlocked')) && <VaultProtectedUnlock warnDraftDiscard vault={vault} secretName={current.name}
         onContinueInBrowser={() => openVaultsInBrowser({ kind: 'edit', secretName: current.name })} />}
       {busy && <Loader2 className="size-4 animate-spin text-muted" />}
       {saved && <p role="status" className="text-xs text-mint-ink">{t('vaults.fields.saved')}</p>}

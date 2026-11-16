@@ -26,12 +26,17 @@ const api = vi.hoisted(() => ({
 const blindBox = vi.hoisted(() => ({ scheme: 'test', enc: 'enc', ct: 'ciphertext' }));
 const sealBlindBox = vi.hoisted(() => vi.fn(async () => blindBox));
 const envelope = vi.hoisted(() => ({ ciphertext: 'ciphertext', nonce: 'nonce', wrap_meta: '{}' }));
-const vault = vi.hoisted(() => ({ status: 'unlocked', refresh: vi.fn(), afterCreated: vi.fn(), sealValue: vi.fn() }));
+const vault = vi.hoisted(() => ({ status: 'unlocked', refresh: vi.fn(), afterCreated: vi.fn(), sealValue: vi.fn(), sealSecretInWindow: vi.fn() }));
+const popup = vi.hoisted(() => ({ close: vi.fn() }));
 vi.mock('@/context/ApiContext', async (original) => ({
   ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api,
 }));
 vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useProtectedHdSupported: () => null, useVaultSandboxWarm: () => true }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
+vi.mock('@/lib/vaultSandboxClient', async (original) => ({
+  ...await original<typeof import('@/lib/vaultSandboxClient')>(),
+  openVaultAuthorizationWindow: () => ({ id: 'window-1', close: popup.close }),
+}));
 vi.mock('@/lib/vaultCrypto', async (original) => ({
   ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox,
 }));
@@ -111,7 +116,7 @@ it('keeps the size box exact: out-of-range typing is not applied and snaps back'
   expect(valueInput().value).toHaveLength(32);
 });
 
-it.each(['standard', 'protected'] as const)('saves exactly the value the field shows, sealed only at Save (%s)', async (protection) => {
+it.each(['standard'] as const)('saves exactly the value the field shows, sealed only at Save (%s)', async (protection) => {
   const onCreated = vi.fn();
   render(form(<VaultSecretForm fixedName="DB_PASSWORD" defaultProtection={protection} onCancel={vi.fn()} onCreated={onCreated} />));
   openGenerator();
@@ -226,17 +231,24 @@ it('lets the length be typed digit by digit in the same box', () => {
   expect(valueInput().value).toHaveLength(100);
 });
 
-it('keeps no copy of a protected generated value once sealing clears the field, even when saving fails', async () => {
-  vault.sealValue.mockImplementation(async (_name: string, _kind: string, value: { clear: () => void }) => {
-    value.clear();
-    throw Object.assign(new Error('boom'), { code: 'sandbox_reset' });
-  });
-  render(form(<VaultSecretForm fixedName="DB_PASSWORD" defaultProtection="protected" onCancel={vi.fn()} onCreated={vi.fn()} />));
-  openGenerator();
-  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+it('protected: no value or generator on the page; Save hands the window the generator settings', async () => {
+  const onCreated = vi.fn();
+  vault.sealSecretInWindow.mockImplementation(async (_name: string, _mode: string, fields: Array<{ record: string }>) => ({
+    fields: fields.map((field) => ({ record: field.record, envelope, generated: true })),
+    establishingVmk: false,
+  }));
+  render(form(<VaultSecretForm fixedName="DB_PASSWORD" defaultProtection="protected" requestSpec={{ generate: { type: 'hex', bytes: 32 } }} onCancel={vi.fn()} onCreated={onCreated} />));
+  expect(screen.queryByLabelText(en.vaults.dialog.value)).toBeNull();
+  expect(screen.queryByRole('button', { name: en.vaults.generate.password })).toBeNull();
+  expect(screen.getByText(en.vaults.dialog.window.slot)).toBeTruthy();
   await waitFor(() => expect(submit().disabled).toBe(false));
   await act(async () => { fireEvent.click(submit()); });
-  await waitFor(() => expect(vault.sealValue).toHaveBeenCalled());
-  expect(valueInput().value).toBe('');
-  expect(screen.queryByText(en.vaults.generate.generated)).toBeNull();
+  await waitFor(() => expect(onCreated).toHaveBeenCalledWith('DB_PASSWORD', 'created'));
+  const [name, mode, fields, windowId] = vault.sealSecretInWindow.mock.calls[0];
+  expect([name, mode, windowId]).toEqual(['DB_PASSWORD', 'create', 'window-1']);
+  // The Agent's suggestion goes to the window, which generates with it.
+  expect(fields).toEqual([{ record: 'DB_PASSWORD', label: 'value', required: true, generate: { type: 'hex', bytes: 32 } }]);
+  expect(api.createVaultSecret.mock.calls[0][0].sealed).toEqual(envelope);
+  expect(vault.sealValue).not.toHaveBeenCalled();
+  expect(popup.close).toHaveBeenCalled();
 });

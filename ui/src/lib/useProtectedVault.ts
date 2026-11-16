@@ -16,6 +16,8 @@ import {
   resetVaultSandboxClient,
   subscribeVaultStateEvents,
   type ApproveReleaseItem,
+  type SecureWindowSealField,
+  type SecureWindowSealResult,
   type VaultSandboxSealResult,
   type VaultSandboxSignScheme,
   type VaultSandboxSigningContext,
@@ -760,6 +762,36 @@ export function useProtectedVault() {
     [syncProtectedOperationStatus],
   );
 
+  /**
+   * Seal a static secret whose values the person types in the secure window: the page sends only
+   * the fields' names (and generator settings), never a value. A locked vault is unlocked in that
+   * window; values go from the window to the sandbox frame only.
+   */
+  const sealSecretInWindow = useCallback(
+    async (
+      secret: string,
+      mode: 'create' | 'edit',
+      fields: SecureWindowSealField[],
+      authorizationWindow: string,
+    ): Promise<SecureWindowSealResult & { authzFactorRegistration?: VaultWebAuthnRegistrationPayload }> => {
+      assertVaultEntryAvailable();
+      assertDurableSetupReady();
+      const wrapMeta = sessionVault.wrapMeta;
+      if (!wrapMeta) throw new Error('vault-not-setup');
+      const sandbox = await getVaultSandboxClient();
+      try {
+        const sealed = await sandbox.sealInWindow({ secret, mode, wrapMeta, fields }, authorizationWindow);
+        return {
+          ...sealed,
+          authzFactorRegistration: sessionVault.freshSetup ? (sessionVault.authzFactorRegistration ?? undefined) : undefined,
+        };
+      } finally {
+        void syncProtectedOperationStatus(wrapMeta).catch(() => undefined);
+      }
+    },
+    [syncProtectedOperationStatus],
+  );
+
   const lock = useCallback(() => {
     void lockVault(true);
     setStatus(vaultStatusNow());
@@ -801,6 +833,7 @@ export function useProtectedVault() {
     setupPasskey,
     unlockPasskey,
     sealValue,
+    sealSecretInWindow,
     sealHdWallet,
     signProtectedRequest,
     approveProtectedRelease,

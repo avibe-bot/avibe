@@ -28,7 +28,7 @@ vi.mock('@/context/ApiContext', async (original) => ({
   ...await original<typeof import('@/context/ApiContext')>(),
   useApi: () => api,
 }));
-vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
+vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useVaultSandboxWarm: () => true }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({
   ...await original<typeof import('@/lib/vaultCrypto')>(), sealBlindBox,
@@ -162,24 +162,10 @@ it('keeps a generated draft through a staged removal and Undo, and never sends a
   expect(sealBlindBox).not.toHaveBeenCalled();
 });
 
-it('seals a protected generated value only at Save, and clears the page copy and its mark', async () => {
-  const envelope = { ciphertext: 'ciphertext', nonce: 'nonce', wrap_meta: '{}' };
-  const sealed: string[] = [];
-  vault.sealValue.mockImplementation(async (_name, _kind, value) => {
-    sealed.push(value.valueRef.current);
-    value.clear();
-    return { envelope };
-  });
+it('a protected secret has no generator on the page: its values are generated in the secure window', () => {
   renderEditor({ ...secret, protection: 'protected' });
-  fireEvent.click(rowGenerator(0));
-  const shown = valueOf('Value for password');
-  await closePopup();
-  expect(vault.sealValue).not.toHaveBeenCalled();
-  expect(await save()).toBe(true);
-  expect(sealed).toEqual([shown]);
-  expect(batch()[1].values).toEqual([{ field: 'password', record: 'LOGIN', sealed: envelope }]);
-  expect(valueOf('Value for password')).toBe('');
-  expect(screen.queryByText(en.vaults.generate.generated)).toBeNull();
+  expect(screen.queryByLabelText('Value for password')).toBeNull();
+  expect(screen.queryAllByRole('button', { name: en.vaults.generate.password })).toHaveLength(0);
 });
 
 it.each([

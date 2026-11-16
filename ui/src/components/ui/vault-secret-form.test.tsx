@@ -31,6 +31,7 @@ const sealBlindBox = vi.hoisted(() => vi.fn(async () => blindBox));
 const vault = vi.hoisted(() => ({
   status: 'unlocked', refresh: vi.fn(), afterCreated: vi.fn(),
   sealValue: vi.fn(),
+  sealSecretInWindow: vi.fn(),
   setupVaultDurably: vi.fn(),
 }));
 vi.mock('@/context/ApiContext', async (original) => ({
@@ -83,6 +84,11 @@ beforeEach(async () => {
     value.clear();
     return { envelope, establishingVmk: true, authzFactorRegistration: { challenge_id: 'setup' } };
   });
+  vault.sealSecretInWindow.mockImplementation(async (_name: string, _mode: string, fields: Array<{ record: string }>) => ({
+    fields: fields.map((field) => ({ record: field.record, envelope, generated: false })),
+    establishingVmk: true,
+    authzFactorRegistration: { challenge_id: 'setup' },
+  }));
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
@@ -91,11 +97,13 @@ it('blocks protected creation before refresh/seal at an unsupported address, eve
   vi.stubGlobal('isSecureContext', false);
   const cancel = vi.fn();
   render(form(<VaultSecretForm fixedName="TOKEN" defaultProtection="protected" onCancel={cancel} onCreated={vi.fn()} />));
-  fireEvent.change(screen.getByPlaceholderText(en.vaults.dialog.valuePlaceholder), { target: { value: 'public-test-draft' } });
+  // A Protected value is typed in the secure window: no input for it here.
+  expect(screen.queryByPlaceholderText(en.vaults.dialog.valuePlaceholder)).toBeNull();
   expect(submitButton().disabled).toBe(true);
   fireEvent.click(submitButton());
   expect(vault.refresh).not.toHaveBeenCalled();
   expect(vault.sealValue).not.toHaveBeenCalled();
+  expect(vault.sealSecretInWindow).not.toHaveBeenCalled();
   expect(api.createVaultSecret).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: en.vaults.request.dismiss }));
   expect(cancel).toHaveBeenCalledOnce();
@@ -141,10 +149,15 @@ it.each(['standard', 'protected'] as const)('creates a complete %s login with ca
   applyTemplate('Login + 2FA');
   expect(screen.queryByRole('radio', { name: 'File' })).toBeNull();
   const submit = screen.getByRole('button', { name: 'Save & let the agent continue' }) as HTMLButtonElement;
-  change('Value for username', '张三');
-  change('Value for password', '密碼');
-  expect(submit.disabled).toBe(true);
-  change('Value for totp', 'seed');
+  if (protection === 'standard') {
+    change('Value for username', '张三');
+    change('Value for password', '密碼');
+    expect(submit.disabled).toBe(true);
+    change('Value for totp', 'seed');
+  } else {
+    // Typed in the secure window: no value inputs here.
+    expect(screen.queryByLabelText('Value for username')).toBeNull();
+  }
   await waitFor(() => expect(submit.disabled).toBe(false));
   fireEvent.click(submit);
   await waitFor(() => expect(onCreated).toHaveBeenCalledWith('GITHUB_LOGIN', 'created'));
@@ -164,7 +177,13 @@ it.each(['standard', 'protected'] as const)('creates a complete %s login with ca
       { name: 'totp', record: 'GITHUB_LOGIN.totp', blind_box: blindBox },
     ]);
   } else {
-    expect(vault.sealValue.mock.calls.map((call) => call[0])).toEqual(['GITHUB_LOGIN.username', 'GITHUB_LOGIN', 'GITHUB_LOGIN.totp']);
+    const [name, mode, fields, windowId] = vault.sealSecretInWindow.mock.calls[0];
+    expect([name, mode, windowId]).toEqual(['GITHUB_LOGIN', 'create', 'win']);
+    expect(fields.map((field: { record: string; label: string; required: boolean }) => [field.record, field.label, field.required])).toEqual([
+      ['GITHUB_LOGIN.username', 'username', true], ['GITHUB_LOGIN', 'password', true], ['GITHUB_LOGIN.totp', 'totp', true],
+    ]);
+    expect(vault.sealValue).not.toHaveBeenCalled();
+    expect(sandbox.windowClose).toHaveBeenCalled();
     expect(payload.sealed).toEqual(envelope);
     expect(payload.establishing_vmk).toBe(true);
     expect(payload.authz_factor_registration).toEqual({ challenge_id: 'setup' });
@@ -816,4 +835,31 @@ describe('the edit dialog saves its fields with its one Save', () => {
     expect(onCancel).toHaveBeenCalledOnce();
     expect(api.updateVaultSecretFields).not.toHaveBeenCalled();
   });
+});
+
+it.each([
+  ['authorization_window_closed', en.vaults.dialog.window.closed],
+  ['authorization_cancelled', en.vaults.dialog.window.cancelled],
+  ['authorization_window_timeout', en.vaults.dialog.window.timeout],
+])('protected: a secure window that ends with %s saves nothing and says so', async (code, message) => {
+  const { VaultSandboxError } = await import('@/lib/vaultSandboxClient');
+  vault.sealSecretInWindow.mockRejectedValueOnce(new VaultSandboxError(code, 'x', true));
+  const onCreated = vi.fn();
+  render(form(<VaultSecretForm fixedName="TOKEN" defaultProtection="protected" onCancel={vi.fn()} onCreated={onCreated} />));
+  await waitFor(() => expect(submitButton().disabled).toBe(false));
+  await act(async () => { fireEvent.click(submitButton()); });
+  expect(await screen.findByText(message)).toBeTruthy();
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  expect(onCreated).not.toHaveBeenCalled();
+  expect(sandbox.windowClose).toHaveBeenCalled();
+});
+
+it('protected: a blocked secure window opens nothing and says how to allow it', async () => {
+  sandbox.windowBlocked = true;
+  render(form(<VaultSecretForm fixedName="TOKEN" defaultProtection="protected" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  await waitFor(() => expect(submitButton().disabled).toBe(false));
+  await act(async () => { fireEvent.click(submitButton()); });
+  expect(await screen.findByText(en.vaults.dialog.window.blocked)).toBeTruthy();
+  expect(vault.sealSecretInWindow).not.toHaveBeenCalled();
+  sandbox.windowBlocked = false;
 });

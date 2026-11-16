@@ -43,6 +43,7 @@ import {
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
 import { assertVaultEntryAvailable } from './vaultEntry';
+import type { GenerateRecipe } from './vaultGenerate';
 import { recordVaultPasskeyOutcome, vaultPasskeyHandoff } from './vaultBrowserHandoff';
 import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
@@ -184,6 +185,50 @@ export type VaultSandboxSealResult = {
   publicKey?: string;
   addresses?: SigningAddresses;
 };
+
+/** One value a person types in the secure window (contract "seal a whole Protected secret with values
+ *  typed in the secure window" v1.1). `record` is the record name it is sealed under; `label` is the
+ *  field's name as shown; a field that is not `required` may be left empty, which keeps its value. */
+export type SecureWindowSealField = { record: string; label: string; required: boolean; generate?: GenerateRecipe };
+export type SecureWindowSealResult = {
+  /** In request order. No envelope only for a non-required field left empty (keep its value). */
+  fields: Array<{ record: string; envelope?: ProtectedRecordEnvelope; generated: boolean }>;
+  establishingVmk: boolean;
+};
+
+const isRecordLike = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Checks the window's answer against what was asked: the same records in the same order, an
+ *  envelope for every required field, and nothing else trusted. */
+export function parseSecureWindowSeal(fields: readonly SecureWindowSealField[], reply: unknown): SecureWindowSealResult {
+  const bad = (message: string) => new VaultSandboxError('invalid_response', message);
+  if (!isRecordLike(reply) || !Array.isArray(reply.fields) || typeof reply.establishingVmk !== 'boolean') {
+    throw bad('secure-window seal returned an unexpected result');
+  }
+  if (reply.fields.length !== fields.length) throw bad('secure-window seal returned a different number of fields');
+  const out = reply.fields.map((entry, index) => {
+    const asked = fields[index];
+    if (!isRecordLike(entry) || entry.record !== asked.record || typeof entry.generated !== 'boolean') {
+      throw bad('secure-window seal returned a field out of order');
+    }
+    const envelope = entry.envelope;
+    if (envelope === undefined) {
+      if (asked.required) throw bad('secure-window seal left a required field empty');
+      return { record: asked.record, generated: false };
+    }
+    if (!isRecordLike(envelope) || typeof envelope.ciphertext !== 'string' || typeof envelope.nonce !== 'string'
+      || typeof envelope.wrap_meta !== 'string') {
+      throw bad('secure-window seal returned an invalid envelope');
+    }
+    return {
+      record: asked.record,
+      envelope: { ciphertext: envelope.ciphertext, nonce: envelope.nonce, wrap_meta: envelope.wrap_meta },
+      generated: entry.generated,
+    };
+  });
+  return { fields: out, establishingVmk: reply.establishingVmk };
+}
 
 /** One member of a batch `approveRelease` — the sandbox releases one blind box per item. */
 export type ApproveReleaseItem = {
@@ -978,6 +1023,19 @@ export class VaultSandboxClient {
       interactive: true,
       authorizationWindow,
     });
+  }
+
+  /** Seal a whole static secret whose values are typed in the secure window (never on the page). */
+  async sealInWindow(
+    payload: { secret: string; mode: 'create' | 'edit'; wrapMeta: string; fields: SecureWindowSealField[] },
+    authorizationWindow: string,
+  ): Promise<SecureWindowSealResult> {
+    const reply = await this.request<unknown>('seal', { kind: 'static', inputMode: 'secure-window', ...payload }, {
+      timeoutMs: INTERACTIVE_TIMEOUT_MS,
+      interactive: true,
+      authorizationWindow,
+    });
+    return parseSecureWindowSeal(payload.fields, reply);
   }
 
   /** Whether the pinned build offers an optional operation (from its `ready` capabilities). */

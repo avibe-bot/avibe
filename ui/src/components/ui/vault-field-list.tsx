@@ -91,13 +91,16 @@ type FieldRemoveSpec = {
 };
 
 export function VaultFieldRow({
-  field, name, isDefault, value, action, note, wrapValue, onSetDefault, remove, issue, disabled,
+  field, name, isDefault, value, valueNote, action, note, wrapValue, onSetDefault, remove, issue, disabled,
 }: {
   /** The row's current name, used in labels and the phone menu's title. */
   field: string;
   name: FieldNameSpec;
   isDefault: boolean;
-  value: FieldValueSpec;
+  /** The value input; a Protected value typed only in the secure window has none (see `valueNote`). */
+  value?: FieldValueSpec;
+  /** Drawn where the value input would be, for a value the page never holds. */
+  valueNote?: ReactNode;
   /** Trailing control beside the value, such as a row's Save button. */
   action?: ReactNode;
   /** A line under the row, e.g. the generated mark. */
@@ -236,10 +239,10 @@ export function VaultFieldRow({
           ) : null}
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          {(wrapValue ?? ((input: ReactNode) => input))(
+          {value ? (wrapValue ?? ((input: ReactNode) => input))(
             <VaultFieldValueInput field={field} {...value} disabled={disabled} invalid={valueInvalid}
               describedBy={valueInvalid ? errorId : undefined} />,
-          )}
+          ) : <div className="flex min-w-0 flex-1 items-center">{valueNote}</div>}
           {action}
           {remove ? (
             <Button

@@ -5,6 +5,7 @@ import {
   Check,
   Eye,
   EyeOff,
+  ExternalLink,
   FileText,
   KeyRound,
   Loader2,
@@ -54,6 +55,9 @@ import {
 import { useProtectedHdSupported, useProtectedVault, useVaultSandboxWarm } from '@/lib/useProtectedVault';
 import { protectedHdBusy, protectedHdSubmitted, useProtectedHdCreate } from '@/lib/useProtectedHdCreate';
 import { ProtectedHdDesignState } from '@/lib/protectedHdDesign';
+import { openVaultAuthorizationWindow, type SecureWindowSealField, type VaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
+import { secureWindowFailure } from '@/lib/vaultSecureWindow';
+import { SecureWindowCell, SecureWindowSlot } from './vault-secure-window-slot';
 import { nameIssueAmong, rememberAddTier, rememberedAddTier, type NameIssue } from '@/lib/vaultNameCheck';
 import { askTurnOffNoteShown, useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
@@ -486,6 +490,15 @@ export const VaultSecretForm: React.FC<{
   const nameInvalid = secretName.length > 0 && !secretNameValid;
   const protectedCreateReady = !entryIssue && protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
+  // A new Protected static secret: its values are typed in the secure window, never on this page
+  // (contract "seal a whole Protected secret with values typed in the secure window" v1.1). The window
+  // unlocks the vault itself, so a locked vault is enough; one must exist to hold it.
+  const protectedStaticInWindow = !editSecret && protection === 'protected' && !isKeypair;
+  // Design frames draw a locked vault with the window ready (lib/protectedHdDesign).
+  const protectedWindowWarm = useVaultSandboxWarm(protectedStaticInWindow && !entryIssue && !hdDesign) || hdDesign;
+  const protectedStaticStatus = hdDesign ? 'locked' : protectedVault.status;
+  const protectedStaticReady = protectedStaticInWindow && !entryIssue && protectedWindowWarm
+    && (protectedStaticStatus === 'locked' || protectedStaticStatus === 'unlocked');
   // A Solana key: avault creates it on the standard tier, the sandbox on the protected tier.
   const isSolanaKey = !editSecret && isKeypair && chain === 'solana';
   const isHd = !editSecret && isKeypair && chain === 'mnemonic';
@@ -581,7 +594,11 @@ export const VaultSecretForm: React.FC<{
     };
   }, [signingKey, api]);
 
-  const staticValueReady = fieldRows
+  const staticValueReady = protectedStaticInWindow
+    // The values come from the secure window: here only the fields' names must be ready.
+    ? !fieldRows || (fieldRows.every((field) => VAULT_FIELD_PATTERN.test(field.name)) &&
+      new Set(fieldRows.map((field) => field.name)).size === fieldRows.length)
+    : fieldRows
     ? fieldRows.every((field) => field.value && VAULT_FIELD_PATTERN.test(field.name)) &&
       new Set(fieldRows.map((field) => field.name)).size === fieldRows.length
     : staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
@@ -609,7 +626,8 @@ export const VaultSecretForm: React.FC<{
       !submitting &&
       (isHd
         ? (protection === 'standard' && hdReady) || (protectedHdReady && !protectedHdBusy(protectedHd.phase) && !protectedHdSubmitted(protectedHd.phase))
-        : (protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
+        : (protection === 'standard' && p2Ready)
+          || (protectedStaticInWindow ? protectedStaticReady : protection === 'protected' && protectedCreateReady));
 
   // Why Create is disabled, one reason at a time and in the order the form is filled in: the name,
   // then what the key needs, then the tier's readiness. A reason is shown only when the user can act
@@ -623,6 +641,8 @@ export const VaultSecretForm: React.FC<{
     if (!fixedName && !secretName) return t(isHd ? 'vaults.dialog.nameRequiredWallet' : 'vaults.dialog.nameRequired');
     if (nameInvalid || currentNameIssue) return null;
     if (!valueReady) {
+      // Typed in the secure window: only a field row's name can be missing, and its row says so.
+      if (protectedStaticInWindow) return null;
       if (!isKeypair) {
         if (fieldRows) return fieldRowsNamed && fieldRows.some((field) => !field.value) ? t('vaults.dialog.createNeedsValue') : null;
         return staticSource === 'text' && !value ? t('vaults.dialog.createNeedsValue') : null;
@@ -641,7 +661,8 @@ export const VaultSecretForm: React.FC<{
     if (protection === 'protected') {
       // Only where the panel above offers the step: setting up (and, for a key, unlocking).
       const status = protectedVaultStatus;
-      const actionable = isHd ? protectedHdSupported !== false && status === 'needs-setup' : status === 'needs-setup' || status === 'locked';
+      const actionable = isHd ? protectedHdSupported !== false && status === 'needs-setup'
+        : protectedStaticInWindow ? status === 'needs-setup' : status === 'needs-setup' || status === 'locked';
       return actionable ? t('vaults.dialog.createNeedsProtected') : null;
     }
     // On a seed wallet the avault notice is drawn only once avault was read.
@@ -916,13 +937,57 @@ export const VaultSecretForm: React.FC<{
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
+    const normalizedFetchAuthName = fetchAuthName.trim();
+    if (!isHd && fetchAuthMode === 'header') {
+      if (!normalizedFetchAuthName) {
+        setError(t('vaults.dialog.errors.authNameRequired'));
+        return;
+      }
+      if (!HTTP_HEADER_TOKEN_RE.test(normalizedFetchAuthName)) {
+        setError(t('vaults.dialog.errors.authHeaderInvalid'));
+        return;
+      }
+      if (normalizedFetchAuthName.toLowerCase() === 'host') {
+        setError(t('vaults.dialog.errors.authHeaderForbidden'));
+        return;
+      }
+    }
+    if (!isHd && fetchAuthMode === 'query') {
+      if (!normalizedFetchAuthName) {
+        setError(t('vaults.dialog.errors.authNameRequired'));
+        return;
+      }
+      if (!QUERY_PARAM_RE.test(normalizedFetchAuthName)) {
+        setError(t('vaults.dialog.errors.authQueryInvalid'));
+        return;
+      }
+    }
+    // The secure window is opened by this click, before anything is awaited (protocol v2 §6.6).
+    let secureWindow: VaultAuthorizationWindow | null = null;
+    if (protectedStaticInWindow) {
+      try {
+        secureWindow = openVaultAuthorizationWindow();
+      } catch (err: unknown) {
+        setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed')));
+        return;
+      }
+      if (!secureWindow) {
+        setError(t('vaults.dialog.window.blocked'));
+        return;
+      }
+    }
     if (!isProtectedHd && checksName) {
       // The form is busy while the name is checked: Create and Cancel wait, so one click saves once.
       setSubmitting(true);
       const issue = await checkName(secretName, true);
-      if (!mounted.current) return;
+      if (!mounted.current) {
+        secureWindow?.close();
+        return;
+      }
       setSubmitting(false);
       if (issue) {
+        // Nothing to type in the window for a name that is taken.
+        secureWindow?.close();
         // Taken after the words were made: back to the first step with them, only the name to change.
         if (isHd && hdStep !== 'setup') {
           setNameIssue({ name: secretName, issue, afterSave: 'standard-hd' });
@@ -951,31 +1016,6 @@ export const VaultSecretForm: React.FC<{
         onNameTaken: () => setNameIssue({ name: secretName, issue: { kind: 'taken' }, refused: true }),
       });
       return;
-    }
-    const normalizedFetchAuthName = fetchAuthName.trim();
-    if (!isHd && fetchAuthMode === 'header') {
-      if (!normalizedFetchAuthName) {
-        setError(t('vaults.dialog.errors.authNameRequired'));
-        return;
-      }
-      if (!HTTP_HEADER_TOKEN_RE.test(normalizedFetchAuthName)) {
-        setError(t('vaults.dialog.errors.authHeaderInvalid'));
-        return;
-      }
-      if (normalizedFetchAuthName.toLowerCase() === 'host') {
-        setError(t('vaults.dialog.errors.authHeaderForbidden'));
-        return;
-      }
-    }
-    if (!isHd && fetchAuthMode === 'query') {
-      if (!normalizedFetchAuthName) {
-        setError(t('vaults.dialog.errors.authNameRequired'));
-        return;
-      }
-      if (!QUERY_PARAM_RE.test(normalizedFetchAuthName)) {
-        setError(t('vaults.dialog.errors.authQueryInvalid'));
-        return;
-      }
     }
     if (isHd && signingSource === 'generate' && hdStep === 'setup') {
       // Nothing leaves the browser yet: the words are made here, shown, then checked.
@@ -1088,7 +1128,30 @@ export const VaultSecretForm: React.FC<{
       let authzFactorRegistration: Awaited<ReturnType<typeof protectedVault.sealValue>>['authzFactorRegistration'];
       let protectedPublicMeta: Record<string, unknown> | undefined;
       let extraFields: VaultCreatePayload['fields'];
-      if (isSolanaKey && protection === 'standard') {
+      if (protectedStaticInWindow && secureWindow) {
+        // Every value is typed (or generated) in the secure window; only the fields' names and
+        // generator settings leave this page, and only sealed records come back.
+        const rows = fieldRows ?? [{ name: 'value', recipe: undefined }];
+        const defaultField = fieldRows ? fieldRows[defaultFieldIndex].name : 'value';
+        const fields: SecureWindowSealField[] = rows.map((row, index) => ({
+          record: vaultRecordName(secretName, row.name, defaultField),
+          label: row.name,
+          required: true,
+          generate: fieldRows ? (row.recipe ?? rowPreset(row as FieldDraft, index)) : recipe,
+        }));
+        const sealed = await protectedVault.sealSecretInWindow(secretName, 'create', fields, secureWindow.id);
+        establishingVmk = sealed.establishingVmk;
+        authzFactorRegistration = sealed.authzFactorRegistration;
+        extraFields = [];
+        let defaultCrypto: { sealed: ProtectedRecordEnvelope } | undefined;
+        for (const [index, field] of sealed.fields.entries()) {
+          if (!field.envelope) throw new Error(t('vaults.request.saveFailed'));
+          if (rows[index].name === defaultField) defaultCrypto = { sealed: field.envelope };
+          else extraFields.push({ name: rows[index].name, record: field.record, sealed: field.envelope });
+        }
+        cryptoFields = defaultCrypto!;
+        if (!fieldRows) extraFields = undefined;
+      } else if (isSolanaKey && protection === 'standard') {
         if (signingSource === 'import') {
           // The pasted key is sealed for avault under this name and format; avault alone opens and
           // checks it, and the daemon only relays the box.
@@ -1224,7 +1287,11 @@ export const VaultSecretForm: React.FC<{
       setFetchAuthName('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {
-      if (isAvaultAuthorizationRequired(err)) {
+      // Only a failure of the secure window this Save opened reads as one.
+      const windowMessage = secureWindow ? secureWindowFailure(t, err) : null;
+      if (windowMessage !== null) {
+        if (windowMessage) setError(windowMessage);
+      } else if (isAvaultAuthorizationRequired(err)) {
         setNeedsAvaultAuthorization(true);
       } else if (err instanceof ApiError && solanaImportRejected(err.code)) {
         // Shown beside the pasted key, which stays so it can be corrected.
@@ -1244,6 +1311,7 @@ export const VaultSecretForm: React.FC<{
     } finally {
       fileBytesToWipe?.fill(0);
       generatedKey?.privateKey.fill(0);
+      secureWindow?.close();
       setSubmitting(false);
     }
   };
@@ -1445,7 +1513,7 @@ export const VaultSecretForm: React.FC<{
                 },
                 autoFocus: focusField?.id === row.id && focusField.part === 'name',
               }}
-              value={{
+              value={protectedStaticInWindow ? undefined : {
                 value: row.value,
                 label: t('vaults.fields.value', { field: label }),
                 placeholder: row.name ? t('vaults.fields.value', { field: row.name }) : t('vaults.dialog.valuePlaceholder'),
@@ -1455,6 +1523,7 @@ export const VaultSecretForm: React.FC<{
                 forceReveal: generatorOpen === row.id,
                 generated: Boolean(row.value && row.generated),
               }}
+              valueNote={<SecureWindowCell label={t('vaults.dialog.window.slot')} />}
               note={row.value && row.generated && generatorOpen !== row.id ? <VaultGeneratedBadge /> : undefined}
               wrapValue={(input) => (
                 <VaultGenerateControl
@@ -1487,6 +1556,7 @@ export const VaultSecretForm: React.FC<{
         })}
       </VaultFieldList>
       <VaultFieldNameRule shown={showNameRule} />
+      {protectedStaticInWindow ? <span className="text-[11.5px] leading-snug text-muted">{t('vaults.dialog.window.slotFieldsHint')}</span> : null}
       <VaultFieldReferences
         secretName={secretName}
         fields={fieldNames.filter((_, index) => fieldNameIssues[index] === null)}
@@ -1496,7 +1566,7 @@ export const VaultSecretForm: React.FC<{
   ) : (
     <div className="flex flex-col gap-1.5">
       <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
-      {valueField}
+      {protectedStaticInWindow ? <SecureWindowSlot title={t('vaults.dialog.window.slot')} hint={t('vaults.dialog.window.slotHint')} /> : valueField}
       <div className="-ml-2.5 flex flex-wrap items-center gap-0.5">
         <span className="mr-1.5 flex items-center">
           <Button type="button" variant="ghost" size="xs" className="px-2.5 text-[13px] text-muted hover:text-foreground"
@@ -1657,7 +1727,9 @@ export const VaultSecretForm: React.FC<{
   // Protected setup/unlock gating step + avault availability notices, shared by both modes.
   const gatingNotices = (
     <>
-      {protection === 'protected' && !protectedCreateReady && (
+      {protection === 'protected' && !protectedCreateReady
+        // A static secret typed in the secure window needs no unlock here: the window asks for the Passkey.
+        && !(protectedStaticInWindow && !entryIssue && protectedStaticStatus === 'locked') && (
         <VaultProtectedUnlock warnDraftDiscard vault={protectedVault} secretName={secretName || undefined} onContinueInBrowser={continueInBrowser} />
       )}
       {protection === 'protected' && protectedCreateReady && <VaultProtectedUnlock warnDraftDiscard vault={protectedVault} />}
@@ -1859,7 +1931,7 @@ export const VaultSecretForm: React.FC<{
             {cancelLabel ?? t('vaults.request.dismiss')}
           </Button>
           <Button type="submit" className="w-full sm:w-auto" disabled={!canSubmit}>
-            {submitting ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+            {submitting ? <Loader2 className="size-4 animate-spin" /> : protectedStaticInWindow ? <ExternalLink className="size-4" /> : <Check className="size-4" />}
             {t('vaults.request.saveAndWake')}
           </Button>
         </div>
@@ -2262,7 +2334,7 @@ export const VaultSecretForm: React.FC<{
           />
         ) : (
           <Button type="submit" disabled={!canSubmit}>
-            {submitting && <Loader2 className="size-4 animate-spin" />}
+            {submitting ? <Loader2 className="size-4 animate-spin" /> : protectedStaticInWindow ? <ExternalLink className="size-4" /> : null}
             {isHd ? t(signingSource === 'generate' ? 'vaults.hd.generateCta' : 'vaults.hd.importCta') : t('vaults.dialog.createSecret')}
           </Button>
         )}

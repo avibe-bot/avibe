@@ -27,6 +27,9 @@ const api = vi.hoisted(() => ({
   createVaultRevealContext: vi.fn(),
   denyVaultRequest: vi.fn(),
   fulfillVaultAccessRequest: vi.fn(),
+  // A step that reaches its save (in the app) ends there: these answer without a daemon.
+  createVaultSecret: vi.fn(async () => ({ ok: true, secret: {} })),
+  updateVaultSecretFields: vi.fn(async () => ({ ok: false, code: 'secret_not_found' })),
   getAvaultAuthorization: vi.fn(async () => ({ ok: true, required: false, detected_at: null, attempt: null })),
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
@@ -49,6 +52,8 @@ const vault = vi.hoisted(() => ({
   setupPasskey: vi.fn(),
   unlockPasskey: vi.fn(),
   sealValue: vi.fn(),
+  sealSecretInWindow: vi.fn(),
+  afterCreated: vi.fn(),
   approveProtectedRelease: vi.fn(),
   signProtectedRequest: vi.fn(),
   revealProtectedValue: vi.fn(),
@@ -152,7 +157,6 @@ const protectedTier: Click = { role: 'button', name: /^protected/i };
 const openInBrowser: Click = { role: 'button', name: /add a passkey|unlock with passkey|open in browser/i };
 const acknowledgeLoss: Click = { role: 'checkbox', name: /if i lose this passkey/i };
 const addPasskey: Click = { role: 'button', name: /^add a passkey$/i };
-const unlockWithPasskey: Click = { role: 'button', name: /^unlock with passkey$/i };
 const review: Click = { role: 'button', name: /^review$/i };
 const moreActions: Click = { role: 'button', name: /^more actions$/i };
 // What a shell without the capability says, and a shell with it must never say.
@@ -161,6 +165,19 @@ const approvalFallbackNote = en.vaults.approval.browserFallbackNote;
 const unlockFallbackNote = en.vaults.protectedUnlock.browserFallbackNote;
 
 const resumedDialog = () => screen.findByRole('dialog');
+// A Protected value is typed in the secure window, opened by the dialog's own Save (no passkey step
+// on the page): resumed, the step waits for that Save.
+const saveAndWake: Click = { role: 'button', name: /^save & let the agent continue$/i };
+const changeValues: Click = { role: 'button', name: /^change values in the secure window$/i };
+const saveEdit: Click = { role: 'button', name: /^save$/i };
+const expectWindowStep = async (fixedName: string) => {
+  const dialog = within(await resumedDialog());
+  expect(dialog.getByRole('button', { name: protectedTier.name }).getAttribute('aria-pressed')).toBe('true');
+  expect(dialog.getAllByText(fixedName).length).toBeGreaterThan(0);
+  expect(dialog.getByText(en.vaults.dialog.window.slot)).toBeTruthy();
+  const save = dialog.getByRole('button', { name: saveAndWake.name }) as HTMLButtonElement;
+  await waitFor(() => expect(save.disabled).toBe(false));
+};
 const expectApprovalButton = async (name: RegExp) => {
   const button = within(await resumedDialog()).getByRole('button', { name }) as HTMLButtonElement;
   await waitFor(() => expect(button.disabled).toBe(false));
@@ -211,7 +228,7 @@ type Ui = {
 };
 const staticUi: Ui = { VaultApprovalCard, VaultRequestCard, VaultSecretForm, VaultsPage };
 
-const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue];
+const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.sealSecretInWindow, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue];
 
 const cases: Array<{
   surface: string;
@@ -298,8 +315,8 @@ const cases: Array<{
     clicks: [protectedTier, openInBrowser],
     requests: [standardProvision],
     vaultStatus: 'locked',
-    resumed: () => expectProtectedForm('WALLET_PASSWORD'),
-    inApp: { clicks: [protectedTier, unlockWithPasskey], ceremony: vault.unlockPasskey },
+    resumed: () => expectWindowStep('WALLET_PASSWORD'),
+    inApp: { clicks: [protectedTier, saveAndWake], ceremony: vault.sealSecretInWindow },
     afterFailure: [{ role: 'button', name: /^open in browser$/i }],
     fallbackNote: unlockFallbackNote,
   },
@@ -333,10 +350,12 @@ const cases: Array<{
     secrets: [protectedSecret],
     vaultStatus: 'locked',
     resumed: async () => {
-      expect(within(await resumedDialog()).getByLabelText('Value for value')).toBeTruthy();
-      await expectPasskeyReady();
+      const dialog = within(await resumedDialog());
+      expect(dialog.queryByLabelText('Value for value')).toBeNull();
+      const change = dialog.getByRole('button', { name: changeValues.name }) as HTMLButtonElement;
+      await waitFor(() => expect(change.disabled).toBe(false));
     },
-    inApp: { clicks: [unlockWithPasskey], ceremony: vault.unlockPasskey },
+    inApp: { clicks: [changeValues, saveEdit], ceremony: vault.sealSecretInWindow },
     afterFailure: [{ role: 'button', name: /^open in browser$/i }],
     fallbackNote: unlockFallbackNote,
   },
@@ -557,6 +576,10 @@ describe('desktop shell that runs protected-vault passkey steps in the app', () 
   beforeEach(() => {
     vault.approveProtectedRelease.mockResolvedValue([{}]);
     vault.signProtectedRequest.mockResolvedValue({ signature: 'inert-signature' });
+    vault.sealSecretInWindow.mockImplementation(async (_name: string, _mode: string, fields: Array<{ record: string }>) => ({
+      fields: fields.map((field) => ({ record: field.record, envelope: { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' }, generated: false })),
+      establishingVmk: false,
+    }));
     vault.revealProtectedValue.mockResolvedValue({ completed: true });
     vault.setupPasskey.mockResolvedValue(undefined);
     vault.unlockPasskey.mockResolvedValue(undefined);

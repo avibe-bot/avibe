@@ -296,9 +296,11 @@ it('says one reason by a disabled Create at a time, in the order the form is fil
   expect(screen.getByText(d.createNeedsValue)).toBeTruthy();
   fireEvent.change(screen.getByPlaceholderText(d.valuePlaceholder), { target: { value: 'token' } });
   expect(screen.queryByText(d.createNeedsValue)).toBeNull();
-  // Protected, locked: the tier must be unlocked first.
+  // Protected: the value is typed in the secure window, which also unlocks a locked vault, so
+  // nothing more is needed on this page.
   fireEvent.click(protectedCard());
-  expect(screen.getByText(d.createNeedsProtected)).toBeTruthy();
+  expect(screen.queryByText(d.createNeedsValue)).toBeNull();
+  expect(screen.queryByText(d.createNeedsProtected)).toBeNull();
   // A signing key to import: the key.
   fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${d.standardProtection}`) }));
   fireEvent.click(screen.getByRole('radio', { name: d.kindKeypair }));
@@ -398,4 +400,17 @@ it('a name the server refused at save stays marked when a later list read misses
   await act(async () => { fireEvent.blur(nameBox()); });
   expect(screen.getByText(d.nameTaken)).toBeTruthy();
   expect((screen.getByRole('button', { name: p.launchCreate }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('protected static: the window is reserved by the click, then closed unused when the name turns out taken', async () => {
+  mount();
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.change(nameBox(), { target: { value: 'API_TOKEN' } });
+  fireEvent.click(protectedCard());
+  taken('API_TOKEN');
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: d.createSecret })); });
+  expect(await screen.findByText(d.nameTaken)).toBeTruthy();
+  expect(popup.opened).toBe(1);
+  expect(popup.close).toHaveBeenCalled();
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
 });

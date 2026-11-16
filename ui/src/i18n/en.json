@@ -6447,7 +6447,22 @@
       "createNeedsKey": "Paste the private key to import.",
       "createNeedsProtected": "Set up or unlock Protected above first.",
       "createNeedsAvault": "Install or update avault as shown above first.",
-      "createNeedsPassphraseAgain": "Enter the passphrase again to create the wallet."
+      "createNeedsPassphraseAgain": "Enter the passphrase again to create the wallet.",
+      "window": {
+        "slot": "Fill in the secure window",
+        "slotHint": "When you save, a separate secure window opens: type or generate the value there. Avibe never receives it.",
+        "slotFieldsHint": "When you save, a separate secure window opens: type or generate each field's value there. Avibe never receives them.",
+        "saved": "Saved",
+        "replacing": "Replace in the secure window",
+        "keep": "Keep current values",
+        "editHint": "Values change only in the secure window, opened when you save. Leave a field empty there to keep it.",
+        "cancelled": "Cancelled in the secure window; nothing was saved.",
+        "closed": "The secure window was closed; nothing was saved. You can try again.",
+        "timeout": "The secure window wasn't finished within 5 minutes; nothing was saved. Try again.",
+        "blocked": "The browser blocked the secure window. Allow pop-ups for this site and try again.",
+        "reset": "The protected vault was locked by you or reset meanwhile; nothing was saved.",
+        "changeValues": "Change values in the secure window"
+      }
     },
     "handoff": {
       "done": "Done. You can close this tab and go back to the desktop app.",

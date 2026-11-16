@@ -6447,7 +6447,22 @@
       "createNeedsKey": "请先粘贴要导入的私钥。",
       "createNeedsProtected": "请先在上方设置或解锁保护档。",
       "createNeedsAvault": "请先按上方提示安装或更新 avault。",
-      "createNeedsPassphraseAgain": "请再输入一次 Passphrase，再创建钱包。"
+      "createNeedsPassphraseAgain": "请再输入一次 Passphrase，再创建钱包。",
+      "window": {
+        "slot": "在安全窗口里填写",
+        "slotHint": "保存时会打开独立的安全窗口，在那里输入或生成值。Avibe 拿不到它。",
+        "slotFieldsHint": "保存时会打开独立的安全窗口，在那里输入或生成每个字段的值。Avibe 拿不到它们。",
+        "saved": "已保存",
+        "replacing": "在安全窗口里替换",
+        "keep": "保留现有值",
+        "editHint": "值只在保存时打开的安全窗口里修改；在那里留空的字段保持不变。",
+        "cancelled": "已在安全窗口里取消，什么都没有保存。",
+        "closed": "安全窗口关了，什么都没有保存。可以再试一次。",
+        "timeout": "安全窗口 5 分钟内没有完成，什么都没有保存。请再试一次。",
+        "blocked": "浏览器拦住了安全窗口。允许这个网站弹出窗口后再试一次。",
+        "reset": "这期间保护档被你锁定或被重置，什么都没有保存。",
+        "changeValues": "在安全窗口里修改值"
+      }
     },
     "handoff": {
       "done": "已完成，可以关闭此标签页，回到桌面应用。",
