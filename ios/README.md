@@ -461,9 +461,9 @@ receives no bridge.
   it (`signed_out` or `busy` otherwise). The WebView joins the coordinator's
   release barriers: the sign-out that follows waits for it before rotating
   the store and leaves the old store to a later sweep while it is alive.
-  While it is open no instance can be selected, so a notification tap shows
-  the instance list instead of opening an instance of an account the page
-  may be deleting. The privacy policy uses a non-persistent store.
+  While it is open no instance can be selected: a notification tap is set
+  aside (nothing opens and the page stays) rather than opening an instance
+  of an account the page may be deleting. The privacy policy uses a non-persistent store.
 - A page closes with the bundled page that awaits it: if the App changes
   route underneath, the page is dismissed and answers `{completed: false}`,
   and a presentation UIKit refuses answers at once.
