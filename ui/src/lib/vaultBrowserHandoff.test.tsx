@@ -18,6 +18,7 @@ import { VaultSecretForm } from '@/components/ui/vault-secret-form';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 import en from '@/i18n/en.json';
 import { vaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
+import { VaultSandboxError } from '@/lib/vaultSandboxClient';
 
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(),
@@ -573,6 +574,24 @@ describe('desktop shell that runs protected-vault passkey steps in the app', () 
     await waitFor(() => expect(c.inApp.ceremony).toHaveBeenCalledTimes(1));
     expect(open.mock.calls.every(([url]) => url === 'about:blank')).toBe(true);
     expect(screen.queryByText(cannotUsePasskeys)).toBeNull();
+  });
+
+  // A window the user closed, or one the app declined to show because it was not in front, is not
+  // something the user did wrong: the card says what happened and keeps its action for a retry.
+  it('tells the user a closed secure window approved nothing and leaves Approve to try again', async () => {
+    const user = userEvent.setup();
+    const access = cases[0];
+    serve(access);
+    openSandboxWindows();
+    enterDesktopShell(true);
+    vault.approveProtectedRelease.mockRejectedValue(new VaultSandboxError('authorization_window_closed', 'authorization window was closed', true));
+    renderAt('/vaults', access.desktop(staticUi), access.role);
+    await press(user, approve);
+
+    expect(await screen.findByText(en.errors.authorization_window_closed)).toBeTruthy();
+    expect(screen.queryByText('authorization window was closed')).toBeNull();
+    expect(screen.getByRole('button', { name: /^approve$/i })).toBeTruthy();
+    expect(vaultPasskeyHandoff()).toBeNull();
   });
 
   // The hand-off after a failure lives for the page, so each case below is a new page: a fresh copy

@@ -671,6 +671,57 @@ def test_desktop_readiness_retries_transport_errors_within_one_budget(monkeypatc
     assert set(observations) == {"/ready"}
 
 
+@pytest.mark.parametrize("migrating_for", [0.0, 0.6])
+def test_desktop_readiness_waits_out_a_database_update(monkeypatch, migrating_for):
+    """Giving up mid-update would roll the start back and kill the update.
+
+    The budget is 0.2 s. A service that spends 0.6 s updating its database and
+    then answers ready is waited for; with no update, the budget alone decides.
+    """
+    import time
+
+    started = time.monotonic()
+
+    def updating() -> bool:
+        return time.monotonic() - started < migrating_for
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            ready = bool(migrating_for) and not updating()
+            body = json.dumps({"schema_version": 1, "product": "avibe", "ready": ready}
+                              | ({} if ready else {"code": "service_starting"})).encode()
+            self.send_response(200 if ready else 503)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # The service holds the lock through its update, then becomes the owner.
+        monkeypatch.setattr(
+            runtime, "resolve_service_owner_pid",
+            lambda *, include_starting=True: 1234 if include_starting or not updating() else None,
+        )
+        monkeypatch.setattr(runtime, "service_instance_migrating", lambda pid: pid == 1234 and updating())
+        monkeypatch.setattr(runtime, "service_instance_started", lambda pid: not updating())
+        monkeypatch.setattr(runtime, "pid_alive", lambda _pid: True)
+
+        result = runtime.wait_for_desktop_startup_ready(1234, "127.0.0.1", server.server_address[1], timeout=0.2)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result == (1234 if migrating_for else None)
+    if migrating_for:
+        assert time.monotonic() - started >= migrating_for
+
+
 @pytest.mark.parametrize(
     "response_kind", ["drip", "oversized", "oversized-stream", "starting", "utf16", "compressed", "malformed"],
 )

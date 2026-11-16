@@ -61,7 +61,7 @@ async def test_writer_requires_epoch_proof_and_exact_committed_response(engine, 
             conn.execute(messages.update().where(messages.c.id == response.row_id).values(platform="telegram"))
         before = [tuple(row) for row in conn.execute(select(agent_events).where(agent_events.c.event_type == "tool_result"))]
         canonical = conn.execute(select(messages.c.content_json).where(messages.c.id == response.row_id)).scalar()
-    monkeypatch.setattr("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", None if case == "unverified" else 1 if case == "bridge-proof" else 2)
+    monkeypatch.setattr("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", None if case == "unverified" else 1 if case == "bridge-proof" else 3)
     monkeypatch.setattr("core.message_mirror.get_cached_sqlite_engine", lambda: engine)
     context = MessageContext(user_id="fixture", channel_id="fixture", platform="avibe",
                              platform_specific={"agent_session_id": SESSION, "suppress_delivery": True})
@@ -133,7 +133,7 @@ os._exit(72)
 
 
 @pytest.mark.no_sqlite_template
-def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_path, monkeypatch):
+def test_verified_epoch_three_keeps_no_copy_for_subsequent_additive_upgrades(tmp_path, monkeypatch):
     from storage import importer
     from tests.test_sqlite_readiness import COMPLETED, DATA_MARKER
 
@@ -153,5 +153,5 @@ def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_p
     )
     monkeypatch.setattr(migrations, "alembic_dir", lambda: graph)
     decision = migrations.run_migrations(path)
-    assert decision.compatibility_epoch == 2 and decision.skip_snapshot
+    assert decision.compatibility_epoch == 3 and decision.skip_snapshot
     assert not list((tmp_path / "backups").glob("*/vibe.sqlite"))

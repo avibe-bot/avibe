@@ -465,8 +465,8 @@ impl RuntimeHost {
 
         // A launcher may report its non-zero exit after an earlier bootstrap
         // timed out. Re-check the retained watch before deciding this run is
-        // already waiting on a viable launch.
-        if let Some(code) = self.clear_failed_launch() {
+        // already waiting on a viable launch, reading its last verdict first.
+        if let Some(code) = self.retained_exit_failure(&origin).await {
             return publish(
                 sink,
                 BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
@@ -628,7 +628,9 @@ impl RuntimeHost {
                 return publish(sink, receipt_invalid(&origin, attempt));
             }
             if Instant::now() >= deadline {
-                watch.cancel_receipt();
+                // The timeout ends this wait, not the helper or its receipt. A
+                // helper still running (a long database update) is retained, and
+                // the next Retry waits on the same receipt for its real outcome.
                 self.clear_successful_launch();
                 return publish(
                     sink,
@@ -732,7 +734,7 @@ impl RuntimeHost {
                     _ => publish(sink, receipt_invalid(&origin, attempt)),
                 };
             }
-            if let Some(code) = self.clear_failed_launch() {
+            if let Some(code) = self.retained_exit_failure(&origin).await {
                 return publish(
                     sink,
                     BootstrapStatus::failed(&origin, attempt, BootstrapNotice::new(code), true),
@@ -948,6 +950,44 @@ impl RuntimeHost {
         (!presented).then_some(code)
     }
 
+    /// What a retained helper that exited non-zero has to report.
+    ///
+    /// Its final receipt frame can arrive up to `EXIT_DRAIN` after the exit, so
+    /// wait for it, bounded, then present a failure verdict it carries (such as
+    /// `database_disk_full`) ahead of the generic exit code. A verdict already
+    /// presented is not shown again; the exit then only releases the retry slot.
+    async fn retained_exit_failure(&self, origin: &LoopbackOrigin) -> Option<BootstrapNoticeCode> {
+        let watch = self
+            .launched_runtime()
+            .attempt
+            .as_ref()
+            .map(|attempt| attempt.watch.clone())?;
+        if !watch.failed() {
+            return None;
+        }
+        if watch.receipt_capable() {
+            let deadline = Instant::now() + crate::receipt::EXIT_DRAIN * 2;
+            while watch.receipt_event().is_none() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                watch.receipt_changed(remaining).await;
+            }
+            if let Some(ReceiptEvent::Receipt(receipt)) = watch.receipt_event() {
+                if receipt.outcome == StartupReceiptOutcome::Failed
+                    && receipt_matches_origin(&receipt, origin)
+                    && !watch.receipt_failure_presented()
+                {
+                    watch.acknowledge_receipt_failure();
+                    let _ = self.clear_failed_launch();
+                    return Some(receipt_failure_notice(receipt.reason));
+                }
+            }
+        }
+        self.clear_failed_launch()
+    }
+
     /// Readiness timeout releases only a completed helper, never the liveness
     /// fence. Pending helpers remain retained so Retry cannot overlap a live
     /// launch.
@@ -992,13 +1032,15 @@ fn receipt_matches_origin(receipt: &crate::receipt::StartupReceipt, origin: &Loo
     LoopbackOrigin::parse(&receipt.origin).is_ok_and(|receipt_origin| receipt_origin.as_str() == origin.as_str())
 }
 
-fn receipt_failure_notice(reason: Option<StartupReceiptReason>) -> BootstrapNoticeCode {
+pub(crate) fn receipt_failure_notice(reason: Option<StartupReceiptReason>) -> BootstrapNoticeCode {
     match reason {
         Some(StartupReceiptReason::HandoverRefused | StartupReceiptReason::RuntimeClaimRefused) => {
             BootstrapNoticeCode::RuntimeOwnershipLost
         }
         Some(StartupReceiptReason::HandoverFailed) => BootstrapNoticeCode::RuntimeStopFailed,
         Some(StartupReceiptReason::RuntimeNotReady) => BootstrapNoticeCode::RuntimeDiscoveryFailed,
+        Some(StartupReceiptReason::DatabaseDiskFull) => BootstrapNoticeCode::DatabaseDiskFull,
+        Some(StartupReceiptReason::DatabaseDiskFullUnconfirmed) => BootstrapNoticeCode::DatabaseDiskFullUnconfirmed,
         Some(StartupReceiptReason::StartupFailed) | None => BootstrapNoticeCode::RuntimeSpawnFailed,
     }
 }

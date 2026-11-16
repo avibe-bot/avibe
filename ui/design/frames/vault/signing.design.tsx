@@ -1,5 +1,5 @@
 // Signing capability is shown alongside existing addresses, without changing keys.
-import { VaultApprovalCard, VaultSigningIdentity } from '@/components/ui/vault-approval-card';
+import { VaultApprovalCard } from '@/components/ui/vault-approval-card';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 import type { VaultRequest, VaultSecret } from '@/context/ApiContext';
 
@@ -50,7 +50,40 @@ const ecdsaContext = (type: 'p2pkh' | 'p2wpkh', network: string) => ({
   kind: `bitcoin-${type}-v1`, addressType: type, network, sighashType: 1, digest,
   digestAlgorithm: type === 'p2pkh' ? 'bitcoin-legacy-sighash-all' : 'bitcoin-bip143-sighash-all',
 });
-const desktopFixtures = { ...fixtures, desktopShell: true };
+// Protected EVM and Solana keys sign the same way, each with its own context; the card says once, in
+// its bottom note, that the key stays in the browser and only the signature returns.
+const protectedSol = 'FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z';
+const solTransfer =
+  '01000103d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a'
+  + '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c'
+  + '0000000000000000000000000000000000000000000000000000000000000000'
+  + 'c3a31d0d0fb5cc1047ecf3c8316bb8fdaadee46efcc68d5848a3f6644f597f44'
+  + '01020200010c020000008096980000000000';
+const protectedEvmRequest: VaultRequest = {
+  ...request, id: 'vrq_design_evm', secret_name: 'PROTECTED_ETH_KEY',
+  delivery: { digest, scheme: 'ecdsa-secp256k1-recoverable', signing_context: { kind: 'evm-transaction', digestAlgorithm: 'keccak256', chainId: '1', unsignedTransaction: {}, digest } },
+  card: { request_type: 'sign', secret_name: 'PROTECTED_ETH_KEY', kind: 'keypair', protection: 'protected' },
+};
+const protectedSolRequest: VaultRequest = {
+  ...request, id: 'vrq_design_sol', secret_name: 'PROTECTED_SOL_KEY',
+  delivery: { scheme: 'ed25519', message_hex: solTransfer, signing_context: { kind: 'solana-transaction-v1', messageHex: solTransfer } },
+  card: { request_type: 'sign', secret_name: 'PROTECTED_SOL_KEY', kind: 'keypair', protection: 'protected' },
+};
+const desktopFixtures = {
+  ...workbenchFixtures({
+    '/api/vault/secrets': { ok: true, secrets: [
+      { ...standard, name: 'PROTECTED_BTC_KEY', protection: 'protected' },
+      { ...standard, name: 'PROTECTED_ETH_KEY', protection: 'protected' },
+      { ...standard, name: 'PROTECTED_SOL_KEY', protection: 'protected', signing_curve: 'ed25519', signing_addresses: { solana: protectedSol } },
+    ] },
+    '/api/vault/grants': { ok: true, grants: [] },
+    '/api/vault/requests': { ok: true, requests: [] },
+    '/api/vault/avault-authorization': { ok: true, required: false, detected_at: null, attempt: null },
+    '/api/dependencies': { deps: [] },
+    '/api/skills': { ok: true, skills: [] },
+  }),
+  desktopShell: true,
+};
 const protectedCard = (r: VaultRequest) => () => <div className="p-6"><VaultApprovalCard onResolved={noop} onCancel={noop} request={r} /></div>;
 
 const designFrames = frames([
@@ -63,12 +96,6 @@ const designFrames = frames([
     name: 'keypath', title: 'Vault · BIP86 approval identity',
     width: 640, height: 460, status: 'shipped', fixtures,
     render: () => <div className="p-6"><VaultApprovalCard onResolved={noop} onCancel={noop} request={request} /></div>,
-  },
-  {
-    name: 'protected-keypath', title: 'Vault · Protected Bitcoin secure-window warning',
-    width: 640, height: 180, status: 'shipped', fixtures,
-    // The same view as the real approval card, without its custody/network container.
-    render: () => <div className="p-6"><VaultSigningIdentity scheme="schnorr-secp256k1-bip341-keypath" addresses={standard.signing_addresses ?? null} protectedKey /></div>,
   },
   {
     name: 'raw', title: 'Vault · Raw BIP340 is not the Taproot address',
@@ -91,6 +118,14 @@ const designFrames = frames([
     render: protectedCard(protectedBtc('schnorr-secp256k1-bip341-keypath', {
       kind: 'bitcoin-taproot-keypath-v1', network: 'signet', digestAlgorithm: 'bip341-sighash-default-keypath', digest,
     })),
+  },
+  {
+    name: 'protected-evm', title: 'Vault · Protected EVM request: one note says the key stays in the browser (desktop app)',
+    width: 640, height: 520, status: 'shipped', fixtures: desktopFixtures, render: protectedCard(protectedEvmRequest),
+  },
+  {
+    name: 'protected-solana', title: 'Vault · Protected Solana request: one note says the key stays in the browser (desktop app)',
+    width: 640, height: 560, status: 'shipped', fixtures: desktopFixtures, render: protectedCard(protectedSolRequest),
   },
 ]);
 

@@ -22,7 +22,9 @@
       "runtime_stop_failed": "Avibe could not confirm that the Runtime stopped, so some or all of it may still be running. Choose Try again to reconnect to it, then stop it again if you need to.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
-      "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
+      "workbench_navigation_failed": "Avibe could not open the Workbench in this window.",
+      "database_disk_full": "Avibe couldn't update its database because the disk is full. Nothing was changed. Free some space on the disk that holds your Avibe data, then choose Try again.",
+      "database_disk_full_unconfirmed": "Avibe couldn't update its database because the disk is full. Free some space on the disk that holds your Avibe data, then choose Try again."
     },
     "tray": {
       "open": "Open Avibe",
@@ -1235,6 +1237,7 @@
         "unread": "Model Hub status unavailable",
         "notStarted": "Model Hub not ready",
         "notInstalled": "Model Hub component not installed",
+        "allOff": "Local backends are all turned off",
         "allDirect_one": "The only backend uses its own login",
         "allDirect_other": "All {{count}} backends use their own login",
         "starting": "Starting…",
@@ -1519,6 +1522,11 @@
           "cancel": "Cancel",
           "add": "Add model",
           "apply": "Save model"
+        },
+        "off": {
+          "status": "Turned off",
+          "enable": "Turn on",
+          "enableLabel": "Turn on {{backend}} in Settings › Backends"
         }
       },
       "takeover": {
@@ -3213,6 +3221,7 @@
     "sandbox_browser_unavailable": "Protected Vault needs a secure browser context with Web Crypto. Open Avibe directly in an up-to-date compatible browser, not inside another page or embedded browser.",
     "sandbox_browser_required": "Continue this protected Vault step in your browser, not the desktop app.",
     "sandbox_reset": "This protected Vault attempt was cancelled or reset. Retry from Avibe to verify a fresh sandbox.",
+    "authorization_window_closed": "The secure window closed before this step finished, so nothing was approved, signed or shown. Try again.",
     "sandbox_ready_timeout": "The verified Vault sandbox did not start. Check your connection, update Avibe, and retry.",
     "avault_authorization_required": "avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Choose Authorize avault, then answer the dialog on that Mac.",
     "stale_login_session": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
@@ -6520,7 +6529,6 @@
       "ttlHours": "{{count}} h",
       "accessNote": "Unlocked in the secure window. The value is never shown to the AI or in chat.",
       "signNote": "The private key is used only inside the secure window. Avibe receives only the signature.",
-      "protectedWarning": "Protected signing happens in the secure window. Only the signature returns to Avibe.",
       "browserNote": "This version of the desktop app can't use your passkey directly. Review and approve in your browser.",
       "browserFallbackNote": "The passkey step didn't work in the app, so review and approve this in your browser.",
       "continueInBrowser": "Continue in browser",

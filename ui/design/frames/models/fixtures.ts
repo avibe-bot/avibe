@@ -164,6 +164,8 @@ export type AgentSpec = {
   backend: AgentBackend;
   mode?: 'hub' | 'direct';
   cliPresent?: boolean;
+  /** Switched on in Settings · Backends; omitted reads as on. */
+  enabled?: boolean;
   menuKind?: 'fixed' | 'open';
   order?: Source[];
   routes?: Record<string, RouteSpec>;
@@ -187,11 +189,12 @@ const modelSupply = (modelId: string, route: RouteSpec | undefined): ModelSupply
   has_runnable_hop: (route?.hops ?? []).some(([hop]) => runnable(route?.health?.[hop.id] ?? 'healthy')),
 });
 
-export const agent = ({ backend, mode = 'hub', cliPresent = true, menuKind, order = [], routes = {}, catalog, namedAgents = [] }: AgentSpec): AgentSupply => {
+export const agent = ({ backend, mode = 'hub', cliPresent = true, enabled, menuKind, order = [], routes = {}, catalog, namedAgents = [] }: AgentSpec): AgentSupply => {
   const catalogModels = catalog ?? Object.keys(routes).map((id) => backendModel(id, backend === 'opencode' ? { origin: 'provider', native_protocol: 'openai_responses' } : {}));
   return {
     backend,
     cli_present: cliPresent,
+    ...(enabled === undefined ? {} : { backend_enabled: enabled }),
     mode,
     menu_kind: menuKind ?? (backend === 'opencode' ? 'open' : 'fixed'),
     sources: mode === 'hub'

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ExternalLink, Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -77,6 +77,20 @@ export const VaultProtectedUnlock: React.FC<{
 
   const issue = vaultEntryIssue();
   const inBrowser = issue === 'desktop';
+  // When a failed in-app step moves this panel to the browser hand-off, the control the user pressed
+  // (Add a passkey, Unlock, a seed-phrase wallet's launch button) is gone and focus falls to the page.
+  // Land it on the hand-off's action instead. Focus that is still somewhere is left where it is.
+  const handoffButton = useRef<HTMLButtonElement>(null);
+  const handoffNoteId = useId();
+  const showsFallback = inBrowser && handoff === 'fallback';
+  useEffect(() => {
+    const button = handoffButton.current;
+    if (!showsFallback || !button) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    button.focus({ preventScroll: true });
+    button.scrollIntoView?.({ block: 'nearest' });
+  }, [showsFallback, vault.status]);
   if (issue && !inBrowser) {
     return <div className="flex flex-col gap-3">
       <VaultEntryNotice issue={issue} warnDraftDiscard={warnDraftDiscard} />
@@ -125,8 +139,8 @@ export const VaultProtectedUnlock: React.FC<{
 
   const browserHandoff = (
     <div className="flex flex-col items-center gap-2.5">
-      <span className="text-center text-[12px] leading-snug text-muted-foreground">{t(handoff === 'fallback' ? 'vaults.protectedUnlock.browserFallbackNote' : 'vaults.protectedUnlock.browserNote')}</span>
-      <Button type="button" variant="brand" className="w-full" onClick={onContinueInBrowser}>
+      <span id={handoffNoteId} className="text-center text-[12px] leading-snug text-muted-foreground">{t(handoff === 'fallback' ? 'vaults.protectedUnlock.browserFallbackNote' : 'vaults.protectedUnlock.browserNote')}</span>
+      <Button ref={handoffButton} type="button" variant="brand" className="w-full" aria-describedby={handoffNoteId} onClick={onContinueInBrowser}>
         <ExternalLink className="size-5" />
         {t('vaults.protectedUnlock.openInBrowser')}
       </Button>

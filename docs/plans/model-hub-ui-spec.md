@@ -4499,6 +4499,12 @@ page selection, counted in the pill and rendered as rows. A hidden catalogue row
 persisted mode therefore cannot select a page that has no row for it, and the empty set
 is never treated as vacuously “all direct.”
 
+*Amendment 2026-11-16 (switched-off backends):* `installedAgents` keeps deciding page
+dispatch. Within it, a CLI backend whose `backend_enabled` is false is drawn as one
+folded row after the backends that are on (icon, name, 「已停用」, 「去启用」 to
+Settings › Backends › that backend): no model list, no actions, no wires, not named as
+a Source's consumer, not counted in the direct pill. Not installed stays absent.
+
 **Display condition** `[derived]`: `installedAgents` is nonempty, every member is in 直连
 mode and no source exists. The empty `installedAgents` case is this section's No backend
 found branch below. All terms are read from current state, and that is deliberate —
