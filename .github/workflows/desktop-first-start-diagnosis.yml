@@ -167,6 +167,10 @@ jobs:
             kill "$logger" 2>/dev/null || true
           }
 
+          # Plain-HTTP traffic to the local Workbench: which locale file the
+          # page asked for, and the Accept-Language its WebView sent.
+          sudo tcpdump -i lo0 -A -s 0 -l 'tcp dst port 5123' > "$W/logs/http-5123.txt" 2>/dev/null &
+          sleep 1
           launch_and_watch cold 45
 
           # Stop the shell and the Runtime it started, keeping the prepared files.
@@ -177,6 +181,8 @@ jobs:
           sleep 3
           launch_and_watch warm 20 0.25
 
+          sudo pkill -x tcpdump || true
+          grep -aE '^(GET|POST) |Accept-Language' "$W/logs/http-5123.txt" | head -300 > "$W/logs/http-requests.txt" || true
           cp "$SUPPORT"/*.log "$W/logs/" 2>/dev/null || true
           find "$SUPPORT" -maxdepth 2 \( -name '*.log' -o -name '*.json' -o -name '*.jsonl' \) -size -5M \
             -exec cp {} "$W/logs/" \; 2>/dev/null || true
@@ -261,12 +267,6 @@ jobs:
           "$W/Probe.app/Contents/MacOS/probe" | tee "$W/logs/webkit-probe-bundled.txt"
           plutil -p /Applications/Avibe.app/Contents/Info.plist > "$W/logs/avibe-info-plist.txt" || true
           ls /Applications/Avibe.app/Contents/Resources | head -50 > "$W/logs/avibe-resources.txt" || true
-          # What the Workbench stored for its language (i18next caches its detection).
-          find "$HOME/Library/WebKit" "$HOME/Library/Caches" -path '*avibe*' -name '*.sqlite3' 2>/dev/null | while read -r db; do
-            echo "== $db"; sqlite3 "$db" "select key, cast(value as text), hex(value) from ItemTable" 2>&1 | head -20
-          done > "$W/logs/webkit-localstorage.txt"
-          find "$HOME/Library/WebKit" -maxdepth 6 -path '*avibe*' 2>/dev/null | head -60 >> "$W/logs/webkit-localstorage.txt"
-
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
