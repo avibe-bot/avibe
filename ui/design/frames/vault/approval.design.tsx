@@ -13,12 +13,15 @@ const phone = phoneShell('/vaults', <VaultsPage />);
 const pending = (request: VaultRequest) => vaultFixtures(vaultApi({ grants: [], requests: [request] }));
 const review = ['role=button[name="{t:vaults.requests.review}"]'];
 
-// A new Bitcoin signing request as a list carries it (protected Bitcoin contract rev0.4 §4.3): no
-// name, card, delivery or session. The row offers only Review; the dialog reads it in full first.
+// A new Bitcoin signing request as a list carries it (protected Bitcoin contract rev0.4 §4.3, #3871):
+// no card, delivery or session, but its key's name and tier, so the row reads like a Taproot one. A
+// name too long for the summary is withheld and the row keeps the generic line. The row offers only
+// Review; the dialog reads it in full first.
 const signSummary: VaultRequest = {
-  ...signRequest, id: 'vrq_btc', secret_name: null, requester: null, delivery: null, message_id: null, card: null, session: null,
+  ...signRequest, id: 'vrq_btc', secret_name: 'BTC_COLD_KEY', protection: 'protected', requester: null, delivery: null, message_id: null, card: null, session: null,
 };
-const summaryFixtures = (full: unknown) => vaultFixtures({ ...vaultApi({ grants: [], requests: [signSummary] }), '/api/vault/requests/vrq_btc': full });
+const summaryFixtures = (full: unknown, summary: VaultRequest = signSummary) =>
+  vaultFixtures({ ...vaultApi({ grants: [], requests: [summary] }), '/api/vault/requests/vrq_btc': full });
 
 const designFrames = frames([
   {
@@ -89,12 +92,22 @@ const designFrames = frames([
   },
   {
     name: 'summary-row',
-    title: '审批 · 新的 Bitcoin 签名请求（列表只有摘要，点审阅才读取完整请求）',
+    title: '审批 · 新的 Bitcoin 签名请求：列表摘要带密钥名和保护档，点审阅才读取完整请求',
     width: 1192,
     height: 900,
     status: 'shipped',
     route: '/vaults',
     fixtures: summaryFixtures({ ok: true, request: signRequest }),
+    render: page,
+  },
+  {
+    name: 'summary-row-unnamed',
+    title: '审批 · 摘要不带名称（名称过长）：仍是「签名请求 · 点审阅查看详情」，标出保护档',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: '/vaults',
+    fixtures: summaryFixtures({ ok: true, request: signRequest }, { ...signSummary, secret_name: null }),
     render: page,
   },
   {
