@@ -1422,8 +1422,10 @@ final class AppModel: ObservableObject {
     ///
     /// A refresh or push-management request the App runs on its own (as on
     /// a return to the foreground, which is when a shortcut arrives) keeps
-    /// the selection but holds the account. The open waits for it, within
-    /// the bound the instance list's open uses, then opens once.
+    /// the selection but holds the account. The open waits for it, up to
+    /// `selectionKeepingWait`, then opens once, unless meanwhile a newer
+    /// open was requested or the screen, the runtime, the account, or the
+    /// selection changed: the user has moved on.
     func openSelectedInstance(path: String) {
         guard hasCompletedBootstrap else {
             pendingInstanceOpen = .selectedInstance(path: path)
@@ -1435,14 +1437,32 @@ final class AppModel: ObservableObject {
             return
         }
         let request = instanceOpenRequest
+        let route = route
+        let identity = runtimeIdentity
+        let accountID = sessionCoordinator.currentAccount?.id
+        let selected = sessionCoordinator.selectedInstance
         Task { [weak self] in
-            await self?.sessionCoordinator.waitForSelectionKeepingOperations()
-            guard let self, self.instanceOpenRequest == request else {
+            await self?.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            guard
+                let self,
+                self.instanceOpenRequest == request,
+                self.route == route,
+                self.runtimeIdentity == identity,
+                self.sessionCoordinator.currentAccount?.id == accountID,
+                self.sessionCoordinator.selectedInstance == selected
+            else {
                 return
             }
             self.openSelectedInstanceNow(path: path)
         }
     }
+
+    /// How long a shortcut waits for a selection-keeping operation. Someone
+    /// who pressed a button expects it to act within a few seconds; a
+    /// session read or push update normally ends well within this.
+    static let selectionKeepingWait: Duration = .seconds(5)
 
     private func openSelectedInstanceNow(path: String) {
         guard

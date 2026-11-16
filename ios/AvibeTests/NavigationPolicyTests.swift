@@ -952,7 +952,9 @@ final class NavigationPolicyTests: XCTestCase {
         let (appModel, _) = try await makeFixtureAppModel(
             storedSelection: Self.instanceOneSelection
         ) { appModel in
-            // What `AvibeApp` attaches for its own model.
+            // What `AvibeApp` attaches for its own model. This replaces the
+            // test host's handler for the rest of the process; no other test
+            // runs a shortcut.
             InstancePathRequests.shared.attach { [weak appModel] path in
                 appModel?.openSelectedInstance(path: path)
             }
@@ -1081,41 +1083,87 @@ final class NavigationPolicyTests: XCTestCase {
         }
     }
 
+    /// On a cold launch the intent can run before the scene attaches the
+    /// App's model: the request waits, is delivered once on attach, and a
+    /// request after that goes straight through.
+    @MainActor
+    func testShortcutRequestsWaitForTheAppToAttach() {
+        let requests = InstancePathRequests()
+        var delivered: [String] = []
+        requests.open(path: "/chat/early")
+        XCTAssertEqual(delivered, [])
+
+        requests.attach { delivered.append($0) }
+        XCTAssertEqual(delivered, ["/chat/early"])
+
+        var reattached: [String] = []
+        requests.attach { reattached.append($0) }
+        XCTAssertEqual(reattached, [], "A delivered request came back.")
+
+        requests.open(path: "/chat/later")
+        XCTAssertEqual(delivered, ["/chat/early"])
+        XCTAssertEqual(reattached, ["/chat/later"])
+    }
+
     /// A shortcut usually arrives as the App returns to the foreground, when
     /// the App may be refreshing the account or updating push on its own.
     /// Those keep the selection, so the open waits for them and then opens
-    /// the main Bot's conversation instead of being dropped as busy.
+    /// the main Bot's conversation instead of being dropped as busy, unless
+    /// the user moved on meanwhile (here: opened Account).
     @MainActor
     func testMainBotShortcutWaitsForASelectionKeepingRefresh() async throws {
-        let held = HeldSessionReads()
-        addTeardownBlock { held.release.signal() }
-        let (appModel, _) = try await makeFixtureAppModel(
-            storedSelection: Self.instanceOneSelection,
-            heldSessionReads: held
-        )
-        try await waitUntil("The restored open") {
-            appModel.runtimeIdentity == 1
-        }
-        let refresh = Task { @MainActor in
-            try await appModel.mobileSessionCoordinator.refresh()
-        }
-        try await waitUntil("The refresh's session read") {
-            held.count.current == 2
-        }
-        XCTAssertTrue(
-            appModel.mobileSessionCoordinator.isHeldBySelectionKeepingOperation
-        )
+        for userMovesOn in [false, true] {
+            let held = HeldSessionReads()
+            addTeardownBlock { held.release.signal() }
+            let (appModel, _) = try await makeFixtureAppModel(
+                storedSelection: Self.instanceOneSelection,
+                heldSessionReads: held
+            )
+            try await waitUntil("The restored open") {
+                appModel.runtimeIdentity == 1
+            }
+            let refresh = Task { @MainActor in
+                try await appModel.mobileSessionCoordinator.refresh()
+            }
+            try await waitUntil("The refresh's session read") {
+                held.count.current == 2
+            }
+            XCTAssertTrue(
+                appModel.mobileSessionCoordinator.isHeldBySelectionKeepingOperation
+            )
 
-        appModel.openSelectedInstance(path: OpenMainBotIntent.path)
-        try await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(appModel.runtimeIdentity, 1, "It opened during the refresh.")
+            appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(
+                appModel.runtimeIdentity, 1, "It opened during the refresh."
+            )
+            if userMovesOn {
+                appModel.showAccount()
+                guard case .accountOverBrowser = appModel.route else {
+                    XCTFail("Account did not cover the runtime")
+                    return
+                }
+            }
 
-        held.release.signal()
-        _ = try await refresh.value
-        try await waitUntil("The shortcut's open after the refresh") {
-            appModel.runtimeIdentity == 2
+            held.release.signal()
+            _ = try await refresh.value
+            if userMovesOn {
+                try await Task.sleep(for: .milliseconds(200))
+                XCTAssertEqual(appModel.runtimeIdentity, 1)
+                guard case .accountOverBrowser = appModel.route else {
+                    XCTFail("The waited open replaced Account")
+                    return
+                }
+            } else {
+                try await waitUntil("The shortcut's open after the refresh") {
+                    appModel.runtimeIdentity == 2
+                }
+                _ = try await waitForPushRuntime(
+                    appModel,
+                    instanceID: "instance-1"
+                )
+            }
         }
-        _ = try await waitForPushRuntime(appModel, instanceID: "instance-1")
     }
 
     /// The shortcut reaches Settings > Action Button only through the App
