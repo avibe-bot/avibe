@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { ArrowLeft, ArrowRight, Check, ChevronDown, ChevronRight, CircleHelp, Download, Folder, Globe, Home, Inbox, Laptop, LogOut, RefreshCw, Settings, ShieldCheck, TriangleAlert, UserRound, WifiOff } from 'lucide-react';
+import { StatusDot, StatusGlyph } from '@/components/SidebarStatusRow';
+import { VersionChip } from '@/components/VersionChip';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -52,17 +54,20 @@ function AccountEntry({ fixture, placement, remote, compact = false, menu = fals
   const t = copy(fixture.lang), { connection, updateAvailable } = fixture;
   const signedOut = connection === 'signed-out', busy = connection === 'switching';
   const instance = remote ? 'Studio' : t('本机 · MacBook Pro', 'This Mac · MacBook Pro');
-  const indicator = connection === 'offline' ? <WifiOff data-status-indicator className="size-3 shrink-0 text-gold-ink" aria-label={t('当前实例已断开', 'Current instance disconnected')} /> : busy ? <RefreshCw data-status-indicator className="size-3 shrink-0 text-cyan-ink" aria-label={t('正在连接 Studio', 'Connecting to Studio')} /> : placement === 'bottom' ? <span data-status-indicator className="size-1.5 shrink-0 rounded-full bg-mint" aria-label={t('当前实例已连接', 'Current instance connected')} /> : null;
+  const indicator = connection === 'offline' ? <WifiOff data-status-indicator className="size-3 shrink-0 text-gold-ink" aria-label={t('当前实例已断开', 'Current instance disconnected')} /> : busy ? <RefreshCw data-status-indicator className="size-3 shrink-0 text-cyan-ink" aria-label={t('正在连接 Studio', 'Connecting to Studio')} /> : placement === 'bottom' ? <StatusDot tone="running" label={t('当前实例已连接', 'Current instance connected')} /> : null;
+  // The bottom row follows the shipped shared row (ui/design: chrome/bottom-row): the status leads.
+  const bottomRow = placement === 'bottom' && !compact;
   return <div data-placement-entry={placement} data-connection-status={connection} data-update-available={updateAvailable} data-compact={compact} className="relative min-w-0">
     <div className={cn('flex items-center gap-1', compact && 'gap-0.5')}>
-      <Button data-account-trigger variant="ghost" className={cn('min-w-0 flex-1 justify-start gap-1.5 rounded-md px-0 text-left text-xs', placement === 'top' && 'h-10 px-0 text-xs', placement === 'bottom' ? 'h-8' : 'h-10', compact && 'flex-none justify-center')} title={signedOut ? t('登录 · 本机', 'Sign in · This Mac') : busy ? t('当前本机，正在连接 Studio', 'Current: This Mac, connecting to Studio') : `${instance}${connection === 'offline' ? t(' · 已断开', ' · Disconnected') : ''}`} aria-expanded={menu}>
-        <UserRound data-account-avatar className="size-3.5 shrink-0 text-muted" />
+      <Button data-account-trigger variant="ghost" className={cn('min-w-0 flex-1 justify-start gap-1.5 rounded-md px-0 text-left text-xs', bottomRow && 'gap-1.5', placement === 'top' && 'h-10 px-0 text-xs', placement === 'bottom' ? 'h-8' : 'h-10', compact && 'flex-none justify-center')} title={signedOut ? t('登录 · 本机', 'Sign in · This Mac') : busy ? t('当前本机，正在连接 Studio', 'Current: This Mac, connecting to Studio') : `${instance}${connection === 'offline' ? t(' · 已断开', ' · Disconnected') : ''}`} aria-expanded={menu}>
+        {bottomRow ? <StatusGlyph>{indicator}</StatusGlyph> : <UserRound data-account-avatar className="size-3.5 shrink-0 text-muted" />}
         {!compact && placement === 'top' && <span className="min-w-0 flex-1"><span className="block truncate text-xs">{signedOut ? t('登录或注册', 'Sign in / sign up') : instance}</span><span className="block truncate text-xs font-normal text-muted">{busy ? t('本机 → Studio · 连接中', 'This Mac → Studio · Connecting') : instance}</span></span>}
-        {!compact && placement === 'bottom' && <span data-account-group className="flex min-w-0 flex-1 items-center gap-1.5"><span data-account-label className="min-w-0 truncate">{busy ? t('本机 → Studio', 'This Mac → Studio') : signedOut ? t('登录或注册', 'Sign in / sign up') : instance}</span>{indicator}<ChevronDown data-account-chevron className="size-3 shrink-0 rotate-180 text-muted" /></span>}
+        {bottomRow && <span data-account-group className="flex min-w-0 flex-1 items-center gap-2"><span data-account-label className="min-w-0 truncate">{busy ? t('本机 → Studio', 'This Mac → Studio') : signedOut ? t('登录或注册', 'Sign in / sign up') : instance}</span><ChevronDown data-account-chevron className="size-3 shrink-0 rotate-180 text-muted" /></span>}
         {compact && indicator}
         {!compact && placement === 'top' && <>{indicator}<ChevronDown className="size-3 shrink-0 text-muted" /></>}
       </Button>
-      {(!compact || updateAvailable) && placement === 'bottom' && <div className="relative shrink-0"><Button data-version-trigger data-update-trigger={updateAvailable || undefined} aria-label={updateAvailable ? t('Desktop 有更新', 'Desktop update available') : t('本机 Desktop 版本 3.2.6rc9', 'Local Desktop version 3.2.6rc9')} variant="ghost" size="sm" className={cn("h-8 gap-1 px-1.5 text-2xs text-muted", compact && "px-0")} aria-expanded={updatePanel}>{updateAvailable ? <><Download className="size-3 text-gold-ink" />{!compact && <span className="size-1.5 rounded-full bg-gold" aria-hidden="true" />}</> : <span>3.2.6rc9</span>}</Button></div>}
+      {bottomRow && <div className="relative shrink-0"><VersionChip data-version-trigger data-update-trigger={updateAvailable || undefined} aria-label={updateAvailable ? t('Desktop 有更新', 'Desktop update available') : t('本机 Desktop 版本 v3.2.6rc9', 'Local Desktop version v3.2.6rc9')} attention={updateAvailable} updateDot={updateAvailable} aria-expanded={updatePanel}>{updateAvailable && <Download size={12} aria-hidden="true" />}v3.2.6rc9</VersionChip></div>}
+      {compact && updateAvailable && placement === 'bottom' && <div className="relative shrink-0"><Button data-version-trigger data-update-trigger={updateAvailable || undefined} aria-label={updateAvailable ? t('Desktop 有更新', 'Desktop update available') : t('本机 Desktop 版本 3.2.6rc9', 'Local Desktop version 3.2.6rc9')} variant="ghost" size="sm" className={cn("h-8 gap-1 px-1.5 text-2xs text-muted", compact && "px-0")} aria-expanded={updatePanel}>{updateAvailable ? <><Download className="size-3 text-gold-ink" />{!compact && <span className="size-1.5 rounded-full bg-gold" aria-hidden="true" />}</> : <span>3.2.6rc9</span>}</Button></div>}
     </div>
     {updateAvailable && updatePanel && placement === 'bottom' && <DesktopUpdatePopover t={t} />}
     {menu && <Account t={t} upward={placement === 'bottom'} />}

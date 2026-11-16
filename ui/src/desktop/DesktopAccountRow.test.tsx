@@ -81,7 +81,7 @@ it('AUTH-SETUP-178 routes the native menu to the same panel and preserves Skip',
   expect(mock.present).not.toHaveBeenCalled();
 });
 
-it('AUTH-SETUP-178 current version offers no install; the account menu has no updater action', async () => {
+it('AUTH-SETUP-178 current version offers no install; account entry stays separate from updates', async () => {
   mock.phase = 'current';
   mount();
   fireEvent.click(await screen.findByTitle('v3.2.6rc12'));
@@ -145,11 +145,12 @@ it('AUTH-SETUP-177 signed-out footer directly presents account without opening a
 it('AUTH-SETUP-178 the whole signed-in footer directly opens instances without a popup or caret', async () => {
   mount();
   const trigger = document.querySelector('[data-account-trigger]')!;
-  fireEvent.click(trigger.querySelector('[data-account-avatar]')!);
+  fireEvent.click(trigger.querySelector('[data-status-indicator]')!);
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
   expect(trigger.hasAttribute('aria-expanded')).toBe(false);
   expect(document.querySelector('[data-instance-menu]')).toBeNull();
   expect(document.querySelector('[data-account-chevron]')).toBeNull();
+  expect(document.querySelector('[data-account-avatar]')).toBeNull();
   expect(trigger.textContent).toBe('This computer');
 });
 

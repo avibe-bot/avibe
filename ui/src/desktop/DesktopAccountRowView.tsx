@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Download, Globe, Laptop, RefreshCw, UserRound, WifiOff } from 'lucide-react';
+import { Download, RefreshCw, WifiOff } from 'lucide-react';
+import { SidebarStatusRow, StatusDot, StatusGlyph } from '../components/SidebarStatusRow';
+import { VersionChip } from '../components/VersionChip';
 import { Button } from '../components/ui/button';
 import type { DesktopClientProjection, DesktopClientView } from './bridge';
 
@@ -10,7 +12,8 @@ export type DesktopAccountRowViewProps = {
   localUpdater: ReactNode;
 };
 
-/** Shared product footer; the container owns native state and navigation. */
+/** ui/design: chrome/bottom-row. Shared layout with the A5 direct account entry;
+ * the container owns native state and navigation. */
 export function DesktopAccountRowView({ state, onPresent, localUpdater }: DesktopAccountRowViewProps) {
   const { t } = useTranslation();
   const remote = state.connection.committed.kind === 'remote';
@@ -21,22 +24,20 @@ export function DesktopAccountRowView({ state, onPresent, localUpdater }: Deskto
   const instance = state.connection.committed.kind === 'local'
     ? state.local.slug ?? t('desktopClient.thisDevice') : state.connection.committed.name;
   const label = signedIn ? instance : t('desktopClient.signIn');
-  const accountTrigger = <Button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md px-2 text-left text-xs [--press-scale:1]" title={label}>
-          {signedIn ? remote ? <Globe data-account-avatar className="size-3.5 shrink-0 text-muted" /> : <Laptop data-account-avatar className="size-3.5 shrink-0 text-muted" /> : <UserRound data-account-avatar className="size-3.5 shrink-0 text-muted" />}
-          <span data-account-group className="flex min-w-0 flex-1 items-center gap-1.5">
-            <span data-account-label className="min-w-0 truncate">{label}</span>
-            {offline ? <WifiOff className="size-3 shrink-0 text-gold-ink" aria-label={t('desktopClient.disconnected')} />
-              : busy ? <RefreshCw className="size-3 shrink-0 animate-spin text-cyan-ink" aria-label={t('desktopClient.connecting')} />
-              : <span data-status-indicator className="size-1.5 shrink-0 rounded-full bg-mint" aria-label={t('desktopClient.connected')} />}
-
-          </span>
-        </Button>;
-  return <div data-desktop-account-row className="relative flex min-w-0 items-center gap-1">
-    {accountTrigger}
-    <div data-version-trigger className="shrink-0">
-      {remote ? <Button variant="ghost" size="sm" className="h-8 gap-1 px-1.5 text-2xs text-muted" aria-label={t('desktopClient.localVersion', { version: state.desktop.version })} onClick={() => onPresent('updates')}>
-        {update ? <><Download className="size-3 text-gold-ink" /><span className="size-1.5 rounded-full bg-gold" /></> : state.desktop.version}
-      </Button> : localUpdater}
-    </div>
+  const accountTrigger = <Button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md pl-0 pr-1.5 text-left text-xs [--press-scale:1]" title={label}>
+    <StatusGlyph>
+      {offline ? <WifiOff data-status-indicator className="size-3 shrink-0 text-gold-ink" aria-label={t('desktopClient.disconnected')} />
+        : busy ? <RefreshCw data-status-indicator className="size-3 shrink-0 animate-spin text-cyan-ink" aria-label={t('desktopClient.connecting')} />
+        : <StatusDot tone="running" label={t('desktopClient.connected')} />}
+    </StatusGlyph>
+    <span data-account-label className="min-w-0 truncate">{label}</span>
+  </Button>;
+  const shown = `${t('dashboard.versionPrefix')}${state.desktop.version}`;
+  const version = remote ? <VersionChip attention={update} updateDot={update} aria-label={t('desktopClient.localVersion', { version: shown })} onClick={() => onPresent('updates')}>
+    {update && <Download size={12} aria-hidden="true" />}
+    {shown}
+  </VersionChip> : localUpdater;
+  return <div data-desktop-account-row className="relative min-w-0">
+    <SidebarStatusRow status={accountTrigger} version={version} />
   </div>;
 }

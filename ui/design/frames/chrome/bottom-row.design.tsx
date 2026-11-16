@@ -49,7 +49,7 @@ const projection = (remote: boolean, update: boolean, link: Link = 'connected'):
 });
 
 const rowProps = (remote: boolean, update = false, link: Link = 'connected'): Omit<DesktopAccountRowViewProps, 'localUpdater'> => ({
-  state: projection(remote, update, link), menuOpen: false, onMenuOpenChange: () => {}, onPresent: () => {},
+  state: projection(remote, update, link), onPresent: () => {},
 });
 
 /** The complete window, with the desktop app's row in place of the Web's when given. */

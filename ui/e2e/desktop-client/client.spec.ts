@@ -20,6 +20,20 @@ async function language(page: Page, lang: string) {
   await page.addInitScript((lng) => localStorage.setItem('i18nextLng', lng), lang);
 }
 
+// Keep the product guard and URL producer real; intercept only OS protocol dispatch,
+// as the Setup browser consumer does, so clicks cannot open the installed App.
+async function capturePresentations(page: Page) {
+  const presentations: string[] = [];
+  await page.exposeFunction('__fixturePresent', (url: string) => presentations.push(url));
+  await page.route('**/src/desktop/bridge.ts', async (route) => {
+    const response = await route.fetch();
+    const body = await response.text();
+    expect(body).toContain('window.location.assign(');
+    await route.fulfill({ response, body: body.replace('window.location.assign(', 'window.__fixturePresent(') });
+  });
+  return presentations;
+}
+
 for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 }]) {
   for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark']) {
     test(`AUTH-SETUP-178 real AppShell ${viewport.width} ${lang} ${theme}`, async ({ page }, info) => {
@@ -33,24 +47,33 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.route('**/api/version**', (route) => route.fulfill({ json: { current: state.desktop.version, latest: '3.2.7', has_update: true, managed_by: 'desktop' } }));
       state.remote_auxiliary = 'disabled_incomplete';
       const requests = await installBridge(page, state, { projection: true });
+      const presentations = await capturePresentations(page);
       await language(page, lang);
       await page.goto(`/?theme=${theme}`);
       await expect(page.locator('[data-account-label]')).toHaveText('authoritative-local');
-      const avatar = page.locator('[data-account-avatar]');
-      await expect(avatar).toBeVisible();
+      await expect(page.locator('[data-sidebar-status-row] [data-status-indicator]')).toBeVisible();
+      await expect(page.locator('[data-account-avatar]')).toHaveCount(0);
       const footer = page.locator('[data-sidebar-footer]');
       const measurements = await footer.evaluate((node) => {
         const rect = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
-        return { avatar: rect('[data-account-avatar]').x, tools: node.firstElementChild!.getBoundingClientRect().x,
-          dotGap: rect('[data-status-indicator]').x - rect('[data-account-label]').right,
-          versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right };
+        const tools = node.firstElementChild!.getBoundingClientRect();
+        const row = rect('[data-sidebar-status-row]');
+        return { dot: rect('[data-status-indicator]').x, tools: tools.x,
+          labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
+          versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
+          above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
       });
-      expect(measurements.avatar).toBe(24);
+      expect(measurements.dot).toBe(16);
       expect(measurements.tools).toBe(16);
-      expect(measurements.dotGap).toBeLessThanOrEqual(6);
+      expect(measurements.labelGap).toBeGreaterThanOrEqual(0);
+      expect(measurements.labelGap).toBeLessThanOrEqual(8);
       await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
       expect(measurements.versionRight).toBe(measurements.footerRight);
+      expect(measurements.below).toBe(8);
+      expect(measurements.below).toBeLessThanOrEqual(measurements.above);
       await expect(footer).not.toContainText('max@example.test');
+      await expect(page.locator('[data-version-trigger] button')).toHaveAttribute('data-version-chip');
+      await page.screenshot({ animations: 'disabled', path: info.outputPath('local-bottom-row.png') });
       await page.locator('[data-version-trigger] button').click();
       const popup = page.getByRole('dialog', { name: lang === 'en' ? 'Version & Update' : '版本与更新' });
       await expect(popup).toBeVisible();
@@ -62,6 +85,8 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       await page.keyboard.press('Escape');
       await expect(page.locator('[data-version-trigger] button')).toBeFocused();
       await page.locator('[data-account-trigger]').click();
+      await expect.poll(() => presentations).toEqual([`avibe://desktop/instances?locale=${lang}`]);
+      await expect(page.locator('[data-account-trigger]')).not.toHaveAttribute('aria-expanded');
       await expect(page.locator('[data-instance-menu]')).toHaveCount(0);
       await expect(popup).toHaveCount(0);
       await expect(page.locator('[data-update-menu]')).toHaveCount(0);
@@ -99,6 +124,47 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       expect(denied).toEqual([]);
     });
   }
+}
+
+for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark']) {
+  test(`AUTH-SETUP-178 remote shared bottom row 880 ${lang} ${theme}`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 880, height: 600 });
+    const denied = await serveProduct(page, lang);
+    const state = clientState(); signIn(state);
+    state.local.slug = 'local-must-not-leak';
+    state.connection = { status: 'remote_connected', committed: { kind: 'remote', name: 'Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' }, pending: null };
+    state.remote_auxiliary = 'disabled_incomplete';
+    state.desktop.update.phase = theme === 'dark' ? 'available' : 'current';
+    const requests = await installBridge(page, state, { projection: true });
+    const presentations = await capturePresentations(page);
+    await language(page, lang);
+    await page.goto(`/?theme=${theme}`);
+    const row = page.locator('[data-sidebar-status-row]');
+    await expect(page.locator('[data-account-label]')).toHaveText('Studio');
+    await expect(row.locator('[data-account-avatar],[data-account-chevron]')).toHaveCount(0);
+    await expect(row).not.toContainText('max@example.test');
+    await expect(row).not.toContainText((lang === 'en' ? en : zh).desktopClient.auxiliaryIncomplete);
+    const chip = row.locator('[data-version-chip]');
+    await expect(chip).toHaveText(`v${state.desktop.version}`);
+    const geometry = await row.evaluate((node) => {
+      const box = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
+      return { left: box('[data-status-indicator]').left,
+        gap: box('[data-account-label]').left - box('[data-status-indicator]').right,
+        right: box('[data-version-chip]').right - node.getBoundingClientRect().right,
+        bottom: innerHeight - node.getBoundingClientRect().bottom };
+    });
+    expect(geometry.left).toBe(16); expect(geometry.gap).toBeGreaterThanOrEqual(0);
+    expect(geometry.gap).toBeLessThanOrEqual(8); expect(geometry.right).toBe(0); expect(geometry.bottom).toBe(8);
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('remote-bottom-row.png') });
+    await chip.click();
+    await expect.poll(() => presentations).toEqual([`avibe://desktop/updates?locale=${lang}`]);
+    await page.locator('[data-account-trigger]').click();
+    await expect.poll(() => presentations).toEqual([`avibe://desktop/updates?locale=${lang}`, `avibe://desktop/instances?locale=${lang}`]);
+    await expect(page.locator('[data-account-trigger]')).not.toHaveAttribute('aria-expanded');
+    await expect(page.locator('[data-instance-menu],[data-update-menu],[data-update-panel]')).toHaveCount(0);
+    expect(await page.evaluate(() => '__TAURI_INTERNALS__' in window)).toBe(false);
+    expect(requests).toEqual([]); expect(denied).toEqual([]);
+  });
 }
 
 for (const lang of ['en', 'zh'] as const) for (const persistenceError of [false, true]) test(`AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transient (${lang}, persistenceError=${persistenceError})`, async ({ page }, info) => {
