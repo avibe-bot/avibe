@@ -2493,8 +2493,10 @@ final class DirectPathAppTests: XCTestCase {
         launchesWithInstanceOneSelected: Bool = false,
         reusingDefaults: UserDefaults? = nil,
         notifications: NotificationsOn? = nil,
-        beforeTheAppExists: () throws -> Void = {},
-        whenTheAppExists: (AppModel) -> Void = { _ in }
+        // Before `beforeTheAppExists`: an unlabeled trailing closure at a
+        // call site keeps meaning that last parameter.
+        whenTheAppExists: (AppModel) -> Void = { _ in },
+        beforeTheAppExists: () throws -> Void = {}
     ) async throws -> AppModel {
         let providerPatches = notifications?.providerPatches
         let server = try LocalHTTPServer { request in
