@@ -220,7 +220,10 @@ final class AppModel: ObservableObject {
     private var runtimeOpenLongWaitTimer: (any RuntimeOpenTimer)?
     /// When the App went to the background, on `runtimeOpenTiming`'s clock;
     /// `nil` in the foreground. WebKit is suspended there, so the opening
-    /// budget is not charged for that time.
+    /// budget is not charged for that time. It starts `nil`: the App declares
+    /// no background modes, and a scene-based launch can still report
+    /// `.background` before its scene is active, which would stop the clock
+    /// for the whole first session.
     private var runtimeOpenBackgroundedAt: Duration?
     /// The background time already excluded from the opening budget.
     private var runtimeOpenBackgroundTime: Duration = .zero
@@ -399,10 +402,6 @@ final class AppModel: ObservableObject {
         self.runtimeOpenBudget = runtimeOpenBudget
         self.runtimeOpenLongWait = runtimeOpenLongWait
         self.runtimeOpenNotificationCenter = runtimeOpenNotificationCenter
-        // The App can be launched into the background.
-        if UIApplication.shared.applicationState == .background {
-            runtimeOpenBackgroundedAt = self.runtimeOpenTiming.now
-        }
         nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
         sessionNotifications = SessionNotificationCleaner(
             center: pushNotificationCenter ?? SystemPushNotificationCenter()

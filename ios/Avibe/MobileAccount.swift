@@ -905,26 +905,51 @@ final class MobileSessionCoordinator {
     }
 
     /// The instance list's open (`session.selectInstance`). When the account
-    /// is held only by an operation that keeps the selection (a
-    /// push-management request the App makes on its own, as on a return to
-    /// the foreground, or a refresh of the signed-in account), it first
-    /// waits up to `bound` for that operation to finish, then selects once.
-    /// Any other operation, a reset or a sign-out still answers `busy` at
-    /// once. `selectInstance` itself and transport ownership are unchanged.
+    /// is held only by operations that keep the selection (push-management
+    /// requests the App makes on its own, as on a return to the foreground,
+    /// or a refresh of the signed-in account), it first waits for them, up
+    /// to `bound` in all, then selects once. Any other operation, a reset or
+    /// a sign-out still answers `busy` at once. An open that waited is
+    /// dropped as `busy` if its page closed, another page opened, or the
+    /// account or selection changed meanwhile. `selectInstance` itself and
+    /// transport ownership are unchanged.
     func selectInstanceAfterSelectionKeepingOperation(
         id: String,
         waitingAtMost bound: Duration = .seconds(10)
     ) async throws -> MobileInstance {
-        if case .operation(let token) = phase,
-           token == selectionKeepingOperation
-        {
-            await selectionKeepingOperationFinished(token, atMost: bound)
+        guard isHeldBySelectionKeepingOperation else {
+            return try selectInstance(id: id)
+        }
+        let lease = accountSurfaceLeaseID
+        let requestGeneration = generation
+        let selection = storedSelection()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: bound)
+        // Recovery can run such operations back to back, the next one
+        // starting before this wait resumes.
+        while isHeldBySelectionKeepingOperation, clock.now < deadline {
+            await selectionKeepingOperationFinished(
+                atMost: clock.now.duration(to: deadline)
+            )
+        }
+        guard
+            accountSurfaceLeaseID == lease,
+            generation == requestGeneration,
+            storedSelection() == selection
+        else {
+            throw MobileAccountError.busy
         }
         return try selectInstance(id: id)
     }
 
+    private var isHeldBySelectionKeepingOperation: Bool {
+        if case .operation(let token) = phase {
+            return token == selectionKeepingOperation
+        }
+        return false
+    }
+
     private func selectionKeepingOperationFinished(
-        _ token: UUID,
         atMost bound: Duration
     ) async {
         let waiter = UUID()
@@ -935,7 +960,7 @@ final class MobileSessionCoordinator {
                 .resume()
         }
         await withCheckedContinuation { continuation in
-            if selectionKeepingOperation == token {
+            if isHeldBySelectionKeepingOperation {
                 selectionKeepingOperationWaiters[waiter] = continuation
             } else {
                 continuation.resume()

@@ -583,6 +583,10 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNotNil(app.runtimeOpenNotice)
         XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
 
+        // SwiftUI builds its native accessibility tree only while
+        // accessibility automation is on; turn it on for this test alone.
+        let restoreAutomation = try enableAccessibilityAutomation()
+        defer { restoreAutomation() }
         let scene = try XCTUnwrap(
             UIApplication.shared.connectedScenes
                 .compactMap { $0 as? UIWindowScene }
@@ -3693,6 +3697,31 @@ final class DirectPathAppTests: XCTestCase {
         }
         storeIdentifiers.removeAll()
     }
+}
+
+/// Turns on the simulator's accessibility automation, as XCUITest does, and
+/// returns what restores its previous value.
+private func enableAccessibilityAutomation() throws -> () -> Void {
+    let root = ProcessInfo.processInfo.environment["IPHONE_SIMULATOR_ROOT"] ?? ""
+    guard
+        let handle = dlopen(root + "/usr/lib/libAccessibility.dylib", RTLD_NOW)
+            ?? dlopen("/usr/lib/libAccessibility.dylib", RTLD_NOW),
+        let isEnabledSymbol = dlsym(handle, "_AXSAutomationEnabled"),
+        let setEnabledSymbol = dlsym(handle, "_AXSSetAutomationEnabled")
+    else {
+        throw NSError(
+            domain: "AccessibilityAutomation",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "libAccessibility is not available."]
+        )
+    }
+    typealias IsEnabled = @convention(c) () -> Int32
+    typealias SetEnabled = @convention(c) (Int32) -> Void
+    let isEnabled = unsafeBitCast(isEnabledSymbol, to: IsEnabled.self)
+    let setEnabled = unsafeBitCast(setEnabledSymbol, to: SetEnabled.self)
+    let previous = isEnabled()
+    setEnabled(1)
+    return { setEnabled(previous) }
 }
 
 /// One element of the native accessibility tree.

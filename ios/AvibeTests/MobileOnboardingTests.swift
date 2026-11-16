@@ -1466,6 +1466,120 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(opened.last?.instance.id, instance.id)
     }
 
+    /// Recovery can run push requests back to back, the next one starting
+    /// before the waiting open resumes: the open keeps waiting, within its
+    /// one bound, and opens once the last of them ends.
+    func testTheListsOpenWaitsThroughPushRequestsRunBackToBack() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let holds = [HeldCall(), HeldCall()]
+        let managements = holds.map { hold in
+            let management = FakeMobileAuthTransport()
+            management.pushManagementHandler = { _ in
+                await hold.wait()
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return management
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first] + managements + [FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let patch = PushManagementRequest(
+            method: "PATCH",
+            path: "/api/push/apns/installations/current",
+            headers: [:],
+            body: nil
+        )
+        let requests = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(patch)
+            _ = try await coordinator.pushManagementRequest(patch)
+        }
+        try await holds[0].waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+
+        holds[0].release()
+        try await holds[1].waitUntilHeld()
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened, 1, "It opened, or gave up, during the second request.")
+
+        holds[1].release()
+        let reopened = try await reopen.value
+        try await requests.value
+        XCTAssertEqual(reopened.id, instance.id)
+        XCTAssertEqual(opened, 2)
+    }
+
+    /// An open that waited is dropped when the page that asked for it closed
+    /// meanwhile (the sheet swiped away over a live runtime): it must not
+    /// replace the runtime the user went back to.
+    func testTheListsOpenIsDroppedWhenItsPageClosesDuringTheWait() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        // The sheet over the runtime; the push request uses its transport.
+        coordinator.activateAccountSurface()
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        coordinator.leaveAccountSurface()
+
+        hold.release()
+        do {
+            _ = try await reopen.value
+            XCTFail("The open went ahead after its page closed.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        try await request.value
+        XCTAssertEqual(opened, 1)
+    }
+
     /// Only an operation that keeps the selection is waited for: any other
     /// one (here the first session read, before a list exists) still
     /// answers busy at once.
