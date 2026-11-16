@@ -439,10 +439,42 @@ image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
 `session.refresh`,
-`session.selectInstance`, `session.logout`, `app.returnToInstance`, and the
-closed `app.openExternal` allowlist (the two install guides and avibe.bot's
-Account security page). Instance documents, child windows, Show Pages, and
-iframes do not receive these handlers.
+`session.selectInstance`, `session.logout`, `app.returnToInstance`,
+`app.openPage`, and the closed `app.openExternal` allowlist (the two install
+guides and avibe.bot's Account security page). Instance documents, child
+windows, Show Pages, and iframes do not receive these handlers.
+
+### avibe.bot pages in the App
+
+Account's 隐私政策 / Privacy policy and 删除账号 / Delete account
+(App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
+is `privacyPolicy` or `accountDeletion` and nothing else; any other value or
+an extra parameter is `invalid_argument`. Native code owns the addresses:
+`/privacy` and `/account/delete` on the control-plane origin
+(`https://avibe.bot`). The page opens in a native sheet over the bundled page
+with Done, the current host as its title, and a user agent ending in
+`AvibeiOS/<version>`, so avibe.bot hides its site chrome and Cancel. It
+receives no bridge.
+
+- Account deletion uses the account's WebKit store, so the page is already
+  signed in; only a signed-in account with no account change under way gets
+  it (`signed_out` or `busy` otherwise). The WebView joins the coordinator's
+  release barriers: the sign-out that follows waits for it before rotating
+  the store and leaves the old store to a later sweep while it is alive.
+  The privacy policy uses a non-persistent store.
+- Main-frame navigation stays on the control-plane origin; other web
+  addresses and application schemes open in the system, as do new windows.
+  Subframes load web content but launch nothing.
+- avibe-bot-backend's agreed done signal is a main-frame navigation to
+  exactly `/account/delete/done` on that origin, made only after
+  `/api/mobile/session` answers 401 for the cookie jar. The App cancels it,
+  closes the sheet, and `app.openPage` resolves `{completed: true}`; any other
+  close resolves `{completed: false}`.
+- Either way the bundled page then runs `session.refresh`. A signed-out
+  answer is the existing explicit sign-out: the store rotates and the page
+  shows Welcome (from the sheet, the App replaces it with the full-screen
+  account page as for any account transition). A signed-in answer keeps
+  Account.
 
 A complete six-digit email or authenticator code starts verification as soon
 as an edit completes it, whether typed, pasted, or offered above the keyboard

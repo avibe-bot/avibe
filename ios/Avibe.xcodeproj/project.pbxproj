@@ -36,6 +36,7 @@
 		10000000000000000000000E /* MobileAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		10000000000000000000000F /* MobileAuthTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
+		100000000000000000000151 /* AvibePage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000151 /* AvibePage.swift */; };
 		100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* MobileOnboardingContainer.swift */; };
 		100000000000000000000012 /* MobileApp in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
 		100000000000000000000013 /* MobileOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* MobileOnboardingTests.swift */; };
@@ -83,6 +84,7 @@
 		910000000000000000000003 /* MobileAccount.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
+		910000000000000000000151 /* AvibePage.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000151 /* AvibePage.swift */; };
 		91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* MobileOnboardingContainer.swift */; };
 		910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
 		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
@@ -170,6 +172,7 @@
 		200000000000000000000011 /* MobileAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccount.swift; sourceTree = "<group>"; };
 		200000000000000000000012 /* MobileAuthTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransport.swift; sourceTree = "<group>"; };
 		200000000000000000000013 /* MobileOnboardingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingBridge.swift; sourceTree = "<group>"; };
+		200000000000000000000151 /* AvibePage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibePage.swift; sourceTree = "<group>"; };
 		200000000000000000000014 /* MobileOnboardingContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingContainer.swift; sourceTree = "<group>"; };
 		200000000000000000000015 /* MobileApp */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MobileApp; sourceTree = "<group>"; };
 		200000000000000000000016 /* MobileOnboardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingTests.swift; sourceTree = "<group>"; };
@@ -302,6 +305,7 @@
 				200000000000000000000011 /* MobileAccount.swift */,
 				200000000000000000000012 /* MobileAuthTransport.swift */,
 				200000000000000000000013 /* MobileOnboardingBridge.swift */,
+				200000000000000000000151 /* AvibePage.swift */,
 				200000000000000000000014 /* MobileOnboardingContainer.swift */,
 				200000000000000000000018 /* MobilePasskey.swift */,
 				2000000000000000000000D0 /* NativeBadge.swift */,
@@ -787,6 +791,7 @@
 				10000000000000000000000E /* MobileAccount.swift in Sources */,
 				10000000000000000000000F /* MobileAuthTransport.swift in Sources */,
 				100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */,
+				100000000000000000000151 /* AvibePage.swift in Sources */,
 				100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */,
 				100000000000000000000015 /* MobilePasskey.swift in Sources */,
 				1000000000000000000000D0 /* NativeBadge.swift in Sources */,
@@ -871,6 +876,7 @@
 				910000000000000000000003 /* MobileAccount.swift in Fixture Sources */,
 				910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */,
 				910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */,
+				910000000000000000000151 /* AvibePage.swift in Fixture Sources */,
 				91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */,
 				910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */,
 				910000000000000000000007 /* WebOrigin.swift in Fixture Sources */,

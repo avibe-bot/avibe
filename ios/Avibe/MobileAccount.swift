@@ -568,6 +568,10 @@ final class MobileSessionCoordinator {
         snapshot?.account
     }
 
+    var controlPlaneURL: URL {
+        controlPlane.baseURL
+    }
+
     var currentInstances: [MobileInstance] {
         snapshot?.instances ?? []
     }
@@ -620,6 +624,27 @@ final class MobileSessionCoordinator {
             deactivateAccountSurface()
             return
         }
+    }
+
+    /// The store an avibe.bot page shown with the account's sign-in uses
+    /// (`AvibePage.accountDeletion`): the account's own, so the page is
+    /// already signed in. Only a signed-in account gets it, and not while a
+    /// sign-out or account change is under way.
+    func accountWebPageDataStore() throws -> WKWebsiteDataStore {
+        guard snapshot != nil else {
+            throw MobileAccountError.signedOut
+        }
+        guard keepsSelection else {
+            throw MobileAccountError.busy
+        }
+        return websiteDataStore.dataStore
+    }
+
+    /// A WebView on `accountWebPageDataStore()`. An account transition waits
+    /// for it, as for the runtime's, before it rotates the store, and leaves
+    /// the old store for a later sweep if it is still alive.
+    func recordAccountWebPage(_ webView: WKWebView) {
+        recordReleaseBarrier(WebsiteDataStoreReleaseBarrier(webViews: [webView]))
     }
 
     private func ensureTransport() {

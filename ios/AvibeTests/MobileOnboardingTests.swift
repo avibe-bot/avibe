@@ -547,11 +547,105 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.openExternal",
                 "app.dismiss",
                 "app.returnToInstance",
+                "app.openPage",
             ]
         )
         XCTAssertThrowsError(
             try MobileBridgeRequest.parse(["method": "auth.fetch"])
         )
+    }
+
+    // The bundled page names a page, never an address: each page has one
+    // fixed address on the control plane.
+    func testAvibePagesOpenOnlyTheirFixedControlPlaneAddresses() {
+        let production = MobileControlPlaneConfiguration.productionURL
+        XCTAssertEqual(Set(AvibePage.allCases.map(\.rawValue)), ["accountDeletion", "privacyPolicy"])
+        XCTAssertEqual(
+            AvibePage.accountDeletion.url(controlPlane: production).absoluteString,
+            "https://avibe.bot/account/delete"
+        )
+        XCTAssertEqual(
+            AvibePage.privacyPolicy.url(controlPlane: production).absoluteString,
+            "https://avibe.bot/privacy"
+        )
+        XCTAssertEqual(
+            AvibePage.accountDeletion.url(
+                controlPlane: URL(string: "http://127.0.0.1:43127")!
+            ).absoluteString,
+            "http://127.0.0.1:43127/account/delete"
+        )
+        XCTAssertTrue(AvibePage.accountDeletion.usesAccountSignIn)
+        XCTAssertFalse(AvibePage.privacyPolicy.usesAccountSignIn)
+    }
+
+    func testAvibePagesStayOnTheControlPlaneAndOnlyDeletionFinishesAtDone() {
+        let origin = WebOrigin.parseConfigured("https://avibe.bot")!
+        let deletion = AvibePagePolicy(page: .accountDeletion, origin: origin)
+        let privacy = AvibePagePolicy(page: .privacyPolicy, origin: origin)
+        let cases: [(String, AvibePageNavigation, AvibePageNavigation)] = [
+            ("https://avibe.bot/account/delete", .allow, .allow),
+            ("https://avibe.bot/login?next=/account/delete", .allow, .allow),
+            ("https://avibe.bot/app/organizations/org-1/settings", .allow, .allow),
+            ("https://avibe.bot/account/delete/done", .finished, .allow),
+            ("https://avibe.bot/account/delete/done?lang=zh#top", .finished, .allow),
+            ("https://avibe.bot/account/delete/done/more", .allow, .allow),
+            ("https://avibe.bot/account/delete/doneish", .allow, .allow),
+            ("http://avibe.bot/account/delete/done", .openOutside, .openOutside),
+            ("https://evil.avibe.bot/account/delete/done", .openOutside, .openOutside),
+            ("https://github.com/login/oauth/authorize", .openOutside, .openOutside),
+            ("mailto:support@avibe.bot", .openOutside, .openOutside),
+            ("about:blank", .allow, .allow),
+            ("javascript:alert(1)", .cancel, .cancel),
+            ("file:///etc/hosts", .cancel, .cancel),
+        ]
+        for (raw, deletionExpected, privacyExpected) in cases {
+            let url = URL(string: raw)!
+            XCTAssertEqual(deletion.mainFrameNavigation(to: url), deletionExpected, raw)
+            XCTAssertEqual(privacy.mainFrameNavigation(to: url), privacyExpected, raw)
+        }
+        XCTAssertEqual(deletion.subframeNavigation(to: URL(string: "https://challenges.example.com/")!), .allow)
+        XCTAssertEqual(deletion.subframeNavigation(to: URL(string: "mailto:a@example.com")!), .cancel)
+        XCTAssertEqual(deletion.newWindow(to: URL(string: "https://avibe.bot/privacy")!), .openOutside)
+        XCTAssertEqual(deletion.newWindow(to: URL(string: "javascript:void(0)")!), .cancel)
+    }
+
+    // The deletion page is signed in with the account's own store, and the
+    // sign-out its completion causes waits for it like for the runtime.
+    func testAccountDeletionPageSharesTheSignedInStoreAndHoldsItsCleanup() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let transport = FakeMobileAuthTransport()
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        XCTAssertThrowsError(try coordinator.accountWebPageDataStore()) { error in
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.signedOut.code)
+        }
+
+        transport.session = snapshot(accountID: "account-1")
+        _ = try await coordinator.bootstrap()
+        XCTAssertTrue(try coordinator.accountWebPageDataStore() === store.dataStore)
+        let oldIdentifier = store.identifier
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        var page: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+        coordinator.recordAccountWebPage(try XCTUnwrap(page))
+
+        // The account is gone: the session reads signed out.
+        transport.session = nil
+        let state = try await coordinator.refresh()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNotEqual(store.identifier, oldIdentifier)
+        XCTAssertTrue(registry.removalAttempts.isEmpty, "The page still uses the old store")
+        XCTAssertThrowsError(try coordinator.accountWebPageDataStore())
+
+        page = nil
+        await store.sweepOrphans()
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
     }
 
     func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView() async throws {
@@ -672,6 +766,49 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? String
         XCTAssertEqual(invalid, MobileAccountError.invalidRequest.code)
         XCTAssertEqual(dismissCalls, 1)
+    }
+
+    func testOpenPageAcceptsOnlyANamedPage() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport]
+            ),
+            startScreen: .sheet
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 844)
+        )
+        defer { window.isHidden = true }
+
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+        for params in [
+            "{}",
+            "{page: 'https://avibe.bot/account/delete'}",
+            "{page: 'accountDeletion', url: 'https://example.com/'}",
+            "{page: 'settings'}",
+        ] {
+            let code = try await webView.callAsyncJavaScript(
+                """
+                try {
+                  await window.avibeMobile.call('app.openPage', \(params));
+                  return 'missing-error';
+                } catch (error) {
+                  return error.code;
+                }
+                """,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            ) as? String
+            XCTAssertEqual(code, "invalid_argument", params)
+        }
+        XCTAssertNil(controller.presentedViewController)
     }
 
     func testSheetRejectsAuthMethodsWithoutMutatingTheRuntime() async throws {

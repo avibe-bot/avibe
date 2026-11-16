@@ -117,6 +117,8 @@ const accountPage = (props: Partial<AccountProps> = {}) => (
     onSwitch={noop}
     onLogout={noop}
     onLicenses={noop}
+    onPrivacy={noop}
+    onDeleteAccount={noop}
     {...props}
   />
 );

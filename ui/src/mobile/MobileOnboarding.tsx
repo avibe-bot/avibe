@@ -49,6 +49,7 @@ import {
   logoutMobileSession,
   normalizeMobileBridgeError,
   openMobileExternal,
+  openMobilePage,
   refreshMobileSession,
   requestMobileOtp,
   returnToMobileInstance,
@@ -79,7 +80,7 @@ import {
 } from './InstanceList';
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
 import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
-import { LicensesContent, LicensesEntry } from './LicensesPage';
+import { AboutSection, DeleteAccount, LicensesContent } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
 type Screen =
@@ -108,6 +109,7 @@ type BusyAction =
   | 'refresh'
   | 'select'
   | 'logout'
+  | 'deleteAccount'
   | 'return';
 type CooldownSource = 'client' | 'provider' | null;
 type CooldownScope = 'send' | 'all' | null;
@@ -1831,6 +1833,8 @@ function Account({
   onSwitch,
   onLogout,
   onLicenses,
+  onPrivacy,
+  onDeleteAccount,
   inSheet = false,
   showCurrent = !inSheet,
   onClose,
@@ -1856,6 +1860,9 @@ function Account({
   onSwitch: () => void;
   onLogout: () => void;
   onLicenses: () => void;
+  onPrivacy: () => void;
+  /** Opens avibe.bot's account deletion page over Account, with the App's sign-in. */
+  onDeleteAccount: () => void;
 }) {
   const { t } = useTranslation();
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id);
@@ -1931,7 +1938,8 @@ function Account({
           <ChevronRight className="size-4" />
         </Button>
       </section> : null}
-      {licenses ? <LicensesEntry disabled={locked} onOpen={onLicenses} /> : null}
+      <AboutSection disabled={locked} licenses={licenses} onLicenses={onLicenses} onPrivacy={onPrivacy} />
+      <DeleteAccount disabled={locked} onDelete={onDeleteAccount} />
     </CloudScreen>
   );
 }
@@ -2487,6 +2495,18 @@ function MobileOnboardingScreens() {
     return () => window.clearTimeout(timer);
   }, [accountRoot, screen, refreshSheet]);
 
+  /** Back to Welcome with nothing of the old account kept on the page. */
+  const showSignedOut = (next: MobileSessionState) => {
+    setSession(next);
+    pendingWeakPassword.current = null;
+    setEmail('');
+    setCode('');
+    setCooldown(0);
+    setCooldownSource(null);
+    setCooldownScope(null);
+    setScreen('welcome');
+  };
+
   const logout = async () => {
     const token = beginOperation('logout');
     if (token === null) return;
@@ -2499,14 +2519,7 @@ function MobileOnboardingScreens() {
         setErrorKey('mobileApp.errors.network');
         return;
       }
-      setSession(next);
-      pendingWeakPassword.current = null;
-      setEmail('');
-      setCode('');
-      setCooldown(0);
-      setCooldownSource(null);
-      setCooldownScope(null);
-      setScreen('welcome');
+      showSignedOut(next);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
@@ -2514,6 +2527,37 @@ function MobileOnboardingScreens() {
     } finally {
       finishOperation(token);
     }
+  };
+
+  /**
+   * avibe.bot's deletion page, over Account with the App's sign-in. However it closes (deleted,
+   * Done, or a swipe), the session says whether the account is still there: signed out goes to
+   * Welcome, still signed in stays on Account. A failure leaves Account as it was; its error card
+   * is sign-out's, and the next session read settles the state.
+   */
+  const deleteAccount = async () => {
+    const token = beginOperation('deleteAccount');
+    if (token === null) return;
+    setErrorKey(null);
+    try {
+      await sheetRefreshSettled.current;
+      await openMobilePage('accountDeletion');
+      if (!ownsOperation(token)) return;
+      const next = await refreshMobileSession();
+      if (!ownsOperation(token)) return;
+      if (next.status === 'signedOut') showSignedOut(next);
+      else if (next.status === 'signedIn') setSession(next);
+      else applySession(token, next, true);
+    } catch {
+      // Nothing to show here: see above.
+    } finally {
+      finishOperation(token);
+    }
+  };
+
+  const openPrivacyPolicy = () => {
+    if (isOperationLocked()) return;
+    void openMobilePage('privacyPolicy').catch(() => {});
   };
 
   const leaveAccount = async () => {
@@ -2750,6 +2794,8 @@ function MobileOnboardingScreens() {
             setScreen('licenses');
           }
         }}
+        onPrivacy={openPrivacyPolicy}
+        onDeleteAccount={() => void deleteAccount()}
       />
     );
   }

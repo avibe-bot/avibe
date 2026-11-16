@@ -127,6 +127,7 @@ enum MobileBridgeMethod: String, CaseIterable {
     case appOpenExternal = "app.openExternal"
     case appDismiss = "app.dismiss"
     case appReturnToInstance = "app.returnToInstance"
+    case appOpenPage = "app.openPage"
 }
 
 struct MobileBridgeRequest {
@@ -255,6 +256,8 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let returnToRuntime: () -> Bool
     private let dismissSurface: () -> Bool
     private let sheetMethodsOnly: Bool
+    /// Set by the view controller once it exists; it presents the page.
+    var presentPage: ((AvibePage) async throws -> Bool)?
 
     init(
         coordinator: MobileSessionCoordinator,
@@ -425,6 +428,22 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         throw MobileAccountError.runtimeUnavailable
                     }
                     reply(replyHandler, result: NSNull())
+                case .appOpenPage:
+                    guard
+                        request.params.count == 1,
+                        let rawPage = request.params["page"] as? String,
+                        let page = AvibePage(rawValue: rawPage)
+                    else {
+                        throw MobileAccountError(
+                            code: "invalid_argument",
+                            message: "The page is not one the App shows."
+                        )
+                    }
+                    guard let presentPage else {
+                        throw MobileAccountError.forbidden
+                    }
+                    let completed = try await presentPage(page)
+                    reply(replyHandler, result: ["completed": completed])
                 }
             } catch let error as MobileAccountError {
                 reply(replyHandler, error: error)
@@ -519,6 +538,12 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         )
         super.init(nibName: nil, bundle: nil)
         handler.trustedWebView = webView
+        handler.presentPage = { [weak self] page in
+            guard let self else {
+                throw MobileAccountError.forbidden
+            }
+            return try await self.presentAvibePage(page)
+        }
         webView.navigationDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false
     }
@@ -584,6 +609,31 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         }
         hasLoadedBundledPage = true
         webView.load(URLRequest(url: resourceURL))
+    }
+
+    /// Shows one of the fixed avibe.bot pages over this page and returns
+    /// once it closes: `true` when the deletion page reported the account
+    /// deleted. The bundled page then reads the session to learn the rest.
+    private func presentAvibePage(_ page: AvibePage) async throws -> Bool {
+        guard presentedViewController == nil, viewIfLoaded?.window != nil else {
+            throw MobileAccountError.busy
+        }
+        let dataStore = page.usesAccountSignIn
+            ? try coordinator.accountWebPageDataStore()
+            : WKWebsiteDataStore.nonPersistent()
+        let controlPlane = coordinator.controlPlaneURL
+        return await withCheckedContinuation { continuation in
+            let controller = AvibePageViewController(
+                page: page,
+                controlPlane: controlPlane,
+                websiteDataStore: dataStore,
+                onFinish: { continuation.resume(returning: $0) }
+            )
+            if page.usesAccountSignIn {
+                coordinator.recordAccountWebPage(controller.webView)
+            }
+            present(controller.makePresentation(), animated: true)
+        }
     }
 
     private func configureSheetPresentation() {
