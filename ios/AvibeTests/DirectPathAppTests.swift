@@ -829,6 +829,8 @@ final class DirectPathAppTests: XCTestCase {
             root: view,
             notifications: notifications,
             afterArrivals: 0,
+            // The restore may have registered while the bootstrap was awaited.
+            afterRegistrations: 0,
             file: file,
             line: line
         ) {}
@@ -886,13 +888,14 @@ final class DirectPathAppTests: XCTestCase {
         root: RootViewStandIn,
         notifications: NotificationsOn,
         afterArrivals arrivals: Int,
+        afterRegistrations registrationsBefore: Int? = nil,
         step: String = "",
         file: StaticString = #filePath,
         line: UInt = #line,
         _ open: () throws -> Void
     ) async throws {
         defer { notifications.providerPatches.releaseAll() }
-        let registered = root.registrations.count
+        let registered = registrationsBefore ?? root.registrations.count
         try open()
         try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
             notifications.providerPatches.arrivals > arrivals
