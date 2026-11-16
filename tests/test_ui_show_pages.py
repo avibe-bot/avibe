@@ -99,6 +99,50 @@ def _active_org_cookie(config, email="member@example.com", subject="member-1", *
     )
 
 
+def test_show_runtime_entry_injection_adds_exact_manifest_and_platform_meta():
+    content = b"""<!doctype html>
+<html><head><title>Custom</title></head><body><div id="root"></div></body></html>"""
+    config = ui_server._show_system_entry_config(
+        title="Q4 Roadmap",
+        base_path="/p/limited-link/",
+        icon_url="/p/limited-link/__show/icon?v=icon-v1",
+        language="en",
+    )
+
+    injected = ui_server._inject_show_system_entry(
+        content,
+        config,
+        base_path="/p/limited-link/",
+    ).decode("utf-8")
+
+    assert '<link rel="manifest" href="/p/limited-link/__show/manifest.webmanifest">' in injected
+    assert '<link rel="apple-touch-icon" href="/p/limited-link/__show/icon?v=icon-v1">' in injected
+    assert 'name="apple-mobile-web-app-title" content="Q4 Roadmap"' in injected
+    assert 'name="avibe-show-system-entry"' in injected
+    assert 'src="/p/limited-link/__show/system-entry.js"' in injected
+    assert "/p/limited-link/" in injected
+    assert "token" not in injected.lower()
+
+
+def test_show_runtime_entry_script_keeps_limited_page_copy_localized():
+    english = ui_server._show_system_entry_config(
+        title="Demo",
+        base_path="/p/demo/",
+        icon_url="/apple-touch-icon.png",
+        language="en",
+    )
+    chinese = ui_server._show_system_entry_config(
+        title="演示",
+        base_path="/p/demo/",
+        icon_url="/apple-touch-icon.png",
+        language="zh",
+    )
+
+    assert english["copy"]["cta"] == "Add to Home Screen or Dock"
+    assert chinese["copy"]["cta"] == "添加到主屏幕或程序坞"
+    assert english["copy"]["cta"] != chinese["copy"]["cta"]
+
+
 class _FakeShowRuntimeManager:
     def __init__(
         self,

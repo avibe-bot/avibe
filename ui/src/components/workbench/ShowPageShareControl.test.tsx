@@ -25,10 +25,12 @@ const platform = vi.hoisted(() => ({
 vi.mock('../../lib/native', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/native')>()),
   isNativeShell: () => native.shell,
+  openNativeExternal: vi.fn(async () => true),
 }));
 vi.mock('../../lib/platform', () => ({
   isIosDevice: () => platform.ios,
-  isRealMobileSafari: () => platform.safari,
+  isRealMobileSafari: () => platform.ios && platform.safari,
+  isRealSafari: () => platform.safari,
   isStandalonePwa: () => platform.standalone,
 }));
 
@@ -180,7 +182,7 @@ describe('ShowPageShareControl installation guidance', () => {
     await screen.findByDisplayValue(/\/show\/ses-1\//);
   };
 
-  it('hides Add to Home Screen guidance in the native shell', async () => {
+  it('keeps the system-entry guidance in the native shell and offers Safari handoff', async () => {
     platform.ios = true;
     platform.safari = true;
     await renderOpenControl();
@@ -189,7 +191,18 @@ describe('ShowPageShareControl installation guidance', () => {
 
     native.shell = true;
     await renderOpenControl();
-    expect(screen.queryByText('Add to Home Screen')).toBeNull();
+    expect(screen.getByText('Add to Home Screen or Dock')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open in Safari' })).toBeTruthy();
+  });
+
+  it('shows macOS Safari Dock guidance without using the Avibe Dock pin control', async () => {
+    platform.ios = false;
+    platform.safari = true;
+    await renderOpenControl();
+
+    expect(screen.getByText('Add to Dock')).toBeTruthy();
+    expect(screen.getByText(/File.*Add to Dock/)).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: 'Pin to Dock' })).toBeNull();
   });
 });
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
+import { Check, Copy, ExternalLink, LayoutGrid, Loader2, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '../ui/button';
@@ -9,13 +9,14 @@ import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { showDockId } from '../../context/dockDoc';
-import { isNativeShell } from '../../lib/native';
-import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
+import { isNativeShell, openNativeExternal } from '../../lib/native';
+import { isIosDevice, isRealMobileSafari, isRealSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
 import { copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
+import { ShowPageSystemEntryGuide, type ShowPageSystemEntryMode } from './ShowPageSystemEntryGuide';
 
 export const ShowPageShareControl: React.FC<{
   sessionId: string;
@@ -73,7 +74,20 @@ export const ShowPageShareControl: React.FC<{
   const link = payload && !offline ? copyHref(payload) ?? '' : '';
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   const iosStandalone = isIosDevice() && isStandalonePwa();
-  const showAddToHome = !isNativeShell() && !!link && (iosStandalone || isRealMobileSafari());
+  const nativeShell = isNativeShell();
+  const safariBrowser = isRealSafari();
+  const iosSafari = isRealMobileSafari();
+  const systemEntryUnavailable = nativeShell && payload?.url_available === false;
+  const showSystemEntry = Boolean(payload && !offline && (link || systemEntryUnavailable));
+  const systemEntryMode: ShowPageSystemEntryMode = systemEntryUnavailable
+    ? 'unavailable'
+    : nativeShell
+      ? 'native'
+      : iosSafari || iosStandalone
+        ? 'ios'
+        : safariBrowser && !isIosDevice()
+          ? 'mac'
+          : 'other';
 
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);
@@ -178,6 +192,11 @@ export const ShowPageShareControl: React.FC<{
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const openInBrowser = async () => {
+    if (!link) return;
+    await openNativeExternal(link);
   };
 
   const nativeShare = async () => {
@@ -302,27 +321,12 @@ export const ShowPageShareControl: React.FC<{
           </p>
         ) : null}
 
-        {showAddToHome ? (
-          <div className="border-t border-border pt-3">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-              <Plus className="size-3.5 shrink-0 text-cyan-ink" />
-              {t('chat.showPage.addToHomeTitle')}
-            </div>
-            {iosStandalone ? (
-              <p className="mt-1 text-xs leading-relaxed text-muted">
-                {t('chat.showPage.addToHomeBodyPwa')}
-              </p>
-            ) : (
-              <a
-                href={link}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 block text-xs leading-relaxed text-foreground underline underline-offset-2"
-              >
-                {t('chat.showPage.addToHomeBodySafari')}
-              </a>
-            )}
-          </div>
+        {showSystemEntry ? (
+          <ShowPageSystemEntryGuide
+            mode={systemEntryMode}
+            link={link}
+            onOpenBrowser={openInBrowser}
+          />
         ) : null}
 
         {payload && canPinToDock ? (

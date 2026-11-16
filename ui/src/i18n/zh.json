@@ -5617,7 +5617,16 @@
       "pinnedConfirm": "已固定 —「{{title}}」已在你的应用栏中",
       "addToHomeTitle": "添加到主屏幕",
       "addToHomeBodySafari": "点此处在新页面中打开，再点「分享」 →「添加到主屏幕」。",
-      "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。"
+      "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。",
+      "addToDockTitle": "添加到程序坞",
+      "addToDockBodySafari": "在 Safari 中打开此页面，然后选择“文件” →“添加到程序坞”。",
+      "addToSystemTitle": "添加到主屏幕或程序坞",
+      "addToSystemBodyOther": "复制链接，在 Safari 中打开此 Show Page 后添加。",
+      "systemEntryUnavailableTitle": "暂时无法添加到 Safari",
+      "systemEntryUnavailableBody": "此 Show Page 目前只能在 Avibe 内访问，因此无法通过 Safari 添加。",
+      "openInBrowser": "在 Safari 中打开",
+      "openInBrowserBody": "在 Safari 中打开此 Show Page，再通过分享或文件菜单添加。",
+      "copyLink": "复制链接"
     },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",

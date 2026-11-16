@@ -5617,7 +5617,16 @@
       "pinnedConfirm": "Pinned — “{{title}}” is in your Dock",
       "addToHomeTitle": "Add to Home Screen",
       "addToHomeBodySafari": "Tap here to open in a new tab, then Share → “Add to Home Screen”.",
-      "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”."
+      "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”.",
+      "addToDockTitle": "Add to Dock",
+      "addToDockBodySafari": "Open this page in Safari, then choose File → “Add to Dock”.",
+      "addToSystemTitle": "Add to Home Screen or Dock",
+      "addToSystemBodyOther": "Copy the link and open it in Safari to add this Show Page.",
+      "systemEntryUnavailableTitle": "Safari entry unavailable",
+      "systemEntryUnavailableBody": "This Show Page is only reachable inside Avibe right now, so Safari cannot add it.",
+      "openInBrowser": "Open in Safari",
+      "openInBrowserBody": "Open this Show Page in Safari, then use Share or File to add it.",
+      "copyLink": "Copy link"
     },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",

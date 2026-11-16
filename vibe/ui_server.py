@@ -242,6 +242,115 @@ _SHOW_RUNTIME_MODULE_SCRIPT_RE = re.compile(
     r"<script\b(?=[^>]*\btype\s*=\s*['\"]module['\"])[^>]*>",
     re.IGNORECASE,
 )
+_SHOW_SYSTEM_ENTRY_META = "avibe-show-system-entry"
+_SHOW_SYSTEM_ENTRY_MANIFEST = "__show/manifest.webmanifest"
+_SHOW_SYSTEM_ENTRY_ICON = "__show/icon"
+_SHOW_SYSTEM_ENTRY_SCRIPT = "__show/system-entry.js"
+_SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
+(() => {
+  const meta = document.querySelector('meta[name="avibe-show-system-entry"]');
+  if (!meta) return;
+  let config;
+  try {
+    config = JSON.parse(meta.content || '{}');
+  } catch {
+    return;
+  }
+  const copy = config.copy || {};
+  const root = document.createElement('div');
+  root.setAttribute('aria-label', copy.title || copy.cta || 'Show Page');
+  const shadow = root.attachShadow({ mode: 'open' });
+  const style = document.createElement('style');
+  style.textContent = `
+    :host { all: initial; }
+    .wrap { position: fixed; right: 16px; bottom: 16px; z-index: 2147483000; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
+    .button, .copy { border: 1px solid rgba(23,32,42,.18); border-radius: 999px; background: rgba(255,255,255,.94); color: #17202a; box-shadow: 0 8px 26px rgba(23,32,42,.16); cursor: pointer; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .button { padding: 9px 13px; }
+    .button:hover, .copy:hover { background: #f4f7f8; }
+    .panel { display: none; width: min(300px, calc(100vw - 32px)); margin-bottom: 8px; padding: 14px; border: 1px solid rgba(23,32,42,.14); border-radius: 16px; background: rgba(255,255,255,.98); box-shadow: 0 16px 42px rgba(23,32,42,.2); }
+    .panel[data-open="true"] { display: block; }
+    .title { margin: 0 0 6px; font: 700 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .body { margin: 0; color: #53616d; font: 400 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .steps { margin: 10px 0 0; padding-left: 20px; color: #17202a; font: 500 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .copy { display: none; margin-top: 10px; padding: 7px 10px; }
+    .copy[data-visible="true"] { display: inline-block; }
+    .status { min-height: 18px; margin: 8px 0 0; color: #187c62; font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .wrap { color: #eef4f6; }
+      .button, .copy, .panel { border-color: rgba(238,244,246,.18); background: rgba(26,34,39,.96); color: #eef4f6; }
+      .button:hover, .copy:hover { background: #313d44; }
+      .body { color: #aebbc1; }
+      .steps { color: #eef4f6; }
+    }
+  `;
+  shadow.append(style);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'wrap';
+  const panel = document.createElement('section');
+  panel.className = 'panel';
+  panel.setAttribute('data-open', 'false');
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', copy.title || copy.cta || 'Show Page');
+  const title = document.createElement('h2');
+  title.className = 'title';
+  const body = document.createElement('p');
+  body.className = 'body';
+  const steps = document.createElement('ol');
+  steps.className = 'steps';
+  const copyButton = document.createElement('button');
+  copyButton.className = 'copy';
+  copyButton.type = 'button';
+  copyButton.textContent = copy.copyLink || 'Copy link';
+  copyButton.setAttribute('data-visible', 'false');
+  const status = document.createElement('p');
+  status.className = 'status';
+  panel.append(title, body, steps, copyButton, status);
+  const button = document.createElement('button');
+  button.className = 'button';
+  button.type = 'button';
+  button.textContent = copy.cta || 'Add to Home Screen or Dock';
+  button.setAttribute('aria-expanded', 'false');
+  wrap.append(panel, button);
+  shadow.append(wrap);
+  document.body.append(root);
+
+  const userAgent = navigator.userAgent || '';
+  const ios = /iP(hone|ad|od)/.test(userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const safari = /Safari/.test(userAgent) && /Version\//.test(userAgent) &&
+    !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chrome|Chromium/i.test(userAgent);
+  const mac = /Macintosh|Mac OS X/.test(userAgent) && !ios;
+  if (ios && safari) {
+    title.textContent = copy.iosTitle || copy.title || 'Add to Home Screen';
+    body.textContent = copy.iosBody || '';
+    steps.hidden = true;
+  } else if (mac && safari) {
+    title.textContent = copy.macTitle || copy.title || 'Add to Dock';
+    body.textContent = copy.macBody || '';
+    steps.hidden = true;
+  } else {
+    title.textContent = copy.title || 'Add this Show Page';
+    body.textContent = copy.otherBody || '';
+    steps.hidden = true;
+    copyButton.setAttribute('data-visible', 'true');
+  }
+
+  button.addEventListener('click', () => {
+    const open = panel.getAttribute('data-open') === 'true';
+    panel.setAttribute('data-open', String(!open));
+    button.setAttribute('aria-expanded', String(!open));
+  });
+  copyButton.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      status.textContent = copy.copied || 'Link copied';
+    } catch {
+      status.textContent = window.location.href;
+    }
+  });
+})();
+"""
 _SHOW_RUNTIME_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _SHOW_PAGE_ASSET_SUFFIXES = frozenset(
     {
@@ -15944,6 +16053,15 @@ def _is_show_page_api_handler_path(asset_path: str) -> bool:
     return relative == "api" or relative.startswith("api/")
 
 
+def _is_show_system_entry_asset(asset_path: str) -> bool:
+    relative = (asset_path or "").strip("/")
+    return relative in {
+        _SHOW_SYSTEM_ENTRY_MANIFEST,
+        _SHOW_SYSTEM_ENTRY_ICON,
+        _SHOW_SYSTEM_ENTRY_SCRIPT,
+    }
+
+
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
     if _is_show_page_api_handler_path(asset_path):
@@ -17760,6 +17878,19 @@ async def _show_page_runtime_response(
             include_write_token=external_prefix is None and show_authenticated,
             include_annotation_bootstrap=include_annotation_bootstrap,
         )
+        content = _inject_show_system_entry(
+            content,
+            _show_system_entry_config(
+                title=_show_page_title(session_id, _request_ui_language()),
+                base_path=base_path,
+                icon_url=_show_system_entry_icon_url(
+                    base_path=base_path,
+                    session_id=session_id,
+                ),
+                language=_request_ui_language(),
+            ),
+            base_path=base_path,
+        )
         if external_prefix:
             response_headers["Referrer-Policy"] = "same-origin"
         _mark_show_runtime_document_no_store(response_headers)
@@ -18143,6 +18274,134 @@ def _inject_show_runtime_config(
     return html.encode("utf-8")
 
 
+def _show_page_title(session_id: str, language: str) -> str:
+    from storage.sessions_service import read_session_display_meta
+
+    try:
+        meta = read_session_display_meta([session_id])
+    except Exception:
+        meta = {}
+    title = str((meta.get(session_id) or {}).get("title") or "").strip()
+    return title or t("show.systemEntry.defaultTitle", language)
+
+
+def _show_system_entry_config(
+    *,
+    title: str,
+    base_path: str,
+    icon_url: str,
+    language: str,
+) -> dict[str, Any]:
+    return {
+        "title": title,
+        "basePath": base_path,
+        "iconUrl": icon_url,
+        "copy": {
+            "cta": t("show.systemEntry.cta", language),
+            "title": t("show.systemEntry.title", language),
+            "iosTitle": t("show.systemEntry.iosTitle", language),
+            "macTitle": t("show.systemEntry.macTitle", language),
+            "iosBody": t("show.systemEntry.iosBody", language),
+            "macBody": t("show.systemEntry.macBody", language),
+            "otherBody": t("show.systemEntry.otherBody", language),
+            "copyLink": t("show.systemEntry.copyLink", language),
+            "copied": t("show.systemEntry.copied", language),
+        },
+    }
+
+
+def _inject_show_system_entry(
+    content: bytes,
+    config: dict[str, Any],
+    *,
+    base_path: str,
+) -> bytes:
+    try:
+        document = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content
+    payload = json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+    escaped_payload = html.escape(payload, quote=True)
+    base = base_path.rstrip("/") + "/"
+    tags = (
+        f'<link rel="manifest" href="{html.escape(base + _SHOW_SYSTEM_ENTRY_MANIFEST, quote=True)}">'
+        f'<link rel="apple-touch-icon" href="{html.escape(str(config["iconUrl"]), quote=True)}">'
+        f'<meta name="apple-mobile-web-app-capable" content="yes">'
+        f'<meta name="mobile-web-app-capable" content="yes">'
+        f'<meta name="apple-mobile-web-app-title" content="{html.escape(str(config["title"]), quote=True)}">'
+        f'<meta name="{_SHOW_SYSTEM_ENTRY_META}" content="{escaped_payload}">'
+        f'<script defer src="{html.escape(base + _SHOW_SYSTEM_ENTRY_SCRIPT, quote=True)}"></script>'
+    )
+    head_match = re.search(r"<head\b[^>]*>", document, flags=re.IGNORECASE)
+    if head_match:
+        document = f"{document[:head_match.end()]}{tags}{document[head_match.end():]}"
+    else:
+        document = f"{tags}{document}"
+    return document.encode("utf-8")
+
+
+def _show_system_entry_icon_url(
+    *,
+    base_path: str,
+    session_id: str,
+) -> str:
+    from core.show_pages import show_page_icon_version
+
+    version = show_page_icon_version(session_id)
+    if not version:
+        return "/apple-touch-icon.png"
+    return f"{base_path.rstrip('/')}/{_SHOW_SYSTEM_ENTRY_ICON}?v={quote(version, safe='')}"
+
+
+def _show_system_entry_response(
+    page: ShowPage,
+    asset_path: str,
+    *,
+    base_path: str,
+    language: str,
+):
+    relative = (asset_path or "").strip("/")
+    if relative == _SHOW_SYSTEM_ENTRY_SCRIPT:
+        response = Response(_SHOW_SYSTEM_ENTRY_SCRIPT_BODY, mimetype="text/javascript")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    icon_url = _show_system_entry_icon_url(base_path=base_path, session_id=page.session_id)
+    if relative == _SHOW_SYSTEM_ENTRY_MANIFEST:
+        from core.show_pages import show_page_web_app_manifest
+
+        manifest = show_page_web_app_manifest(
+            title=_show_page_title(page.session_id, language),
+            start_url=base_path,
+            scope=base_path,
+            icon_url=icon_url,
+        )
+        response = Response(
+            json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+            mimetype="application/manifest+json",
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vary"] = "Cookie"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+    if relative == _SHOW_SYSTEM_ENTRY_ICON:
+        from core.show_pages import ShowPageError, read_show_page_icon
+
+        try:
+            result = read_show_page_icon(page.session_id, request.args.get("v", ""))
+        except (ShowPageError, OSError, ValueError):
+            result = None
+        if result is None:
+            return _show_page_icon_not_found()
+        data, content_type = result
+        response = Response(data, mimetype=content_type)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Content-Security-Policy"] = "sandbox"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+    return _show_page_file_not_found_response()
+
+
 def _rewrite_show_runtime_url_headers(
     headers: dict[str, str],
     *,
@@ -18314,6 +18573,13 @@ async def serve_private_show_page(session_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
+        if _is_show_system_entry_asset(asset_path):
+            return _show_system_entry_response(
+                page,
+                asset_path,
+                base_path=f"/show/{quote(page.session_id, safe='')}/",
+                language=_request_ui_language(),
+            )
         # A remote viewer is an untrusted viewer even on the private surface: keep
         # its asset reads inside the page workspace so an authored symlink cannot
         # serve out-of-Project disk files across the tunnel.
@@ -18781,6 +19047,7 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_not_found_response()
         if page.visibility == "limited":
             request._request.state.public_show_representation_varies_cookie = True
+        system_entry_asset = _is_show_system_entry_asset(asset_path)
         limited_guest = (
             lease is not None
             and lease.page_id == page.session_id
@@ -18804,7 +19071,7 @@ async def serve_public_show_page(share_id, asset_path):
                 representation_candidate
             )
             markdown_requested = markdown_requested and representation_candidate
-        is_spa_navigation = markdown_requested or _is_show_page_spa_route_request(
+        is_spa_navigation = markdown_requested or system_entry_asset or _is_show_page_spa_route_request(
             asset_path,
             request._request,
         )
@@ -18929,6 +19196,14 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
+        if system_entry_asset:
+            response = _show_system_entry_response(
+                page,
+                asset_path,
+                base_path=f"/p/{quote(share_id, safe='')}/",
+                language=_request_ui_language(),
+            )
+            return _with_limited_show_policy(response) if limited_guest else response
         if runtime_path_denied:
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
