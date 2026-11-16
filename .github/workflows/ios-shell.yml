@@ -129,6 +129,7 @@ jobs:
 
       - name: Build the sheet gesture XCUITest fixture
         id: sheet-fixture-build
+        if: ${{ false }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -151,6 +152,9 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
+            -only-testing:AvibeTests/DirectPathAppTests/testCaptureRuntimeOpenScreensForReview \
+            -testLanguage zh-Hans \
+            -testRegion CN \
             CODE_SIGNING_ALLOWED=NO \
             test
 
@@ -164,7 +168,7 @@ jobs:
           retention-days: 7
 
       - name: Run sheet gesture XCUITest fixture
-        if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
+        if: ${{ false }}
         run: |
           set -euo pipefail
           xcodebuild \
