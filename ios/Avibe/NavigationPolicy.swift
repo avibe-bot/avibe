@@ -65,9 +65,10 @@ struct NavigationPolicy {
         result.insert(origin)
     }
 
-    /// GitHub's OAuth authorization endpoints. The rest of github.com is an
-    /// ordinary external site, including the device-code page
-    /// (`/login/device`) that an instance's Copilot sign-in opens.
+    /// GitHub's OAuth authorization endpoints, intercepted only for
+    /// avibe.bot's own sign-in. The rest of github.com is an ordinary
+    /// external site, including the device-code page (`/login/device`) that
+    /// an instance's Copilot sign-in opens.
     private static let githubOrigin = WebOrigin.parseConfigured("https://github.com")
     private static let githubAuthorizationPathPrefix = "/login/oauth/"
 
@@ -98,7 +99,7 @@ struct NavigationPolicy {
         if googleOrigins.contains(origin) {
             return .thirdPartySignIn(.google)
         }
-        if origin == Self.githubOrigin, Self.isGitHubAuthorizationPath(url) {
+        if origin == Self.githubOrigin, isAvibeGitHubAuthorization(url) {
             return .thirdPartySignIn(.github)
         }
         return origin.scheme == "http" || origin.scheme == "https"
@@ -175,15 +176,29 @@ struct NavigationPolicy {
         }
     }
 
-    private static func isGitHubAuthorizationPath(_ url: URL) -> Bool {
-        guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .percentEncodedPath
-            .lowercased()
-        else {
+    /// GitHub authorization for avibe.bot's own sign-in: it returns to an
+    /// authentication origin (Supabase's `/auth/v1/callback`). GitHub sign-in
+    /// for anything else, such as an MCP server an instance connects to, is
+    /// an ordinary external page.
+    private func isAvibeGitHubAuthorization(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return false
         }
-        return path == "/login/oauth"
-            || path.hasPrefix(githubAuthorizationPathPrefix)
+        let path = components.percentEncodedPath.lowercased()
+        guard path == "/login/oauth" || path.hasPrefix(Self.githubAuthorizationPathPrefix) else {
+            return false
+        }
+        return components.queryItems?.contains { item in
+            guard
+                item.name == "redirect_uri",
+                let value = item.value,
+                let redirect = URL(string: value),
+                let redirectOrigin = WebOrigin(url: redirect, requiresHTTPS: false)
+            else {
+                return false
+            }
+            return authenticationOrigins.contains(redirectOrigin)
+        } == true
     }
 
     private func isExternalApplicationURL(_ url: URL) -> Bool {

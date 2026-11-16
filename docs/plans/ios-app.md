@@ -1109,7 +1109,7 @@ Not built. Section 5 gives the reasons and the condition for reconsidering.
 | --- | --- | --- |
 | Native | Notification Service Extension with RFC 8291 decryption (CryptoKit P-256, HKDF, AES-GCM), `push` capability, tap routing, and badge | 2 weeks |
 | Instance | Payload byte budget, subscription label, and tests | 1 week |
-| Backend | Relay registration and delivery routes, APNs HTTP/2 client, rate limits; Sign in with Apple; account deletion | 1.5 weeks |
+| Backend | Relay registration and delivery routes, APNs HTTP/2 client, rate limits; account deletion | 1.5 weeks |
 | Reviews | Product and security review of the relay and the handoff | Before merge |
 
 ### Phase 2: deep native and App Store, about 3-4 weeks
@@ -1148,7 +1148,7 @@ Sogou), with the web composer in the shell.
 | 7 | Hold to talk on the composer and on the center button | Haptic on press and release; dictation reaches the real avibe.bot realtime socket and lands in the composer |
 | 8 | Recording indicator | Shown while capturing (App Review 2.5.14) |
 | 9 | `@` / `#` pickers and chips | Chips insert, delete atomically, and send the same markers as in Safari |
-| 10 | Sign-in | Email code, password, and GitHub complete inside the shell; the session survives a cold launch |
+| 10 | Sign-in | Email code and password complete inside the shell; Google and GitHub show the email-code alert; the session survives a cold launch |
 | 11 | Protected Vault passkey | Works, or the Safari fallback is confirmed |
 
 ## 16. Risks and open questions
@@ -1204,8 +1204,9 @@ Sogou), with the web composer in the shell.
 5. Approve the APNs relay on avibe.bot as a new backend path (product and
    security review), and provide the APNs `.p8` key.
 6. Approve the instance login handoff endpoints (security review).
-7. Add Sign in with Apple and account deletion to avibe.bot (needed for the App
-   Store, not for TestFlight).
+7. Add account deletion to avibe.bot (needed for the App Store, not for
+   TestFlight). Sign in with Apple is not needed: the App signs in only with
+   avibe.bot's own accounts.
 8. TestFlight only, or the App Store after Phase 2. For the App Store, a review
    demo instance and reviewer account are needed.
 9. **Settled 2026-11-04:** stay on the Individual membership. There is no

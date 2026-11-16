@@ -200,16 +200,17 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     // The App signs in only with avibe.bot's own accounts (App Review 4.8),
-    // so GitHub's OAuth authorization is intercepted in every browsing
-    // context, as Google's is. The rest of github.com is an ordinary site.
+    // so GitHub authorization for avibe.bot's sign-in is intercepted in every
+    // browsing context, as Google's is. GitHub sign-in for anything else and
+    // the rest of github.com are an ordinary site.
     func testGitHubAuthorizationIsInterceptedAndTheRestOfGitHubIsExternal() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
 
         for raw in [
-            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
-            "https://github.com/login/oauth/select_account",
-            "https://GitHub.com/Login/OAuth/authorize",
-            "https://github.com/login/oauth",
+            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback&scope=user%3Aemail",
+            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fmctppyrqmrjotgkrwdse.supabase.co%2Fauth%2Fv1%2Fcallback",
+            "https://github.com/login/oauth/select_account?redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
+            "https://GitHub.com/Login/OAuth/authorize?redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
         ] {
             let url = URL(string: raw)!
             XCTAssertEqual(policy.destination(for: url), .thirdPartySignIn(.github), raw)
@@ -228,6 +229,12 @@ final class NavigationPolicyTests: XCTestCase {
         for raw in [
             // The device-code page an instance's Copilot sign-in opens.
             "https://github.com/login/device",
+            // GitHub sign-in for something else, such as an MCP server an
+            // instance connects to, or one that names no callback.
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Fmcp.example.com%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Falice-app.avibe.bot%2Foauth%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Fevil.avibe.bot%2Fauth%2Fv1%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=abc",
             "https://github.com/login",
             "https://github.com/login/oauthx",
             "https://github.com/avibe-bot/avibe",
@@ -334,7 +341,7 @@ final class NavigationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             policy.newWindowDisposition(
-                for: URL(string: "https://github.com/login/oauth/authorize?client_id=abc")!
+                for: URL(string: "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback")!
             ),
             .thirdPartySignIn(.github)
         )

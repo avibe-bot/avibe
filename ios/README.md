@@ -43,9 +43,11 @@ and Web resizing cannot both run.
   Authentication, external, and arbitrary subframes receive neither microphone
   access nor a native bridge.
 - Google and GitHub authorization are intercepted with an email-code
-  explanation. GitHub's are the `/login/oauth/` pages on `github.com`; the
-  rest of `github.com`, including the device-code page an instance's Copilot
-  sign-in opens, is an ordinary external site.
+  explanation. GitHub's are the `/login/oauth/` pages on `github.com` whose
+  `redirect_uri` returns to an authentication origin, that is avibe.bot's own
+  sign-in. GitHub sign-in for anything else (an MCP server an instance
+  connects to) and the rest of `github.com`, including the device-code page an
+  instance's Copilot sign-in opens, are an ordinary external site.
 - Instance WebViews (primary and child) show no form accessory bar
   (previous / next / Done) above the keyboard: `FormAccessoryBar` gives
   WebKit's content view a runtime subclass whose `inputAccessoryView` is nil.
@@ -1055,7 +1057,9 @@ extension; App Store Connect files each TestFlight build under it.
 
 The app and the Notification Service extension each carry a
 `PrivacyInfo.xcprivacy`. Both declare their `UserDefaults` use (the bundle's
-own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking.
+own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking;
+the app also declares system boot time (`35F9.1`), which the direct
+transport's deadlines read through `ProcessInfo.systemUptime`.
 The app also declares the data it collects, matching its App Privacy answers:
 the account's email address and user ID, linked to the user, for App
 Functionality only. The extension decrypts and shows notifications on the
