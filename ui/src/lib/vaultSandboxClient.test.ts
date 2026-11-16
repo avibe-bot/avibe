@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { VaultSandboxClient, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
+import { VaultSandboxClient, authorizationWindowFeatures, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
 import { stubBlankPopup, stubReleaseFetch } from './__fixtures__/vaultSandboxTransport';
 import type { VaultConfirmSurface } from './vaultConfirmSurface';
 import type { PolicyDowngradeContext } from './vaultSigningPolicy';
@@ -353,5 +353,22 @@ describe('VaultSandboxClient protected seed-phrase wallet (contract rev0.7 §4)'
   ])('refuses %s', async (_label, result) => {
     const { instance } = client(withHd, result);
     await expect(instance.sealHdWallet({ name: 'COLD', mode: 'create', wrapMeta: '{}' }, 'win1')).rejects.toMatchObject({ code: 'protected_hd_result_invalid' });
+  });
+});
+
+describe('the secure window opens at a fixed size, centered over the Avibe window', () => {
+  it('computes the same size every time and centers it on the opener', () => {
+    vi.stubGlobal('screenX', 100);
+    vi.stubGlobal('screenY', 50);
+    vi.stubGlobal('outerWidth', 1440);
+    vi.stubGlobal('outerHeight', 900);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=560,top=120');
+    // Never off the left or top edge, even from a small window.
+    vi.stubGlobal('screenX', 0);
+    vi.stubGlobal('screenY', 0);
+    vi.stubGlobal('outerWidth', 400);
+    vi.stubGlobal('outerHeight', 500);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=0,top=0');
+    vi.unstubAllGlobals();
   });
 });

@@ -111,6 +111,18 @@ it('takes nothing secret on the page: no word, passphrase or check fields, and n
   expect(screen.queryByRole('switch', { name: en.vaults.hd.askAccount0 })).toBeNull();
   expect(screen.getByText(p.tierNote)).toBeTruthy();
   expect(screen.getByText(p.generateHint)).toBeTruthy();
+  // Why the words open in their own window, said before it opens (create and import).
+  expect(screen.getByText(p.windowWhy)).toBeTruthy();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  expect(screen.getByText(p.windowWhy)).toBeTruthy();
+});
+
+it('when the window hands back, the dialog lands on the result: the notice takes focus', async () => {
+  await openProtected();
+  vault.sealHdWallet.mockRejectedValue(new VaultSandboxError('authorization_window_closed', 'x', true));
+  await launch();
+  const notice = screen.getByText(p.notice.closed);
+  expect(notice.closest('[tabindex="-1"]')).toBe(document.activeElement);
 });
 
 it('creates: opens the window from the click, saves the opaque result, and offers it only after an exact match', async () => {

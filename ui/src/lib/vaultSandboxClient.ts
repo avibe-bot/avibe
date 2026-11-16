@@ -213,6 +213,19 @@ export type VaultAuthorizationWindow = {
   close: () => void;
 };
 
+const AUTHORIZATION_WINDOW = { width: 520, height: 760 };
+
+/** The secure window's size and place: always the same size, centered over the Avibe window (a
+ *  browser may still move it to stay on screen), so it opens where the person looks. */
+export function authorizationWindowFeatures(): string {
+  const { width, height } = AUTHORIZATION_WINDOW;
+  const outerWidth = window.outerWidth || window.innerWidth || width;
+  const outerHeight = window.outerHeight || window.innerHeight || height;
+  const left = Math.max(0, Math.round((window.screenX ?? 0) + (outerWidth - width) / 2));
+  const top = Math.max(0, Math.round((window.screenY ?? 0) + (outerHeight - height) / 2));
+  return `popup,width=${width},height=${height},left=${left},top=${top}`;
+}
+
 /** Reserve user activation without loading protected code. Each popup is inert
  * until its own verification finishes. The RPC awaits that result by id, so a
  * failed/cancelled popup can never silently fall back to an unverified window. */
@@ -221,7 +234,7 @@ export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null 
   const id = randomId();
   const generation = clientGeneration;
   const signal = generationController.signal;
-  const popup = openLinkInNewContext('about:blank', 'popup,width=520,height=760');
+  const popup = openLinkInNewContext('about:blank', authorizationWindowFeatures());
   if (!popup) return null;
   let closed = false;
   const close = (): void => {

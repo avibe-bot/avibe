@@ -384,3 +384,16 @@ it('adds no reason where a field already says what is wrong, or where nothing ca
   await openWallet('generate');
   expect(screen.getByText(d.createNeedsProtected)).toBeTruthy();
 });
+
+it('a name the server refused at save stays marked when a later list read misses it', async () => {
+  await openWallet('generate');
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'secret_exists', message: 'taken' });
+  api.getVaultHdReconciliation.mockResolvedValue({ ok: false, code: 'invalid_hd_wallet' });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: p.launchCreate })); });
+  expect(await screen.findByText(p.nameTakenCreate)).toBeTruthy();
+  // The list (cached, or not yet showing the other key) doesn't have the name: still taken.
+  taken();
+  await act(async () => { fireEvent.blur(nameBox()); });
+  expect(screen.getByText(d.nameTaken)).toBeTruthy();
+  expect((screen.getByRole('button', { name: p.launchCreate }) as HTMLButtonElement).disabled).toBe(true);
+});
