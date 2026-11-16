@@ -139,6 +139,8 @@ Save a password, API key, or signing key once. Agents ask for it by name. Avibe 
 
 Ask for a comparison, a dashboard, a report, or a small tool and get a live page instead of a long reply. Point at any part of it and say what to change. Keep it private, share it with people you choose, or publish it at a link.
 
+<img src="assets/screenshots/v6/show-page-en.png" alt="A Show Page opened from the Researcher Bot's conversation: a comparison of three team-offsite venues with price, capacity, and travel time by car and by train, and a chart of the drive times" />
+
 ### Scheduled and background work
 
 Bots set their own reminders and schedules, wait for something to happen, such as a web page changing, and keep working in the background. Everything they have set up is listed in one place.
