@@ -483,9 +483,39 @@ def check_signed_app(info: dict, entitlements: dict, *, build: str) -> None:
     )
 
 
+def check_extension_version(app_info: dict, extension_info: dict) -> None:
+    """An extension ships with its app's version; App Store Connect flags a mismatch."""
+    app_version = app_info.get("CFBundleShortVersionString")
+    extension_version = extension_info.get("CFBundleShortVersionString")
+    if not app_version or extension_version != app_version:
+        raise TestFlightError(
+            f"The {NOTIFICATION_SERVICE_BUNDLE_ID} version is {extension_version!r}, "
+            f"not the app's {app_version!r}"
+        )
+
+
+def check_privacy_manifest(bundle: Path) -> None:
+    """Each shipped bundle (the app and its extension) carries its own privacy manifest."""
+    manifest = bundle / "PrivacyInfo.xcprivacy"
+    try:
+        privacy = plistlib.loads(manifest.read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+        raise TestFlightError(f"{bundle.name} has no readable PrivacyInfo.xcprivacy") from exc
+    if privacy.get("NSPrivacyTracking") is not False or not isinstance(
+        privacy.get("NSPrivacyAccessedAPITypes"), list
+    ):
+        raise TestFlightError(f"{bundle.name}'s PrivacyInfo.xcprivacy is incomplete")
+
+
 def verify_archive(archive: Path, *, build: str) -> dict:
     app = archived_app(archive)
     extensions = archived_notification_service_extensions(app)
+    check_extension_version(
+        plistlib.loads((app / "Info.plist").read_bytes()),
+        plistlib.loads((extensions[0] / "Info.plist").read_bytes()),
+    )
+    for bundle in (app, extensions[0]):
+        check_privacy_manifest(bundle)
     bundles = [
         (
             app,
