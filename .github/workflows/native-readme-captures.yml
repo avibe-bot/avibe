@@ -145,6 +145,8 @@ jobs:
           screencapture -x "$W/review/mac-dmg-fullscreen-$LANG_CODE.png"
 
       - name: First open with the download quarantine (Gatekeeper prompt)
+        timeout-minutes: 3
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -155,24 +157,30 @@ jobs:
           hdiutil detach "$MOUNT" -quiet || true
           # Copying out of a downloaded DMG keeps the quarantine mark.
           xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" /Applications/Avibe.app
-          open /Applications/Avibe.app || true
-          sleep 10
+          # `open` blocks until the Gatekeeper dialog is answered; never wait on it.
+          open /Applications/Avibe.app >/dev/null 2>&1 &
+          opener=$!
+          sleep 12
           echo "--- gatekeeper phase ---" >> "$W/review/windows-$LANG_CODE.log"
           "$W/capwin" - x '*' 1 1 >> "$W/review/windows-$LANG_CODE.log"
-          "$W/capwin" "$W/images" "mac-first-open-prompt-$LANG_CODE" CoreServicesUIAgent 200 100 | tee -a "$W/review/windows-$LANG_CODE.log"
+          "$W/capwin" "$W/review" "mac-first-open-prompt-$LANG_CODE" CoreServicesUIAgent 200 100 | tee -a "$W/review/windows-$LANG_CODE.log"
           screencapture -x "$W/review/mac-first-open-fullscreen-$LANG_CODE.png"
           # Dismiss without approving, then clear the mark for the app phase.
           killall CoreServicesUIAgent 2>/dev/null || true
+          kill "$opener" 2>/dev/null || true
           pkill -x Avibe 2>/dev/null || true
           sleep 2
           xattr -dr com.apple.quarantine /Applications/Avibe.app
 
       - name: Launch the app and capture its first window
+        timeout-minutes: 4
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           W="$RUNNER_TEMP/native-capture"
-          open /Applications/Avibe.app
+          xattr -dr com.apple.quarantine /Applications/Avibe.app 2>/dev/null || true
+          open /Applications/Avibe.app >/dev/null 2>&1 &
           elapsed=0
           for at in 10 40 90; do
             sleep $((at - elapsed)); elapsed=$at
@@ -197,7 +205,7 @@ jobs:
             echo "App language: $([ "$LANG_CODE" = zh ] && echo 'zh-Hans (per-app AppleLanguages)' || echo 'system default, English')"
             echo
             echo "mac-dmg-window-*: the Finder window of the mounted DMG, opened as a user would."
-            echo "mac-first-open-prompt-*: what macOS shows on the first open of a downloaded app (quarantine mark set as a browser would). Dismissed, not approved."
+            echo "First-open prompt: what macOS shows on the first open of a downloaded app (quarantine mark set as a browser would) is in the review artifact only. Dismissed, not approved."
             echo "mac-first-window-*-t<N>s: every Avibe window, N seconds after launch. Fresh install, no account, no sample data."
             echo "Not taken here: mac-workbench with the Lumen Studio sample story, mac-setup-ready, mac-mini (need fixtures the native shell cannot load yet)."
             echo
@@ -231,7 +239,7 @@ jobs:
       github.event.pull_request.head.ref == 'vibe/20261114-native-readme-capture-draft' &&
       github.event.pull_request.base.ref == 'master'
     runs-on: windows-11-arm
-    timeout-minutes: 15
+    timeout-minutes: 18
     defaults:
       run:
         shell: powershell
@@ -273,6 +281,8 @@ jobs:
             [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
             [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
             [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+            public static void Close(Win w) { PostMessage(w.H, 0x0010, IntPtr.Zero, IntPtr.Zero); }
             [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
             [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
             public class Win { public IntPtr H; public string Title; public string Proc; public int Pid; public RECT Rc; }
@@ -338,6 +348,8 @@ jobs:
           Get-Content (Join-Path $env:W 'review\runner-facts.txt')
 
       - name: First run of a downloaded installer (system prompt, if any)
+        timeout-minutes: 3
+        continue-on-error: true
         run: |
           $ErrorActionPreference = 'Stop'
           . (Join-Path $env:W 'capture.ps1')
@@ -349,14 +361,16 @@ jobs:
           Set-Content -Path $copy -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3`r`nReferrerUrl=https://avibe.bot/`r`nHostUrl=$env:RELEASE_BASE/$env:WINDOWS_ASSET"
           $before = @{}; foreach ($w in [Cap]::List()) { $before[[string]$w.H] = $true }
           Write-Windows 'before first run'
-          $p = Start-Process -FilePath $copy -PassThru
-          $seen = @{}; $n = 0
+          # Open it through Explorer, as a double-click does. Start-Process would
+          # block this script on the download security prompt.
+          Start-Process -FilePath explorer.exe -ArgumentList "`"$copy`""
+          $seen = @{}; $n = 0; $new = @()
           for ($t = 1; $t -le 25; $t++) {
             Start-Sleep -Seconds 1
             foreach ($w in [Cap]::List()) {
               $key = [string]$w.H
               if ($before.ContainsKey($key) -or $seen.ContainsKey($key)) { continue }
-              $seen[$key] = $true; $n++
+              $seen[$key] = $true; $n++; $new += $w
               $file = Join-Path $env:W ("review\windows-first-run-prompt-{0}-{1}.png" -f $n, $w.Proc)
               [Cap]::Shot($w, $file)
               Add-Content (Join-Path $env:W 'review\first-run.log') ("t={0}s`t{1}`t{2}`t{3}" -f $t, $w.Proc, $w.Title, $file)
@@ -366,12 +380,14 @@ jobs:
           Write-Windows 'first run, after 25s'
           if ($n -eq 0) { Add-Content (Join-Path $env:W 'review\first-run.log') 'no new window appeared within 25 seconds' }
           Get-Content (Join-Path $env:W 'review\first-run.log')
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          foreach ($w in $new) { [Cap]::Close($w) }
           Get-Process smartscreen, consent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Get-Process | Where-Object { $_.ProcessName -like 'Avibe_3.2.6*' } | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
 
       - name: Capture the installer's first screen
+        timeout-minutes: 3
+        continue-on-error: true
         run: |
           $ErrorActionPreference = 'Stop'
           . (Join-Path $env:W 'capture.ps1')
@@ -396,6 +412,8 @@ jobs:
           Start-Sleep -Seconds 2
 
       - name: Install, launch, and capture the app's first window
+        timeout-minutes: 8
+        continue-on-error: true
         run: |
           $ErrorActionPreference = 'Stop'
           . (Join-Path $env:W 'capture.ps1')
