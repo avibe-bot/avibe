@@ -118,8 +118,24 @@ def _entries() -> Iterator[tuple[str, str]]:
                 yield f"{rel}:{match.group(1)}", match.group(2)
     for path in sorted(ROOT.glob("skills/*/SKILL.md")):
         rel = path.relative_to(ROOT).as_posix()
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            yield f"{rel}:{number}", line
+        for number, paragraph in _paragraphs(path.read_text(encoding="utf-8")):
+            yield f"{rel}:{number}", paragraph
+
+
+def _paragraphs(text: str) -> Iterator[tuple[int, str]]:
+    """Blank-line separated blocks, whitespace-collapsed, with their first line.
+
+    Markdown prose is hard-wrapped, so a phrase such as "coming\nsoon" only
+    exists across lines; scanning line by line would never see it.
+    """
+    start, lines = 0, []
+    for number, line in enumerate([*text.splitlines(), ""], start=1):
+        if line.strip():
+            start = start or number
+            lines.append(line.strip())
+        elif lines:
+            yield start, " ".join(lines)
+            start, lines = 0, []
 
 
 def test_user_copy_has_no_unfinished_or_roadmap_wording() -> None:
@@ -140,6 +156,13 @@ def test_allowlist_entries_still_match() -> None:
     present = dict(_entries())
     stale = sorted(key for key in ALLOWED if key in present and not FORBIDDEN.search(present[key]))
     assert stale == [], f"remove ALLOWED entries whose copy was rewritten: {stale}"
+
+
+def test_skill_paragraphs_join_wrapped_phrases() -> None:
+    text = "# Title\n\nThis is coming\nsoon for everyone.\n\n- the user asks for a feature\n  Avibe does not support\n  yet\n"
+    paragraphs = list(_paragraphs(text))
+    assert [number for number, _ in paragraphs] == [1, 3, 6]
+    assert all(FORBIDDEN.search(paragraph) for _, paragraph in paragraphs[1:])
 
 
 def test_pattern_catches_known_unfinished_copy() -> None:
