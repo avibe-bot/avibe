@@ -120,12 +120,16 @@ const DESKTOP_VAULT_PASSKEY_MARKER: &str =
 /// The entitlement that lets WebKit ask the system for a site's passkeys.
 const ASSOCIATED_DOMAINS: &str = "com.apple.developer.associated-domains";
 const SANDBOX_CREDENTIALS: &str = "webcredentials:sandbox.avibe.bot";
-/// The macOS major versions on which the WebView probe has passed in CI.
-/// Passkey PRF, which the protected tier derives its key from, starts with 15.
-/// Above that the list is not a range: what a child may display rests on WebKit
-/// methods outside its public API, whose behaviour only the probe checks, so a
-/// system it has not run on gets no marker. Add a version when CI runs on it.
-const PROBED_MACOS: [isize; 2] = [15, 26];
+/// The macOS major versions on which the WebView probe has passed in CI. It
+/// is a list, not a floor: what a child may display rests on WebKit methods
+/// outside its public API, whose behaviour only the probe checks, so a system
+/// it has not passed on gets no marker. Add a version when CI passes on it.
+///
+/// Passkey PRF, which the protected tier derives its key from, starts with
+/// macOS 15, but 15 is not here: on a hosted macOS 15 runner the probe could
+/// not read the sandbox page back from the window, so nothing shows there
+/// that an opener's page is never displayed.
+const PROBED_MACOS: [isize; 1] = [26];
 
 /// How long a child may exist without displaying a sandbox document. The
 /// Workbench verifies the pinned release (15 s at most) before it navigates a
@@ -1656,14 +1660,14 @@ mod tests {
             "webcredentials:avibe.bot".to_owned(),
             "webcredentials:sandbox.avibe.bot".to_owned(),
         ];
-        assert!(advertises_passkeys(15, Some(&signed)));
         assert!(advertises_passkeys(26, Some(&signed)));
-        // No passkey PRF before 15; no probe run on a later system yet.
-        for unproven in [13, 14, 16, 25, 27, 99] {
+        // Not a floor: neither older systems (15 has passkey PRF, but the
+        // probe has not passed there) nor ones newer than CI has run on.
+        for unproven in [13, 14, 15, 16, 25, 27, 99] {
             assert!(!advertises_passkeys(unproven, Some(&signed)), "{unproven}");
         }
-        assert!(!advertises_passkeys(15, None));
-        assert!(!advertises_passkeys(15, Some(&[])));
+        assert!(!advertises_passkeys(26, None));
+        assert!(!advertises_passkeys(26, Some(&[])));
         for other in [
             "webcredentials:avibe.bot",
             "webcredentials:sandbox.avibe.bot.evil.example",
@@ -1671,7 +1675,7 @@ mod tests {
             "applinks:sandbox.avibe.bot",
             "sandbox.avibe.bot",
         ] {
-            assert!(!advertises_passkeys(15, Some(&[other.to_owned()])), "{other}");
+            assert!(!advertises_passkeys(26, Some(&[other.to_owned()])), "{other}");
         }
     }
 

@@ -195,7 +195,7 @@ top-level document by the same call that installs the hooks, and only after
 they are in place. That call returns before doing anything unless both hold:
 
 - The system is a macOS major version on which the probe has passed in CI.
-  Today that is 15, the first with passkey PRF, and 26. It is a list, not a
+  Today that is 26 only; for macOS 15 see "Not verified". It is a list, not a
   floor: on a version the probe has not run on, nothing says the non-public
   calls behave as rule 3 needs.
 - The running process's own code signature carries
@@ -232,9 +232,8 @@ the sandbox's window goes to the browser with every other link.
 - Unit tests in the module: the origin rule, which requests open a window, what
   a child may load, the commit rule, the attention rule and its interval, the
   size bounds, and the marker's two conditions.
-- `desktop/src-tauri/examples/vault_window_probe.rs`, run by CI on macOS 26 and
-  on macOS 15: real WebKit windows on two loopback origins with a disposable
-  data store. The
+- `desktop/src-tauri/examples/vault_window_probe.rs`, run by CI on macOS 26:
+  real WebKit windows on two loopback origins with a disposable data store. The
   probe compiles the module's source file into itself and enters one step below
   the signature check, so the library exports nothing for tests and has no
   test-only feature. Three runs:
@@ -269,6 +268,18 @@ the sandbox's window goes to the browser with every other link.
   Workbench reload. Both show in the manual check on a signed build.
 
 ## Not verified
+
+**macOS 15 to 25.** Passkey PRF starts with macOS 15, so 15 would be the
+natural floor. The probe was run once on a hosted macOS 15.8 runner. Every step
+before the pixel check passed there, including windows being revealed, which
+means the presentation update is delivered. The pixel check then failed: the
+window stayed on screen and revealed, the probe never read the opener's colour
+from it, and it never read the sandbox page's colour either. Either the
+read-back does not see WebKit's content on that system, which would make the
+check blind there, or the page was not displayed. The two cannot be told apart
+without a macOS 15 machine. Until the probe passes on it, the marker is not set
+on macOS 15, and those systems keep the browser hand-off. Follow-up: make the
+read-back work on macOS 15 (or replace it), then add a CI job and the version.
 
 Only a signed build with a real passkey can show these:
 

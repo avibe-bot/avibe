@@ -498,7 +498,10 @@ addEventListener('message', (event) => {
                 }
                 assert!(
                     started.elapsed() < Duration::from_secs(15),
-                    "the sandbox page was never displayed ({before_release} + {after_release} samples)"
+                    "the sandbox page was never displayed ({before_release} + {after_release} samples; \
+                     the window now: {:?}; read from it: {:?})",
+                    self.children(),
+                    self.child_pixels().map(|colours| colours[..3].to_vec())
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }

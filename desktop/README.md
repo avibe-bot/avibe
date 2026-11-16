@@ -237,7 +237,7 @@ The Workbench learns that passkey steps can stay in the app from
 `window.__AVIBE_DESKTOP_VAULT_PASSKEY__`, which the same code defines on the
 top-level document only when all of this holds: the hooks above are installed
 on that webview; the system is a macOS version on which the probe below has
-passed in CI, today 15 (the first with passkey PRF) and 26; and the running
+passed in CI, today only 26; and the running
 app's own code signature carries
 `com.apple.developer.associated-domains` with
 `webcredentials:sandbox.avibe.bot`, read from the process with `SecTask`. A
@@ -252,10 +252,14 @@ missing there is no window and no marker. That a method exists says nothing
 about what it does. Their behaviour is checked only by the probe, on the macOS
 versions CI runs it on, which is why the marker is limited to those versions
 (`PROBED_MACOS` in the module). When CI moves to a new macOS, add it there.
+macOS 15 has passkey PRF and would be the natural floor, but it is not on the
+list: run once on a hosted macOS 15 runner, the probe passed every step up to
+the pixel check and then could not read the sandbox page back from the window.
+Until that is understood, macOS 15 to 25 keep the browser hand-off.
 
 The pure rules are unit-tested in the module. The behavior is checked with
 real WebKit windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs
-on macOS 26 and on macOS 15. The probe plays the Workbench and the sandbox from two loopback
+on macOS 26. The probe plays the Workbench and the sandbox from two loopback
 origins with a disposable data store, and reads back what a window's own views
 draw to check that an opener's page is never displayed. It compiles the
 module's source file into itself, so the library exports nothing for it, and
