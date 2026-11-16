@@ -11,18 +11,40 @@ enum ThirdPartySignIn: Equatable {
 
 /// Voice input's consent marker. An instance page that asks each account before
 /// speech goes to a third-party AI service carries
-/// `<meta name="avibe-voice-consent" content="1">` (ui/index.html). A page
-/// without it predates that question, so the App gives it no microphone and
+/// `<meta name="avibe-voice-consent" content="1">` (ui/index.html). A Workbench
+/// page without it predates that question, so the App gives it no microphone and
 /// says to update the instance (App Store guideline 5.1.2(i)). A marked page
 /// asks for itself, and the App adds no question of its own.
-enum VoiceConsentMarker {
-    /// Evaluated in the page's main frame when it asks for the microphone.
-    static let script = #"document.querySelector('meta[name="avibe-voice-consent"]')?.content === "1""#
+enum VoiceConsentMarker: Equatable {
+    /// The Workbench that asks before voice input sends anything.
+    case marked
+    /// A Workbench from before that question: the instance needs an update.
+    case unmarkedWorkbench
+    /// Any other page (a Show Page opened on its own, a page mid-navigation):
+    /// no microphone, and nothing to say about updating.
+    case other
 
-    /// Whether the script's result says the page carries the marker. Anything
-    /// else, an error or a page that is gone included, reads as not marked.
-    static func isPresent(_ result: Any?) -> Bool {
-        (result as? Bool) == true
+    /// Evaluated in the page's main frame when it asks for the microphone. The
+    /// Workbench is recognized by what every 3.x build serves: its React root and
+    /// the Web app manifest, outside the Show Page paths.
+    static let script = #"""
+    (() => {
+      if (document.querySelector('meta[name="avibe-voice-consent"]')?.content === "1") return "marked";
+      const workbench = document.getElementById("root") !== null
+        && document.querySelector('link[rel="manifest"][href="/manifest.webmanifest"]') !== null
+        && !/^\/(show|p)\//.test(location.pathname);
+      return workbench ? "unmarkedWorkbench" : "other";
+    })()
+    """#
+
+    /// What the script's result says. An error, or a page that is gone, reads
+    /// as `other`: denied, without telling anyone to update.
+    init(result: Any?) {
+        switch result as? String {
+        case "marked": self = .marked
+        case "unmarkedWorkbench": self = .unmarkedWorkbench
+        default: self = .other
+        }
     }
 }
 
