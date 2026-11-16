@@ -158,6 +158,14 @@ final class AvibePageViewController: UIViewController, WKNavigationDelegate,
         return navigationController
     }
 
+    /// UIKit refused the presentation (the presenter left its window
+    /// meanwhile): answer now instead of never.
+    func finishUnlessPresented() {
+        if (navigationController ?? self).presentingViewController == nil {
+            finish(completed: false)
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground

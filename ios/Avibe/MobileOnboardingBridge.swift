@@ -494,6 +494,7 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
     private let handler: MobileBridgeHandler
     private let webView: WKWebView
     private var hasLoadedBundledPage = false
+    private weak var presentedAvibePage: UINavigationController?
     private var keyboardViewportLayoutController:
         KeyboardViewportLayoutController?
 
@@ -622,7 +623,8 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
             ? try coordinator.accountWebPageDataStore()
             : WKWebsiteDataStore.nonPersistent()
         let controlPlane = coordinator.controlPlaneURL
-        return await withCheckedContinuation { continuation in
+        var pageWebView: WKWebView?
+        let completed = await withCheckedContinuation { continuation in
             let controller = AvibePageViewController(
                 page: page,
                 controlPlane: controlPlane,
@@ -630,9 +632,26 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
                 onFinish: { continuation.resume(returning: $0) }
             )
             if page.usesAccountSignIn {
-                coordinator.recordAccountWebPage(controller.webView)
+                pageWebView = controller.webView
+                coordinator.beginAccountWebPage(controller.webView)
             }
-            present(controller.makePresentation(), animated: true)
+            let presentation = controller.makePresentation()
+            presentedAvibePage = presentation
+            present(presentation, animated: true)
+            controller.finishUnlessPresented()
+        }
+        if let pageWebView {
+            coordinator.endAccountWebPage(pageWebView)
+        }
+        return completed
+    }
+
+    /// SwiftUI removed this page (the App changed route). A page it
+    /// presented goes with it, so none outlives the page that awaits it.
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        if parent == nil, let presentedAvibePage, presentedAvibePage.presentingViewController != nil {
+            presentedAvibePage.dismiss(animated: false)
         }
     }
 

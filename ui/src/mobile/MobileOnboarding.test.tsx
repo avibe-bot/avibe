@@ -980,6 +980,24 @@ describe('mobile onboarding', () => {
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.action' })).toBeNull();
     });
 
+    it('signs this device out when the page reported the deletion but the read-back did not', async () => {
+      for (const readBack of [
+        () => mobile.refresh.mockRejectedValueOnce({ code: 'busy', message: 'busy' }),
+        () => mobile.refresh.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' }),
+      ]) {
+        await openAccount('#account');
+        mobile.openPage.mockResolvedValueOnce({ completed: true });
+        readBack();
+        mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+        fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+
+        await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
+        expect(mobile.logout).toHaveBeenCalledTimes(1);
+        cleanup();
+        resetMobileMocks();
+      }
+    });
+
     it('keeps Account as it was when the deletion page cannot open', async () => {
       await openAccount('#account');
       mobile.openPage.mockRejectedValueOnce({ code: 'busy', message: 'busy' });

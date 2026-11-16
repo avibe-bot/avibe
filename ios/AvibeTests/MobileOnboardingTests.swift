@@ -633,7 +633,7 @@ final class MobileOnboardingTests: XCTestCase {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         var page: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
-        coordinator.recordAccountWebPage(try XCTUnwrap(page))
+        coordinator.beginAccountWebPage(try XCTUnwrap(page))
 
         // The account is gone: the session reads signed out.
         transport.session = nil
@@ -646,6 +646,84 @@ final class MobileOnboardingTests: XCTestCase {
         page = nil
         await store.sweepOrphans()
         XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+    }
+
+    // A notification tap while the deletion page is open must not open an
+    // instance of an account the page may be deleting.
+    func testNoInstanceOpensWhileTheAccountPageIsOpen() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let page = WKWebView(frame: .zero, configuration: configuration)
+
+        coordinator.beginAccountWebPage(page)
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id)) { error in
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.busy.code)
+        }
+        XCTAssertEqual(opened, 0)
+
+        coordinator.endAccountWebPage(page)
+        XCTAssertEqual(try coordinator.selectInstance(id: instance.id).id, instance.id)
+        XCTAssertEqual(opened, 1)
+    }
+
+    // `app.openPage` answers exactly once however the page closes: the
+    // deletion page's done navigation, or Done.
+    func testOpenPagePresentsTheDeletionPageAndAnswersOnceForEachClose() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(defaults: makeDefaults(), transports: [transport]),
+            startScreen: .sheet
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+
+        for closesWithDone in [false, true] {
+            let call = Task { @MainActor in
+                try await webView.callAsyncJavaScript(
+                    "return await window.avibeMobile.call('app.openPage', {page: 'accountDeletion'});",
+                    arguments: [:],
+                    in: nil,
+                    contentWorld: .page
+                ) as? [String: Any]
+            }
+            var page: AvibePageViewController?
+            for _ in 0..<100 where page == nil {
+                page = (controller.presentedViewController as? UINavigationController)?
+                    .topViewController as? AvibePageViewController
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let shown = try XCTUnwrap(page)
+            XCTAssertEqual(
+                shown.webView.configuration.applicationNameForUserAgent,
+                NativeShellMetadata().userAgentSuffix
+            )
+            if closesWithDone {
+                let done = try XCTUnwrap(shown.navigationItem.leftBarButtonItem)
+                _ = done.target?.perform(done.action, with: done)
+            } else {
+                shown.webView.load(URLRequest(url: URL(string: "http://127.0.0.1:43127/account/delete/done")!))
+            }
+            let result = try await call.value
+            XCTAssertEqual(result?["completed"] as? Bool, !closesWithDone)
+            for _ in 0..<100 where controller.presentedViewController != nil {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertNil(controller.presentedViewController)
+        }
     }
 
     func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView() async throws {

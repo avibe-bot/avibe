@@ -461,7 +461,14 @@ receives no bridge.
   it (`signed_out` or `busy` otherwise). The WebView joins the coordinator's
   release barriers: the sign-out that follows waits for it before rotating
   the store and leaves the old store to a later sweep while it is alive.
-  The privacy policy uses a non-persistent store.
+  While it is open no instance can be selected, so a notification tap shows
+  the instance list instead of opening an instance of an account the page
+  may be deleting. The privacy policy uses a non-persistent store.
+- A page closes with the bundled page that awaits it: if the App changes
+  route underneath, the page is dismissed and answers `{completed: false}`,
+  and a presentation UIKit refuses answers at once.
+- The pages use no JavaScript dialogs and no `window.open` the App must
+  follow; the App implements no dialogs for them.
 - Main-frame navigation stays on the control-plane origin; other web
   addresses and application schemes open in the system, as do new windows.
   Subframes load web content but launch nothing.
@@ -474,7 +481,9 @@ receives no bridge.
   answer is the existing explicit sign-out: the store rotates and the page
   shows Welcome (from the sheet, the App replaces it with the full-screen
   account page as for any account transition). A signed-in answer keeps
-  Account.
+  Account. When the page reported the deletion but the read-back failed or
+  still read signed in, the bundled page signs this device out
+  (`session.logout`) so nothing of the deleted account stays.
 
 A complete six-digit email or authenticator code starts verification as soon
 as an edit completes it, whether typed, pasted, or offered above the keyboard
@@ -818,7 +827,7 @@ pinned to Xcode 26.6.
 
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
-| `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
+| `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. The avibe.bot account deletion page also uses it while open, alongside a covered runtime, as a release barrier: rotation waits for it and defers the old store's removal while it lives. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
 | `websiteDataStore.proxyConfigurations` | Never written by this shell, which has no direct transport. With one, `DirectRouteOwner` is the only writer: one HTTP CONNECT route per account store to the App's loopback proxy, listing exact instance hosts, written before a runtime's first load and never cleared or switched. | XCTest with and without a stand-in transport on real `WKWebsiteDataStore` objects, counting every setter call, including that no listening socket and no route exist without one. No WebKit load through the route is part of this suite. |
 | `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration through the shared WebView factory, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, child discovery, subframe absence, external-origin absence, and unknown-method rejection. |
 | `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
@@ -845,7 +854,7 @@ pinned to Xcode 26.6.
 | Capability | Outcome |
 | --- | --- |
 | New windows and `window.close()` | Supported by `createWebViewWith` and `webViewDidClose`; every ordinary target opens in a child WebView, children recursively use the same delegates, and the toolbar exposes host, Done, and Open in Safari. The Safari action is enabled only for HTTP(S) URLs. |
-| JavaScript `alert`, `confirm`, and `prompt` | Supported with native dialogs and exactly-once completion on every exit path. |
+| JavaScript `alert`, `confirm`, and `prompt` | Supported with native dialogs and exactly-once completion on every exit path, in instance WebViews. avibe.bot pages in the App (`app.openPage`) get none: WebKit's defaults apply (`confirm` is false), and those pages use none. |
 | Instance HTTPS, matching `blob:`, and instance-frame `data:` downloads | Supported through the action/response policies and `WKDownloadDelegate`; non-displayable MIME and attachment responses use the same rule. |
 | File selection, camera, and photo saving | Uses WebKit's Safari-style picker and the system activity sheet. `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription` are localized. |
 | External application schemes | Trusted top-level contexts use `UIApplication.open`; subframes cancel them without leaving the app. |

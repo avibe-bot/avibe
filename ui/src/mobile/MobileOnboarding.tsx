@@ -2532,24 +2532,36 @@ function MobileOnboardingScreens() {
   /**
    * avibe.bot's deletion page, over Account with the App's sign-in. However it closes (deleted,
    * Done, or a swipe), the session says whether the account is still there: signed out goes to
-   * Welcome, still signed in stays on Account. A failure leaves Account as it was; its error card
-   * is sign-out's, and the next session read settles the state.
+   * Welcome, still signed in stays on Account. When the page reported the account deleted, any
+   * other answer (a failed or stale read) signs this device out instead, so nothing of a deleted
+   * account stays. A page that could not open leaves Account as it was.
    */
   const deleteAccount = async () => {
     const token = beginOperation('deleteAccount');
     if (token === null) return;
     setErrorKey(null);
+    let completed = false;
     try {
       await sheetRefreshSettled.current;
-      await openMobilePage('accountDeletion');
+      ({ completed } = await openMobilePage('accountDeletion'));
       if (!ownsOperation(token)) return;
-      const next = await refreshMobileSession();
+      const next = await refreshMobileSession().catch((error: unknown) => {
+        if (completed) return null;
+        throw error;
+      });
       if (!ownsOperation(token)) return;
-      if (next.status === 'signedOut') showSignedOut(next);
-      else if (next.status === 'signedIn') setSession(next);
-      else applySession(token, next, true);
+      if (next?.status === 'signedOut') {
+        showSignedOut(next);
+      } else if (completed) {
+        const signedOut = await logoutMobileSession();
+        if (ownsOperation(token) && signedOut.status === 'signedOut') showSignedOut(signedOut);
+      } else if (next?.status === 'signedIn') {
+        setSession(next);
+      } else if (next) {
+        applySession(token, next, true);
+      }
     } catch {
-      // Nothing to show here: see above.
+      // Nothing to show: Account's error card belongs to sign-out.
     } finally {
       finishOperation(token);
     }
