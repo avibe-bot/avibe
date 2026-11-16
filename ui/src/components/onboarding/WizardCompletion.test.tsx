@@ -38,6 +38,11 @@ function mount() { return render(<MemoryRouter initialEntries={['/setup']}><I18n
 // `api.getConfig()` answers from a 30-second cache, and the shell's prerequisite reads
 // deliberately do not. Both are driven from here so a case can make them disagree and
 // prove which one the flow actually acted on.
+// Finishing setup also saves the language it was read in (English here).
+const FINISH_EN = [
+  { kind: 'set', path: ['setup_completed'], value: true },
+  { kind: 'set', path: ['language'], value: 'en' },
+];
 const jsonResponse = (body: unknown, init: { ok?: boolean; status?: number } = {}) => ({ ok: init.ok ?? true, status: init.status ?? 200, json: async () => body }) as unknown as Response;
 const baseConfig = (overrides: Record<string, unknown> = {}) => ({
   version: 'v2', setup_completed: false, runtime: {}, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true },
@@ -192,7 +197,7 @@ describe('explicit any-one-ready completion', () => {
     fireEvent.click(enter); fireEvent.click(enter);
     expect(await screen.findByTestId('destination')).toBeTruthy();
     expect(screen.getByTestId('destination').textContent).toBe('null');
-    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
     expect(mock.api.setDefaultVibeAgent).toHaveBeenCalledExactlyOnceWith('claude-agent');
     expect(mock.permission).not.toHaveBeenCalled(); expect(mock.control).not.toHaveBeenCalled();
   });
@@ -549,7 +554,7 @@ describe('saved messaging no longer gates the workspace', () => {
     incompleteSlack();
     fireEvent.click(await setup({ stopped: true }));
     expect(await screen.findByTestId('destination')).toBeTruthy();
-    expect(mock.api.mutateConfig.mock.lastCall![0]).toEqual([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    expect(mock.api.mutateConfig.mock.lastCall![0]).toEqual(FINISH_EN);
     expect(mock.api.slackManifest).not.toHaveBeenCalled(); expect(mock.api.slackAuthTest).not.toHaveBeenCalled();
     expect(mock.control).toHaveBeenCalledExactlyOnceWith('start');
   });
@@ -644,7 +649,7 @@ describe('fresh prerequisite boundary', () => {
     await waitFor(() => expect(enterAgain.hasAttribute('disabled')).toBe(false));
     fireEvent.click(enterAgain);
     expect(await screen.findByTestId('destination')).toBeTruthy();
-    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
     expect(enter).toBe(enterAgain);
   });
   it('an older enabled read settling last cannot revive a newer disabled answer or finish setup', async () => {
@@ -1075,12 +1080,31 @@ describe('AUTH-SETUP-161 set up later', () => {
     fireEvent.click(later);
 
     expect(await screen.findByTestId('destination')).toBeTruthy();
-    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
     // No entry gate, no default Agent: with no provider there is nothing to judge or pick,
     // and the home's Getting started is what leads back to a model.
     expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
     expect(mock.api.listVibeAgents.mock.calls.length).toBe(gateReads);
     expect(mock.control).not.toHaveBeenCalled();
+  });
+
+  it('saves the language the setup was read in as the instance language', async () => {
+    // A Chinese reader (detected as zh-CN), or anyone who picked 中文 on the setup screens.
+    i18n.addResourceBundle('zh', 'translation', en);
+    await act(async () => { await i18n.changeLanguage('zh-CN'); });
+    try {
+      const later = await arriveWithNothing();
+      fireEvent.click(later);
+
+      expect(await screen.findByTestId('destination')).toBeTruthy();
+      expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([
+        { kind: 'set', path: ['setup_completed'], value: true },
+        { kind: 'set', path: ['language'], value: 'zh' },
+      ]);
+    } finally {
+      await act(async () => { await i18n.changeLanguage('en'); });
+      i18n.removeResourceBundle('zh', 'translation');
+    }
   });
 
   it('AUTH-SETUP-161 stays in setup and says so when the finish cannot be confirmed', async () => {
@@ -1136,7 +1160,7 @@ describe('AUTH-SETUP-170 Desktop completion handoff', () => {
     await act(async () => confirmRead(jsonResponse({ ...served, setup_completed: true })));
     expect(await screen.findByTestId('destination')).toBeTruthy();
     expect(mock.presentDesktop).toHaveBeenCalledExactlyOnceWith('setup-complete');
-    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
     expect(seeds()).toHaveLength(seedCount);
   });
   it('keeps a remote Runtime completion local to that Runtime', async () => {

@@ -296,7 +296,13 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
       // Through the language operation, not straight at i18n: a language change
       // gives this effect a new `api` and so a second read, which must not undo
       // the pick that caused it — nor may a first read that answers late.
-      adoptPersistedLanguage(i18n, c.language);
+      // A fresh instance stores a default language nobody chose. While setup is
+      // still pending the page keeps its reader's language; finishing setup
+      // saves that language as the instance's own (Wizard), and from then on
+      // the saved one wins.
+      if (c?.setup_state?.needs_setup !== true) {
+        adoptPersistedLanguage(i18n, c.language);
+      }
     }).catch(() => {});
   }, [api, capabilities.can_manage_instance, i18n]);
 

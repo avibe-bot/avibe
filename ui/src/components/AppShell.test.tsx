@@ -996,6 +996,31 @@ describe('AppShell persistent Workbench chrome', () => {
     await waitFor(() => expect(i18n.changeLanguage).toHaveBeenCalledWith('zh'));
   });
 
+  it.each([
+    ['keeps the reader language while setup is pending', { needs_setup: true }, []],
+    ['applies the saved language once setup is finished', { needs_setup: false }, ['en']],
+  ])('%s', async (_name, setupState, expected) => {
+    viewport.isDesktop = true;
+    // A fresh instance stores the default `en`; nobody chose it yet.
+    api.getConfig.mockResolvedValue({ language: 'en', setup_state: setupState, platforms: { enabled: [] } });
+    i18n.language = 'zh';
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    await waitFor(() => expect(api.getConfig).toHaveBeenCalled());
+    await act(async () => {});
+    expect(i18n.changeLanguage.mock.calls.map(([code]: [string]) => code)).toEqual(expected);
+  });
+
   it('keeps a language the user picked while the instance config was still being read', async () => {
     viewport.isDesktop = true;
     const instance = i18n;

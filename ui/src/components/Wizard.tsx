@@ -31,6 +31,7 @@ import { LanguageSwitcher } from './LanguageSwitcher';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
+import { APP_LANGUAGES, type AppLanguage } from '../i18n/options';
 import { ASSISTANT_ORDER, SETUP_LINEUP } from './onboarding/collaborationTimeline';
 import { createAgentCollectionReadAuthority } from './settings/models/collectionReadAuthority';
 import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, type EntryRefusal } from './onboarding/entryGate';
@@ -285,8 +286,14 @@ const AssistantsEntry = forwardRef<SetupScreenHandle, ComponentProps<typeof Agen
   },
 );
 
+/** The app language the setup screens are showing, if it is one the app ships. */
+const setupLanguage = (i18n: { resolvedLanguage?: string; language: string }): AppLanguage | null => {
+  const code = (i18n.resolvedLanguage ?? i18n.language ?? '').split('-')[0];
+  return (APP_LANGUAGES as readonly string[]).includes(code) ? (code as AppLanguage) : null;
+};
+
 export function Wizard() {
-  const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
+  const api = useApi(); const { t, i18n } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<SetupReadFailure | null>(null);
@@ -555,7 +562,14 @@ export function Wizard() {
    */
   const finishSetup = async (holds: () => boolean) => {
     try {
-      await api.mutateConfig([setConfigField(['setup_completed'], true)]);
+      // The language this setup was read in becomes the instance language: until
+      // now the stored one was a default nobody chose (AppShell does not adopt it
+      // while setup is pending). A pick from the language switch is that language.
+      const language = setupLanguage(i18n);
+      await api.mutateConfig([
+        setConfigField(['setup_completed'], true),
+        ...(language ? [setConfigField(['language'], language)] : []),
+      ]);
     } catch {
       // Unknown, not failed. The readback below is what decides.
     }
