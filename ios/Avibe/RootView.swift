@@ -395,6 +395,18 @@ private struct RuntimeOpenNoticeBanner: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                // The page's current block, above the notice, reopens it.
+                Text(
+                    String(
+                        format: NSLocalizedString(
+                            "runtime.open.timeout.reopen_hint.named",
+                            comment: ""
+                        ),
+                        notice.instanceName
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: dismiss) {

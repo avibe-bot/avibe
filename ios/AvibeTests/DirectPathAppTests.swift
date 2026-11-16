@@ -564,9 +564,9 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     /// After a timeout the page's current block is the one way to open the
-    /// instance again. The native notice only explains, with no reopen of
-    /// its own, and sits in the lower half, clear of the page's title,
-    /// account button and current block.
+    /// instance again. The native notice only explains and points to it,
+    /// with no reopen of its own, and sits in the lower half, clear of the
+    /// page's title, account button and current block.
     @MainActor
     func testRuntimeOpenTimeoutNoticeOffersNoSecondReopenAndLeavesThePageTopUncovered()
         async throws
@@ -607,6 +607,13 @@ final class DirectPathAppTests: XCTestCase {
             ),
             "One"
         )
+        let reopenHint = String(
+            format: NSLocalizedString(
+                "runtime.open.timeout.reopen_hint.named",
+                comment: ""
+            ),
+            "One"
+        )
         let retry = NSLocalizedString("browser.error.retry", comment: "")
         let dismiss = NSLocalizedString(
             "runtime.open.timeout.dismiss",
@@ -631,6 +638,8 @@ final class DirectPathAppTests: XCTestCase {
             "The timeout notice is not on screen: \(labels)"
         )
         XCTAssertTrue(labels.contains(dismiss), "\(labels)")
+        // It says where the one reopen is.
+        XCTAssertTrue(labels.contains(reopenHint), "\(labels)")
         XCTAssertFalse(labels.contains(retry), "\(labels)")
         XCTAssertGreaterThan(notice.frame.minY, window.bounds.midY)
     }
