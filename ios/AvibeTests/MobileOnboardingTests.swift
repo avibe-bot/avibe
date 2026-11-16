@@ -1209,6 +1209,96 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(coordinator.isSelectedRuntime(opened))
     }
 
+    /// What an open that waits for its route asks: a push-management request
+    /// or a refresh of the signed-in account keeps the runtime; an
+    /// operation that does not keep the selection does not, nor does a
+    /// sign-out once it has begun.
+    func testOnlyASelectionKeepingOperationKeepsTheRuntimeOfAnOpen()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let refresh = FakeMobileAuthTransport()
+        let refreshed = snapshot(accountID: "account-1")
+        let account = FakeMobileAuthTransport()
+        var runtime: MobileRuntimeContext?
+        var coordinator: MobileSessionCoordinator!
+        var kept: [String: Bool] = [:]
+        func record(_ name: String) {
+            kept[name] = coordinator.keepsSelectedRuntime(runtime!)
+            XCTAssertFalse(coordinator.isCurrentRuntime(runtime!), name)
+        }
+        management.pushManagementHandler = { _ in
+            record("push management")
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        refresh.fetchSessionHandler = {
+            record("refresh")
+            return .signedIn(refreshed)
+        }
+        account.verifySecondFactorHandler = { _ in
+            record("second factor")
+            throw MobileAccountError.secondFactorInvalid
+        }
+        coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [
+                first,
+                management,
+                refresh,
+                account,
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+            ],
+            onOpen: { runtime = $0 },
+            onPreparePushLogout: {
+                record("sign-out")
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let opened = try XCTUnwrap(runtime)
+        XCTAssertTrue(coordinator.keepsSelectedRuntime(opened))
+
+        _ = try await coordinator.pushManagementRequest(
+            PushManagementRequest(
+                method: "PATCH",
+                path: "/api/push/apns/installations/installation/provider",
+                headers: [:],
+                body: nil
+            )
+        )
+        _ = try await coordinator.refresh()
+        XCTAssertTrue(coordinator.keepsSelectedRuntime(opened))
+
+        coordinator.activateAccountSurface()
+        do {
+            _ = try await coordinator.verifySecondFactor(
+                method: .totp,
+                code: "123456"
+            )
+            XCTFail("The fixture answers an invalid code.")
+        } catch {}
+        coordinator.deactivateAccountSurface()
+        XCTAssertTrue(coordinator.keepsSelectedRuntime(opened))
+
+        _ = try await coordinator.logout()
+        XCTAssertEqual(
+            kept,
+            [
+                "push management": true,
+                "refresh": true,
+                "second factor": false,
+                "sign-out": false,
+            ]
+        )
+        XCTAssertFalse(coordinator.keepsSelectedRuntime(opened))
+    }
+
     /// The account page over a runtime reads the session while a push
     /// request the App made on its own is still running, instead of failing
     /// as busy (shown as "can't reach avibe.bot"). Nothing that changes the

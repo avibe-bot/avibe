@@ -957,12 +957,265 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.route, .onboarding(.account))
     }
 
+    // MARK: An open across the push update it starts
+
+    // Opening a runtime resumes push registration; on a device with
+    // notifications on, that sends a provider update through the account
+    // coordinator while the open is still settling and while the root view
+    // makes its WebView. The request keeps the selection, so the open
+    // stands: the browser shows the runtime, and its WebView is kept.
+
+    @MainActor
+    func testATappedInstanceOpensAcrossThePushUpdateItStartsWithATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: StandInDirectTransport(),
+            restoring: false
+        )
+    }
+
+    @MainActor
+    func testATappedInstanceOpensAcrossThePushUpdateItStartsWithoutATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: nil,
+            restoring: false
+        )
+    }
+
+    @MainActor
+    func testARestoredInstanceOpensAcrossThePushUpdateItStartsWithATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: StandInDirectTransport(),
+            restoring: true
+        )
+    }
+
+    @MainActor
+    func testARestoredInstanceOpensAcrossThePushUpdateItStartsWithoutATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: nil,
+            restoring: true
+        )
+    }
+
+    // What does end an open while its route is prepared still does: the
+    // App returns to the instance list and never shows the runtime.
+
+    @MainActor
+    func testASignOutDuringTheOpenReturnsToTheList() async throws {
+        let app = try await makeApp(directTransport: StandInDirectTransport())
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.logout()
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await XCTUnwrap(atOpen.started).value
+        trackStore(of: app)
+        try await eventually { app.route != .loading }
+
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+    }
+
+    @MainActor
+    func testANewSignInDuringTheOpenReturnsToTheList() async throws {
+        let app = try await makeApp(directTransport: StandInDirectTransport())
+        // Starting another sign-in advances the account generation at once.
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                // The fixture has no code endpoint; the request fails
+                // after the generation has moved.
+                _ = try await app.mobileSessionCoordinator.requestOTP(
+                    email: "other@example.com"
+                )
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        _ = try await XCTUnwrap(atOpen.started).result
+        trackStore(of: app)
+        try await eventually { app.route != .loading }
+
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+    }
+
+    @MainActor
+    func testAChangedStoredSelectionDuringTheOpenReturnsToTheList() async throws {
+        let app = try await makeApp(directTransport: StandInDirectTransport())
+        let defaults = try XCTUnwrap(appDefaults)
+        let atOpen = AtTheOpen(app) { _ in
+            defaults.removeObject(forKey: Self.selectionKey)
+            return nil
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await eventually { app.route != .loading }
+
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+    }
+
+    /// A refresh keeps the runtime until its answer names another account;
+    /// then the account transition ends the runtime, whether the open has
+    /// settled or not, and releases its WebView.
+    @MainActor
+    func testAnAccountChangeDuringTheOpenReturnsToTheList() async throws {
+        let session = SessionAnswerOverride()
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(
+            directTransport: transport,
+            sessionResponse: { session.response }
+        )
+        let fetched = FixtureEvent(description: "refresh fetch held")
+        let releaseFetch = DispatchSemaphore(value: 0)
+        defer { releaseFetch.signal() }
+        session.hold(
+            .json(
+                """
+                {"account":{"id":"account-2","email":"other@example.com"},"instances":[
+                  {"id":"instance-1","name":"One","host":"instance-one.example",
+                   "url":"https://instance-one.example","relationship":"owner","available":true}
+                ]}
+                """
+            ),
+            started: fetched,
+            release: releaseFetch
+        )
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.refresh()
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        await fulfillment(of: [fetched.expectation], timeout: 30)
+        try await eventually { app.route != .loading }
+        var page: RuntimePage?
+        var controller: WebViewController?
+        if case .browser(let runtime) = app.route {
+            let made = try makeRuntimeController(app, runtime)
+            app.registerRuntimeController(made, for: runtime)
+            page = try RuntimePage(controller: made)
+            XCTAssertNotNil(made.livePrimaryWebView)
+            controller = made
+        }
+        defer { page?.close() }
+
+        releaseFetch.signal()
+        try await XCTUnwrap(atOpen.started).value
+        trackStore(of: app)
+        try await eventually { app.route == .onboarding(.instances) }
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        if let controller {
+            XCTAssertNil(controller.livePrimaryWebView)
+        }
+        XCTAssertEqual(atOpen.routes.last, .onboarding(.instances))
+    }
+
+    /// Opens instance-1 by a tap on the list, or by the restore of a launch
+    /// whose stored selection names it, and starts a push-management
+    /// request at the open's first route, as the App's own resume of push
+    /// registration does. The request is held in flight until the end.
+    @MainActor
+    private func assertTheOpenStandsAcrossAPushRequest(
+        directTransport: StandInDirectTransport?,
+        restoring: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let hold = PushHold(path: "/api/push/apns/installations/hold/provider")
+        let startRequest: @MainActor (AppModel) -> Task<Void, Error>? = { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.pushManagementRequest(
+                    PushManagementRequest(
+                        method: "POST",
+                        path: hold.path,
+                        headers: [:],
+                        body: nil
+                    )
+                )
+            }
+        }
+        var atOpen: AtTheOpen?
+        let app = try await makeApp(
+            directTransport: directTransport,
+            pushHolds: [hold],
+            launchesWithInstanceOneSelected: restoring,
+            whenTheAppExists: { app in
+                if restoring {
+                    atOpen = AtTheOpen(app, start: startRequest)
+                }
+            }
+        )
+        if !restoring {
+            atOpen = AtTheOpen(app, start: startRequest)
+            _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        }
+        let open = try XCTUnwrap(atOpen, file: file, line: line)
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
+        try await eventually { app.route != .loading }
+
+        guard case .browser(let runtime) = app.route else {
+            hold.release.signal()
+            _ = await open.started?.result
+            return XCTFail(
+                "The open ended at \(app.route) while a push request ran.",
+                file: file,
+                line: line
+            )
+        }
+        XCTAssertEqual(runtime.instance.id, "instance-1", file: file, line: line)
+        // Still in flight: the coordinator keeps the runtime but is not idle.
+        XCTAssertFalse(
+            app.mobileSessionCoordinator.isCurrentRuntime(runtime),
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            app.mobileSessionCoordinator.keepsSelectedRuntime(runtime),
+            file: file,
+            line: line
+        )
+
+        // The root view's WebView arrives while the request still runs.
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        defer { page.close() }
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+
+        hold.release.signal()
+        try await XCTUnwrap(open.started, file: file, line: line).value
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertTrue(
+            app.mobileSessionCoordinator.isCurrentRuntime(runtime),
+            file: file,
+            line: line
+        )
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+        if let directTransport {
+            XCTAssertEqual(open.routes, [.loading, .browser(runtime)], file: file, line: line)
+            let target = try XCTUnwrap(directTransport.selections.last, file: file, line: line)
+            XCTAssertEqual(target.runtime, runtime, file: file, line: line)
+            // The registered WebView is the runtime's, once the account is idle.
+            XCTAssertTrue(
+                app.directRendezvousWebView(for: DirectIrohSelection(target))
+                    === controller.livePrimaryWebView,
+                file: file,
+                line: line
+            )
+        } else {
+            XCTAssertEqual(open.routes, [.browser(runtime)], file: file, line: line)
+        }
+    }
+
     // MARK: A runtime abandoned when its WebView registers
 
     @MainActor
     func testARuntimeAbandonedAtRegistrationEndsItsDirectSelection() async throws {
         let transport = StandInDirectTransport()
-        let hold = PushHold(path: "/api/push/hold-1")
+        // An exclusive operation that does not keep the selection and leaves
+        // the account as it is: a second-factor answer the server holds.
+        let hold = PushHold(path: "/api/two-factor/verify")
         let app = try await makeApp(
             directTransport: transport,
             pushHolds: [hold]
@@ -972,11 +1225,21 @@ final class DirectPathAppTests: XCTestCase {
         let target = try XCTUnwrap(transport.selections.last)
         XCTAssertEqual(target.runtime, runtime)
 
-        // An ordinary push-management request is in flight when the root
-        // view's WebView arrives: the App refuses it and returns to the
-        // instance picker, without the usual stop of a runtime.
-        let management = try await holdPushManagement(hold, in: app)
+        // That operation is in flight when the root view's WebView arrives:
+        // the App refuses it and returns to the instance picker, without the
+        // usual stop of a runtime. (A push-management request keeps the
+        // selection and does not; see the opens across one below.)
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let operation = Task { @MainActor in
+            _ = try await app.mobileSessionCoordinator.verifySecondFactor(
+                method: .totp,
+                code: "123456"
+            )
+        }
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        XCTAssertFalse(app.mobileSessionCoordinator.keepsSelectedRuntime(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
         let deselected = transport.deselectCount
         app.registerRuntimeController(
             try makeRuntimeController(app, runtime),
@@ -986,10 +1249,12 @@ final class DirectPathAppTests: XCTestCase {
         // The selection ended with the browser.
         XCTAssertEqual(transport.deselectCount, deselected + 1)
 
-        // The request ends. The account still has its instance, so only the
-        // ended selection stands between a report and the direct path.
+        // The operation ends without changing the account. It still has its
+        // instance, so only the ended selection stands between a report and
+        // the direct path.
         hold.release.signal()
-        try await management.value
+        _ = await operation.result
+        app.mobileSessionCoordinator.deactivateAccountSurface()
         try await reportUsableWhileTheAccountIsIdle(
             transport,
             for: target,
@@ -1813,11 +2078,19 @@ final class DirectPathAppTests: XCTestCase {
     /// The isolated preferences of the last App `makeApp` built.
     private var appDefaults: UserDefaults?
 
+    /// Where the account coordinator keeps the selected instance.
+    private static let selectionKey = "avibe.mobile.selection"
+
     /// An `AppModel` signed in through a local control plane, past its
     /// bootstrap. `nil` builds it exactly as the App does, with no
     /// transport argument at all. `beforeTheAppExists` runs once the control
     /// plane listens and before the `AppModel` is made, which is where a
     /// test takes the baseline of what the App itself does.
+    /// `launchesWithInstanceOneSelected` launches with instance-1 as the
+    /// stored selection, so the bootstrap restores it; `makeApp` then
+    /// returns at once and the test waits for the open itself.
+    /// `whenTheAppExists` runs right after the `AppModel` is made, before
+    /// its bootstrap runs.
     @MainActor
     private func makeApp(
         directTransport: DirectTransporting?,
@@ -1827,7 +2100,9 @@ final class DirectPathAppTests: XCTestCase {
         pushKeychain: InMemoryPushKeychainStore? = nil,
         pushInstallationMarker: InMemoryPushInstallationMarkerStore? = nil,
         pushNotificationCenter: PushNotificationCentering? = nil,
-        beforeTheAppExists: () throws -> Void = {}
+        launchesWithInstanceOneSelected: Bool = false,
+        beforeTheAppExists: () throws -> Void = {},
+        whenTheAppExists: (AppModel) -> Void = { _ in }
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
             if request.method == "POST",
@@ -1887,6 +2162,15 @@ final class DirectPathAppTests: XCTestCase {
             await self.removeTrackedStores()
         }
 
+        if launchesWithInstanceOneSelected {
+            defaults.set(
+                Data(
+                    #"{"accountID":"account-1","instanceID":"instance-1","url":"https://instance-one.example"}"#.utf8
+                ),
+                forKey: Self.selectionKey
+            )
+        }
+
         try beforeTheAppExists()
 
         let controlPlane = MobileControlPlaneConfiguration(testBaseURL: baseURL)
@@ -1925,6 +2209,7 @@ final class DirectPathAppTests: XCTestCase {
                 badgeCenter: SilentBadgeCenter()
             )
         }
+        whenTheAppExists(app)
         trackStore(of: app)
         releaseFixtureApps.append { [weak app] in
             app?.showInstancePicker()
@@ -1932,6 +2217,9 @@ final class DirectPathAppTests: XCTestCase {
         }
         addTeardownBlock { @MainActor [self] in
             server.requests.attach(to: self, name: "direct App bootstrap requests")
+        }
+        if launchesWithInstanceOneSelected {
+            return app
         }
         try await WebKitReadiness.waitForSignedInFixture(
             app,
@@ -2594,10 +2882,49 @@ private final class SessionAnswerOverride: @unchecked Sendable {
     }
 
     func holdSignedOut(started: FixtureEvent, release: DispatchSemaphore) {
+        hold(.status(401), started: started, release: release)
+    }
+
+    /// The next session read signals `started` and answers `response` once
+    /// `release` is signaled; later reads answer `response` at once.
+    func hold(
+        _ response: LocalHTTPResponse,
+        started: FixtureEvent,
+        release: DispatchSemaphore
+    ) {
         lock.lock()
         defer { lock.unlock() }
-        storedResponse = .status(401)
+        storedResponse = response
         heldFetch = (started, release)
+    }
+}
+
+/// Runs `start` at the first route the App sets after this is made, in the
+/// same main-actor turn: for an open, that is where `openRuntime` has just
+/// resumed push registration, before it starts preparing the route. Records
+/// every route set from then on.
+@MainActor
+private final class AtTheOpen {
+    private(set) var routes: [AppRoute] = []
+    private(set) var started: Task<Void, Error>?
+    private var didStart = false
+    private var subscription: AnyCancellable?
+
+    init(
+        _ app: AppModel,
+        start: @escaping @MainActor (AppModel) -> Task<Void, Error>?
+    ) {
+        subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
+            guard let self, let app else {
+                return
+            }
+            self.routes.append(route)
+            guard !self.didStart else {
+                return
+            }
+            self.didStart = true
+            self.started = start(app)
+        }
     }
 }
 
