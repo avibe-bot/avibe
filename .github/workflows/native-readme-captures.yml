@@ -144,8 +144,8 @@ jobs:
           "$W/capwin" "$W/images" "mac-dmg-window-$LANG_CODE" Finder 300 200 | tee -a "$W/review/windows-$LANG_CODE.log"
           screencapture -x "$W/review/mac-dmg-fullscreen-$LANG_CODE.png"
 
-      - name: First open with the download quarantine (Gatekeeper prompt)
-        timeout-minutes: 3
+      - name: Launch the app and capture its first window
+        timeout-minutes: 4
         continue-on-error: true
         shell: bash
         run: |
@@ -155,7 +155,29 @@ jobs:
           test -n "$app"
           ditto "$app" /Applications/Avibe.app
           hdiutil detach "$MOUNT" -quiet || true
-          # Copying out of a downloaded DMG keeps the quarantine mark.
+          xattr -dr com.apple.quarantine /Applications/Avibe.app 2>/dev/null || true
+          open /Applications/Avibe.app >/dev/null 2>&1 &
+          elapsed=0
+          for at in 10 40 90; do
+            sleep $((at - elapsed)); elapsed=$at
+            echo "--- app t=${at}s ---" >> "$W/review/windows-$LANG_CODE.log"
+            "$W/capwin" - x '*' 1 1 >> "$W/review/windows-$LANG_CODE.log"
+            "$W/capwin" "$W/images" "mac-first-window-$LANG_CODE-t${at}s" "Avibe,avibe-desktop" 200 120 | tee -a "$W/review/windows-$LANG_CODE.log"
+            screencapture -x "$W/review/mac-fullscreen-$LANG_CODE-t${at}s.png"
+          done
+          osascript -e 'quit app "Avibe"' 2>/dev/null || true
+          sleep 3
+          pkill -x Avibe 2>/dev/null || true
+          pkill -x avibe-desktop 2>/dev/null || true
+
+      - name: First open with the download quarantine (Gatekeeper prompt)
+        timeout-minutes: 3
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/native-capture"
+          # Copying out of a downloaded DMG keeps the quarantine mark; set it again.
           xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;$(uuidgen)" /Applications/Avibe.app
           # `open` blocks until the Gatekeeper dialog is answered; never wait on it.
           open /Applications/Avibe.app >/dev/null 2>&1 &
@@ -171,24 +193,6 @@ jobs:
           pkill -x Avibe 2>/dev/null || true
           sleep 2
           xattr -dr com.apple.quarantine /Applications/Avibe.app
-
-      - name: Launch the app and capture its first window
-        timeout-minutes: 4
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          W="$RUNNER_TEMP/native-capture"
-          xattr -dr com.apple.quarantine /Applications/Avibe.app 2>/dev/null || true
-          open /Applications/Avibe.app >/dev/null 2>&1 &
-          elapsed=0
-          for at in 10 40 90; do
-            sleep $((at - elapsed)); elapsed=$at
-            echo "--- app t=${at}s ---" >> "$W/review/windows-$LANG_CODE.log"
-            "$W/capwin" - x '*' 1 1 >> "$W/review/windows-$LANG_CODE.log"
-            "$W/capwin" "$W/images" "mac-first-window-$LANG_CODE-t${at}s" "Avibe,avibe-desktop" 200 120 | tee -a "$W/review/windows-$LANG_CODE.log"
-            screencapture -x "$W/review/mac-fullscreen-$LANG_CODE-t${at}s.png"
-          done
 
       - name: Write the manifest
         if: always()
@@ -282,6 +286,7 @@ jobs:
             [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
             [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
             [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+            [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
             public static void Close(Win w) { PostMessage(w.H, 0x0010, IntPtr.Zero, IntPtr.Zero); }
             [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int s);
             [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
@@ -307,12 +312,14 @@ jobs:
             }
             public static void Shot(Win w, string path) {
               SetProcessDPIAware();
-              SetWindowPos(w.H, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
-              System.Threading.Thread.Sleep(500);
-              RECT r = w.Rc;
-              using (Bitmap b = new Bitmap(r.R - r.L, r.B - r.T))
-              using (Graphics g = Graphics.FromImage(b)) { g.CopyFromScreen(r.L, r.T, 0, 0, b.Size); b.Save(path, ImageFormat.Png); }
-              SetWindowPos(w.H, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+              RECT r; GetWindowRect(w.H, out r);
+              using (Bitmap b = new Bitmap(Math.Max(1, r.R - r.L), Math.Max(1, r.B - r.T)))
+              using (Graphics g = Graphics.FromImage(b)) {
+                IntPtr hdc = g.GetHdc();
+                PrintWindow(w.H, hdc, 2);
+                g.ReleaseHdc(hdc);
+                b.Save(path, ImageFormat.Png);
+              }
             }
             public static void Full(string path) {
               SetProcessDPIAware();
