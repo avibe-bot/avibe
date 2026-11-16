@@ -55,6 +55,7 @@ import {
 import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
 import { DesktopSettingsCommand } from './DesktopSettingsCommand';
+import { VaultHandoffReturn } from './VaultHandoffReturn';
 import { prefetchRoutePages } from '../routePages';
 import { WebPushReconciler } from './workbench/WebPushReconciler';
 
@@ -479,6 +480,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <DesktopSettingsCommand />
     <DesktopClientPresentation />
+    <VaultHandoffReturn />
     <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
     <WindowManagerProvider standalone={standaloneAppTab} onWindowForeground={leaveSettingsForWindow}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>

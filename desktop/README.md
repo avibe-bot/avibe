@@ -155,6 +155,17 @@ these two window commands through their parent; they are intentionally inside
 this window-control boundary. No remote bootstrap, notification, updater, file,
 or Runtime lifecycle permission is granted.
 
+`main-window-focus` grants `focus_main_window` to the main window's loopback
+Workbench pages, advertised by `__AVIBE_DESKTOP_FOCUS__`. The Workbench calls it
+when a Protected Vault step it handed to the system browser has finished there
+(`ui/src/lib/vaultHandoffReturn.ts`). The command takes no arguments, rechecks
+that the caller is the Workbench, does nothing while the window is in front,
+answers at most one call per few seconds, and only shows and focuses the main
+window. Where the platform refuses a background activation (macOS 14 and later
+may; Windows foreground rules), it asks for attention instead: a Dock bounce or
+a taskbar flash. A Workbench on a remote instance has no grant and simply stays
+where it is.
+
 ## Product packages
 
 The consumer DMG/NSIS build is self-contained. It embeds target-specific

@@ -6461,6 +6461,10 @@
       "createNeedsAvault": "Install or update avault as shown above first.",
       "createNeedsPassphraseAgain": "Enter the passphrase again to create the wallet."
     },
+    "handoff": {
+      "done": "Done. You can close this tab and go back to the desktop app.",
+      "openApp": "Open the desktop app"
+    },
     "requests": {
       "title": "Pending requests",
       "subtitle": "Agents are waiting for your approval.",

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, ChevronRight, Copy, ExternalLink, Eye, Globe, History, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronRight, Copy, ExternalLink, Eye, Globe, History, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -43,6 +43,7 @@ import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault, useVaultSandboxWarm } from '../../lib/useProtectedVault';
 import {
   openVaultsInBrowser,
+  readDesktopVaultHandoff,
   readVaultBrowserStep,
   withoutVaultBrowserStep,
 } from '../../lib/vaultBrowserHandoff';
@@ -409,7 +410,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
  * blank the rest of the hub.
  */
 const PendingRequestsSection: React.FC<{
-  onResolved: () => void;
+  onResolved: (requestId: string) => void;
   focusRequestId?: string | null;
   /** Open a focused provision request on the Protected tier (the desktop app's handoff). */
   focusStartProtected?: boolean;
@@ -450,7 +451,7 @@ const PendingRequestsSection: React.FC<{
   const onSettled = useCallback((requestId: string) => {
     setRequests((prev) => prev.filter((r) => r.id !== requestId));
     void load();
-    onResolved();
+    onResolved(requestId);
   }, [load, onResolved]);
 
   return (
@@ -461,6 +462,25 @@ const PendingRequestsSection: React.FC<{
       focusStartProtected={focusStartProtected}
       onFocusRequestOpened={onFocusRequestOpened}
     />
+  );
+};
+
+/**
+ * One line for a step the desktop app handed to this tab, once it is done here: the app comes back by
+ * itself, so this tab can be closed. A step handed off from a conversation also links back to it.
+ */
+const DesktopHandoffDone: React.FC<{ session: string | null }> = ({ session }) => {
+  const { t } = useTranslation();
+  return (
+    <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-mint/40 bg-mint/10 px-4 py-3 text-sm text-mint-ink">
+      <CheckCircle2 className="size-4 shrink-0" />
+      <span className="min-w-0 flex-1">{t('vaults.handoff.done')}</span>
+      {session ? (
+        <a href={`avibe://session/${session}`} className="shrink-0 font-semibold underline underline-offset-2">
+          {t('vaults.handoff.openApp')}
+        </a>
+      ) : null}
+    </div>
   );
 };
 
@@ -489,7 +509,7 @@ export const VaultsPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The Add dialog while open: a new secret, or one resumed from the desktop app's handoff.
-  const [adding, setAdding] = useState<{ name?: string; startProtected: boolean } | null>(null);
+  const [adding, setAdding] = useState<{ name?: string; startProtected: boolean; desktopHandoff?: boolean } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
@@ -521,6 +541,10 @@ export const VaultsPage: React.FC = () => {
   // A request linked from IM, or a step the desktop app handed to this browser (`openVaultsInBrowser`),
   // resumed below; each drops the step from the URL once resumed so a reload doesn't resume it again.
   const step = useMemo(() => readVaultBrowserStep(searchParams), [searchParams]);
+  // The step the desktop app handed to this tab, read once on arrival: the URL drops it once resumed.
+  const [desktopHandoff] = useState(() => readDesktopVaultHandoff(searchParams));
+  const [desktopHandoffDone, setDesktopHandoffDone] = useState(false);
+  const handoffRequestId = desktopHandoff?.step.kind === 'request' ? desktopHandoff.step.requestId : null;
   // The secret whose row menu is open; a reveal handed off from the desktop app reopens it.
   const [menuSecret, setMenuSecret] = useState<string | null>(null);
   const [menuField, setMenuField] = useState<string | null>(null);
@@ -531,7 +555,7 @@ export const VaultsPage: React.FC = () => {
 
   useEffect(() => {
     if (!canUseVaultSecrets || step?.kind !== 'add') return;
-    setAdding({ name: step.name, startProtected: true });
+    setAdding({ name: step.name, startProtected: true, desktopHandoff: true });
     clearStep();
   }, [canUseVaultSecrets, step, clearStep]);
 
@@ -567,6 +591,11 @@ export const VaultsPage: React.FC = () => {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const onRequestResolved = useCallback((requestId: string) => {
+    if (requestId === handoffRequestId) setDesktopHandoffDone(true);
+    refresh();
+  }, [handoffRequestId, refresh]);
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
@@ -867,10 +896,11 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
+      {desktopHandoffDone ? <DesktopHandoffDone session={desktopHandoff?.session ?? null} /> : null}
       {canReadVaultState ? <AvaultAuthorizationNotice /> : null}
       {canUseVaultSecrets ? (
         <PendingRequestsSection
-          onResolved={refresh}
+          onResolved={onRequestResolved}
           focusRequestId={step?.kind === 'request' ? step.requestId : null}
           focusStartProtected={step?.kind === 'request' && step.startProtected}
           onFocusRequestOpened={clearStep}
@@ -1002,6 +1032,7 @@ export const VaultsPage: React.FC = () => {
           if (!o) setAdding(null);
         }}
         onCreated={(name, reason) => {
+          if (adding?.desktopHandoff) setDesktopHandoffDone(true);
           setAdding(null);
           // Only an Add for a name an agent asked for treats an existing secret as provided.
           if (reason !== 'already_exists') showToast(t('vaults.created', { name }), 'success');
@@ -1017,6 +1048,7 @@ export const VaultsPage: React.FC = () => {
         onCancel={() => setEditTarget(null)}
         onCreated={() => setEditTarget(null)}
         onSaved={(name) => {
+          if (desktopHandoff?.step.kind === 'edit' && desktopHandoff.step.secretName === name) setDesktopHandoffDone(true);
           setEditTarget(null);
           showToast(t('vaults.saved', { name }), 'success');
           refresh();
