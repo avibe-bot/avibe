@@ -77,7 +77,7 @@ _PREVIOUS_SESSION_TITLE_STEPS = (
 )
 _SESSION_TITLE_STEPS = (
     "without waiting for the user:\n`vibe session update --title '<short title>' --if-untitled` "
-    "(single quotes, so the shell leaves `$` and backticks alone; write a `'` in the title as `'\\''`)\n\n"
+    "(single quotes stop shell expansion; write a `'` in the title as `'\\''` in bash, `''` in PowerShell)\n\n"
     "It keeps a title the user or an Agent already set. Do not mention"
 )
 _PREVIOUS_PREFERENCES_CONTEXT = (

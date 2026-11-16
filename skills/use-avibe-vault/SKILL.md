@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or signing digests and Solana messages without exposing secret values to the agent.
-version: 0.11.4
+version: 0.11.5
 ---
 
 # Use Avibe Vault
@@ -51,7 +51,7 @@ Rules:
 Common commands:
 
 Generate a password into a new Standard login entry, then use it by name without viewing it. Use generation only when the application accepts a user-chosen random credential; it cannot invent a vendor-issued API key:
-`vibe vault generate LOGIN --field password --length 32 --no-lookalikes --description "Automation login" --tag automation`
+`vibe vault generate LOGIN --field password --length 32 --no-lookalikes --description 'Automation login' --tag automation`
 `vibe vault run --env PASSWORD=LOGIN.password -- python login.py`
 
 The password default is 24 characters (8..100 for both Agent and user generation); letters are always enabled, digits and symbols are enabled unless `--no-digits` / `--no-symbols` is supplied, and lookalikes are allowed unless `--no-lookalikes` is supplied. No plaintext is printed. `--length` and the three password flags are invalid with hex/base64, even if another caller explicitly sends false for a password-only option.
@@ -65,13 +65,13 @@ Add a new random field to that Standard entry, or create a separate Base64 secre
 Hex is lowercase; Base64 uses standard padded encoding without line wrapping. Both default to 32 random bytes (16..64), and `--bytes` is invalid for passwords. Metadata flags `--description`, `--tag`, `--skill`, `--allow-host`, `--fetch-auth`, and `--auth-name` use the same replacement/preservation semantics as `vibe vault edit`; omitted metadata is preserved. The result contains the same masked secret row as `list` plus an operation-level `generated` summary. It never returns the generated value.
 
 Request that the user add a missing static secret. `spec-json` may contain only non-secret prefill metadata; the actual secret value is entered by the user in the browser:
-`vibe vault request OPENAI_API_KEY --reason "Need OpenAI API access" --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
+`vibe vault request OPENAI_API_KEY --reason 'Need OpenAI API access' --spec-json '{"kind":"static","protection":"protected","description":"OpenAI API key","tags":["openai","prod","skill:model-work"],"policy":{"allowed_hosts":["api.openai.com"],"auth":{"type":"bearer"}}}'`
 
 A request may suggest a generator preset for an application that accepts a user-chosen secret. This is only a hint: the user chooses whether to generate and save, for either tier. Passwords default to 24 characters (8–100, chosen by the user); hex and standard padded Base64 default to 32 random bytes (16–64). Do not use a generator to invent a third-party API key:
-`vibe vault request APP_SECRET --reason "Configure the app signing secret" --spec-json '{"generate":{"type":"hex","bytes":32}}'`
+`vibe vault request APP_SECRET --reason 'Configure the app signing secret' --spec-json '{"generate":{"type":"hex","bytes":32}}'`
 
 Request a multi-field login item with a password default. These are field names only, never values:
-`vibe vault request GITHUB_LOGIN --reason "Log in to GitHub" --spec-json '{"protection":"protected","fields":["username","password","totp"],"default_field":"password"}'`
+`vibe vault request GITHUB_LOGIN --reason 'Log in to GitHub' --spec-json '{"protection":"protected","fields":["username","password","totp"],"default_field":"password"}'`
 
 A `totp` field is ordinary stored secret material in this version, not a generated one-time code.
 
@@ -143,7 +143,7 @@ For a listed protected HD Native SegWit or Legacy address, use the DER scheme an
 `vibe vault sign PROTECTED_WALLET --chain bitcoin --account 1 --address-type p2pkh --scheme ecdsa-secp256k1-der --digest "$LEGACY_SIGHASH_HEX" --signing-context-file p2pkh-context.json`
 
 Ask the user to delete a Vault secret. Every agent-initiated delete needs one-click user approval, including standard, protected, static, and keypair secrets:
-`vibe vault remove OLD_TOKEN --reason "Rotated credential"`
+`vibe vault remove OLD_TOKEN --reason 'Rotated credential'`
 This returns a pending request ID without deleting anything. With the normal callback, Avibe resumes this Session after the user decides; do not rerun `rm`. With `--no-callback`, or when the request has no resolvable Session, check explicitly with `vibe vault await <request_id>`; do not rerun `rm`. If a repeated `rm` reuses a pending request created by another Session, use the returned request ID with `vibe vault await <request_id>` rather than expecting a callback for the current Session.
 
 `vibe vault remove` always requests whole-secret deletion. It rejects `NAME.field`; remove a single field from the Vaults page instead.

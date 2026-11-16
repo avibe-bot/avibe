@@ -133,8 +133,8 @@ Delay:
 
 ```bash
 vibe watch add \
-  --name "Delay follow-up" \
-  --message "The delayed check completed. Continue from the result below." \
+  --name 'Delay follow-up' \
+  --message 'The delayed check completed. Continue from the result below.' \
   -- \
   bash -lc 'sleep 120; echo "Timer finished after 120 seconds."'
 ```
@@ -143,8 +143,8 @@ File appears:
 
 ```bash
 vibe watch add \
-  --name "Wait for export file" \
-  --message "The export file is ready. Inspect it and continue." \
+  --name 'Wait for export file' \
+  --message 'The export file is ready. Inspect it and continue.' \
   -- \
   bash -lc 'while [ ! -f /tmp/export.json ]; do sleep 10; done; echo "Detected /tmp/export.json"'
 ```
@@ -153,8 +153,8 @@ Log match:
 
 ```bash
 vibe watch add \
-  --name "Watch app log" \
-  --message "The expected log pattern appeared. Inspect the event and continue." \
+  --name 'Watch app log' \
+  --message 'The expected log pattern appeared. Inspect the event and continue.' \
   --forever \
   -- \
   bash -lc 'tail -Fn0 /tmp/app.log | while read -r line; do case "$line" in *READY*) echo "$line"; break;; esac; done'
@@ -358,10 +358,10 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --state-file "$STATE_FILE" --seed-state
 
 vibe watch add \
-  --name "Watch PR 151 review and CI" \
+  --name 'Watch PR 151 review and CI' \
   --forever \
   --timeout 0 \
-  --message "PR #151 has a combined review/CI success candidate or new actionable activity. Fetch live PR, review threads, and exact-head Actions state. Handle findings/errors promptly and summarize actual fixes or blockers briefly; do not announce a half-success. For a success candidate, verify all delivery gates and send one combined final report. Keep this durable combined Watch armed until close-out. Do not post round summaries as PR comments." \
+  --message 'PR #151 has a combined review/CI success candidate or new actionable activity. Fetch live PR, review threads, and exact-head Actions state. Handle findings/errors promptly and summarize actual fixes or blockers briefly; do not announce a half-success. For a success candidate, verify all delivery gates and send one combined final report. Keep this durable combined Watch armed until close-out. Do not post round summaries as PR comments.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe --pr 151 \
@@ -386,8 +386,8 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
 
 # Push or post the review trigger only after the baseline is durable.
 vibe watch add \
-  --name "Watch PR 151 reviews" \
-  --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
+  --name 'Watch PR 151 reviews' \
+  --message 'PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
@@ -460,8 +460,8 @@ Catch up on existing activity first:
 ```bash
 STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-catch-up.json"
 vibe watch add \
-  --name "Catch up PR 151 reviews" \
-  --message "PR #151 already has review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
+  --name 'Catch up PR 151 reviews' \
+  --message 'PR #151 already has review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
@@ -478,11 +478,11 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --repo avibe-bot/avibe --pr 151 --state-file "$STATE_FILE" --seed-state
 
 vibe watch add \
-  --name "Monitor PR 151 reviews" \
+  --name 'Monitor PR 151 reviews' \
   --forever \
   --timeout 0 \
   --lifetime-timeout 0 \
-  --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
+  --message 'PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
@@ -592,8 +592,8 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --repo avibe-bot/avibe --new-prs --state-file "$STATE_FILE" --seed-state
 
 vibe watch add \
-  --name "Watch new PRs" \
-  --message "The repository has new pull requests. Review the new PRs and continue as needed." \
+  --name 'Watch new PRs' \
+  --message 'The repository has new pull requests. Review the new PRs and continue as needed.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe \
@@ -613,8 +613,8 @@ Standalone GitHub Actions for a pushed commit that is not being monitored throug
 
 ```bash
 vibe watch add \
-  --name "Watch CI" \
-  --message "GitHub Actions failed. Inspect the result below and fix the failures. Then summarise the round here in one or two lines -- what failed and what you changed. Save a longer message for the build going green, the loop being blocked, or a decision that needs the user." \
+  --name 'Watch CI' \
+  --message 'GitHub Actions failed. Inspect the result below and fix the failures. Then summarise the round here in one or two lines -- what failed and what you changed. Save a longer message for the build going green, the loop being blocked, or a decision that needs the user.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_action.py" \
     --repo cyhhao/sub2api \

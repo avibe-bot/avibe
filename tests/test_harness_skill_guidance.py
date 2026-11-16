@@ -178,7 +178,7 @@ def test_use_avibe_harness_owns_the_extracted_harness_protocol() -> None:
 def test_background_watch_skill_defaults_to_current_session() -> None:
     body = _read("skills/background-watch-hook/SKILL.md")
 
-    assert '--message "PR #151 has an event.' in body
+    assert "--message 'PR #151 has an event." in body
     assert "Inside an Avibe-injected Agent shell, omitting the target continues this conversation." in body
     assert "Use `--session-id <id>` only when" in body
     assert "Use `--create-session --same-scope` for one visible sibling Session" in body
@@ -231,7 +231,7 @@ def test_background_watch_skill_uses_bundled_waiters_and_persists_managed_pr_sta
     supervisor, waiter = preferred_forever_command.split("  -- \\\n", 1)
     assert "--timeout 0" in supervisor
     assert "--timeout 0" in waiter
-    generic_forever_command = body.split('  --name "Monitor PR 151 reviews"', 1)[1].split(
+    generic_forever_command = body.split("  --name 'Monitor PR 151 reviews'", 1)[1].split(
         "```", 1
     )[0]
     supervisor, waiter = generic_forever_command.split("  -- \\\n", 1)
@@ -315,3 +315,17 @@ def test_guidance_teaches_receipts_and_no_reply_not_successful_callbacks() -> No
     for path in ("core/prompts/harness-agents.md", "skills/use-avibe-harness/SKILL.md"):
         body = _read(path)
         assert "read receipt" in body and "--no-reply" in body
+
+
+def test_built_in_shell_examples_single_quote_free_text() -> None:
+    # Double quotes let the shell expand `$`, backticks and `!` in model-written
+    # text before vibe sees it ("Codex $500" became "Codex 00").
+    double_quoted = re.compile(r'--(?:title|name|message|reason|description|shell) "')
+    paths = [*ROOT.joinpath("core/prompts").glob("*.md"), *ROOT.joinpath("skills").rglob("*.md")]
+    offenders = [
+        f"{path.relative_to(ROOT)}:{number}"
+        for path in paths
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if double_quoted.search(line)
+    ]
+    assert offenders == []

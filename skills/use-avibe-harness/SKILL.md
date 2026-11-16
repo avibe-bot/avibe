@@ -30,7 +30,7 @@ A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and 
 | Branch from this Session's context | `vibe agent run --fork-self --message ...` |
 | Bring a Session to the user | `vibe session update --session-id <id> --visible` |
 | Time trigger | `vibe task add --cron "<expr>" --message '...'` (or `--at "<ISO-8601>"`) |
-| Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell "<cmd>"` |
+| Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell '<cmd>'` |
 | External signal | `vibe watch add --name '<label>' --message '<what to do>' -- <cmd>` |
 | Live runs, Watches, Tasks, anomalies | `vibe harness status` |
 | History | `vibe runs list`, `vibe runs show <run-id>`, `vibe data query` |

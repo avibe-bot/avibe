@@ -83,8 +83,8 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --state-file "$STATE_FILE" --seed-state
 
 vibe watch add \
-  --name "Watch PR 151 review and CI" --forever --timeout 0 \
-  --message "PR #151 has an event. Follow pr-delivery-loop; verify live gates, handle findings/errors, and keep half-success silent." \
+  --name 'Watch PR 151 review and CI' --forever --timeout 0 \
+  --message 'PR #151 has an event. Follow pr-delivery-loop; verify live gates, handle findings/errors, and keep half-success silent.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe --pr 151 --branch "$BRANCH" \
