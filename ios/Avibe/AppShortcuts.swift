@@ -15,6 +15,14 @@ struct AvibeAppShortcuts: AppShortcutsProvider {
             shortTitle: "Talk to Main Bot",
             systemImageName: "bubble.left.and.bubble.right"
         )
+        if #available(iOS 18.0, *) {
+            AppShortcut(
+                intent: SpeakToMainBotIntent(),
+                phrases: ["Speak to Main Bot in \(.applicationName)"],
+                shortTitle: "Speak to Main Bot",
+                systemImageName: "waveform"
+            )
+        }
     }
 }
 

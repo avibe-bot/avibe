@@ -744,37 +744,37 @@
         }
       }
     },
-    "voiceCapture.intent.title" : {
+    "Speak to Main Bot" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Speak to Main Bot" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "对主伙伴说" } }
       }
     },
-    "voiceCapture.intent.description" : {
+    "Records what you say and sends it to your main Bot without opening Avibe." : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Records what you say and sends it to your main Bot without opening Avibe." } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不用打开 Avibe，录下你说的话发给主伙伴。" } }
       }
     },
-    "voiceCapture.action.send" : {
+    "Send" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Send" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送" } }
       }
     },
-    "voiceCapture.action.cancel" : {
+    "Cancel" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
       }
     },
-    "voiceCapture.action.retry" : {
+    "Retry" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
       }
     },
-    "voiceCapture.action.discard" : {
+    "Discard" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Discard" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不要了" } }
