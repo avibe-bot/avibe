@@ -755,6 +755,29 @@ export function useProtectedVault() {
     [syncProtectedOperationStatus],
   );
 
+  /**
+   * Show a protected static secret's fields in the secure window: one approval, then every field as
+   * its own row (hidden until shown) with Copy, all inside the sandbox. One field keeps the original
+   * single-record request; several go as `items` (a sandbox build that lists them).
+   */
+  const revealProtectedSecret = useCallback(
+    async (
+      items: Array<{ material: ProtectedUnlockMaterial; context: VaultSignedOperationContext }>,
+      defaultFieldLabel: string,
+      authorizationWindow?: string,
+    ): Promise<{ completed: boolean }> => {
+      assertDurableSetupReady();
+      if (items.length === 0) throw new Error('reveal-needs-a-field');
+      const sandbox = await getVaultSandboxClient();
+      try {
+        return await sandbox.reveal(items.length === 1 ? items[0] : { items, defaultFieldLabel }, authorizationWindow);
+      } finally {
+        void syncProtectedOperationStatus(items[0].material.envelope.wrap_meta).catch(() => undefined);
+      }
+    },
+    [syncProtectedOperationStatus],
+  );
+
   const lock = useCallback(() => {
     void lockVault(true);
     setStatus(vaultStatusNow());
@@ -800,6 +823,7 @@ export function useProtectedVault() {
     signProtectedRequest,
     approveProtectedRelease,
     revealProtectedValue,
+    revealProtectedSecret,
     afterCreated,
     lock,
     lockAndResetForPolicyChange,

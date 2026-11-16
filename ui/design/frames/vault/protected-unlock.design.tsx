@@ -24,6 +24,7 @@ const vault = (status: Vault['status'], error: string | null = null): Vault => (
   signProtectedRequest: unavailable,
   approveProtectedRelease: unavailable,
   revealProtectedValue: unavailable,
+  revealProtectedSecret: unavailable,
   afterCreated: () => {},
   lock: () => {},
   lockAndResetForPolicyChange: () => {},

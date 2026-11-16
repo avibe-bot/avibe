@@ -6252,11 +6252,9 @@
       "strictHelp": "Ask for your passkey on every approval and reveal — not just an in-sandbox confirmation. Signing always asks regardless. Turning this on re-locks the vault so it takes effect right away."
     },
     "reveal": {
-      "show": "Show value",
-      "copy": "Copy value",
-      "showInBrowser": "Show in browser",
+      "view": "View secret",
+      "viewInBrowser": "View in browser",
       "errors": {
-        "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
         "unavailable": "Reveal isn't available for this secret yet."
       }
@@ -6301,7 +6299,6 @@
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
       "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
       "replacePlaceholder": "Saved · type to replace",
-      "revealField": "Field to reveal",
       "nameRequired": "Enter a field name",
       "nameInvalid": "Use lowercase letters, digits, and underscores, starting with a letter",
       "nameTaken": "There's already a {{field}} field",

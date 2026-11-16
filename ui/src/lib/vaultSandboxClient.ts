@@ -834,8 +834,13 @@ export class VaultSandboxClient {
     return solana ? assertEd25519Record(sealed) : sealed;
   }
 
+  /** Shows a protected value in the secure window. One record is the original shape; several (a
+   *  whole secret's fields, from a build that lists them) go as `items` with the default field's label
+   *  as display text, since the default record name is the secret's own name. */
   reveal(
-    payload: { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext },
+    payload:
+      | { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext }
+      | { items: Array<{ material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext }>; defaultFieldLabel: string },
     authorizationWindow?: string,
   ): Promise<{ completed: boolean }> {
     return this.request<{ completed: boolean }>('reveal', payload, {
