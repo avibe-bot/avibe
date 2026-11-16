@@ -155,7 +155,7 @@ const unlockWithPasskey: Click = { role: 'button', name: /^unlock with passkey$/
 const review: Click = { role: 'button', name: /^review$/i };
 const moreActions: Click = { role: 'button', name: /^more actions$/i };
 // What a shell without the capability says, and a shell with it must never say.
-const cannotUsePasskeys = /desktop app can't use|don't work in the desktop app/i;
+const cannotUsePasskeys = /desktop app can't use your passkey/i;
 const approvalFallbackNote = en.vaults.approval.browserFallbackNote;
 const unlockFallbackNote = en.vaults.protectedUnlock.browserFallbackNote;
 
