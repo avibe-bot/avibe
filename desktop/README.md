@@ -218,10 +218,17 @@ rules are stated at the top of that file. In short:
   In the seed-wallet window that can shorten a typed passphrase without
   notice; entering it twice catches that when a wallet is created, and
   comparing the address when one is imported.
-- **Not where the user is not.** A sandbox window comes on screen only while
-  Avibe is the active app and the main window is visible, on the current Space
-  and not minimized, and only one at a time. A window that may not appear when
-  its sandbox document is ready is closed, never shown later. Its size is
+- **Only for the Workbench the user is looking at.** A sandbox window comes on
+  screen only if the web view that asked for it is the one in front of the
+  user: still in the main window, not hidden, with no other web view of that
+  window in front of it, the window visible, on the current Space and not
+  minimized, and Avibe the active app. All of that is read afresh each time it
+  matters, at the commit and for every click and key. The shell hides a Workbench's
+  web view under its account screen and before it retires one, while the page
+  keeps running; such a page gets no window, and a window it already has is
+  closed. Only one sandbox window is on screen over the main window at a time.
+  A window that may not appear when its sandbox document is ready is closed,
+  never shown later. Its size is
   clamped to between 360 x 400 and 900 x 1000 points. The main webview's pages
   can hold at most four windows, hidden ones included. The title bar shows the
   host and ignores the page's title, but it is not proof of what a window is:
@@ -254,9 +261,20 @@ rules are stated at the top of that file. In short:
 - **Opener, data and lifetime.** The window keeps the opener link and the
   opener's website data store, including the disposable store of a remote
   instance. `window.close()` closes it; the user closing it destroys the page,
-  which the opener sees as a closed popup. Reloading, closing or destroying the
-  main window closes it. It becomes the key window when its content is
-  revealed, and the main window is key again when it closes.
+  which the opener sees as a closed popup. Reloading the Workbench, hiding its
+  web view, or closing or destroying the main window closes it. It becomes the
+  key window when its content is revealed, and the main window is key again
+  when it closes.
+- **Only the web view the app starts with, for now.** The support is installed
+  on the main window's own web view, which holds the Workbench the app starts
+  with. After the user switches instance, the Workbench runs in a replacement
+  web view inside the same window; that one, and the account screen, are not
+  openers: their requests for a window go to the browser as before and their
+  pages get no marker. So after switching instance, or while connected to
+  another computer, this version still opens the browser for the passkey step.
+  The start-up web view is retired on an instance switch, on return from
+  sign-out, and on a local rebind while the account screen is up; from then on
+  there is no marker until the app restarts.
 
 The passkey prompt, the review and the cryptography stay in sandbox code. None
 of the shell's own code handles the passkey result. WebKit's passkey code does

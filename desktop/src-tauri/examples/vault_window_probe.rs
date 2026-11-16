@@ -177,6 +177,8 @@ addEventListener('keydown', (event) => { (event.metaKey ? log.commands : log.key
 addEventListener('keyup', (event) => event.preventDefault(), true);
 addEventListener('message', (event) => {
   if (event.data === 'log') fetch('/report', { method: 'POST', body: JSON.stringify(log) });
+  // For when the opener will not be there to ask.
+  if (event.data === 'log-later') setTimeout(() => fetch('/report', { method: 'POST', body: JSON.stringify(log) }), 3000);
 });
 if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slow.css">');
 </script>
@@ -593,28 +595,65 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
 
             // No child outlives the main window: not when the user closes it,
             // which the shell answers by hiding it, and not when it is destroyed.
-            for last in ["closed", "destroyed"] {
-                self.eval(&format!(
-                    "window.open('about:blank'); window.open('{sandbox}/window#case={last}')"
-                ));
-                self.a_window_opened_by_the_workbench_loaded(last);
-                self.wait_children("a shown and a reserved window", |children| {
-                    children.len() == 2 && children.iter().filter(|child| child.shown()).count() == 1
-                });
-                if last == "closed" {
-                    self.main.close().unwrap();
-                    self.wait_children("the closed main window to take its children along", |children| {
-                        children.is_empty()
-                    });
-                }
-            }
+            self.eval(&format!(
+                "window.open('about:blank'); window.open('{sandbox}/window#case=closed')"
+            ));
+            self.a_window_opened_by_the_workbench_loaded("closed");
+            self.wait_children("a shown and a reserved window", |children| {
+                children.len() == 2 && children.iter().filter(|child| child.shown()).count() == 1
+            });
+            self.main.close().unwrap();
+            self.wait_children("the closed main window to take its children along", |children| {
+                children.is_empty()
+            });
+
+            // The Workbench's web view is closed without being hidden first,
+            // as a web view is when the shell is done with it. Its page goes
+            // on running and it is never freed, but it is out of its window:
+            // its card takes no more input. From here the probe cannot ask the
+            // Workbench page anything, so the card reports by itself.
+            self.eval(&format!("probe.windows.card = window.open('{sandbox}/card')"));
+            self.wait_children("a card", |children| children.len() == 1 && children[0].shown());
+            let input = self.start_input();
+            std::thread::sleep(Duration::from_millis(3000));
+            // A reserved window too, so that both kinds are there at the end.
+            self.eval("window.open('about:blank'); probe.windows.card.postMessage('log-later', '*')");
+            std::thread::sleep(Duration::from_millis(300));
+            let workbench: &tauri::Webview = self.main.as_ref();
+            workbench.close().unwrap();
+            self.on_main(|_| ());
+            let closed = now_ms();
+            let log = self.report("card-log");
+            input.stop();
+            let received = |from: f64, until: f64| {
+                ["clicks", "keys", "commands"]
+                    .iter()
+                    .flat_map(|kind| log[*kind].as_array().expect("a list of times").iter())
+                    .filter(|at| at.as_f64().is_some_and(|at| at > from && at < until))
+                    .count()
+            };
+            assert!(
+                received(0.0, closed) > 0,
+                "the card was to be live before its opener was closed: {log}"
+            );
+            assert_eq!(
+                received(closed, f64::MAX),
+                0,
+                "a card took input after its opener's web view was closed: {log}"
+            );
+            assert!(self.child_windows() >= 1, "the card is still there");
+            println!("vault window probe: a card whose opener was closed without being hidden took no more input");
+
+            // No child outlives the main window: the card, and the reserved
+            // window if its deadline has not passed, go when it is destroyed.
             self.the_main_window_takes_its_children_along();
 
             println!(
                 "vault window probe (app active{}): marker scope, hidden reservation, reveal only after the \
                  sandbox document is presented, opener link, empty content controller and own preferences, \
-                 URL scheme guard, navigation refusals, one window at a time, hidden main window, no input \
-                 before a card has been seen, a displayed card in front and key, size bounds, close paths, \
+                 URL scheme guard, navigation refusals, one window at a time, hidden main window, hidden, \
+                 covered and closed Workbench, no input before a card has been seen, a displayed card in front and key, size \
+                 bounds, close paths, \
                  deadline, cap, reload and main-window teardown passed",
                 if self.focus { ", with focus" } else { "" }
             );
@@ -928,8 +967,50 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             }
             let commands = self.card_log().commands.len();
             println!("vault window probe: {commands} command-key events reached the live card");
-            self.eval("probe.windows.card.close()");
-            self.wait_children("the card to close", |children| children.is_empty());
+
+            // The Workbench's own web view is hidden while its page keeps
+            // running, as under the app's account screen. Its card is closed,
+            // it cannot bring up another, and when it is shown again a card is
+            // not live for two seconds.
+            let workbench: &tauri::Webview = self.main.as_ref();
+            workbench.hide().unwrap();
+            self.wait_children("the card of a hidden Workbench to close", |children| {
+                children.is_empty()
+            });
+            self.eval("probe.report({ case: 'opener-hidden', closed: probe.windows.card.closed })");
+            let hidden = self.report("opener-hidden");
+            assert_eq!(hidden["closed"], true, "{hidden}");
+            self.eval(&format!("probe.windows.unseen = window.open('{sandbox}/quiet')"));
+            self.never_on_screen("a sandbox window asked for by a hidden Workbench", "unseen", 0);
+            let back = now_ms();
+            let workbench: &tauri::Webview = self.main.as_ref();
+            workbench.show().unwrap();
+            self.a_card_asked_for_on_arrival("the Workbench's web view was shown again", back);
+
+            // Another web view of the main window is shown in front of the
+            // Workbench, which is not hidden: the Workbench is covered all the
+            // same, and gets no card. Uncovered, the user has arrived.
+            let in_front = self
+                .main
+                .as_ref()
+                .window()
+                .add_child(
+                    tauri::webview::WebviewBuilder::new(
+                        "in-front",
+                        WebviewUrl::External("about:blank".parse().unwrap()),
+                    )
+                    .incognito(true),
+                    tauri::LogicalPosition::new(0., 0.),
+                    tauri::LogicalSize::new(4000., 4000.),
+                )
+                .unwrap();
+            self.on_main(|_| ());
+            self.eval(&format!("probe.windows.covered = window.open('{sandbox}/quiet')"));
+            self.never_on_screen("a sandbox window asked for by a covered Workbench", "covered", 0);
+            let back = now_ms();
+            in_front.close().unwrap();
+            self.on_main(|_| ());
+            self.a_card_asked_for_on_arrival("the web view in front of the Workbench was removed", back);
 
             // The main window comes back and a card is asked for at once: it
             // is displayed at once, and takes input two seconds after the

@@ -70,15 +70,18 @@ the sandbox unmodified.
    If anything but a sandbox document commits, the window is closed. If it has
    displayed nothing 60 seconds after it was created, it is closed.
 4. **When it comes on screen, and when it takes input.** It comes on screen
-   only if, when its first sandbox document commits, the app is active, the
-   opener's window is visible, on the active Space and not minimized, and no
-   other sandbox window of that opener is on screen. Otherwise it is closed,
-   never kept for later. A window on screen takes clicks and keys only while
+   only if, when its first sandbox document commits, the web view that asked
+   is the one the user is looking at (still in the native window the support
+   was installed for, not hidden and with no hidden view around it, no other
+   web view of that window in front of it, the window visible, on the active
+   Space and not minimized, and the app active) and no other sandbox window is
+   on screen over that native window. Otherwise it is
+   closed, never kept for later. A window on screen takes clicks and keys only while
    the app is active and the window is visible, and that has held without a
    break for 0.75 seconds the first time the card is seen and 2 seconds every
    later time, and never sooner than 2 seconds after the user last arrived
-   (the app became active, or the opener's window came back from hidden,
-   minimized or another Space). Until then input is dropped at the window's
+   (the app became active, or the opener came back into view: its window from
+   hidden, minimized or another Space, or its web view from hidden). Until then input is dropped at the window's
    event entry and is not passed to what is underneath. Its content size is
    clamped to 360-900 by 400-1000 points.
 5. **What it holds.** A new, empty `WKUserContentController` and default
@@ -88,8 +91,8 @@ the sandbox unmodified.
    preferences must not be the opener's and must report each of those features
    off. Otherwise there is no child. Media capture is refused. Its title is the allowed host.
 6. **How it ends.** `window.close()`, the user closing it, the opener committing
-   a new document, the opener's window being closed or destroyed, a crashed web
-   content process, or rules 3 and 4. Each path takes the window out of the
+   a new document, the opener's web view being hidden, the opener's window
+   being closed or destroyed, a crashed web content process, or rules 3 and 4. Each path takes the window out of the
    shell's registry, closes the native window and destroys the page one turn of
    the main run loop later. The web view keeps its navigation delegate until
    the page is destroyed; with the window out of the registry that delegate
@@ -209,6 +212,46 @@ The complete answer to the missing gesture still belongs to the sandbox
 (arming Confirm only after its document has been focused and visible for the
 arming time) and is not part of this change.
 
+### One native window, several web views
+
+While this change was in review the shell changed what a main window is. A
+Runtime replacement (the user switching to another instance, or back) used to
+build a new main window; it now creates a child web view inside the one native
+main window, and the account screen is another child web view shown over a
+hidden Workbench. Three things follow.
+
+- "The main window is on screen" is no longer enough for rule 4: a Workbench's
+  web view can be hidden while the native window is visible and the page keeps
+  running. So the rule is stated on the opener: the web view that asked must be
+  the one the user is looking at. That is three reads, made afresh at the
+  commit, for every click and key, and for the arrival bookkeeping: the web
+  view is still in the native window the support was installed for; it is not
+  hidden and has no hidden view around it; and no other web view of that
+  window that is not hidden lies in front of it. The first matters because a
+  web view the shell closes is taken out of its window but never freed, its
+  page keeps running, and its `hidden` never changes; a weak reference to it
+  never clears, so admission at `window.open` uses the same read. The third
+  matters because the shell covers a Workbench by hiding it, but one path
+  (bringing the main window forward while the account page reloads) can show
+  the Workbench under the account screen.
+- Separately, the shell key-value observes `hidden` on the opener's web view,
+  since nothing else announces it. That is only what makes closing prompt:
+  hidden, every sandbox window of that opener is closed at once, reserved and
+  empty ones included; shown again, that is an arrival. All three of the
+  shell's retirement paths hide a web view before closing it. A close alone
+  does not hide; a card whose opener was closed without being hidden stays on
+  screen and takes no input, until the user closes it or the main window
+  goes.
+- "One on screen" is counted for the native window, whichever web view in it
+  asked. The cap of four is for the whole app.
+- The support is installed only on the web view the app starts with. A
+  replacement web view is not an opener: its window requests go to wry, its
+  page has no marker, and nothing it does reaches what was installed for the
+  first one, because requests are admitted by the identity of the web view that
+  made them. So in this version a Workbench after an instance switch, and a
+  remote instance, keep the browser hand-off. Installing on replacement web
+  views, with the reload hook there and a probe case, is the follow-up.
+
 ### Why the URL schemes are guarded
 
 WebKit's copy of the opener's configuration includes its custom URL scheme
@@ -303,7 +346,14 @@ the sandbox's window goes to the browser with every other link.
     Clicks must be logged afterwards, so the check cannot pass by never
     delivering. A card displayed while another window of the app is in front
     is the app's frontmost window and key, and neither changes when it starts
-    to take input. Minimizing, a Space change and display sleep are not
+    to take input. With the Workbench's own web view hidden: its card is
+    closed, a window it asks for is closed without ever being on screen, and
+    after the web view is shown again a card asked for at once takes no input
+    for two seconds. With another web view of the main window shown in front of
+    the Workbench: a window it asks for is closed without ever being on screen,
+    and after that web view is removed a card takes no input for two seconds.
+    With the Workbench's web view closed without being hidden: its card takes
+    no more input. Minimizing, a Space change and display sleep are not
     produced by the probe; for those, as for full covering, the claim rests on
     AppKit's documentation of the occlusion state.
   - **App not active.** A sandbox window is closed instead of appearing. This
