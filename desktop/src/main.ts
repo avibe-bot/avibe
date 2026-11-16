@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
+import { connect } from './connection'
 import './styles.css'
 
 /**
@@ -47,6 +48,7 @@ interface BootstrapCatalog {
   installationHelp: string
   notRunningTitle: string
   shellUnavailable: string
+  slowStart: string
   genericFailure: string
   notices: Record<NoticeCode, string>
 }
@@ -78,15 +80,37 @@ const messageEl = requireElement('message')
 const originEl = requireElement('origin')
 const trackEl = requireElement('track')
 const actionsEl = requireElement('actions')
+const hintEl = requireElement('hint')
 const retryEl = requireElement<HTMLButtonElement>('retry')
 const helpEl = requireElement<HTMLButtonElement>('help')
 const locale = selectLocale(navigator.languages)
 const catalog = __DESKTOP_BOOTSTRAP_CATALOGS__[locale]
 
+/** When a reader of a still-starting window may start to wonder. */
+const SLOW_START_MS = 15_000
+
+let sawEvent = false
+let slow = false
+// The page shows "not responding", not a status from the app.
+let unavailable = false
+
 root.lang = locale
 messageEl.textContent = catalog.notices.preparing
+hintEl.textContent = catalog.slowStart
 retryEl.textContent = catalog.retry
 helpEl.textContent = catalog.installationHelp
+let slowTimer = 0
+startSlowClock()
+
+/** Times the wait from the start of this attempt: page load, or a new start after a failure. */
+function startSlowClock(): void {
+  window.clearTimeout(slowTimer)
+  slow = false
+  slowTimer = window.setTimeout(() => {
+    slow = true
+    showSlowHint()
+  }, SLOW_START_MS)
+}
 
 function requireElement<T extends HTMLElement = HTMLElement>(id: string): T {
   const element = document.getElementById(id)
@@ -97,6 +121,10 @@ function requireElement<T extends HTMLElement = HTMLElement>(id: string): T {
 }
 
 function render(status: BootstrapStatus): void {
+  unavailable = false
+  if (root.dataset.phase === 'failed' && status.phase !== 'failed') {
+    startSlowClock()
+  }
   root.dataset.phase = status.phase
   messageEl.textContent = localizeNotice(status.notice)
   originEl.textContent = status.origin
@@ -112,6 +140,25 @@ function render(status: BootstrapStatus): void {
   helpEl.hidden = !showHelp
   actionsEl.hidden = !showRetry && !showHelp
   document.title = status.phase === 'failed' ? catalog.notRunningTitle : 'Avibe'
+  showSlowHint()
+}
+
+/** The second line appears only while the app is still starting, and only once the wait is long. */
+function showSlowHint(): void {
+  const phase = root.dataset.phase
+  hintEl.hidden = !slow || phase === 'failed' || phase === 'ready'
+}
+
+/** The page's state before the first status arrives: the app is starting. */
+function renderStarting(): void {
+  unavailable = false
+  root.dataset.phase = 'probing'
+  messageEl.textContent = catalog.notices.preparing
+  originEl.textContent = ''
+  trackEl.hidden = false
+  actionsEl.hidden = true
+  document.title = 'Avibe'
+  showSlowHint()
 }
 
 function selectLocale(languages: readonly string[]): 'en' | 'zh' {
@@ -165,8 +212,10 @@ retryEl.addEventListener('click', () => {
       }
     })
     .catch((error: unknown) => {
+      // The app answered a moment ago with the failure on screen; one refused
+      // call does not make it unresponsive. Keep that failure and its actions.
+      console.error('bootstrap retry failed', error)
       retryEl.disabled = false
-      reportUnavailable(error)
     })
 })
 
@@ -176,34 +225,49 @@ helpEl.addEventListener('click', () => {
   })
 })
 
-async function start(): Promise<void> {
-  let sawEvent = false
-  // Subscribe before asking for the current value, so a status published while
-  // this page was still loading cannot be missed.
-  await listen<BootstrapStatus>(STATUS_EVENT, (event) => {
-    sawEvent = true
-    render(event.payload)
+function start(): Promise<void> {
+  return connect({
+    // Subscribe before asking for the current value, so a status published
+    // while this page was still loading cannot be missed.
+    subscribe: () =>
+      listen<BootstrapStatus>(STATUS_EVENT, (event) => {
+        sawEvent = true
+        render(event.payload)
+      }),
+    snapshot: async () => {
+      const current = await invoke<BootstrapStatus | null>('bootstrap_status')
+      // If a newer event arrived before the snapshot resolved, keep that newer
+      // state. The snapshot exists only to populate a page that loaded mid-run.
+      if (current && !sawEvent) {
+        render(current)
+      }
+    },
+    heardFromApp: () => sawEvent,
+    onStuck: reportUnavailable,
+    onRecovered: () => {
+      // A status may already have replaced the message; if not, the app has
+      // answered without one yet, so it is starting.
+      if (unavailable) {
+        renderStarting()
+      }
+    },
   })
-
-  const current = await invoke<BootstrapStatus | null>('bootstrap_status')
-  // If a newer event arrived before the snapshot resolved, keep that newer
-  // state. The snapshot exists only to populate a page that loaded mid-run.
-  if (current && !sawEvent) {
-    render(current)
-  }
 }
 
 /**
- * The shell is the only thing that can answer these calls. If it cannot, the
- * page says so plainly instead of sitting on a spinner forever.
+ * The native side is the only thing that can answer these calls. When it has
+ * not answered for a long time, the page says so plainly instead of sitting on
+ * a spinner forever.
  */
 function reportUnavailable(error: unknown): void {
   console.error('bootstrap command failed', error)
+  unavailable = true
   root.dataset.phase = 'failed'
   messageEl.textContent = catalog.shellUnavailable
   trackEl.hidden = true
   actionsEl.hidden = true
   document.title = catalog.notRunningTitle
+  showSlowHint()
 }
 
-void start().catch(reportUnavailable)
+void start()

@@ -112,6 +112,17 @@ body {
   color: var(--muted);
 }
 
+.hint {
+  margin: -8px 0 0;
+  max-width: 32ch;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.hint[hidden] {
+  display: none;
+}
+
 [data-phase='failed'] .message {
   color: var(--foreground);
 }
