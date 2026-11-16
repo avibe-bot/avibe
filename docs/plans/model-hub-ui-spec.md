@@ -3240,10 +3240,7 @@ count), routes cards offer no 添加模型 and no Agent attention footer; an emp
 providers come first (`gateway.group.emptyNoProviders`).
 
 **2026-11-17 amendment — plain words on Providers** (Product, first-time-user review).
-A provider card names its kind only; the API format stays in the provider's details. A
-saved provider whose model list came back with its key (`verification_pending` with a
-discovered, unretired model) reads as usable and names its users, instead of 「已保存」
-until the first successful call; one with no fetched list keeps 「已保存」. The route
+A provider card names its kind only; the API format stays in the provider's details. The route
 origin 「透传」 / Passthrough reads 「原样转发」 / Forwarded as is, in every string.
 
 **2026-09-04 owner ruling — vendor preset + declared protocol** `[derived]`.

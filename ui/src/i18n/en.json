@@ -1622,7 +1622,7 @@
         "help": {
           "automatic": "Matched by model name.\nProvider order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
-          "passthrough": "No provider lists this model.\nIts name is forwarded as is to eligible API-key providers, in default order, to try.",
+          "passthrough": "No provider lists this model.\nIts name is forwarded as is to eligible API-key providers, which try it in default order.",
           "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
         },
         "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",

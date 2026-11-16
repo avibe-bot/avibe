@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 import { sourceDetail } from './sourcePresentation';
 import { SourcePrivateValue } from './SourcePrivacy';
-import { activeSourceAdoption, awaitingFirstCall, sourceStatePresentation } from './sourceStatePresentation';
+import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import { serviceVendorForSource } from './searchServices';
@@ -31,14 +31,14 @@ export const SourceRow: React.FC<{
     known: adoptedBy !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
-    verificationPending: awaitingFirstCall(source),
+    verificationPending: Boolean(source.verification_pending),
   });
   const kindKey = source.supply_channel === 'native_cli'
     ? 'nativeCredential'
     : source.kind === 'subscription'
       ? 'subscription'
       : 'apiKey';
-  const adopted = !awaitingFirstCall(source) && (source.state.status === 'active' || source.state.status === 'standby') && (adoptedBy?.length ?? 0) > 0;
+  const adopted = !source.verification_pending && (source.state.status === 'active' || source.state.status === 'standby') && (adoptedBy?.length ?? 0) > 0;
   return (
     <button
       type="button"

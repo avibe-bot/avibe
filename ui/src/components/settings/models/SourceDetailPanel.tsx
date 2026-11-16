@@ -62,7 +62,7 @@ import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { foldRegionRead, loadingRegion, readRegion, regionFailed, type RegionRead } from './regionRead';
 import { serviceMonthUsage, type ServiceMonth } from './usageProjection';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction, wasBlocked } from './repair';
-import { activeSourceAdoption, awaitingFirstCall, sourceStatePresentation } from './sourceStatePresentation';
+import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { SourceTestDialog } from './SourceTestDialog';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
@@ -799,7 +799,7 @@ export const SourceDetailPanel: React.FC<{
     known: adoptedBy !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
-    verificationPending: awaitingFirstCall(source),
+    verificationPending: Boolean(source.verification_pending),
   });
   // One authority picks the remedy and another total Record names its concrete
   // control. `retest` points at model refetch; `reenable` points at the search

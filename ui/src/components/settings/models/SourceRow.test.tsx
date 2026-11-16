@@ -33,27 +33,6 @@ describe('SourceRow', () => {
     expect(screen.queryByText(/Supplying Codex|正在使用 Codex/)).toBeNull();
   });
 
-  it.each(['en', 'zh'])('reads a saved provider whose model list came back with the key as usable, naming who uses it, in %s', (lng) => {
-    const locale = i18n.cloneInstance({ lng });
-    render(<I18nextProvider i18n={locale}><SourceRow source={{
-      ...source,
-      verification_pending: 'vp_fixture',
-      models: [{ id: 'claude-opus-5', origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null }],
-      adopted_by: [{ backend: 'vibey', menu_model: 'claude-opus-5' }],
-    }} activeBackends={new Set(['vibey'])} onOpen={vi.fn()} /></I18nextProvider>);
-    expect(screen.queryByText(locale.t('settings.models.sourceDetail.status.saved'))).toBeNull();
-    expect(screen.getByText(/Vibey/)).toBeTruthy();
-  });
-
-  it('keeps 「Saved」 when only typed-in models exist, since nothing has used the key yet', () => {
-    render(<I18nextProvider i18n={i18n}><SourceRow source={{
-      ...source,
-      verification_pending: 'vp_fixture',
-      models: [{ id: 'my-model', origin: 'manual', reasoning_efforts: [], reasoning_efforts_source: null }],
-    }} onOpen={vi.fn()} /></I18nextProvider>);
-    expect(screen.getByText(i18n.t('settings.models.sourceDetail.status.saved'))).toBeTruthy();
-  });
-
   it('opens the Source detail without exposing inline source mutations', async () => {
     const onOpen = vi.fn();
     render(<I18nextProvider i18n={i18n}><SourceRow source={source} onOpen={onOpen} /></I18nextProvider>);

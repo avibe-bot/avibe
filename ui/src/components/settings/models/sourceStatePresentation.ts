@@ -1,6 +1,6 @@
 import type { TranslationKey } from '@/i18n/types';
 import { QUOTA_EXHAUSTED } from './supply';
-import type { AgentBackend, AdoptedBy, NeedsActionDetailKey, Source, SourceState, SourceStatus } from './types';
+import type { AgentBackend, AdoptedBy, NeedsActionDetailKey, SourceState, SourceStatus } from './types';
 
 export type SourceStateSurface = 'card' | 'detail';
 
@@ -47,16 +47,6 @@ export const attributableBackends = (
   : switchedOff.size > 0
     ? new Set(allBackends.filter((backend) => !switchedOff.has(backend)))
     : undefined;
-
-/**
- * Saved, but nothing yet shows the key works. A model list fetched with this key
- * already shows that, so such a provider reads as usable (and who uses it) at once
- * rather than 「已保存」 until the first chat succeeds.
- * ui/design: models/plain-words/just-added
- */
-export const awaitingFirstCall = (source: Pick<Source, 'verification_pending' | 'models'>): boolean =>
-  Boolean(source.verification_pending)
-  && !source.models.some((model) => model.origin === 'discovered' && !model.retired);
 
 /**
  * A healthy source that no route currently reaches. It is the state a source

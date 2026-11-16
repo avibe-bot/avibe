@@ -119,7 +119,7 @@ const designFrames = frames([
   },
   {
     name: 'route-passthrough',
-    title: '模型路由 · 透传',
+    title: '模型路由 · 原样转发',
     width: 1000,
     height: 760,
     status: 'shipped',
