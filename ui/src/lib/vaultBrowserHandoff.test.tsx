@@ -407,6 +407,7 @@ describe('desktop shell protected-vault browser handoff', () => {
     const target = new URL(String(open.mock.calls[0][0]));
     expect(target.origin).toBe(window.location.origin);
     expect(target.pathname).toBe('/vaults');
+    expect(target.searchParams.get('from')).toBe('desktop');
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
     expect(api.createVaultRevealContext).not.toHaveBeenCalled();
@@ -421,6 +422,43 @@ describe('desktop shell protected-vault browser handoff', () => {
     await c.resumed();
 
     expect(open).toHaveBeenCalledTimes(1);
+    expectNoProtectedOperations();
+  });
+
+  // The browser tab is where the user lands after the step: once it is done there, the tab says so
+  // and links back to the conversation the app handed it off from. An IM link is not a hand-off.
+  it.each([
+    { from: 'the desktop app', handoff: true },
+    { from: 'an IM link', handoff: false },
+  ])('a request answered in a tab opened from $from says the tab can be closed: $handoff', async ({ handoff }) => {
+    const user = userEvent.setup();
+    vault.status = 'locked';
+    api.getVaultRequests.mockResolvedValue({ requests: [protectedAccess] });
+    api.getVaultRequest.mockResolvedValue({ ok: true, request: protectedAccess });
+    api.listVaultSecrets.mockResolvedValue({ secrets: [] });
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123/chat/ses_A-1'));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    renderAt('/chat/ses_A-1', <VaultApprovalCard request={protectedAccess} onResolved={vi.fn()} onCancel={vi.fn()} />);
+    await user.click(await screen.findByRole(approve.role, { name: approve.name }));
+    const target = new URL(String(open.mock.calls[0][0]));
+    expect(target.searchParams.get('session')).toBe('ses_A-1');
+    cleanup();
+    delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));
+
+    const path = handoff ? `${target.pathname}${target.search}` : `/vaults?request_id=${protectedAccess.id}`;
+    renderAt(path, <VaultsPage />);
+    await user.click(within(await resumedDialog()).getByRole('button', { name: /^deny$/i }));
+    await waitFor(() => expect(api.denyVaultRequest).toHaveBeenCalledWith(protectedAccess.id));
+    if (handoff) {
+      const done = (await screen.findByText(en.vaults.handoff.done)).closest('[role="status"]') as HTMLElement;
+      expect(done).toBeTruthy();
+      expect(within(done).getByRole('link', { name: en.vaults.handoff.openApp }).getAttribute('href')).toBe('avibe://session/ses_A-1');
+    } else {
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(screen.queryByText(en.vaults.handoff.done)).toBeNull();
+    }
     expectNoProtectedOperations();
   });
 });

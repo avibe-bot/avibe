@@ -33,6 +33,7 @@ mod pet;
 mod pet_native;
 mod update_install;
 pub mod updater;
+mod window_return;
 
 #[cfg(target_os = "macos")]
 mod computer_use;
@@ -1915,6 +1916,7 @@ fn build_main_window(
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+        .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
@@ -2750,7 +2752,8 @@ pub fn run() {
             pet::pet_reset_voice_shortcut,
             pet::pet_bind,
             pet::pet_unbind,
-            pet::pet_open
+            pet::pet_open,
+            window_return::focus_main_window
         ])
         .setup(|app| {
             #[cfg(feature = "bundled-runtime")]

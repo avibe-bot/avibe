@@ -191,6 +191,27 @@ old-parser failures. No phrase re-view/export RPC exists in v1.
 
 ## 4. Trusted create/import and atomic persistence
 
+### Why a separate window
+
+Ordinary Protected keys stay in the embedded sandbox frame: no secret is shown
+or typed there. A seed wallet shows twelve words to write down, checks three of
+them, may take a passphrase, and on import takes the whole phrase. These run only
+in the top-level secure window, for two reasons:
+
+- **The page can draw over an embedded frame.** The page cannot read the frame,
+  but it decides what is drawn around and on top of it. A compromised page (a
+  malicious update, an injected script, a hostile extension) could lay an
+  invisible input over the import box and capture the words, or cover the shown
+  words with a fake set so the wrong backup is written down. A top-level window
+  is out of the page's reach: it cannot be overlaid, and its address bar shows
+  `sandbox.avibe.bot`. Signing approvals use their own window for the same reason.
+- **Safari refuses to create a Passkey inside a cross-origin frame**, so a first
+  setup must be top-level there anyway.
+
+The Web makes the window predictable instead of moving it into the page: it opens
+at one size, centered over the Avibe window; one line before it opens says why
+it is separate; and when it closes, the dialog's result takes focus.
+
 The additive operation/capability is exactly `sealHdWallet`; old `seal` is
 unchanged. Client call: `sealHdWallet({name, mode, wrapMeta}, authorizationWindow)`.
 Mode is exactly `create` or `import`. Payload has EXACTLY those three keys.

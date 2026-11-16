@@ -155,6 +155,18 @@ these two window commands through their parent; they are intentionally inside
 this window-control boundary. No remote bootstrap, notification, updater, file,
 or Runtime lifecycle permission is granted.
 
+`main-window-focus` grants `focus_main_window` to the main window's loopback
+Workbench pages, advertised by `__AVIBE_DESKTOP_FOCUS__`. The Workbench calls it
+when a Protected Vault step it handed to the system browser has finished there
+(`ui/src/lib/vaultHandoffReturn.ts`). The command takes no arguments, rechecks
+that the caller is the Workbench, does nothing while the window is in front, and
+only shows and focuses the main window. As with `window-drag`, a same-origin
+Show Page can reach it through its parent; the shell itself therefore activates
+the window at most once a minute, however often it is asked. Where the platform refuses a background activation (macOS 14 and later
+may; Windows foreground rules), it asks for attention instead: a Dock bounce or
+a taskbar flash. A Workbench on a remote instance has no grant and simply stays
+where it is.
+
 ### The Vault sandbox window (macOS)
 
 A protected Vault step ends in a top-level window of the Vault sandbox,

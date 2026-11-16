@@ -1,5 +1,6 @@
 import { isDesktopShell } from './desktopShell';
 import { openLinkInNewContext } from './pwaNavigation';
+import { noteVaultHandoff } from './vaultHandoffReturn';
 
 /**
  * Whether this document must hand protected-vault passkey steps to the user's
@@ -29,8 +30,21 @@ export type VaultBrowserStep =
   /** Show a protected secret's value. */
   | { kind: 'reveal'; secretName: string; field?: string };
 
-// `request_id` is also the deep link Avibe sends to IM (`vault_request_url`).
-const STEP_PARAMS = ['request_id', 'protection', 'add', 'name', 'edit', 'reveal', 'field'];
+// `request_id` is also the deep link Avibe sends to IM (`vault_request_url`). `from` and `session`
+// mark a step the desktop app handed off, and the conversation it was handed off from.
+const STEP_PARAMS = ['request_id', 'protection', 'add', 'name', 'edit', 'reveal', 'field', 'from', 'session'];
+
+// What the desktop shell's `avibe://session/<id>` link accepts (`runtime-host/src/deep_link.rs`).
+const DEEP_LINK_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const validSessionId = (id: string | null | undefined): id is string =>
+  id != null && DEEP_LINK_ID.test(id) && id !== '.' && id !== '..';
+
+/** The conversation the desktop app shows, which the browser tab can link back to. */
+function currentChatSession(): string | null {
+  const match = /^\/chat\/([^/]+)/.exec(window.location.pathname);
+  const id = match?.[1];
+  return validSessionId(id) ? id : null;
+}
 
 /** Opens Vaults in the user's browser on `step`. */
 export function openVaultsInBrowser(step: VaultBrowserStep): void {
@@ -44,7 +58,23 @@ export function openVaultsInBrowser(step: VaultBrowserStep): void {
           ? { edit: step.secretName }
           : { reveal: step.secretName, ...(step.field ? { field: step.field } : {}) };
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  url.searchParams.set('from', 'desktop');
+  const session = currentChatSession();
+  if (session) url.searchParams.set('session', session);
+  noteVaultHandoff(step);
   openLinkInNewContext(url.toString());
+}
+
+/** A step the desktop app handed to this browser tab, and the conversation to link back to. */
+export type DesktopVaultHandoff = { step: VaultBrowserStep; session: string | null };
+
+/** The desktop hand-off a Vaults URL carries; an IM link or a plain visit carries none. */
+export function readDesktopVaultHandoff(params: URLSearchParams): DesktopVaultHandoff | null {
+  if (params.get('from') !== 'desktop') return null;
+  const step = readVaultBrowserStep(params);
+  if (!step) return null;
+  const session = params.get('session');
+  return { step, session: validSessionId(session) ? session : null };
 }
 
 /** The step a Vaults URL carries, whether the desktop app handed it off or IM linked to a request. */

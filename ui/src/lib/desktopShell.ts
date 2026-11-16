@@ -15,6 +15,8 @@ declare global {
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
     /** The shell also turns Computer Use off from the page; older shells only turn it on. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE_DISABLE__?: true;
+    /** The shell brings its main window forward on the Workbench's request (`focus_main_window`). */
+    readonly __AVIBE_DESKTOP_FOCUS__?: true;
     /** The main Workbench can ask the shell to open standalone native app windows. */
     readonly __AVIBE_DESKTOP_APP_WINDOWS__?: true;
     /** Identity of a native App child window; grants no IPC capabilities. */
@@ -208,6 +210,34 @@ export async function tryOpenDesktopAppWindow(target: DesktopAppWindowTarget): P
     return true;
   } catch {
     return false;
+  }
+}
+
+const desktopFocusInvoke = (): ShellInvoke | null => {
+  const supported = isDesktopShell() && window.__AVIBE_DESKTOP_FOCUS__ === true;
+  if (!supported) return null;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
+  return internals?.invoke ? internals.invoke.bind(internals) : null;
+};
+
+/** Whether this shell can bring its own window forward; older shells and browsers cannot. */
+export function canBringDesktopAppForward(): boolean {
+  return desktopFocusInvoke() !== null;
+}
+
+/**
+ * Ask the shell to show and focus its main window. The shell does nothing when
+ * the window is already in front, and asks for attention instead where the
+ * platform refuses a background activation. A refusal here (a remote instance's
+ * page, an older shell) is not an error the user needs to see.
+ */
+export async function bringDesktopAppForward(): Promise<void> {
+  const invoke = desktopFocusInvoke();
+  if (!invoke) return;
+  try {
+    await invoke('focus_main_window');
+  } catch {
+    // Not granted on this page: the browser tab still tells the user they can return.
   }
 }
 

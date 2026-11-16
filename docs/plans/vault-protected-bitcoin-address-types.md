@@ -80,26 +80,70 @@ reconciliation and its canonical contract are unchanged.
 
 ## Request collection and selected detail
 
-Only the two new kinds emit a proof-free list summary: generated ID, sign type,
-status/timestamps, and null name/requester/delivery/message/card/session. Each
-summary is<=1,024 serialized UTF-8 bytes. Metadata-first storage includes
-session precedence, resource ACL and expiry; do not hydrate proof blobs to then
-throw them away. Old-kind contribution and all existing limit/order/filter/count
-semantics stay, including0/negative/>100 and the distinction between SQL LIMIT
-and post-filter Python slicing. No new count rule or pagination mechanism.
+Only the two new kinds emit a proof-free list summary. It carries the generated ID,
+sign type, status/timestamps, the saved `secret_name`, a top-level
+`protection: "protected" | null`, and null requester/delivery/message/card/session.
+`secret_name` is the exact string persisted on the request row when it was created.
+`protection` is `"protected"` only when the persisted
+`delivery.bitcoin_identity.protection` scalar is exactly `"protected"`, and `null`
+otherwise. It comes from a fixed SQL `CASE` over that trusted persisted capture.
+It never comes from live secret metadata, the current name, the caller, a card or
+the proof. Null in either field means only that the summary does not supply it. It
+does not mean standard, unprotected, missing or renamed. No other field, key/type
+badge, signature or proof material is added. Old-kind items and full
+POST/GET/await requests are unchanged.
+
+Each emitted summary is<=1,024 UTF-8 bytes in the actual endpoint's compact
+serialization, with escaping counted, and in the shared comparison serialization.
+Depth is<=2 and nodes are<=32.
+
+Secret names currently have no length limit. The full stored name is emitted only
+when the whole compact UTF-8 summary carrying it is<=1,024 bytes. Otherwise the
+summary emits `secret_name:null` and keeps every other field. The name is never
+truncated or elided, the row is never dropped, and no count is clamped. No global
+name schema or maximum is introduced.
+
+Metadata-first storage includes session precedence, resource ACL and expiry; do
+not hydrate proof blobs to then throw them away. Old-kind contribution and all
+existing limit/order/filter/count semantics stay, including0/negative/>100 and
+the distinction between SQL LIMIT and post-filter Python slicing. No new count
+rule or pagination mechanism.
 
 Aggregate new contribution is the sum of emitted summary bytes plus separately
 measured wrapper syntax. A compact all-new response with<=100 rows fits128KiB;
 custom counts and mixed old rows do not acquire a universal128KiB promise.
 Canonical accounting is not a claim about arbitrary wire serialization.
 
-The existing UI-audience per-ID GET hydrates one selected full same-ID request
-before protection/passkey/browser-handoff classification or approval controls.
-A known focused ID goes directly to GET, not through first-page membership.
-Shared global/chat/floating/focus/pet consumers discard stale loads on close or
-auth/session changes and never prefetch the proof corpus. Old null-card clients
-refuse approval. Browsing an unknown row beyond the existing first-page behavior
-is not added by this change.
+Before the full GET, only the summary name and a Protected chip may be shown, and
+both are display-only. A null `protection` shows no chip and no standard label.
+Approval, every protection decision and any action still require the full same-ID
+GET. The existing UI-audience per-ID GET hydrates one
+selected full same-ID request before protection/passkey/browser-handoff
+classification or approval controls. Those decisions are recomputed from that
+full request, never from the summary's name or protection, a cached row or a
+current secret lookup. A known focused ID goes directly to GET, not through
+first-page membership. Shared global/chat/floating/focus/pet consumers discard
+stale loads on close or auth/session changes and never prefetch the proof corpus.
+Old null-card clients still refuse approval and may show the name only. Browsing
+an unknown row beyond the existing first-page behavior is not added by this change.
+
+**Amendment record (2026-11-16).** This section amends §4.2 and §4.3 of frozen
+contract rev0.4. The frozen record (sha256
+`62c96696f928757ba42f8c9894d41aec6e70f268058214c2e402054543f94af7`) stays
+untouched, and no new revision artifact is created.
+- Reason: the owner could not recognise the new-kind inbox rows, because they
+  showed only a generic signing request and an ID.
+- §4.2: the exact all-null shape and `secret_name:null` give way to the saved name
+  under the size rule above and to the captured `protection` scalar. The
+  no-protected-badge clause gives way to the display-only chip.
+- §4.3: before the full GET, only the display name and Protected chip are allowed.
+  Approval, protection/passkey/handoff decisions and any action still require the
+  full same-ID GET, and the old fallback is preserved.
+- Re-ACK: Product `eae7c82940cd`.
+
+The four-field RPC, typed contexts, signing, release/grant/policy, pin cohort and
+full-request formats do not change. This amendment claims no Web implementation
+and no runtime acceptance.
 
 ## Validation and delivery
 
