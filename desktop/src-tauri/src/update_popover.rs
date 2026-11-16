@@ -4,7 +4,6 @@
 //! window over the main one, from the bundled account page. The remote page only
 //! asks for it, so it never reaches this computer's installer.
 use avibe_runtime_host::instance_client::protocol::ClientAction;
-use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use url::Url;
 
@@ -56,7 +55,8 @@ pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> boo
     };
     let builder = WebviewWindowBuilder::new(app, UPDATE_POPOVER, WebviewUrl::External(url))
         .initialization_script(initialization)
-        .on_new_window(|_, _| NewWindowResponse::Deny)
+        // The panel's release-notes link opens in the system browser, as in the main window.
+        .on_new_window(|url, _features| crate::handle_new_window_request(url))
         .title("Avibe")
         .inner_size(WIDTH, HEIGHT)
         .transparent(true)

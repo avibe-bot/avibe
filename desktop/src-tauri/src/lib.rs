@@ -2032,7 +2032,7 @@ fn new_window_decision(url: &Url) -> NewWindowDecision {
 /// scripts and IPC handler on that shared content controller: every such window
 /// would add a copy of the scripts to this one and, when dropped, remove this
 /// window's IPC handler, leaving the bootstrap page unable to reach the shell.
-fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+pub(crate) fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
     if new_window_decision(&url) == NewWindowDecision::OpenInSystemBrowser {
         // Off the main thread: this runs inside the webview's own delegate callback.
         tauri::async_runtime::spawn_blocking(move || {
