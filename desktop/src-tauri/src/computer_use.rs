@@ -3771,10 +3771,16 @@ esac
 
     #[tokio::test]
     async fn failed_permission_probe_join_cannot_be_acknowledged_by_repeated_off() {
-        let (cancel, cancelled) = oneshot::channel();
+        let (cancel, _cancelled) = oneshot::channel();
+        let (started, started_rx) = oneshot::channel();
+        // Tokio abort is asynchronous, and `stop` sends cancellation before
+        // awaiting the task. Park a started task forever so the test cannot
+        // accidentally complete normally through that cancellation path.
         let task = tauri::async_runtime::spawn(async move {
-            let _ = cancelled.await;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
         });
+        started_rx.await.expect("permission probe task started");
         task.abort();
         let mut probe = PermissionProbe {
             id: 1,
