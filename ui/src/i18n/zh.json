@@ -6461,6 +6461,10 @@
       "createNeedsAvault": "请先按上方提示安装或更新 avault。",
       "createNeedsPassphraseAgain": "请再输入一次 Passphrase，再创建钱包。"
     },
+    "handoff": {
+      "done": "已完成，可以关闭此标签页，回到桌面应用。",
+      "openApp": "打开桌面应用"
+    },
     "requests": {
       "title": "待处理请求",
       "subtitle": "Agent 在等你批准。",
@@ -6544,6 +6548,10 @@
       },
       "account": "账户",
       "path": "派生路径 {{path}}",
+      "btcInput": "比特币输入",
+      "btcInputType": "{{type}} {{code}}",
+      "btcInputNetwork": "网络：{{network}}（请求方填写的标签）",
+      "btcInputReview": "金额、收款方和手续费，点「签名」后在安全窗口里显示和核对。",
       "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。",
       "solanaBlockhashHint": "Solana 交易通常只在一两分钟内有效。批准晚了，这笔交易可能已经过期，需要重新发起；使用持久 nonce 的交易不受此限。"
     },
@@ -6661,8 +6669,8 @@
       "back": "上一步",
       "wallet": {
         "badge": "助记词 · {{count}} 个账户",
-        "used": "已用 {{count}} / {{limit}} 个账户 · 账户编号与 MetaMask、Phantom 的账户顺序一致",
-        "agentUsage": "Agent 用 --chain 选链，--account 选账户",
+        "used": "已用 {{count}} / {{limit}} 个账户 · EVM 和 Solana 的账户编号与 MetaMask、Phantom 的顺序一致",
+        "agentUsage": "Agent 用 --chain 选链，--account 选账户；比特币再用 --address-type 选地址类型。",
         "ask": "签名前问我",
         "askLocked": "已打开。目前不能在这里关闭。",
         "rename": "重命名",
@@ -6742,7 +6750,8 @@
           "vault_already_initialized": "保护档刚在别处完成设置"
         },
         "nameTakenCreate": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才那组助记词对应的钱包，请不要往它的地址转账。换一个名称重新创建，会生成一组新的助记词。",
-        "nameTakenImport": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才导入的钱包，请不要往它的地址转账。换一个名称重新导入，用同一组助记词即可。"
+        "nameTakenImport": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才导入的钱包，请不要往它的地址转账。换一个名称重新导入，用同一组助记词即可。",
+        "windowWhy": "助记词只在独立安全窗口出现，Avibe 无权读取及覆盖，更加安全"
       },
       "nameTakenAfterSave": "这个名称已被其他密钥使用，钱包还没有保存。换一个名称再保存，助记词不变。",
       "standardTierLine": "你选的是标准档：助记词在这个页面输入，加密后保存在运行 Avibe 的电脑上。"
@@ -7572,7 +7581,7 @@
     "accountService": "avibe.bot",
     "switchInstance": "切换实例",
     "localRemoteAccess": "本机远程访问",
-    "auxiliaryIncomplete": "第一阶段暂不支持远程实例的 Mini 和原生通知。返回本机后可继续使用。",
+    "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
     "signOut": "退出账号",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
     "localVersion": "本机 Desktop 版本 {{version}}",

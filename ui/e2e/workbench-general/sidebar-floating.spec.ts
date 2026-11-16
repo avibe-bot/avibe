@@ -117,7 +117,8 @@ for (const theme of ['light', 'dark'] as const) {
         }),
         appsHeight: (await apps.boundingBox())!.height,
         settingsHeight: (await settings.boundingBox())!.height,
-      })).toEqual({ brandTop: 10, footerBottomInset: 16, appsHeight: 39, settingsHeight: 39 });
+      // The bottom row sits 8px from the edge, no more than its 8px gap above (ui/design: chrome/bottom-row).
+      })).toEqual({ brandTop: 10, footerBottomInset: 8, appsHeight: 39, settingsHeight: 39 });
     }
     const treatment = await apps.evaluate((element) => {
       const style = getComputedStyle(element);
@@ -138,7 +139,7 @@ for (const theme of ['light', 'dark'] as const) {
       brandTop: (await brand.boundingBox())!.y,
       footerBottomInset: await sidebar.evaluate((element) =>
         innerHeight - element.children[1].getBoundingClientRect().bottom),
-    })).toEqual({ width: 496, brandTop: 10, footerBottomInset: 16 });
+    })).toEqual({ width: 496, brandTop: 10, footerBottomInset: 8 });
   });
 }
 

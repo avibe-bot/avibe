@@ -98,3 +98,11 @@ it('AUTH-SETUP-178 the update popup still shows why it cannot reach the desktop 
   expect(screen.getByRole('dialog', { name: 'dashboard.versionAndUpdate' })).toBeTruthy();
   expect(screen.getByText('desktopClient.errors.bridge')).toBeTruthy();
 });
+
+// The remote note lives in the instance menu only, where switching happens; full pages do not repeat it.
+it('AUTH-SETUP-179 full pages do not repeat the remote-instance note', async () => {
+  window.history.replaceState(null, '', '/account/index.html?view=instances');
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
+  expect(screen.queryByText(en.desktopClient.auxiliaryIncomplete)).toBeNull();
+});

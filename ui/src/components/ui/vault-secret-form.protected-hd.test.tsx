@@ -111,6 +111,46 @@ it('takes nothing secret on the page: no word, passphrase or check fields, and n
   expect(screen.queryByRole('switch', { name: en.vaults.hd.askAccount0 })).toBeNull();
   expect(screen.getByText(p.tierNote)).toBeTruthy();
   expect(screen.getByText(p.generateHint)).toBeTruthy();
+  // Why the words open in their own window, said before it opens (create and import).
+  expect(screen.getByText(p.windowWhy)).toBeTruthy();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  expect(screen.getByText(p.windowWhy)).toBeTruthy();
+});
+
+it('when the window hands back, the dialog lands on the result: the notice takes focus', async () => {
+  await openProtected();
+  vault.sealHdWallet.mockRejectedValue(new VaultSandboxError('authorization_window_closed', 'x', true));
+  await launch();
+  const notice = screen.getByText(p.notice.closed);
+  expect(notice.closest('[tabindex="-1"]')).toBe(document.activeElement);
+});
+
+it('moves focus only on the hand-back: not when saving goes on to checking, nor when the name check stops the launch', async () => {
+  await openProtected();
+  let answer: (value: unknown) => void = () => {};
+  api.createVaultSecret.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+  await launch();
+  // waiting → saving: handed back, the notice holds focus. Move focus elsewhere, then saving → checking.
+  const outside = screen.getByRole('button', { name: en.vaults.dialog.cancel });
+  outside.removeAttribute('disabled');
+  outside.focus();
+  api.getVaultHdReconciliation.mockReturnValue(new Promise(() => {}));
+  await act(async () => { answer({ ok: false, code: 'something_new', message: 'x' }); });
+  expect(document.activeElement).toBe(outside);
+});
+
+it('says why the window is separate only on Protected: a Standard wallet is made on this page', async () => {
+  // A fresh tab: no tier remembered from the tests before.
+  sessionStorage.clear();
+  render(<I18nextProvider i18n={i18n}><AsOwner><VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} /></AsOwner></I18nextProvider>);
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.hd.chainMnemonic }));
+  expect(screen.queryByText(p.windowWhy)).toBeNull();
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.signingImport }));
+  expect(screen.queryByText(p.windowWhy)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${en.vaults.dialog.protectedProtection}`) }));
+  expect(screen.getByText(p.windowWhy)).toBeTruthy();
 });
 
 it('creates: opens the window from the click, saves the opaque result, and offers it only after an exact match', async () => {
