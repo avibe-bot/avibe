@@ -32,6 +32,7 @@ mod notifications;
 mod pet;
 mod pet_native;
 mod update_install;
+mod update_popover;
 pub mod updater;
 mod window_return;
 
@@ -2033,7 +2034,7 @@ fn new_window_decision(url: &Url) -> NewWindowDecision {
 /// scripts and IPC handler on that shared content controller: every such window
 /// would add a copy of the scripts to this one and, when dropped, remove this
 /// window's IPC handler, leaving the bootstrap page unable to reach the shell.
-fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+pub(crate) fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
     if new_window_decision(&url) == NewWindowDecision::OpenInSystemBrowser {
         // Off the main thread: this runs inside the webview's own delegate callback.
         tauri::async_runtime::spawn_blocking(move || {
@@ -2613,10 +2614,21 @@ pub fn run() {
                     if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
                         main_document_finished(webview);
                     }
+                    if webview.label() == update_popover::UPDATE_POPOVER
+                        && payload.event() == tauri::webview::PageLoadEvent::Finished
+                    {
+                        if let Some(window) = webview.app_handle().get_webview_window(update_popover::UPDATE_POPOVER) {
+                            update_popover::page_loaded(&window);
+                        }
+                    }
                 })
                 .on_navigation(|webview, url| {
                     if webview.label() == pet::PET_WINDOW {
                         return pet::navigation_allowed(webview.app_handle(), url);
+                    }
+                    if webview.label() == update_popover::UPDATE_POPOVER {
+                        return instance_client::bundle(webview.app_handle())
+                            .is_some_and(|bundle| update_popover::navigation_allowed(url, &bundle));
                     }
                     if instance_client::enabled(webview.app_handle()) && webview.label() == MAIN_WINDOW {
                         if instance_client::presentation_request(
