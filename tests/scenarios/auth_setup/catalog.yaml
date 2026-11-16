@@ -1176,6 +1176,7 @@ scenarios:
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_auth_completion_returns_retained_document_only_after_paired_success
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_during_actual_finalize_preserves_late_material
   - id: AUTH-SETUP-172
     name: One Desktop installation retains one instance and device across concurrency, lost replies, and restart
     status: partial
@@ -1236,6 +1237,9 @@ scenarios:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_retries
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_back_preserves_actual_workbench_document
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_held_candidate_never_gets_authority_and_escape_retires_only_its_roles
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_preserves_receiver_and_foregrounds_then_requires_fresh_request
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_approved_before_finalize_cannot_discard_new_material
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_same_url_delivery_retires_only_old_approval
   - id: AUTH-SETUP-177
     name: Remote and embedded documents gain no Desktop local capability or account credentials
     status: gap

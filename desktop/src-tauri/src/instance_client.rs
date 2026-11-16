@@ -1,6 +1,7 @@
 //! Native-owned account presentation and disposable instance window lifecycle.
 use async_trait::async_trait;
 use avibe_runtime_host::{
+    deep_link::DeepLinkReturn,
     instance_client::{
         account::Passkeys,
         coordinator::{ClientView, Coordinator},
@@ -53,8 +54,15 @@ struct PresentationQueue {
     approval: Option<GuardAttempt>,
     window: u64,
     document: u64,
-    source: Option<(u64, u64, String)>,
+    source: Option<PresentationSource>,
+    link: Option<(u64, DeepLinkReturn)>,
     logout: Option<LogoutReceipt>,
+}
+struct PresentationSource {
+    window: u64,
+    document: u64,
+    label: String,
+    url: String,
 }
 struct LogoutReceipt {
     result: DirectResult,
@@ -107,6 +115,9 @@ impl PresentationQueue {
             self.complete(attempt.intent.id);
         }
         self.approval = None;
+        if self.source.take().is_some() {
+            self.pending = None;
+        }
     }
     fn logout_result(&mut self, owner: u64, generation: u64, receiver: &Url) -> Option<DirectResult> {
         if self
@@ -193,6 +204,50 @@ impl PresentationQueue {
     }
     fn owns_guard_authority(&self, attempt: &GuardAttempt) -> bool {
         self.guard.as_ref() == Some(attempt) || self.approval.as_ref() == Some(attempt)
+    }
+    fn owns_intent(&self, id: u64) -> bool {
+        self.pending.is_some_and(|intent| intent.id == id)
+            || self.guard.as_ref().is_some_and(|attempt| attempt.intent.id == id)
+            || self.approval.as_ref().is_some_and(|attempt| attempt.intent.id == id)
+    }
+    fn source_matches(&self, label: &str, url: &Url) -> bool {
+        self.source.as_ref().is_some_and(|source| {
+            source.window == self.window
+                && source.document == self.document
+                && source.label == label
+                && source.url == url.as_str()
+        })
+    }
+    fn approve(&mut self, attempt: &GuardAttempt, locale: Option<&'static str>, label: &str, url: &Url) -> bool {
+        if !self.owns_guard_authority(attempt) || attempt.receiver != url.as_str() {
+            return false;
+        }
+        let continuation = if self.link.as_ref().is_some_and(|(id, _)| *id == attempt.intent.id) {
+            self.link.take()
+        } else {
+            None
+        };
+        self.enqueue(attempt.intent.view, attempt.intent.owner, false, locale);
+        if let Some((_, ticket)) = continuation {
+            self.link = Some((self.pending.expect("new intent").id, ticket));
+        }
+        self.source = Some(PresentationSource {
+            window: self.window,
+            document: self.document,
+            label: label.into(),
+            url: url.to_string(),
+        });
+        true
+    }
+    fn can_start(&self, intent: PresentationIntent, label: &str, url: &Url) -> bool {
+        self.pending == Some(intent) && (self.source.is_none() || self.source_matches(label, url))
+    }
+    fn cancel(&mut self) {
+        self.pending = None;
+        self.guard = None;
+        self.approval = None;
+        self.source = None;
+        self.logout = None;
     }
 }
 struct Presentation {
@@ -505,6 +560,7 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
         return;
     };
     let coordinator = client.coordinator.clone();
+    retire_stale_link(app);
     let Some(ticket) = app
         .state::<Mutex<crate::DeepLinks>>()
         .lock()
@@ -515,6 +571,16 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
     else {
         return;
     };
+    if client.view.presentation.lock().expect("presentation").account {
+        {
+            let mut queue = client.presentations.lock().expect("presentation intent");
+            queue.enqueue("account", ticket.action_owner, true, None);
+            queue.link = Some((queue.pending.expect("new intent").id, ticket));
+        }
+        schedule_presentation(app);
+        ensure_presentation_retry(app);
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = coordinator
@@ -529,6 +595,28 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
         crate::apply_pending_deep_link(&app);
     });
 }
+
+/// The queue owns the single dormant link continuation. Consumed is not
+/// approved: it remains correlated until a URL arrives or authority retires.
+fn retire_stale_link(app: &AppHandle) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    let mut queue = client.presentations.lock().expect("presentation intent");
+    queue.current(client.coordinator.presentation_owner());
+    let Some((id, ticket)) = &queue.link else { return };
+    let Some(links) = app.try_state::<Mutex<crate::DeepLinks>>() else {
+        return;
+    };
+    let mut links = links.lock().expect("deep links");
+    if !queue.owns_intent(*id) || !links.owns_local_return(ticket) {
+        let (id, ticket) = queue.link.take().expect("link continuation");
+        if queue.owns_intent(id) {
+            queue.cancel();
+        }
+        links.finish_local_return(&ticket, None);
+    }
+}
 /// Per-physical-window callbacks cannot revive a retired document with the reused main label.
 pub fn window_created(app: &AppHandle) -> Option<u64> {
     let client = app.try_state::<Client>()?;
@@ -537,6 +625,7 @@ pub fn window_created(app: &AppHandle) -> Option<u64> {
         .lock()
         .expect("presentation intent")
         .window_created();
+    retire_stale_link(app);
     let mut views = client.view.views.lock().expect("views");
     views.runtime = Some(RuntimeDocument {
         label: MAIN_WINDOW.into(),
@@ -561,6 +650,7 @@ pub(crate) fn window_destroyed(app: &AppHandle) {
         queue.pending = None;
         queue.source = None;
     }
+    retire_stale_link(app);
     {
         let mut views = client.view.views.lock().expect("views");
         views.account = None;
@@ -618,6 +708,7 @@ pub(crate) fn runtime_document_started(app: &AppHandle, label: &str, url: &Url) 
         let window = queue.window;
         queue.document_started(window, url);
     }
+    retire_stale_link(app);
 }
 pub fn page_loaded(app: &AppHandle) {
     if let Some(client) = app.try_state::<Client>() {
@@ -750,6 +841,33 @@ pub async fn desktop_client_request(
     }
     let coordinator = client.coordinator.clone();
     let receiver = window.url().map_err(|_| "untrusted_desktop_caller")?;
+    if matches!(request.action, ClientAction::FinishTotpEnrollment { .. })
+        && request.version == 1
+        && !request.request_id.is_empty()
+        && request.request_id.len() <= 128
+        && request.expected_generation == coordinator.state().generation
+    {
+        // Finalization can issue material without advancing the action owner.
+        // Serialize its admission with an approved presentation's actual start.
+        // Once replacement/escape has started it is too late to issue material;
+        // while it is merely queued, this explicit action supersedes it.
+        let admission = client.view.windows.try_lock().ok();
+        if admission.is_none()
+            || client.view.presentation.lock().expect("presentation").staging
+            || !trusted_page(&client, &window)
+        {
+            return Ok(ClientReply {
+                version: 1,
+                request_id: request.request_id,
+                ok: false,
+                state: coordinator.state(),
+                result: None,
+                error: Some(ClientError::new("busy")),
+            });
+        }
+        client.presentations.lock().expect("presentation intent").cancel();
+        retire_stale_link(&app);
+    }
     let get_state = matches!(request.action, ClientAction::GetState);
     let document = {
         let mut queue = client.presentations.lock().expect("presentation intent");
@@ -959,7 +1077,16 @@ pub fn presentation_request(
         } else {
             None
         };
-        present_owned(app, view, owner, false, approval.as_ref(), locale, Some(&receiver));
+        let account_source = client.view.presentation.lock().expect("presentation").account;
+        present_owned(
+            app,
+            view,
+            owner,
+            account_source && approval.is_none(),
+            approval.as_ref(),
+            locale,
+            Some((label, &receiver)),
+        );
     }
     true
 }
@@ -988,7 +1115,7 @@ fn present_owned(
     guarded: bool,
     approval: Option<&GuardAttempt>,
     locale: Option<&'static str>,
-    receiver: Option<&Url>,
+    receiver: Option<(&str, &Url)>,
 ) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
@@ -1009,9 +1136,22 @@ fn present_owned(
         {
             return false;
         }
-        queue.enqueue(view, owner, guarded, locale);
-        queue.source = receiver.map(|url| (queue.window, queue.document, url.to_string()));
+        if let Some(approval) = approval {
+            let Some((label, url)) = receiver else { return false };
+            if !queue.approve(approval, locale, label, url) {
+                return false;
+            }
+        } else {
+            queue.enqueue(view, owner, guarded, locale);
+            queue.source = receiver.map(|(label, url)| PresentationSource {
+                window: queue.window,
+                document: queue.document,
+                label: label.into(),
+                url: url.to_string(),
+            });
+        }
     }
+    retire_stale_link(app);
     schedule_presentation(app);
     ensure_presentation_retry(app);
     true
@@ -1070,6 +1210,7 @@ fn schedule_presentation(app: &AppHandle) {
 }
 
 fn apply_presentation(app: &AppHandle) {
+    retire_stale_link(app);
     let Some(client) = app.try_state::<Client>() else {
         return;
     };
@@ -1103,15 +1244,11 @@ fn apply_presentation(app: &AppHandle) {
             .complete(intent.id);
         return;
     }
-    // Decide the bundled-account exemption only after taking the physical
-    // window serializer and reading the actual receiver. A request queued
-    // during restore must not inherit either the old account route or a later
-    // Runtime route's policy.
-    let native_account_entry = route.as_ref().is_some_and(|current| {
-        let state = native.presentation.lock().expect("presentation");
-        state.account && account_view(current, &native.bundle).is_some()
-    });
-    if intent.guarded && !native_account_entry {
+    let account_receiver = native.presentation.lock().expect("presentation").account;
+    if account_receiver && !trusted_page(&client, &window) {
+        return;
+    }
+    if intent.guarded {
         let Some(receiver) = route else { return };
         let committed_receipt = client.coordinator.committed_view_generation();
         let allowed = {
@@ -1128,6 +1265,30 @@ fn apply_presentation(app: &AppHandle) {
         };
         if !allowed {
             return;
+        }
+        if account_receiver {
+            // This exact admitted receiver owns any transient recovery material.
+            // Bring it forward before asking; refusal has no separate wire result.
+            let foreground = (|| -> Result<(), ClientError> {
+                client.coordinator.presentation_epoch(intent.owner)?;
+                let physical = window.window();
+                physical.unminimize().map_err(failure)?;
+                physical.show().map_err(failure)?;
+                window.show().map_err(failure)?;
+                physical.set_focus().map_err(failure)?;
+                window.set_focus().map_err(failure)?;
+                client.coordinator.presentation_epoch(intent.owner)?;
+                Ok(())
+            })();
+            if foreground.is_err() {
+                client
+                    .presentations
+                    .lock()
+                    .expect("presentation intent")
+                    .complete(intent.id);
+                retire_stale_link(app);
+                return;
+            }
         }
         let attempt = client
             .presentations
@@ -1159,53 +1320,95 @@ fn apply_presentation(app: &AppHandle) {
         }
         return;
     }
-    {
-        let mut queue = client.presentations.lock().expect("presentation intent");
-        if intent.view == "sign-out" {
-            let matched = queue.source.as_ref().is_some_and(|(window, document, receiver)| {
-                *window == queue.window
-                    && *document == queue.document
-                    && route.as_ref().is_some_and(|url| url.as_str() == receiver)
-            });
-            // Native menu entry while already bundled bypasses the Workbench guard;
-            // it is itself the explicit source-bound native intent.
-            if matched || (intent.guarded && native_account_entry) {
-                let generation = client.coordinator.state().generation;
-                queue.logout = Some(LogoutReceipt {
-                    result: DirectResult::new_sign_out_intent(generation),
-                    owner: intent.owner,
-                    generation,
-                    window: queue.window,
-                    document: queue.document + 1,
-                    destination: url.clone(),
-                });
-            } else {
-                queue.complete(intent.id);
-                return;
-            }
-        }
-    }
-    native.presentation.lock().expect("presentation").staging = true;
+    // Submission is not replacement admission. Keep one queued task, but let a
+    // newer material-producing action retire it before it obtains the serializer.
+    client.presentations.lock().expect("presentation intent").scheduled = true;
     let native = native.clone();
     let app = app.clone();
     drop(windows);
     tauri::async_runtime::spawn(async move {
-        let _windows = native.windows.lock().await;
+        let windows = native.windows.lock().await;
+        let client = app.state::<Client>();
         let result = async {
             let epoch = native.presentation_epoch(intent.owner)?;
-            native.open_account(epoch, url).await
+            let receiver = active_webview(&app).ok_or_else(|| failure("receiver missing"))?;
+            let current = receiver.url().map_err(failure)?;
+            if native.presentation.lock().expect("presentation").account && !trusted_page(&client, &receiver) {
+                return Err(ClientError::new("stale_generation"));
+            }
+            let continuation = {
+                let mut queue = client.presentations.lock().expect("presentation intent");
+                if !queue.can_start(intent, receiver.label(), &current) {
+                    return Err(ClientError::new("stale_generation"));
+                }
+                let continuation = if queue.link.as_ref().is_some_and(|(id, _)| *id == intent.id) {
+                    let links = app.state::<Mutex<crate::DeepLinks>>();
+                    let links = links.lock().expect("deep links");
+                    if !links.owns_local_return(&queue.link.as_ref().expect("link").1) {
+                        queue.cancel();
+                        return Err(ClientError::new("stale_generation"));
+                    }
+                    queue.link.take().map(|(_, ticket)| ticket)
+                } else {
+                    None
+                };
+                if intent.view == "sign-out" {
+                    if !queue.source_matches(receiver.label(), &current) {
+                        queue.complete(intent.id);
+                        return Err(ClientError::new("stale_generation"));
+                    }
+                    let generation = client.coordinator.state().generation;
+                    queue.logout = Some(LogoutReceipt {
+                        result: DirectResult::new_sign_out_intent(generation),
+                        owner: intent.owner,
+                        generation,
+                        window: queue.window,
+                        document: queue.document + 1,
+                        destination: url.clone(),
+                    });
+                }
+                native.presentation.lock().expect("presentation").staging = true;
+                continuation
+            };
+            if let Some(ticket) = continuation {
+                // The accepted local escape needs this serializer itself.
+                // Staging now prevents a new finalization from issuing material
+                // after this presentation has crossed its admission boundary.
+                drop(windows);
+                let result = client
+                    .coordinator
+                    .return_local_if_current(ticket.expected_generation, ticket.action_owner)
+                    .await;
+                let accepted = result
+                    .as_ref()
+                    .ok()
+                    .copied()
+                    .filter(|owner| client.coordinator.presentation_epoch(*owner).is_ok());
+                app.state::<Mutex<crate::DeepLinks>>()
+                    .lock()
+                    .expect("deep links")
+                    .finish_local_return(&ticket, accepted);
+                result.map(|_| ())
+            } else {
+                let result = native.open_account(epoch, url).await;
+                drop(windows);
+                result
+            }
         }
         .await;
         native.presentation.lock().expect("presentation").staging = false;
-        let client = app.state::<Client>();
         let mut queue = client.presentations.lock().expect("presentation intent");
-        if result.is_ok() || client.coordinator.presentation_epoch(intent.owner).is_err() {
+        queue.scheduled = false;
+        if result.is_ok()
+            || result.as_ref().is_err_and(|error| error.code == "stale_generation")
+            || client.coordinator.presentation_epoch(intent.owner).is_err()
+        {
             queue.complete(intent.id);
         } else {
             queue.logout = None;
         }
         drop(queue);
-        drop(_windows);
+        retire_stale_link(&app);
         native.changed(&client.coordinator.state());
     });
 }
@@ -1380,9 +1583,12 @@ impl NativeView {
                             account.admitted
                         };
                         if event.event() == tauri::webview::PageLoadEvent::Started {
-                            let mut queue = client.presentations.lock().expect("presentation intent");
-                            let physical = queue.window;
-                            queue.document_started(physical, event.url());
+                            {
+                                let mut queue = client.presentations.lock().expect("presentation intent");
+                                let physical = queue.window;
+                                queue.document_started(physical, event.url());
+                            }
+                            retire_stale_link(view.app_handle());
                         }
                         if event.event() == tauri::webview::PageLoadEvent::Finished && owned && *event.url() == expected {
                             let app = view.app_handle().clone();
@@ -1780,6 +1986,7 @@ impl ClientView for NativeView {
     }
     fn changed(&self, state: &ClientState) {
         self.presentation.lock().expect("presentation").state = state.clone();
+        retire_stale_link(&self.app);
         if self.windows.try_lock().is_ok() {
             if let Some(runtime) = runtime_webview(&self.app) {
                 // Runtime receives only the minimal projection even while retained.
@@ -2013,6 +2220,92 @@ mod tests {
             .navigate(Url::parse("tauri://localhost/account/index.html?view=account").unwrap())
             .unwrap();
         assert!(!updater_caller(app.handle(), &bundle, account_page));
+    }
+
+    #[test]
+    fn a_link_approval_preserves_its_exact_continuation_in_both_callback_orders() {
+        for callback_first in [false, true] {
+            let mut links = crate::DeepLinks::default();
+            links.receive_owned(["avibe://settings"], Some(4));
+            let ticket = links.claim_local_return(12, 4).unwrap();
+            let mut queue = PresentationQueue::default();
+            let physical = queue.window_created();
+            let receiver: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+            queue.document_started(physical, &receiver);
+            queue.enqueue("account", 4, true, None);
+            let intent = queue.current(4).unwrap();
+            queue.link = Some((intent.id, ticket));
+            let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+            if callback_first {
+                queue.guard_result(&attempt, "\"dispatched\"");
+                assert!(queue.pending.is_none());
+                assert!(queue.owns_intent(intent.id));
+                assert!(links.owns_local_return(&queue.link.as_ref().unwrap().1));
+            }
+            assert!(queue.approve(&attempt, Some("zh"), "main-account-2", &receiver));
+            let approved = queue.current(4).unwrap();
+            assert!(!approved.guarded);
+            assert!(queue.can_start(approved, "main-account-2", &receiver));
+            assert!(!queue.can_start(approved, "main-account-3", &receiver));
+            assert_eq!(queue.link.as_ref().unwrap().0, approved.id);
+            assert!(links.owns_local_return(&queue.link.as_ref().unwrap().1));
+            queue.guard_result(&attempt, "\"dispatched\"");
+            assert_eq!(queue.pending, Some(approved));
+            assert!(!queue.approve(&attempt, None, "main-account-2", &receiver));
+            // A new explicit material-producing action cancels even an already
+            // approved but not-yet-started replacement.
+            queue.cancel();
+            assert!(!queue.can_start(approved, "main-account-2", &receiver));
+            assert!(!queue.owns_intent(approved.id));
+        }
+    }
+
+    #[test]
+    fn a_consumed_or_unknown_link_guard_cannot_replay_and_retires_with_its_authority() {
+        for callback in ["\"dispatched\"", "\"unknown\"", "\"unconsumed\"", "null"] {
+            for retirement in ["presentation", "owner", "document", "window"] {
+                let mut queue = PresentationQueue::default();
+                let receiver: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+                let physical = queue.window_created();
+                queue.document_started(physical, &receiver);
+                queue.enqueue("account", 4, true, None);
+                let intent = queue.current(4).unwrap();
+                let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+                queue.guard_result(&attempt, callback);
+                // Consumed leaves only dormant approval; unknown keeps the
+                // original guard. Neither can schedule another guard.
+                assert!(queue.pending.is_none() || queue.guard.is_some());
+                assert!(queue.begin_guard(intent, receiver.to_string()).is_none());
+                match retirement {
+                    "presentation" => queue.enqueue("instances", 4, true, None),
+                    "owner" => {
+                        queue.current(5);
+                    }
+                    "document" => queue.document_started(physical, &receiver),
+                    "window" => {
+                        queue.window_created();
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(!queue.owns_guard_authority(&attempt));
+                assert!(!queue.approve(&attempt, None, "main-account-2", &receiver));
+            }
+        }
+    }
+
+    #[test]
+    fn an_approved_receiver_cannot_cross_a_same_url_document_replacement() {
+        let mut queue = PresentationQueue::default();
+        let receiver: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+        let physical = queue.window_created();
+        queue.document_started(physical, &receiver);
+        queue.enqueue("instances", 4, true, None);
+        let intent = queue.current(4).unwrap();
+        let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+        assert!(queue.approve(&attempt, None, "main-account-2", &receiver));
+        let approved = queue.current(4).unwrap();
+        queue.document_started(physical, &receiver);
+        assert!(!queue.can_start(approved, "main-account-2", &receiver));
     }
 
     // A footer/menu intent used to disappear when its deferred callback met a

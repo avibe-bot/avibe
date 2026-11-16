@@ -45,24 +45,36 @@ def main():
     assets = source / "desktop/dist"
     assets.mkdir(exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(bundle)) as stream:
-        stream.extractall(assets, filter="data")
+        # Complete Desktop archives retain their leading dist directory.
+        leading_dist = all(member.name == "dist" or member.name.startswith("dist/")
+                           for member in stream.getmembers())
+        stream.extractall(source / "desktop" if leading_dist else assets, filter="data")
     if args.account_feedback:
         # This archive-only adapter invokes the same menu owner as production.
         # No public product seam, alternate admission or updater change is added.
         library = source / "desktop/src-tauri/src/lib.rs"
         original_library = library.read_bytes()
         library.write_text(library.read_text() + """
-pub fn fixture_account_menu(app: &tauri::AppHandle) { instance_client::menu_present(app, "sign-out"); }
+pub fn fixture_account_menu(app: &tauri::AppHandle, view: &str) {
+    instance_client::menu_present(app, match view {
+        "account" => "account", "instances" => "instances", "sign-out" => "sign-out",
+        _ => panic!("unsupported fixture menu"),
+    });
+}
 pub static FIXTURE_SHOW_FAILURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static FIXTURE_RETIRE_FAILURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static FIXTURE_ERROR_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static FIXTURE_ERROR_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+pub static FIXTURE_PRESENTATION_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static FIXTURE_PRESENTATION_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 """)
         example = source / "desktop/src-tauri/examples/instance_client_probe.rs"
         text = example.read_text()
         needle = '                        "state"=>emit('
         assert text.count(needle) == 1
-        text = text.replace(needle, '                        "menu"=> avibe_desktop_lib::fixture_account_menu(&handle),\n' + needle)
+        text = text.replace(needle, '''                        "menu"=> avibe_desktop_lib::fixture_account_menu(&handle, command["view"].as_str().unwrap_or("sign-out")),
+                        "presentation_snapshot"=> avibe_desktop_lib::instance_client::fixture_presentation_snapshot(&handle),
+''' + needle)
         text = text.replace(needle, '''                        "show_failure"=> {
                             avibe_desktop_lib::FIXTURE_SHOW_FAILURE.store(true,std::sync::atomic::Ordering::SeqCst);
                             emit(json!({"event":"control_ready"}));
@@ -76,10 +88,71 @@ pub static FIXTURE_ERROR_RELEASE: tokio::sync::Notify = tokio::sync::Notify::con
                             emit(json!({"event":"control_ready"}));
                         },
                         "release_error_view"=> avibe_desktop_lib::FIXTURE_ERROR_RELEASE.notify_one(),
+                        "hold_presentation"=> {
+                            avibe_desktop_lib::FIXTURE_PRESENTATION_HOLD.store(true,std::sync::atomic::Ordering::SeqCst);
+                            emit(json!({"event":"control_ready"}));
+                        },
+                        "release_presentation"=> avibe_desktop_lib::FIXTURE_PRESENTATION_RELEASE.notify_one(),
 ''' + needle)
         example.write_text(text)
         native = source / "desktop/src-tauri/src/instance_client.rs"
         native_original = native.read_bytes()
+        # Read-only owner observations: assertions wait for actual dispatch or
+        # replacement, never an arbitrary absence-of-navigation delay.
+        text = native.read_text()
+        needle = "    fn guard_result(&mut self, attempt: &GuardAttempt, result: &str) {\n"
+        assert text.count(needle) == 1
+        text = text.replace(needle, needle + '''
+        println!("{}", serde_json::json!({"event":"guard_result","token":attempt.token(),"view":attempt.intent.view,"result":result}));
+''')
+        start = text.index("fn apply_presentation(")
+        end = text.index("\n/// The callback reports", start)
+        apply = text[start:end]
+        needle = "    tauri::async_runtime::spawn(async move {\n"
+        assert apply.count(needle) == 1
+        apply = apply.replace(needle, needle + '''
+        if crate::FIXTURE_PRESENTATION_HOLD.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            println!("{}", serde_json::json!({"event":"presentation_held","id":intent.id}));
+            tokio::time::timeout(std::time::Duration::from_secs(20), crate::FIXTURE_PRESENTATION_RELEASE.notified())
+                .await.expect("fixture presentation release");
+        }
+''')
+        needle = "        native.changed(&client.coordinator.state());"
+        assert apply.count(needle) == 1
+        apply = apply.replace(needle, needle + '''
+        println!("{}",serde_json::json!({"event":"presentation_finished","id":intent.id,"ok":result.is_ok(),
+            "error":result.as_ref().err().map(|error|error.code.as_str())}));
+''')
+        text = text[:start] + apply + text[end:]
+        native.write_text(text + '''
+pub fn fixture_presentation_snapshot(app: &AppHandle) {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let client = handle.state::<Client>();
+        let queue = client.presentations.lock().unwrap();
+        let physical = handle.get_window(MAIN_WINDOW).unwrap();
+        let active = active_webview(&handle);
+        let mut result = serde_json::json!({"event":"presentation_snapshot",
+            "owner":client.coordinator.presentation_owner(),"window":queue.window,"document":queue.document,
+            "pending":queue.pending.map(|intent|intent.id),"guard":queue.guard.as_ref().map(GuardAttempt::token),
+            "approval":queue.approval.as_ref().map(GuardAttempt::token),"logout":queue.logout.is_some(),
+            "label":active.as_ref().map(|view|view.label()),"visible":physical.is_visible().unwrap(),
+            "minimized":physical.is_minimized().unwrap(),"focused":physical.is_focused().unwrap()});
+        #[cfg(target_os="macos")]
+        unsafe {
+            use objc2::{msg_send,runtime::AnyObject};
+            let native = &*physical.ns_window().unwrap().cast::<AnyObject>();
+            let key: bool = msg_send![native,isKeyWindow];
+            let visible: bool = msg_send![native,isVisible];
+            let mini: bool = msg_send![native,isMiniaturized];
+            let application: *mut AnyObject = msg_send![objc2::class!(NSApplication),sharedApplication];
+            let application_active: bool = msg_send![application,isActive];
+            result["native"] = serde_json::json!({"key":key,"visible":visible,"minimized":mini,"application_active":application_active});
+        }
+        println!("{}",result);
+    }).unwrap();
+}
+''')
         needle = "        let result = retired.and(removed);"
         assert native.read_text().count(needle) == 1
         native.write_text(native.read_text().replace(needle, """
@@ -106,6 +179,65 @@ pub static FIXTURE_ERROR_RELEASE: tokio::sync::Notify = tokio::sync::Notify::con
         }
 """))
         shell_adaptations = adapt_shell(args, source) if args.shell_consumers else {}
+        # The operator owns the desktop. Only the explicitly selected foreground
+        # batch may activate a fixture window; all other cases stay off screen.
+        # Substitute final OS effects only, never admission or the guard result.
+        library.write_text(library.read_text() + """
+pub fn fixture_focus(focus: impl FnOnce() -> tauri::Result<()>) -> tauri::Result<()> {
+    if std::env::var("AVIBE_FIXTURE_FOREGROUND").as_deref() == Ok("1") { focus() } else { Ok(()) }
+}
+pub static FIXTURE_RECEIPT_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+""")
+        for path in (library, native):
+            text = path.read_text()
+            for receiver in ("physical", "window", "view"):
+                text = text.replace(f"{receiver}.set_focus()", f"crate::fixture_focus(|| {receiver}.set_focus())")
+            path.write_text(text)
+        text = library.read_text()
+        needle = "    let _ = native_frame::clamp(&window.window());"
+        assert text.count(needle) == 1
+        library.write_text(text.replace(needle, """
+    if std::env::var("AVIBE_FIXTURE_FOREGROUND").as_deref() == Ok("1") {
+        let _ = native_frame::clamp(&window.window());
+    }
+"""))
+        native.write_text(native.read_text() + """
+pub fn fixture_initial_account(app: &AppHandle) {
+    let owner = app.state::<Client>().coordinator.presentation_owner();
+    let locale = match std::env::var("AVIBE_FIXTURE_LOCALE").as_deref() {
+        Ok("zh") => "zh", _ => "en",
+    };
+    present_owned(app, "account", owner, false, None, Some(locale), None);
+}
+""")
+        text = example.read_text()
+        needle = '            instance_client::present(app.handle(),"account");'
+        assert text.count(needle) == 1
+        text = text.replace(needle, """
+            if std::env::var("AVIBE_FIXTURE_FOREGROUND").as_deref() != Ok("1") {
+                app.get_window("main").unwrap().set_position(tauri::LogicalPosition::new(-20000., -20000.)).unwrap();
+            }
+            instance_client::fixture_initial_account(app.handle());
+""")
+        needle = "    let reply = instance_client::desktop_client_request(window, app, request).await;"
+        assert text.count(needle) == 1
+        text = text.replace(needle, """
+    let receipt_observer = std::env::var("AVIBE_FIXTURE_RECEIPT_OBSERVER").as_deref() == Ok("1")
+        && request.request_id != "feedback-fixture" && matches!(request.action, ClientAction::GetState);
+    let reply = instance_client::desktop_client_request(window, app, request).await;
+    if receipt_observer && matches!(&reply, Ok(reply) if matches!(reply.result, Some(DirectResult::SignOutIntent { .. }))) {
+        // The native receipt tests inspect the genuine result before AccountApp
+        // consumes it. Ordinary product-consumer cases never enable this hold.
+        emit(json!({"event":"receipt_result_held"}));
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(20),
+            avibe_desktop_lib::FIXTURE_RECEIPT_RELEASE.notified()).await;
+    }
+""")
+        needle = '"state"=>emit('
+        assert text.count(needle) == 1
+        text = text.replace(needle, '''"release_receipt"=> avibe_desktop_lib::FIXTURE_RECEIPT_RELEASE.notify_waiters(),
+                        ''' + needle)
+        example.write_text(text)
         build(args, source, "", {
             "head":args.head, "bundle_sha256":args.bundle_sha256, "mode":"account-feedback",
             "library_original_sha256":hashlib.sha256(original_library).hexdigest(),
@@ -115,7 +247,9 @@ pub static FIXTURE_ERROR_RELEASE: tokio::sync::Notify = tokio::sync::Notify::con
             "updater_sha256":hashlib.sha256((source / "desktop/src-tauri/src/updater.rs").read_bytes()).hexdigest(),
             "updater_key":"empty", "shell_adaptations": shell_adaptations, "adaptations":["archive-only call to existing native menu owner",
                                                  "optional one-shot failure after actual store retirement",
-                                                 "bounded pause before error presentation owner check", "optional one-shot failure after actual native show/focus"],
+                                                 "bounded pause before error presentation owner check", "optional one-shot failure after actual native show/focus",
+                                                 "quiet default: offscreen main and suppressed final OS focus/clamp only; foreground batch explicitly opts out",
+                                                 "initial synthetic locale; optional bounded automatic receipt-result hold for native receipt observers only"],
         })
         return
     # Fail if a source change moves the transport boundary; never fuzzy-patch
@@ -167,6 +301,18 @@ def adapt_shell(args, source):
     support = source / "desktop/src-tauri/examples/support/fixture_shell.rs"
     if args.shell_fixture:
         shutil.copy2(args.shell_fixture, support)
+    support_text = support.read_text()
+    needle = '            "hide" => handle.get_window(MAIN_WINDOW).unwrap().hide().unwrap(),'
+    assert support_text.count(needle) == 1
+    support.write_text(support_text.replace(needle, needle + '''
+            "minimize" => handle.get_window(MAIN_WINDOW).unwrap().minimize().unwrap(),
+            #[cfg(target_os="macos")]
+            "background" => unsafe {
+                use objc2::{msg_send,runtime::AnyObject};
+                let application: *mut AnyObject = msg_send![objc2::class!(NSApplication),sharedApplication];
+                let _: () = msg_send![application,deactivate];
+            },
+'''))
     shell_adaptations["support_sha256"] = hashlib.sha256(support.read_bytes()).hexdigest()
     library = source / "desktop/src-tauri/src/lib.rs"
     library_source = library.read_text()

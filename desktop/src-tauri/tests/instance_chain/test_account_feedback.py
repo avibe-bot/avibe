@@ -24,6 +24,8 @@ import proxy
 @pytest.fixture
 def account_native(tmp_path, request):
     calls = []
+    revocation_received = threading.Event()
+    revocation_release = threading.Event()
     policy = {"grant": "ok", "factor": False}
     identity = {"account": {"id": "synthetic-account", "email": "user@example.test"}, "instances": []}
 
@@ -82,6 +84,9 @@ def account_native(tmp_path, request):
                 cookie = "account=synthetic; Path=/; Secure; HttpOnly"
             elif path == "/api/mobile/session":
                 if self.command == "DELETE":
+                    revocation_received.set()
+                    if policy.get("hold_revocation"):
+                        assert revocation_release.wait(timeout=10), "fixture revocation response not released"
                     value = {}
                 elif "account=synthetic" in headers.get("cookie", ""):
                     value = identity
@@ -113,7 +118,7 @@ def account_native(tmp_path, request):
                 value = {"operation_id": "fixture-operation", "local": local_descriptor()}
             elif path == "/api/desktop/instances/ensure-local":
                 value = {"outcome": "already_paired", "owner_match": True, "instance_id": "local"}
-            elif path == "/":
+            elif path in ("/", "/settings/general", "/settings/shortcuts"):
                 content_type = "text/html"
                 value = "<!doctype html><html><body>Isolated local Workbench</body></html>"
                 if policy.get("document_redirect") and headers["host"] == "studio.avibe.bot":
@@ -144,8 +149,15 @@ def account_native(tmp_path, request):
     config = tmp_path / "native.json"
     config.write_text(json.dumps({"root": str(tmp_path), "backend": base, "provider": base,
                                  "local": base, "proxy": tunnel_url, "mappings": str(mappings)}))
-    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "AVIBE_FIXTURE_TLS_SHA256": fingerprint}
-    if getattr(request, "param", {}).get("shell"):
+    options = getattr(request, "param", {})
+    foreground = os.environ.get("AVIBE_FIXTURE_FOREGROUND") == "1"
+    locale = getattr(request.node, "callspec", None)
+    locale = locale.params.get("locale", options.get("locale", "en")) if locale else options.get("locale", "en")
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "AVIBE_FIXTURE_TLS_SHA256": fingerprint,
+                   "AVIBE_FIXTURE_FOREGROUND": "1" if foreground else "0", "AVIBE_FIXTURE_LOCALE": locale}
+    if options.get("receipt_observer"):
+        environment["AVIBE_FIXTURE_RECEIPT_OBSERVER"] = "1"
+    if options.get("shell"):
         environment["AVIBE_FIXTURE_SHELL"] = "1"
     for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
                 "AVIBE_HOME", "CODEX_HOME", "TMPDIR"):
@@ -203,7 +215,7 @@ def account_native(tmp_path, request):
         return js("return await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
                   + json.dumps(envelope) + "});")
 
-    def present(view="account", locale="en"):
+    def present(view="account", locale=None):
         suffix = f"?locale={locale}" if locale else ""
         send(action="eval", script=f"location='avibe://desktop/{view}{suffix}';")
         wait("loaded", lambda event: f"view={view}" in event["url"] and
@@ -224,11 +236,16 @@ def account_native(tmp_path, request):
         wait("native_ready")
         wait("loaded", lambda event: "/account/index.html" in event["url"])
         presentation_ready("account")
+        deadline = time.monotonic() + 8
+        while not js("return Boolean(document.querySelector('h1'));"):
+            assert time.monotonic() < deadline, "actual AccountApp has not rendered"
         yield {"send": send, "wait": wait, "js": js, "state": state, "request": request, "present": present,
                "calls": calls, "policy": policy, "root": tmp_path, "history": history,
-               "identity": identity, "hold": hold}
+               "identity": identity, "hold": hold, "foreground": foreground,
+               "revocation_received": revocation_received, "revocation_release": revocation_release}
     finally:
         hold.release.set()
+        revocation_release.set()
         if process.poll() is None:
             process.terminate()
             try:
@@ -239,6 +256,12 @@ def account_native(tmp_path, request):
         server.shutdown()
         tunnel.shutdown()
         log.close()
+        (tmp_path / "process-cleanup.json").write_text(json.dumps({
+            "pid": process.pid, "exit_code": process.returncode,
+            "executable": str(executable), "environment": environment,
+            "server_port": server.server_port, "proxy": tunnel_url,
+            "owned_http_and_proxy_shutdown": True,
+        }, indent=2))
         # Retain exact wire shape without duplicating the synthetic password/tokens in logs.
         (tmp_path / "http-shapes.json").write_text(json.dumps([
             {"method": method, "path": path, "headers": sorted(headers), "fields": sorted(body or {})}
@@ -257,6 +280,7 @@ def password(f):
     return f["request"]({"type": "sign_in_password", "email": "user@example.test", "password": "synthetic-password"})
 
 
+@pytest.mark.parametrize("account_native", [{"receipt_observer": True}], indirect=True)
 def test_plain_admitted_signout_returns_native_receipt(account_native):
     """AUTH-SETUP-176: old producer accepted the route but returned no intent."""
     f = account_native
@@ -357,6 +381,7 @@ def test_cancel_fences_password_response_from_actual_http(account_native):
     assert not any(call[1] == "/api/desktop/session" for call in f["calls"])
 
 
+@pytest.mark.parametrize("account_native", [{"receipt_observer": True, "locale": "zh"}], indirect=True)
 def test_signout_receipt_repeats_only_in_admitted_document_and_consumes_once(account_native):
     f = account_native
     assert password(f)["ok"]
@@ -387,6 +412,7 @@ def test_signout_receipt_repeats_only_in_admitted_document_and_consumes_once(acc
 
 
 @pytest.mark.parametrize("replacement", ["reload", "route", "owner", "lifecycle"])
+@pytest.mark.parametrize("account_native", [{"receipt_observer": True}], indirect=True)
 def test_logout_receipt_cannot_reappear_after_document_or_owner_replacement(account_native, replacement):
     f = account_native
     f["present"]("sign-out")
@@ -410,6 +436,7 @@ def test_logout_receipt_cannot_reappear_after_document_or_owner_replacement(acco
 
 
 @pytest.mark.parametrize("locale,store_failure", [("en", False), ("zh", False), ("zh", True)])
+@pytest.mark.parametrize("account_native", [{"receipt_observer": True}], indirect=True)
 def test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_retries(account_native, locale, store_failure):
     """AUTH-SETUP-176: cleanup error survives new receiver without a new intent."""
     f = account_native
@@ -455,6 +482,7 @@ def test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_ret
 
 
 @pytest.mark.parametrize("decision", ["approve", "cancel", "new_owner", "reload"])
+@pytest.mark.parametrize("account_native", [{"receipt_observer": True}], indirect=True)
 def test_native_menu_guard_receipt_keeps_actual_source_and_owner(account_native, decision):
     """AUTH-SETUP-176/177: actual menu callback cannot cross a source/owner replacement."""
     f = account_native
@@ -494,6 +522,7 @@ def test_native_menu_guard_receipt_keeps_actual_source_and_owner(account_native,
         assert f["state"]()["credential_count"] == 1
 
 
+@pytest.mark.parametrize("account_native", [{"receipt_observer": True}], indirect=True)
 def test_new_explicit_escape_supersedes_delayed_cleanup_error_presentation(account_native):
     f = account_native
     assert password(f)["ok"]
@@ -898,3 +927,226 @@ def test_final_account_ui_recovery_ack_obeys_native_persistence_result(account_n
     else:
         eventually(f, lambda state: len(state["views"]) == 1 and active(f)["label"] == label)
         assert f["state"]()["credential_count"] == 1
+
+
+def recovery_page(f, *, hold_finish=False, submit=True):
+    """Produce material through the actual AccountApp submit/result owner."""
+    f["policy"].update({"paired": True, "factor": True, "gate": "enroll"})
+    assert password(f)["state"]["account"]["gate"] == "enroll"
+    eventually(f, lambda _: f["js"]("return [...document.querySelectorAll('button')].some(b=>b.textContent==='Add authenticator');"))
+    f["js"]("[...document.querySelectorAll('button')].find(b=>b.textContent==='Add authenticator').click();return true;")
+    eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('#factor-code'));"))
+    # The saved-codes action stays in Account on this real persistence failure,
+    # letting a fresh ordinary request exercise the same native guard afterward.
+    f["send"](action="credential_write_failure")
+    f["wait"]("control_ready")
+    if hold_finish:
+        f["send"](action="hold", path="/api/two-factor/totp")
+        f["wait"]("control_ready")
+    f["js"]("""
+        const input=document.querySelector('#factor-code');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'123456');
+        input.dispatchEvent(new Event('input',{bubbles:true}));return true;
+    """)
+    eventually(f, lambda _: f["js"]("return !document.querySelector('#factor-code').form.querySelector('button').disabled;"))
+    if not submit:
+        return
+    f["send"](action="eval", script="document.querySelector('#factor-code').form.requestSubmit();")
+    if hold_finish:
+        f["wait"]("http_held", lambda event: event["path"] == "/api/two-factor/totp")
+    else:
+        eventually(f, lambda _: f["js"]("return document.body.innerText.includes('fixture-recovery');"))
+
+
+def presentation_snapshot(f):
+    f["send"](action="presentation_snapshot")
+    return f["wait"]("presentation_snapshot")
+
+
+def foreground_snapshot(f, label):
+    """Await positive OS activation, which can follow the guard eval callback."""
+    deadline = time.monotonic() + 5
+    while True:
+        current = presentation_snapshot(f)
+        assert current["label"] == label, current
+        if (current["visible"] and not current["minimized"] and current["focused"]
+                and current["native"]["visible"] and current["native"]["key"]
+                and current["native"]["application_active"]):
+            return current
+        assert time.monotonic() < deadline, current
+        time.sleep(.02)
+
+
+def link_destination(f, path):
+    # A fixture-result navigation used for eval would interrupt an in-flight
+    # document navigation. Wait for the real Finished event before evaluating.
+    eventually(f, lambda _: any(
+        event.get("event") == "loaded" and urlsplit(event["url"]).path == path
+        for event in f["history"]))
+    assert f["js"]("return location.pathname;") == path
+
+
+def ordinary_presentation(f, entry):
+    if entry.startswith("menu:"):
+        f["send"](action="menu", view=entry.split(":", 1)[1])
+    elif entry == "updater":
+        f["send"](action="shell_control", operation="updates")
+    elif entry.startswith("url:"):
+        f["send"](action="eval", script="location=" + json.dumps("avibe://desktop/" + entry.split(":", 1)[1]))
+    else:
+        assert entry.startswith("avibe://")
+        f["send"](action="native_link", url=entry)
+
+
+def presentation_outcome(f, start, label):
+    """Observe actual native dispatch or replacement, not a quiet time window."""
+    deadline = time.monotonic() + 15
+    while True:
+        snapshot = presentation_snapshot(f)
+        callbacks = [event for event in f["history"][start:] if event.get("event") == "guard_result"]
+        if callbacks:
+            # The callback can arrive after the snapshot command. Read its
+            # completed queue state instead of returning that earlier sample.
+            return presentation_snapshot(f), callbacks
+        if snapshot["label"] != label:
+            return snapshot, callbacks
+        assert time.monotonic() < deadline, snapshot
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+@pytest.mark.parametrize("entry,visibility", [
+    ("menu:account", "visible"), ("menu:instances", "hide"), ("menu:sign-out", "minimize"),
+    ("updater", "hide"), ("menu:account", "background"),
+    ("url:account", "visible"), ("url:instances", "visible"),
+    ("url:setup-complete", "visible"), ("url:sign-out", "visible"), ("url:updates", "visible"),
+    ("avibe://settings", "hide"), ("avibe://settings/shortcuts", "minimize"),
+])
+def test_recovery_presentation_preserves_receiver_and_foregrounds_then_requires_fresh_request(account_native, entry, visibility):
+    """AUTH-SETUP-171/176/177: native presentation cannot acknowledge recovery."""
+    f = account_native
+    f["send"](action="shell_control", operation="focus")
+    f["wait"]("shell_control", lambda event: event["operation"] == "focus")
+    recovery_page(f)
+    original = presentation_snapshot(f)
+    document = f["js"]("window.recoveryMarker=crypto.randomUUID();return [window.__AVIBE_DESKTOP_DOCUMENT__,window.recoveryMarker];")
+    before = f["state"]()
+    if f["foreground"] and visibility != "visible":
+        f["send"](action="shell_control", operation=visibility)
+        f["wait"]("shell_control", lambda event: event["operation"] == visibility)
+        eventually(f, lambda _: (
+            not presentation_snapshot(f)["visible"] if visibility == "hide"
+            else not presentation_snapshot(f)["native"]["application_active"] if visibility == "background"
+            else presentation_snapshot(f)["minimized"]))
+    start = len(f["history"])
+    ordinary_presentation(f, entry)
+    current, callbacks = presentation_outcome(f, start, original["label"])
+    assert current["label"] == original["label"], (entry, original, current)
+    assert callbacks and callbacks[-1]["result"] == '"dispatched"', callbacks
+    assert current["document"] == original["document"] and current["owner"] == original["owner"], current
+    assert current["pending"] is None and not current["logout"], current
+    assert f["js"]("return [window.__AVIBE_DESKTOP_DOCUMENT__,window.recoveryMarker];") == document
+    assert f["js"]("return document.body.innerText.includes('fixture-recovery');")
+    assert f["state"]()["state"]["generation"] == before["state"]["generation"]
+    assert not [call for call in f["calls"] if call[0] == "DELETE"]
+    assert f["state"]()["erase_calls"] == before["erase_calls"]
+    if f["foreground"]:
+        current = foreground_snapshot(f, original["label"])
+        (f["root"] / "recovery-foreground.json").write_text(json.dumps(current, indent=2))
+    else:
+        assert not current["focused"] and not current["native"]["application_active"], current
+    f["js"]("[...document.querySelectorAll('button')].find(b=>b.textContent==='I have saved these codes').click();return true;")
+    eventually(f, lambda _: f["js"]("return !document.body.innerText.includes('fixture-recovery');"))
+    # Explicit real lifecycle/Finished delivery must not replay the refused intent.
+    f["send"](action="shell_control", operation="finished")
+    f["wait"]("shell_control", lambda event: event["operation"] == "finished")
+    unchanged = presentation_snapshot(f)
+    assert unchanged["label"] == original["label"] and unchanged["owner"] == original["owner"], unchanged
+    assert unchanged["pending"] is None and not unchanged["logout"], unchanged
+    if entry in ("menu:sign-out", "url:sign-out"):
+        f["policy"]["hold_revocation"] = True
+    ordinary_presentation(f, entry)
+    eventually(f, lambda _: presentation_snapshot(f)["label"] != original["label"])
+    if entry.startswith("avibe://"):
+        link_destination(f, "/settings/shortcuts" if entry.endswith("/shortcuts") else "/settings/general")
+    elif entry in ("menu:sign-out", "url:sign-out"):
+        # This is the full automatic AccountApp receipt consumer, without the
+        # separate native receipt-observation hold used by the A4 owner tests.
+        settled = eventually(f, lambda state: state["state"]["account"]["status"] == "signed_out"
+                             and len(state["views"]) == 1
+                             and not state["views"][0]["label"].startswith("main-account-"))
+        assert settled["credential_count"] == 0 and settled["erase_calls"] > before["erase_calls"]
+        assert settled["state"]["generation"] > before["state"]["generation"]
+        # Local completion is observable while the server response is held.
+        # Then await the real request event, without imposing arrival order.
+        assert not f["revocation_release"].is_set()
+        assert f["revocation_received"].wait(timeout=5), "no actual revocation request"
+        assert sum(call[0] == "DELETE" and call[1] == "/api/mobile/session" for call in f["calls"]) == 1
+        f["revocation_release"].set()
+    else:
+        destination = "updates" if entry == "updater" else entry.split(":", 1)[1]
+        eventually(f, lambda _: f["js"]("return location.search;").startswith("?view=" + destination))
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+def test_recovery_presentation_during_actual_finalize_preserves_late_material(account_native):
+    f = account_native
+    recovery_page(f, hold_finish=True)
+    before = presentation_snapshot(f)
+    start = len(f["history"])
+    ordinary_presentation(f, "menu:instances")
+    current, callbacks = presentation_outcome(f, start, before["label"])
+    assert current["label"] == before["label"], current
+    assert callbacks[-1]["result"] == '"dispatched"'
+    assert current["owner"] == before["owner"] and not current["logout"]
+    f["send"](action="release")
+    eventually(f, lambda _: f["js"]("return document.body.innerText.includes('fixture-recovery');"))
+    assert presentation_snapshot(f)["label"] == before["label"]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+def test_recovery_presentation_approved_before_finalize_cannot_discard_new_material(account_native):
+    f = account_native
+    recovery_page(f, submit=False)
+    before = presentation_snapshot(f)
+    f["send"](action="hold_presentation")
+    f["wait"]("control_ready")
+    ordinary_presentation(f, "menu:instances")
+    held = f["wait"]("presentation_held")
+    f["send"](action="eval", script="document.querySelector('#factor-code').form.requestSubmit();")
+    eventually(f, lambda _: f["js"]("return document.body.innerText.includes('fixture-recovery');"))
+    f["send"](action="release_presentation")
+    result = f["wait"]("presentation_finished", lambda event: event["id"] == held["id"])
+    assert not result["ok"] and result["error"] == "stale_generation", result
+    after = presentation_snapshot(f)
+    assert after["label"] == before["label"] and after["document"] == before["document"], after
+    assert after["owner"] == before["owner"] and not after["logout"]
+    assert f["js"]("return document.body.innerText.includes('fixture-recovery');")
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+def test_recovery_presentation_same_url_delivery_retires_only_old_approval(account_native):
+    f = account_native
+    recovery_page(f)
+    before = presentation_snapshot(f)
+    # Observation only; the actual AccountApp listener decides and consumes.
+    f["js"]("window.addEventListener('avibe:desktop-present',e=>window.observedPresentation=e.detail);return true;")
+    tokens = []
+    for _ in range(2):
+        start = len(f["history"])
+        ordinary_presentation(f, "avibe://settings")
+        current, callbacks = presentation_outcome(f, start, before["label"])
+        assert current["label"] == before["label"] and callbacks[-1]["result"] == '"dispatched"'
+        tokens.append(f["js"]("return window.observedPresentation.presentationToken;"))
+    assert tokens[0] != tokens[1]
+    f["send"](action="eval", script="location=" + json.dumps("avibe://desktop/account?native_request=" + tokens[0]))
+    assert f["js"]("return document.body.innerText.includes('fixture-recovery');")
+    assert presentation_snapshot(f)["owner"] == before["owner"]
+    assert presentation_snapshot(f)["approval"] == tokens[1]
+    f["js"]("[...document.querySelectorAll('button')].find(b=>b.textContent==='I have saved these codes').click();return true;")
+    eventually(f, lambda _: f["js"]("return !document.body.innerText.includes('fixture-recovery');"))
+    f["send"](action="shell_control", operation="finished")
+    f["wait"]("shell_control", lambda event: event["operation"] == "finished")
+    assert presentation_snapshot(f)["label"] == before["label"]
+    ordinary_presentation(f, "avibe://settings")
+    eventually(f, lambda _: presentation_snapshot(f)["label"] != before["label"])
+    link_destination(f, "/settings/general")
