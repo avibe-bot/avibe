@@ -932,7 +932,7 @@ fn open_child(
         if !std::ptr::eq(&*held_controller, &*empty)
             || std::ptr::eq(&*held_controller, &*shell_controller)
             || std::ptr::eq(&*held_preferences, &*shell_preferences)
-            || held_preferences.isElementFullscreenEnabled()
+            || !child_features_off(&held_preferences)
         {
             return None;
         }
@@ -1016,36 +1016,54 @@ const FEATURES_OFF: [&str; 3] = [
 /// features above off. `None` when WebKit does not confirm each one is off;
 /// a child is not created then.
 fn child_preferences(mtm: MainThreadMarker) -> Option<Retained<WKPreferences>> {
-    // SAFETY: Main thread. The feature list and its two accessors are WebKit's
+    // SAFETY: Main thread. The feature list and its accessors are WebKit's
     // own, checked to exist before they are called.
     unsafe {
         let preferences = WKPreferences::new(mtm);
         preferences.setElementFullscreenEnabled(false);
-        if preferences.isElementFullscreenEnabled()
-            || WKPreferences::class().class_method(sel!(_features)).is_none()
+        if WKPreferences::class().class_method(sel!(_features)).is_none()
             || !preferences.respondsToSelector(sel!(_setEnabled:forFeature:))
             || !preferences.respondsToSelector(sel!(_isEnabledForFeature:))
         {
             return None;
         }
         let features: Retained<NSArray> = msg_send![WKPreferences::class(), _features];
+        for feature in features.iter() {
+            let key: Option<Retained<NSString>> = msg_send![&*feature, key];
+            if key.is_some_and(|key| FEATURES_OFF.contains(&key.to_string().as_str())) {
+                let _: () = msg_send![&*preferences, _setEnabled: false, forFeature: &*feature];
+            }
+        }
+        child_features_off(&preferences).then_some(preferences)
+    }
+}
+
+/// Whether these preferences have element fullscreen and every feature in
+/// [`FEATURES_OFF`] off, as WebKit itself reports them.
+fn child_features_off(preferences: &WKPreferences) -> bool {
+    // SAFETY: Main thread. `child_preferences` checked the accessors exist; a
+    // preferences object is only ever passed here after that.
+    unsafe {
+        if preferences.isElementFullscreenEnabled()
+            || WKPreferences::class().class_method(sel!(_features)).is_none()
+            || !preferences.respondsToSelector(sel!(_isEnabledForFeature:))
+        {
+            return false;
+        }
+        let features: Retained<NSArray> = msg_send![WKPreferences::class(), _features];
         let mut off = 0;
         for feature in features.iter() {
             let key: Option<Retained<NSString>> = msg_send![&*feature, key];
-            let Some(key) = key.map(|key| key.to_string()) else {
-                continue;
-            };
-            if !FEATURES_OFF.contains(&key.as_str()) {
+            if !key.is_some_and(|key| FEATURES_OFF.contains(&key.to_string().as_str())) {
                 continue;
             }
-            let _: () = msg_send![&*preferences, _setEnabled: false, forFeature: &*feature];
-            let enabled: bool = msg_send![&*preferences, _isEnabledForFeature: &*feature];
+            let enabled: bool = msg_send![preferences, _isEnabledForFeature: &*feature];
             if enabled {
-                return None;
+                return false;
             }
             off += 1;
         }
-        (off == FEATURES_OFF.len()).then_some(preferences)
+        off == FEATURES_OFF.len()
     }
 }
 

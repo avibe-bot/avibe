@@ -75,8 +75,10 @@ the sandbox unmodified.
    clamped to 360-900 by 400-1000 points.
 5. **What it holds.** A new, empty `WKUserContentController` and default
    `WKPreferences` of its own with element fullscreen, picture in picture and
-   video presentation modes off, both verified on the created webview before it
-   is returned. Media capture is refused. Its title is the allowed host.
+   video presentation modes off. Before the webview is returned to WebKit, the
+   shell reads both back from it: the controller must be the empty one, and the
+   preferences must not be the opener's and must report each of those features
+   off. Otherwise there is no child. Media capture is refused. Its title is the allowed host.
 6. **How it ends.** `window.close()`, the user closing it, the opener committing
    a new document, the opener's window being closed or destroyed, a crashed web
    content process, or rules 3 and 4. Each path detaches the delegates,
