@@ -1026,6 +1026,8 @@ def test_workflow_signs_every_macos_layer_before_recording():
     assert "macos-26" in [entry["os"] for entry in shell["strategy"]["matrix"]["include"]]
     assert build["runs-on"].count('"aarch64-apple-darwin":"macos-26"') == 1
     pr_control = next(item for item in shell["steps"] if control_script in item.get("run", ""))
+    # Nothing may soften it, such as continue-on-error.
+    assert set(pr_control) == {"name", "if", "run"}
     assert pr_control["if"] == "runner.os == 'macOS'"
     assert pr_control["run"].strip() == f"sh {control_script}"
     assert "environment" not in shell and secret_references(shell) == set()
