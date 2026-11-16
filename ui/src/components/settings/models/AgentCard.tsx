@@ -210,7 +210,8 @@ const AgentModelCard: React.FC<{
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
   onOpenAgent?: (name: string) => void;
-}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onAddModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent }) => {
+  noProviders?: boolean;
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onAddModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent, noProviders = false }) => {
   const { t } = useTranslation();
   const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
@@ -345,8 +346,11 @@ const AgentModelCard: React.FC<{
           ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToGateway')}</Button>}
         </div>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><AddModelButton className="w-auto px-4" disabled={pending} onClick={() => onAddModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}<AddModelButton disabled={pending} onClick={() => onAddModels(agent)} /></div>)}
-      {agent.mode === 'hub' && <AgentSupplyIssues agent={agent} onOpenAgent={onOpenAgent} />}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5">{noProviders ? <p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyNoProviders')}</p> : <><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><AddModelButton className="w-auto px-4" disabled={pending} onClick={() => onAddModels(agent)} /></>}</div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}{!noProviders && <AddModelButton disabled={pending} onClick={() => onAddModels(agent)} />}</div>)}
+      {/* With no provider yet, every Agent lacks a model by construction: the one way
+          forward is the Providers card's add button, not a warning or an add here.
+          ui/design: models/first-provider/fresh */}
+      {agent.mode === 'hub' && !noProviders && <AgentSupplyIssues agent={agent} onOpenAgent={onOpenAgent} />}
     </section>
   );
 };
@@ -401,6 +405,8 @@ export const AgentCard: React.FC<{
   onProbeSettled: (agent: AgentSupply) => void;
   onOpenAgent?: (name: string) => void;
   connectingBackend: string | null;
+  /** No model provider has been added yet (search services do not count). */
+  noProviders?: boolean;
 }> = ({ agents, switchedOff = [], pendingBackends, switchFailures, connectingBackend, ...props }) => {
   const [activeOriginHelp, setActiveOriginHelp] = React.useState<string | null>(null);
   const onOriginHelpChange = React.useCallback((key: string, open: boolean) => {

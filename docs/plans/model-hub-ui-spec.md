@@ -3226,6 +3226,19 @@ the interface is undetermined, ⑤ identified but the inventory did not come bac
 right column is ordered by how far the attempt got before it stopped, which is also the
 order in which the product stops refusing: ③ and ④ cannot save at all, ⑤ can.
 
+**2026-11-17 amendment — ask only what cannot be worked out** (Product, first-time-user
+review). Field order is **服务商** → Base URL → API Key → API 格式 → 更多设置. A catalog
+vendor fixes the format, so the form shows no format area at all. On 自定义 the format area
+is detection's one-line status; the three concrete formats appear only when detection is
+unrecognised, when the person presses 「更改」, or after they chose one. 名称(可选) moves
+under the collapsed 「更多设置」 (open when a name is already typed). Saving still sends the
+format the draft holds. Settings › Models: 「添加供应商」 no longer opens a menu; the
+footer offers 「添加订阅」 and 「添加 API Key」, and search services are added from the
+Tools tab. The routes card no longer shows the gateway's local address as a chip; it is a
+line in the 路由 info hint. Before any model provider exists (search services do not
+count), routes cards offer no 添加模型 and no Agent attention footer; an empty catalog says
+providers come first (`gateway.group.emptyNoProviders`).
+
 **2026-09-04 owner ruling — vendor preset + declared protocol** `[derived]`.
 This dated block sits on top of detect-then-confirm. Authority:
 `docs/plans/model-hub-vendor-preset-protocol.md`. V4 06r already drew the

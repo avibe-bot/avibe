@@ -390,6 +390,24 @@ describe('AgentCard', () => {
     expect(details.hidden).toBe(true);
   });
 
+  it.each(['en', 'zh'] as const)('before any model provider, offers no add-model step and no attention count in %s', (lng) => {
+    const instance = localeInstance(lng);
+    const empty = { ...openCodeAgent, catalog_models: [], menu: { view: 'featured' as const, checked: [] }, model_supply: [], named_agents: [{ name: 'main', effective_model_id: null, supply_status: null }] };
+    const listed = {
+      ...openCodeAgent,
+      backend: 'claude' as const,
+      menu: { view: 'featured' as const, checked: ['listed-model'] },
+      model_supply: [{ model_id: 'listed-model', route_origin: 'automatic' as const, chain_length: 0, has_runnable_hop: false }],
+      named_agents: [{ name: 'claude', effective_model_id: 'listed-model', supply_status: null, route_reason: 'route_unconfigured' as const }],
+    };
+    render(<I18nextProvider i18n={instance}><AgentCard agents={[empty, listed]} noProviders sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText(instance.t('settings.models.gateway.group.emptyNoProviders'))).toBeTruthy();
+    expect(screen.queryByText(instance.t('settings.models.gateway.group.emptyModels'))).toBeNull();
+    expect(screen.queryByRole('button', { name: instance.t('settings.models.gateway.addModel') })).toBeNull();
+    expect(screen.queryByRole('button', { name: new RegExp(instance.t('settings.models.gateway.agentIssues.summary', { count: 1 })) })).toBeNull();
+  });
+
   it('names the unresolved model in the reason and opens the Agent that has to change', async () => {
     const instance = localeInstance('zh');
     const onOpenAgent = vi.fn();

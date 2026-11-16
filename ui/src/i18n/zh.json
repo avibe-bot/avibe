@@ -1294,6 +1294,7 @@
         "heading": "路由",
         "infoLabel": "什么是路由",
         "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
+        "address": "本机地址：{{address}}（把其他工具接到网关时使用）",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
         "addModel": "添加模型",
@@ -1357,7 +1358,8 @@
             "unconfigured": "未配置模型路由",
             "unused": "暂无 Agent 使用"
           },
-          "emptyModels": "这个后端的模型列表是空的"
+          "emptyModels": "这个后端的模型列表是空的",
+          "emptyNoProviders": "添加模型供应商后，这里会列出它提供的模型。"
         },
         "catalog": {
           "title": "{{backend}} 模型",
@@ -2230,6 +2232,7 @@
           "title": "已连接，但尚未完成验证",
           "detail": "这次响应不足以同时确认接口类型和凭证有效性"
         },
+        "more": "更多设置",
         "protocol": {
           "saveFirstHint": "选择供应商使用的 API 格式，无需检测或测试通过即可保存。",
           "auto": "自动探测",
@@ -2238,6 +2241,7 @@
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "搜索服务",
+          "change": "更改",
           "idleHint": "填好 Base URL 和 API Key 后自动识别，不影响保存。",
           "detecting": "正在识别 API 格式…不用等它也能保存。",
           "manual": "手动选择 API 格式",

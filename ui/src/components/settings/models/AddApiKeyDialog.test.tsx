@@ -215,7 +215,7 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     expect((screen.getByLabelText('API key') as HTMLInputElement).value).toBe('sk-typed');
   });
 
-  it('saves the visible protocol at once, without waiting for detection', async () => {
+  it('saves the default format at once, without waiting for detection or asking for one', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
       .mockReturnValue(new Promise<never>(() => undefined));
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
@@ -225,7 +225,8 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     const user = await fillCredentials();
     // The probe is in flight and never answers; the save does not care.
     await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
-    expect(screen.getByRole('button', { name: 'OpenAI Chat Completions' }).getAttribute('aria-pressed')).toBe('true');
+    // The format is not a question while detection may still answer it.
+    expect(screen.queryByRole('button', { name: 'OpenAI Chat Completions' })).toBeNull();
     await clickConfirm(user);
     await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
@@ -242,9 +243,10 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     renderDialog();
     const user = await fillCredentials();
     await screen.findByText('Recognised as Anthropic Messages', undefined, DETECTION_WAIT);
-    await waitFor(() => expect(
-      screen.getByRole('button', { name: 'Anthropic Messages' }).getAttribute('aria-pressed'),
-    ).toBe('true'));
+    // A recognised format is stated, not offered as a choice; 「Change」 opens the choice.
+    expect(screen.queryByRole('button', { name: 'Anthropic Messages' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Change' }));
+    expect(screen.getByRole('button', { name: 'Anthropic Messages' }).getAttribute('aria-pressed')).toBe('true');
     // Only the address and key the person typed are probed.
     expect(observe).toHaveBeenCalledOnce();
     expect(observe.mock.calls[0][0]).toEqual({
@@ -282,6 +284,7 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     renderDialog();
     const user = await fillCredentials();
     await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
+    await user.click(screen.getByRole('button', { name: 'Change' }));
     await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
     answer.resolve(recognisedObservation('anthropic'));
     await waitFor(() => expect(screen.queryByText(/Detecting the API format/)).toBeNull());
@@ -293,7 +296,10 @@ describe('AddApiKeyDialog · save reconciliation', () => {
 
   it('shows the host an unnamed custom endpoint will be called', async () => {
     renderDialog();
-    await fillCredentials();
+    const user = await fillCredentials();
+    // The optional name waits under 「More settings」.
+    expect(screen.queryByRole('textbox', { name: /^Name/ })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'More settings' }));
     expect(screen.getByRole('textbox', { name: /^Name/ }).getAttribute('placeholder')).toBe('relay.example');
   });
 
@@ -320,6 +326,7 @@ describe('AddApiKeyDialog · save reconciliation', () => {
       .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
     renderDialog();
     const user = await fillCredentials();
+    await user.click(screen.getByRole('button', { name: 'Change' }));
     await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
     await clickConfirm(user);
     await screen.findByRole('button', { name: /^Retry$/ });
@@ -336,6 +343,7 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     renderDialog();
     expect(screen.getByRole('button', { name: CONFIRM }).hasAttribute('disabled')).toBe(true);
     const user = await fillCredentials();
+    await user.click(screen.getByRole('button', { name: /More settings|更多设置/ }));
     await user.type(screen.getByRole('textbox', { name: /Name|名称/i }), 'n'.repeat(65));
     expect(screen.getByRole('button', { name: CONFIRM }).hasAttribute('disabled')).toBe(true);
     expect(create).not.toHaveBeenCalled();

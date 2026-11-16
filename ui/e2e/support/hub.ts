@@ -409,10 +409,16 @@ export const fillApiKeyForm = async (
     await dialog.page().getByRole('option', { name: values.vendor, exact: true }).click();
   }
   if (values.name !== undefined) {
-    await dialog.getByLabel(hub('addKey.field.name'), { exact: true }).fill(values.name);
+    // The optional name waits under 「More settings」.
+    const name = dialog.getByLabel(hub('addKey.field.name'), { exact: true });
+    if (!(await name.isVisible())) await dialog.getByRole('button', { name: hub('addKey.more'), exact: true }).click();
+    await name.fill(values.name);
   }
   if (values.protocol) {
-    await dialog.getByRole('button', { name: values.protocol, exact: true }).click();
+    // The format is a choice only once asked for: 「Change」 opens it.
+    const format = dialog.getByRole('button', { name: values.protocol, exact: true });
+    if (!(await format.isVisible())) await dialog.getByRole('button', { name: hub('addKey.protocol.change'), exact: true }).click();
+    await format.click();
   }
   await dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true }).fill(values.baseUrl);
   await dialog.getByLabel(hub('addKey.field.apiKey'), { exact: true }).fill(values.apiKey);

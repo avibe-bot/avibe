@@ -1294,6 +1294,7 @@
         "heading": "Routes",
         "infoLabel": "What routes are",
         "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
+        "address": "Local address: {{address}} (for connecting other tools to the gateway)",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
         "addModel": "Add model",
@@ -1357,7 +1358,8 @@
             "unconfigured": "No model route configured",
             "unused": "No Agent uses this backend"
           },
-          "emptyModels": "This backend's model list is empty"
+          "emptyModels": "This backend's model list is empty",
+          "emptyNoProviders": "Add a model provider and its models will be listed here."
         },
         "catalog": {
           "title": "{{backend}} models",
@@ -2230,6 +2232,7 @@
           "title": "Connected, but not fully verified",
           "detail": "The response does not establish both the interface and credential validity"
         },
+        "more": "More settings",
         "protocol": {
           "saveFirstHint": "Choose the provider's API format. Saving does not require successful detection or a model test.",
           "auto": "Auto detect",
@@ -2238,6 +2241,7 @@
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "Search service",
+          "change": "Change",
           "idleHint": "Detected automatically once Base URL and API key are filled. Saving doesn't wait for it.",
           "detecting": "Detecting the API format… You can save without waiting.",
           "manual": "Choose the API format manually",

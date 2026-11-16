@@ -2799,7 +2799,7 @@ describe('SettingsModelsPage tools region', () => {
   it('connects active Tools service details to settings and the ordinary model Source key management', async () => {
     const put = vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue({ tools: [ACTIVE_SEARCH] });
     renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
-    await screen.findByRole('button', { name: 'Add provider' });
+    await screen.findByRole('button', { name: 'Add API key' });
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     const opener = await screen.findByRole('button', { name: 'DeepSeek' });
     await userEvent.click(opener);
@@ -2817,7 +2817,7 @@ describe('SettingsModelsPage tools region', () => {
 
   it('MH-USAGE-038: leaves a service detail for the Usage tab, whose window the detail read never moved', async () => {
     renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
-    await screen.findByRole('button', { name: 'Add provider' });
+    await screen.findByRole('button', { name: 'Add API key' });
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Exa' }));
     await userEvent.click(await screen.findByRole('button', { name: 'View usage' }));

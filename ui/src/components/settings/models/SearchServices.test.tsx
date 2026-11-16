@@ -80,12 +80,14 @@ describe('search service activation and mixed order', () => {
     const locale = i18n.cloneInstance({ lng });
     const view = render(wrap(<>
       <ToolsTab read={readyRegion({ tools: [ACTIVE_SEARCH] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />
-      <SourcesCard read={readyRegion(SEARCH_SOURCES)} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} searchTool={ACTIVE_SEARCH} onAddSearchService={vi.fn()} />
+      <SourcesCard read={readyRegion(SEARCH_SOURCES)} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} searchTool={ACTIVE_SEARCH} />
     </>, lng));
     expect(screen.getByText(locale.t('settings.models.searchServices.subtitle'))).toBeTruthy();
     expect(screen.getAllByRole('switch')).toHaveLength(2 + ACTIVE_SEARCH.executor_candidates.filter((candidate) => candidate.kind === 'service').length);
     expect(screen.getByRole('heading', { name: locale.t('settings.models.searchServices.order') })).toBeTruthy();
-    expect(screen.getByRole('button', { name: locale.t('settings.models.searchServices.addProvider') })).toBeTruthy();
+    // Sources adds models only: search services are added from the Tools tab.
+    expect(screen.getByRole('button', { name: locale.t('settings.models.upstream.addApiKey') })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: locale.t('settings.models.searchServices.addProvider') })).toBeNull();
     expect(screen.getByRole('button', { name: locale.t('settings.models.searchServices.add') })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: new RegExp(`^${locale.t('settings.models.tools.advanced.label')}`) }));
     expect(screen.getAllByRole('list', { name: locale.t('settings.models.searchServices.order') })).toHaveLength(1);
@@ -284,16 +286,16 @@ describe('search service activation and mixed order', () => {
     expect(screen.getByText(/Automatic:/)).toBeTruthy();
   });
 
-  it('adds the shared dialog entry to Sources only on the active read, and renders search Sources without model claims', async () => {
-    const onAddSearchService = vi.fn();
-    render(wrap(<SourcesCard read={readyRegion(SEARCH_SOURCES)} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} searchTool={ACTIVE_SEARCH} onAddSearchService={onAddSearchService} />));
+  it('opens the API Key form straight from Sources, and renders search Sources without model claims', async () => {
+    const onAddApiKey = vi.fn();
+    render(wrap(<SourcesCard read={readyRegion(SEARCH_SOURCES)} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={onAddApiKey} onAddSubscription={vi.fn()} searchTool={ACTIVE_SEARCH} />));
     const row = screen.getByRole('button', { name: /^Tavily/ });
     expect(row.textContent).toContain('does not provide models');
     expect(row.textContent).toContain('skipped');
-    const trigger = screen.getByRole('button', { name: 'Add provider' });
+    const trigger = screen.getByRole('button', { name: 'Add API key' });
     await userEvent.click(trigger);
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Search services (Tavily, Exa…)' }));
-    expect(onAddSearchService).toHaveBeenCalledWith(trigger);
+    expect(screen.queryByRole('menuitem')).toBeNull();
+    expect(onAddApiKey).toHaveBeenCalledWith(trigger);
   });
 });
 

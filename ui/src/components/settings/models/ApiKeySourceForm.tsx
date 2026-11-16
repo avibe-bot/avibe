@@ -11,7 +11,7 @@
 // that. State is the host's too — it is what setup preserves when a tab is
 // switched away from and back.
 import * as React from 'react';
-import { CircleCheck, Eye, EyeOff, LoaderCircle } from 'lucide-react';
+import { ChevronDown, CircleCheck, Eye, EyeOff, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -26,7 +26,6 @@ import {
   detectableEndpoint,
   draftDefaultName,
   draftNameValid,
-  draftProtocol,
   selectVendor,
   type ApiKeySourceDraft,
 } from './apiKeySourceDraft';
@@ -211,6 +210,14 @@ export const ApiKeySourceForm: React.FC<{
   const vendorPreset = modelApiKeyVendorPreset(draft.vendor);
   const nameValid = draftNameValid(draft);
   const detection = useProtocolDetection(detectableEndpoint(draft), draft.apiKey, disabled);
+  // The format is only a question when detection could not answer it or the
+  // person asked to change it; a preset fixes it, so it is not shown at all.
+  // ui/design: models/first-provider/api-key-preset
+  const [formatOpen, setFormatOpen] = React.useState(false);
+  const showFormats = formatOpen || draft.protocolChosen || detection.kind === 'unrecognised';
+  // The name is optional and defaults to the address, so it waits behind 「更多设置」.
+  const [moreOpen, setMoreOpen] = React.useState(() => draft.displayName.trim() !== '' || !nameValid);
+  const moreId = React.useId();
 
   // A settled detection moves the format until the person picks one. It never
   // waits on anything: the field holds the default meanwhile, and Save sends
@@ -256,9 +263,6 @@ export const ApiKeySourceForm: React.FC<{
           />
         )}
       </Field>
-      <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
-        {(id) => <Input id={id} value={draft.displayName} placeholder={draftDefaultName(draft) ?? undefined} disabled={disabled} aria-invalid={!nameValid} onChange={(event) => onChange({ ...draft, displayName: event.target.value }, 'displayName')} className="model-hub-add-key-input" />}
-      </Field>
       <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
         {(id) => <Input id={id} value={draft.baseUrl} disabled={disabled} autoComplete="url" spellCheck={false} onChange={(event) => onChange({ ...draft, baseUrl: event.target.value }, 'baseUrl')} className="model-hub-add-key-input font-mono" />}
       </Field>
@@ -273,24 +277,40 @@ export const ApiKeySourceForm: React.FC<{
         onEnter={onSubmit}
       />
 
-      <div className="model-hub-add-key-protocol-area">
-        <span className="model-hub-add-key-label">{t('settings.models.addKey.field.protocol')}</span>
-        {vendorPreset ? (
-          <div className="model-hub-add-key-protocol-idle-row">
-            <span className="model-hub-add-key-protocol-active">
-              <ProtocolGlyph protocol={draftProtocol(draft)} />{t(PROTOCOL_COPY_KEYS[draftProtocol(draft)])}
-            </span>
-          </div>
-        ) : (
-          <ProtocolSegments
-            disabled={disabled}
-            selection={draft.protocol}
-            onSelect={(value) => onChange({ ...draft, protocol: value, protocolChosen: true }, 'protocol')}
-          />
-        )}
-        {vendorPreset || draft.protocolChosen
-          ? <p className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.saveFirstHint')}</p>
-          : <DetectionNote detection={detection} />}
+      {!vendorPreset && (
+        <div className="model-hub-add-key-protocol-area">
+          <span className="model-hub-add-key-label">{t('settings.models.addKey.field.protocol')}</span>
+          {showFormats && (
+            <ProtocolSegments
+              disabled={disabled}
+              selection={draft.protocol}
+              onSelect={(value) => onChange({ ...draft, protocol: value, protocolChosen: true }, 'protocol')}
+            />
+          )}
+          {draft.protocolChosen ? null : <DetectionNote detection={detection} />}
+          {!showFormats && (
+            <button type="button" className="model-hub-add-key-hint self-start underline underline-offset-2 hover:text-foreground" disabled={disabled} onClick={() => setFormatOpen(true)}>
+              {t('settings.models.addKey.protocol.change')}
+            </button>
+          )}
+        </div>
+      )}
+      <div className="model-hub-add-key-more">
+        <button
+          type="button"
+          className="model-hub-add-key-hint flex items-center gap-1 hover:text-foreground"
+          aria-expanded={moreOpen}
+          aria-controls={moreId}
+          onClick={() => setMoreOpen((value) => !value)}
+        >
+          <ChevronDown className={cn('size-3 transition-transform', moreOpen && 'rotate-180')} aria-hidden="true" />
+          {t('settings.models.addKey.more')}
+        </button>
+        <div id={moreId} hidden={!moreOpen}>
+          <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
+            {(id) => <Input id={id} value={draft.displayName} placeholder={draftDefaultName(draft) ?? undefined} disabled={disabled} aria-invalid={!nameValid} onChange={(event) => onChange({ ...draft, displayName: event.target.value }, 'displayName')} className="model-hub-add-key-input" />}
+          </Field>
+        </div>
       </div>
     </>
   );

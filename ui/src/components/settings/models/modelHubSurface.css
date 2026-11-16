@@ -3944,3 +3944,9 @@ a.model-hub-order-price:hover { text-decoration: underline; }
     gap: var(--model-hub-picker-stack-gap);
   }
 }
+.model-hub-add-key-more {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: var(--model-hub-add-key-field-gap);
+}

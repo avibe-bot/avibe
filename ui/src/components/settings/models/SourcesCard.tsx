@@ -3,8 +3,6 @@ import { LoaderCircle, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import { ResponsiveMenu } from '@/components/ui/responsive-menu';
-import { searchServicesActive } from './searchServices';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { foldRegionRead, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
@@ -24,12 +22,8 @@ export const SourcesCard: React.FC<{
   subscriptionTriggerRef?: React.Ref<HTMLButtonElement>;
   activeBackends?: ReadonlySet<AgentBackend>;
   searchTool?: HostedWebSearchToolStatus;
-  onAddSearchService?: (opener: HTMLButtonElement) => void;
-}> = ({ read, onRetry, retryDisabled = false, retryRef, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef, activeBackends, searchTool, onAddSearchService }) => {
+}> = ({ read, onRetry, retryDisabled = false, retryRef, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef, activeBackends, searchTool }) => {
   const { t } = useTranslation();
-  const [addOpen, setAddOpen] = React.useState(false);
-  const addTrigger = React.useRef<HTMLButtonElement>(null);
-  const services = searchServicesActive(searchTool);
   const sources = foldRegionRead<Source[], Source[] | undefined>(read, {
     loading: () => undefined,
     ready: (data) => data,
@@ -88,10 +82,8 @@ export const SourcesCard: React.FC<{
           <Plus className="size-3" />
           {t('settings.models.upstream.addSubscription')}
         </Button>
-        {services ? <ResponsiveMenu open={addOpen} onOpenChange={setAddOpen} sheetTitle={t('settings.models.searchServices.addProvider')} trigger={<Button ref={addTrigger} variant="outline" size="xs" className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"><Plus className="size-3" />{t('settings.models.searchServices.addProvider')}</Button>}>
-          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-wash" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddApiKey(addTrigger.current); }}>{t('settings.models.upstream.addApiKey')}</button>
-          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-wash" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddSearchService?.(addTrigger.current); }}>{t('settings.models.searchServices.menu')}</button>
-        </ResponsiveMenu> : <Button
+        {/* Search services are added on the Tools tab, so this opens the API Key form directly. */}
+        <Button
           variant="outline"
           size="xs"
           className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"
@@ -99,7 +91,7 @@ export const SourcesCard: React.FC<{
         >
           <Plus className="size-3" />
           {t('settings.models.upstream.addApiKey')}
-        </Button>}
+        </Button>
       </div>
     </section>
   );
