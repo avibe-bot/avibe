@@ -59,7 +59,7 @@ struct VoiceCaptureAttributes: ActivityAttributes {
 
 /// The island's Send button: stop recording and send what was heard.
 struct VoiceCaptureSendIntent: LiveActivityIntent {
-    static let title: LocalizedStringResource = "voiceCapture.action.send"
+    static let title: LocalizedStringResource = "Send"
     static let isDiscoverable = false
 
     func perform() async throws -> some IntentResult {
@@ -72,7 +72,7 @@ struct VoiceCaptureSendIntent: LiveActivityIntent {
 
 /// The island's Cancel button: stop recording and discard the take.
 struct VoiceCaptureCancelIntent: LiveActivityIntent {
-    static let title: LocalizedStringResource = "voiceCapture.action.cancel"
+    static let title: LocalizedStringResource = "Cancel"
     static let isDiscoverable = false
 
     func perform() async throws -> some IntentResult {
@@ -85,7 +85,7 @@ struct VoiceCaptureCancelIntent: LiveActivityIntent {
 
 /// Retry on a failed take: send the kept recording again.
 struct VoiceCaptureRetryIntent: LiveActivityIntent {
-    static let title: LocalizedStringResource = "voiceCapture.action.retry"
+    static let title: LocalizedStringResource = "Retry"
     static let isDiscoverable = false
 
     func perform() async throws -> some IntentResult {

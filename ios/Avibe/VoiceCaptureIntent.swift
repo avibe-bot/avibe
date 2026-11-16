@@ -14,9 +14,9 @@ import Foundation
 /// (developer.apple.com/documentation/appintents/audiorecordingintent).
 @available(iOS 18.0, *)
 struct SpeakToMainBotIntent: AudioRecordingIntent {
-    static let title: LocalizedStringResource = "voiceCapture.intent.title"
+    static let title: LocalizedStringResource = "Speak to Main Bot"
     static let description = IntentDescription(
-        "voiceCapture.intent.description"
+        "Records what you say and sends it to your main Bot without opening Avibe."
     )
 
     /// The main Bot can act on the user's computer, so a locked phone must

@@ -111,12 +111,10 @@ final class VoiceCaptureController {
         await deliver(take)
     }
 
-    /// Asks the App's runtime to open the main Bot's conversation. Set by
-    /// the App once its model exists.
-    var openMainBotChatHandler: (@MainActor () -> Void)?
-
+    /// Opens the main Bot's conversation, where the Web UI asks for
+    /// whatever is missing (voice consent, the microphone, sign-in).
     func openMainBotChat() {
-        openMainBotChatHandler?()
+        InstancePathRequests.shared.open(path: OpenMainBotIntent.path)
     }
 
     /// Shows a "needs the App" notice when the intent cannot bring the App
