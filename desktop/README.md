@@ -205,12 +205,19 @@ rules are stated at the top of that file. In short:
   without a break for 0.75 seconds the first time the card is seen and 2
   seconds every later time, and never sooner than 2 seconds after the user
   last arrived: Avibe became the active app, or the main window came back from
-  hidden, minimized or another Space. Until then every click and key for the
-  window is dropped where the window receives it; none is passed to what is
-  underneath. The card is displayed the whole time, in front of Avibe's other
-  windows and with the keyboard, and nothing changes on screen when it starts
-  to take input. There is no visual cue; a user who clicks too early clicks
-  again.
+  hidden, minimized or another Space. Until then every key for the window,
+  and every click on its content, is dropped where the window receives it;
+  none is passed to what is underneath. Clicks on the title bar are delivered,
+  so the window can be moved or closed. The card is on screen the whole time.
+  When it is displayed it is put in front of Avibe's other windows and given
+  the keyboard, and the shell never moves it or gives it the keyboard again,
+  so nothing changes on screen when it starts to take input. Another Avibe
+  window can be put in front of it later, by the user or by a page. There is
+  no visual cue: a user who clicks too early clicks again, and keys typed in
+  the two seconds after the user comes back to a card are dropped silently.
+  In the seed-wallet window that can shorten a typed passphrase without
+  notice; entering it twice catches that when a wallet is created, and
+  comparing the address when one is imported.
 - **Not where the user is not.** A sandbox window comes on screen only while
   Avibe is the active app and the main window is visible, on the current Space
   and not minimized, and only one at a time. A window that may not appear when
@@ -222,11 +229,15 @@ rules are stated at the top of that file. In short:
 - **What the input rule does not cover.** A second card navigated into the
   same visible window (the sandbox's own arming applies, as in a browser). A
   present user who confirms without reading. A card displayed while nobody is
-  at the Mac is live when they return, unless the display slept: "present"
-  means active app and visible window, not eyes. The main window merely raised
+  at the Mac is live when they return: "present" means active app and visible
+  window, not eyes. A card fully covered by another Avibe window and brought
+  forward again may be live at once: in the probe AppKit did not report a
+  fully covered card as hidden. The main window merely raised
   from behind another Avibe window is not an arrival; the first 0.75 seconds
   cover a card shown then. A window counts as visible when any part of it
-  shows. Menu commands and system input panels (Paste, the emoji picker,
+  shows, so a card mostly covered by another Avibe window and brought forward
+  again is live at once; only its first click, made while it is not the key
+  window, is not delivered. Menu commands and system input panels (Paste, the emoji picker,
   dictation) still reach a key window; none can confirm. Computer Use and
   other accessibility-driven actions do not pass the window's event entry, as
   in a browser. Drag and drop onto the window is neither click nor key.

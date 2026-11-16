@@ -48,11 +48,15 @@
 //!   [`LIVE_AFTER_RETURN`] every later time, and never sooner than
 //!   [`LIVE_AFTER_RETURN`] after the user last arrived: the app became the
 //!   active one, or the opener's window came back from hidden, minimized or
-//!   another Space. Until then every click and key for the window is dropped
-//!   where the window receives it; it is not passed to what is underneath.
-//!   The card is displayed the whole time, in front of this app's other
-//!   windows and with the keyboard, and nothing about the window changes on
-//!   screen when it starts to take input.
+//!   another Space. Until then every key for the window, and every click on
+//!   its content, is dropped where the window receives it and is not passed
+//!   to what is underneath; clicks on the title bar are delivered, so the
+//!   window can be moved or closed. The card is on screen the whole time. When
+//!   it is displayed it is put in front of this app's other windows and given
+//!   the keyboard, and the shell never moves it or gives it the keyboard
+//!   again: nothing about the window changes on screen when it starts to take
+//!   input. Another window of the app can be put in front of it later, by the
+//!   user or by a page.
 //! - **Not where the user is not.** A child whose first sandbox document
 //!   commits while this app is not the active one, or while the opener's
 //!   window is not on screen, or while another child of that opener is on
@@ -881,9 +885,11 @@ define_class!(
             close(self.ivars().id, true);
         }
 
-        /// The window was covered, uncovered, minimized, restored, hidden with
-        /// the app, moved to another Space, or the display slept or woke. All
-        /// of them end or begin a period in which the user can see the card.
+        /// AppKit's word on whether any of the window can be seen changed:
+        /// it was hidden with the app or its main window, or shown again, and
+        /// by AppKit's documentation also minimized, moved to another Space,
+        /// fully covered, or the display slept. Each ends or begins a period
+        /// in which the user can see the card.
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn occlusion_changed(&self, _notification: &NSNotification) {
             let id = self.ivars().id;

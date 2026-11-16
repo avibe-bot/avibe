@@ -89,8 +89,11 @@ the sandbox unmodified.
    off. Otherwise there is no child. Media capture is refused. Its title is the allowed host.
 6. **How it ends.** `window.close()`, the user closing it, the opener committing
    a new document, the opener's window being closed or destroyed, a crashed web
-   content process, or rules 3 and 4. Each path detaches the delegates,
-   destroys the page and closes the native window.
+   content process, or rules 3 and 4. Each path takes the window out of the
+   shell's registry, closes the native window and destroys the page one turn of
+   the main run loop later. The web view keeps its navigation delegate until
+   the page is destroyed; with the window out of the registry that delegate
+   refuses every navigation.
 
 At most four children exist at once for the main webview, hidden ones included.
 This bounds resources; it is not a security boundary between pages.
@@ -155,9 +158,12 @@ screen was live the moment the user returned or the app was pulled forward.
 So there is one rule, about input, and it is the fourth above. It is checked
 for each event at the one place every mouse, scroll and key event for a window
 passes (`sendEvent:`, and `performKeyEquivalent:` for keys with Command).
-"Visible" is AppKit's own occlusion state for the window, so minimizing, hiding
-the app, a Space change, display sleep and being fully covered are one signal
-and not a list of causes. The app can be brought forward without the user
+"Visible" is AppKit's own occlusion state for the window, so that hiding the
+app or the main window, minimizing, a Space change and display sleep are one
+signal and not a list of causes. The probe produces the first two. The others
+rest on AppKit's documentation, and one of them is known not to hold as
+documented: on the CI runner AppKit did not report a card fully covered by
+another window of the app as hidden. The app can be brought forward without the user
 choosing it (a page asking for the main window or opening an app window, an
 `avibe:` link from another app, an Agent launching the app), so an arrival
 counts from the system's notification, not from any of those commands, and it
@@ -168,21 +174,33 @@ double-click interval, so a click begun on something else never lands on a
 card that appeared in its place. Two seconds after an arrival gives a user who
 has just come to the app, or been brought there, time to see where they are.
 
-Clicks in the interval are dropped, not passed through. The card is on screen;
+Clicks on the window's content in the interval are dropped, not passed
+through; clicks on the title bar are delivered, so the window can be moved or
+closed. The card is on screen;
 a click on its Confirm that fell through would land on whatever the Workbench
 has at that spot, which the page chooses and which can be a real control. The
-card is in front and key from the moment it is displayed, so that the shell
-never moves or keys a window at the moment it turns live, which would itself
-be a cue a page could time. Keys are dropped at the same entry, so being key
-early costs nothing.
+card is put in front of the app's other windows and made key at the moment it
+is displayed, and the shell never moves or keys it again, so nothing happens
+on screen at the moment it turns live that a page could time. Another window
+of the app can be put in front of it later, by the user or by a page. Keys are
+dropped at the same entry, so being key early costs nothing.
+
+There is no visual cue for "not live yet". One consequence: keys typed in the
+two seconds after the user comes back to a card are dropped silently. In the
+seed-wallet window that can shorten a typed passphrase without notice; the
+double entry catches it when a wallet is created, and the address comparison
+when one is imported.
 
 Not covered, by decision or by nature: a second card navigated into the same
 visible window (the sandbox's own arming applies, as in a browser); a present
 user who confirms without reading; a card displayed while nobody is at the Mac,
-which is live when they return unless the display slept; the main window
+which is live when they return; a card fully covered by another window of the
+app and brought forward again, which may be live at once; the main window
 merely raised from behind another window of the app, which is not an arrival
 (the first 0.75 seconds cover it); partial covering, since a window counts as
-visible when any part shows; menu commands and system input panels (Paste, the
+visible when any part shows, so a card mostly covered by another window of the
+app and brought forward again is live at once, and only its first click, made
+while it is not the key window, is not delivered; menu commands and system input panels (Paste, the
 emoji picker, dictation), which reach a key window and cannot confirm;
 Computer Use and other accessibility-driven actions, as in a browser; drag and
 drop.
@@ -277,15 +295,17 @@ the sandbox's window goes to the browser with every other link.
     clicks, a Return key and a Command key to the window every 30 ms. No
     input may be logged before 0.75 seconds after a card is first displayed
     (with a page that was armed long before it could paint); before 2 seconds
-    after the card comes back with the main window, is uncovered by another
-    window of the app, or the user returns from another app or un-hides the
-    app; or before 2 seconds after an arrival for a card asked for at once.
+    after the card comes back with the main window, or the user returns from
+    another app or un-hides the app; or before 2 seconds after an arrival for
+    a card asked for at once. The probe also covers the card completely with
+    another window of the app and checks the same if AppKit then reports the
+    card as hidden; on the CI runner it did not, so that case is not proven.
     Clicks must be logged afterwards, so the check cannot pass by never
     delivering. A card displayed while another window of the app is in front
     is the app's frontmost window and key, and neither changes when it starts
-    to take input. A Space change and display sleep cannot be produced on a
-    runner; for those the claim rests on AppKit's documentation of the
-    occlusion state.
+    to take input. Minimizing, a Space change and display sleep are not
+    produced by the probe; for those, as for full covering, the claim rests on
+    AppKit's documentation of the occlusion state.
   - **App not active.** A sandbox window is closed instead of appearing. This
     run takes no keyboard focus.
   - **The shell's own install** on the unsigned test executable: no marker and

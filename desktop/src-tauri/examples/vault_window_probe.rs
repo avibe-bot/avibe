@@ -613,8 +613,8 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             println!(
                 "vault window probe (app active{}): marker scope, hidden reservation, reveal only after the \
                  sandbox document is presented, opener link, empty content controller and own preferences, \
-                 URL scheme guard, navigation refusals, one window at a time, quiet interval, hidden main \
-                 window, no input before a card has been seen, size bounds, close paths, \
+                 URL scheme guard, navigation refusals, one window at a time, hidden main window, no input \
+                 before a card has been seen, a displayed card in front and key, size bounds, close paths, \
                  deadline, cap, reload and main-window teardown passed",
                 if self.focus { ", with focus" } else { "" }
             );
