@@ -1237,6 +1237,7 @@
         "unread": "Model Hub status unavailable",
         "notStarted": "Model Hub not ready",
         "notInstalled": "Model Hub component not installed",
+        "allOff": "Local backends are all turned off",
         "allDirect_one": "The only backend uses its own login",
         "allDirect_other": "All {{count}} backends use their own login",
         "starting": "Starting…",
@@ -1521,6 +1522,11 @@
           "cancel": "Cancel",
           "add": "Add model",
           "apply": "Save model"
+        },
+        "off": {
+          "status": "Turned off",
+          "enable": "Turn on",
+          "enableLabel": "Turn on {{backend}} in Settings › Backends"
         }
       },
       "takeover": {

@@ -1237,6 +1237,7 @@
         "unread": "模型网关状态不可用",
         "notStarted": "模型网关尚未就绪",
         "notInstalled": "模型网关组件未安装",
+        "allOff": "本机后端都已停用",
         "allDirect_one": "{{count}} 个后端都由 Agent 管理",
         "allDirect_other": "{{count}} 个后端都由 Agent 管理",
         "starting": "正在启动…",
@@ -1521,6 +1522,11 @@
           "cancel": "取消",
           "add": "添加模型",
           "apply": "保存模型"
+        },
+        "off": {
+          "status": "已停用",
+          "enable": "去启用",
+          "enableLabel": "去启用 {{backend}}（设置 › 后端）"
         }
       },
       "takeover": {

@@ -1,6 +1,7 @@
 import * as React from 'react';
-import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Plus, Power, RefreshCw, Route, TriangleAlert } from 'lucide-react';
+import { ArrowDownUp, ArrowRight, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Plus, Power, RefreshCw, Route, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 import { Badge } from '@/components/ui/badge';
 import { RouteOriginBadge } from './RouteOriginBadge';
@@ -350,8 +351,42 @@ const AgentModelCard: React.FC<{
   );
 };
 
+/**
+ * A backend that is installed but switched off in Settings · Backends: one row,
+ * after the backends that are on. It holds no models and no actions, and it is
+ * not a wire endpoint (no `data-agent-backend`), so nothing reads as routed to it.
+ * ui/design: models/backend-off/owners-case
+ */
+const SwitchedOffBackendRow: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { Icon, tileCls, iconCls, label, settingsRoute } = getBackendUiMeta(agent.backend);
+  return (
+    <section
+      className="model-hub-agent-off flex min-w-0 items-center gap-[9px] rounded-lg border border-edge bg-surface px-3.5 py-2.5 shadow-elevation-0"
+      data-agent-backend-off={agent.backend}
+    >
+      <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px] opacity-60 grayscale', tileCls)}><Icon className={cn('size-[15px]', iconCls)} /></span>
+      <h2 className="min-w-0 truncate text-[14px] font-bold leading-[17px] text-muted">{label}</h2>
+      <span className="model-hub-pill model-hub-fill-0a shrink-0 border border-edge text-muted">{t('settings.models.gateway.off.status')}</span>
+      <Button
+        variant="outline"
+        size="xs"
+        className="ml-auto shrink-0 rounded-md px-2.5 text-[11px] font-semibold"
+        aria-label={t('settings.models.gateway.off.enableLabel', { backend: label }) as string}
+        onClick={() => navigate(settingsRoute)}
+      >
+        {t('settings.models.gateway.off.enable')}
+        <ArrowRight aria-hidden="true" />
+      </Button>
+    </section>
+  );
+};
+
 export const AgentCard: React.FC<{
   agents: AgentSupply[];
+  /** Installed backends switched off in Settings · Backends, drawn as folded rows after the rest. */
+  switchedOff?: AgentSupply[];
   runtime: FreshRuntimeProjection | null;
   sources: Source[];
   chains: ModelChainIndex;
@@ -366,12 +401,13 @@ export const AgentCard: React.FC<{
   onProbeSettled: (agent: AgentSupply) => void;
   onOpenAgent?: (name: string) => void;
   connectingBackend: string | null;
-}> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => {
+}> = ({ agents, switchedOff = [], pendingBackends, switchFailures, connectingBackend, ...props }) => {
   const [activeOriginHelp, setActiveOriginHelp] = React.useState<string | null>(null);
   const onOriginHelpChange = React.useCallback((key: string, open: boolean) => {
     // Late blur, leave timers and row cleanup can dismiss only their own help.
     setActiveOriginHelp((current) => open ? key : current === key ? null : current);
   }, []);
   const orderedAgents = [...agents].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend));
-  return <div className="flex flex-col gap-2.5">{orderedAgents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;
+  const orderedOff = [...switchedOff].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend));
+  return <div className="flex flex-col gap-2.5">{orderedAgents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}{orderedOff.map((agent) => <SwitchedOffBackendRow key={agent.backend} agent={agent} />)}</div>;
 };

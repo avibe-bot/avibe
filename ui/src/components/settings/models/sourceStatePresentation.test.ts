@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { sourceStatePresentation, type SourceStateSurface } from './sourceStatePresentation';
+import { activeSourceAdoption, attributableBackends, sourceStatePresentation, type SourceStateSurface } from './sourceStatePresentation';
 import { SOURCE_STATUSES } from './types';
 import type { SourceState, SourceStatus, SupplyChannel } from './types';
 
@@ -172,5 +172,24 @@ describe('sourceStatePresentation', () => {
     expect(sourceStatePresentation(state('needs_action', {
       detail_key: 'models.source.needs_action.balance_exhausted',
     }), 'detail', 'en', 0).key).toBe('settings.models.sourceDetail.status.needsAction.balanceExhausted');
+  });
+});
+
+describe('attributableBackends', () => {
+  const all = ['vibey', 'claude', 'codex', 'opencode'] as const;
+  const adopted = [{ backend: 'codex' as const, menu_model: 'm' }, { backend: 'vibey' as const, menu_model: 'm' }];
+
+  it('names only the Hub backends that are on once the Agent read is ready', () => {
+    const active = attributableBackends(true, ['vibey'], new Set(['codex']), all);
+    expect(activeSourceAdoption(adopted, active)).toEqual([{ backend: 'vibey', menu_model: 'm' }]);
+  });
+
+  it('never names a backend known to be switched off while the Agent read is degraded', () => {
+    const active = attributableBackends(false, [], new Set(['codex']), all);
+    expect(activeSourceAdoption(adopted, active)).toEqual([{ backend: 'vibey', menu_model: 'm' }]);
+  });
+
+  it('leaves attribution unfiltered before anything is known', () => {
+    expect(attributableBackends(false, [], new Set(), all)).toBeUndefined();
   });
 });
