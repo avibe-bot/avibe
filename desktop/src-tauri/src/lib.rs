@@ -1361,19 +1361,25 @@ impl StatusSink for WindowSink {
 /// The capability file is the enforcing boundary. This is the second layer, so
 /// that widening a capability by mistake cannot alone expose the shell to a page
 /// served by the Runtime.
-fn ensure_shell_ui(window: &WebviewWindow) -> Result<(), String> {
+fn ensure_shell_ui<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
     match window.url() {
-        Ok(url)
-            if window.label() == MAIN_WINDOW
-                && is_shell_ui_url(&url)
-                && matches!(url.path(), "/" | "/index.html")
-                && url.query().is_none()
-                && url.fragment().is_none() =>
-        {
-            Ok(())
-        }
+        Ok(url) if window.label() == MAIN_WINDOW && is_bootstrap_page_url(&url) => Ok(()),
         _ => Err("This command is only available to the Avibe desktop shell.".to_owned()),
     }
+}
+
+/// The bundled bootstrap page, and nothing else from the bundle.
+fn is_bootstrap_page_url(url: &Url) -> bool {
+    let page = match url.path() {
+        "/" | "/index.html" => true,
+        // macOS loads the bundled page as `tauri://localhost`, and WebKit keeps
+        // that URL as loaded: a non-special scheme has an empty path. Only that
+        // exact origin may omit the path; Windows always reports
+        // `http://tauri.localhost/`.
+        "" => url.scheme() == "tauri",
+        _ => false,
+    };
+    page && is_shell_ui_url(url) && url.query().is_none() && url.fragment().is_none()
 }
 
 /// The bundled bootstrap may always navigate within its own origin. Once the
@@ -3944,6 +3950,74 @@ mod tests {
             WorkbenchHandoff::Monitor
         );
         assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_MONITOR);
+    }
+
+    #[test]
+    fn the_bootstrap_page_is_recognized_as_each_platform_loads_it() {
+        for raw in [
+            // macOS, as WKWebView reports the bundled page.
+            "tauri://localhost",
+            "tauri://localhost/",
+            "tauri://localhost/index.html",
+            // Windows (WebView2).
+            "http://tauri.localhost/",
+            "http://tauri.localhost/index.html",
+        ] {
+            assert!(is_bootstrap_page_url(&Url::parse(raw).expect("test URL")), "{raw}");
+        }
+        for raw in [
+            "tauri://localhost/account/index.html",
+            "tauri://localhost/account",
+            "tauri://localhost?view=instances",
+            "tauri://localhost/?view=instances",
+            "tauri://localhost#x",
+            "tauri://example.com",
+            "tauri://example.com/",
+            "avibe://localhost",
+            "http://tauri.localhost/account/index.html",
+            "https://tauri.localhost/",
+            "http://127.0.0.1:5123",
+            "http://127.0.0.1:5123/",
+            "about:blank",
+        ] {
+            assert!(!is_bootstrap_page_url(&Url::parse(raw).expect("test URL")), "{raw}");
+        }
+    }
+
+    /// `bootstrap_status`, Try again (`bootstrap_retry`) and Installation help
+    /// (`open_install_docs`) all pass this gate first. On macOS it refused the
+    /// page as WKWebView loads it, so all three failed there.
+    #[test]
+    fn the_bootstrap_commands_admit_the_main_window_on_each_platform_url() {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+        let app = tauri::test::mock_app();
+        let window = |label: &str, raw: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::External(Url::parse(raw).expect("test URL")))
+                .build()
+                .expect("mock window")
+        };
+        let main = window(MAIN_WINDOW, "tauri://localhost");
+        assert_eq!(ensure_shell_ui(&main), Ok(()));
+        for raw in ["tauri://localhost/index.html", "http://tauri.localhost/"] {
+            main.navigate(Url::parse(raw).expect("test URL")).expect("navigate");
+            assert_eq!(ensure_shell_ui(&main), Ok(()), "{raw}");
+        }
+        for raw in ["http://127.0.0.1:5123/", "tauri://localhost/account/index.html"] {
+            main.navigate(Url::parse(raw).expect("test URL")).expect("navigate");
+            assert!(ensure_shell_ui(&main).is_err(), "{raw}");
+        }
+        let other = window("pet", "tauri://localhost");
+        assert!(ensure_shell_ui(&other).is_err(), "only the main window");
+
+        let source = include_str!("lib.rs");
+        for command in [
+            "fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<BootstrapStatus>, String> {\n    ensure_shell_ui(&window)?;",
+            "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {\n    ensure_shell_ui(&window)?;",
+            "fn open_install_docs(window: WebviewWindow) -> Result<(), String> {\n    ensure_shell_ui(&window)?;",
+        ] {
+            assert!(source.contains(command), "the command must be gated by ensure_shell_ui: {command}");
+        }
     }
 
     #[test]

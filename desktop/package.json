@@ -11,6 +11,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && npm --prefix ../ui run build:desktop-account",
     "test:i18n": "node scripts/verify-i18n.mjs",
+    "test:bootstrap": "node --test scripts/connection.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:updater": "cargo test -p avibe-runtime-host update && cargo test -p avibe-desktop update"

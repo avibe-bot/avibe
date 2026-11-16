@@ -87,6 +87,9 @@ jobs:
       - name: Verify bootstrap localization contract
         run: npm run test:i18n
 
+      - name: Test the bootstrap page's connection rule
+        run: npm run test:bootstrap
+
       - name: Install pinned driver validation dependency
         working-directory: .
         run: >-
