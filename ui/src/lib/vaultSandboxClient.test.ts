@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { VaultSandboxClient, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
+import { VaultSandboxClient, authorizationWindowFeatures, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
 import { stubBlankPopup, stubReleaseFetch } from './__fixtures__/vaultSandboxTransport';
 import type { VaultConfirmSurface } from './vaultConfirmSurface';
 import type { PolicyDowngradeContext } from './vaultSigningPolicy';
@@ -522,5 +522,32 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     vi.spyOn(window, 'open').mockReturnValue(null);
     expect(page.client.openVaultAuthorizationWindow()).toBeNull();
     expect(page.handoff()).toBe('fallback');
+  });
+});
+
+describe('the secure window opens at a fixed size, centered over the Avibe window', () => {
+  it('computes the same size every time and centers it on the opener', () => {
+    vi.stubGlobal('screenX', 100);
+    vi.stubGlobal('screenY', 50);
+    vi.stubGlobal('outerWidth', 1440);
+    vi.stubGlobal('outerHeight', 900);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=560,top=120');
+    // Never off the left or top edge, even from a small window.
+    vi.stubGlobal('screenX', 0);
+    vi.stubGlobal('screenY', 0);
+    vi.stubGlobal('outerWidth', 400);
+    vi.stubGlobal('outerHeight', 500);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=0,top=0');
+    // A display left of the primary one has negative coordinates: the window stays on it.
+    vi.stubGlobal('screen', { availLeft: -1440, availTop: 0, availWidth: 1440, availHeight: 900 });
+    vi.stubGlobal('screenX', -1440);
+    vi.stubGlobal('screenY', 0);
+    vi.stubGlobal('outerWidth', 1440);
+    vi.stubGlobal('outerHeight', 900);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=-980,top=70');
+    // Kept within that screen, not pushed off its right edge.
+    vi.stubGlobal('screenX', -400);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=-520,top=70');
+    vi.unstubAllGlobals();
   });
 });

@@ -66,3 +66,11 @@ it('AUTH-SETUP-178 a rejected trusted install does not turn a later check error 
   expect(await screen.findByText(en.update.status.checkFailed)).toBeTruthy();
   expect(screen.queryByText(en.update.failure.install.title)).toBeNull();
 });
+
+// The remote note lives in the instance menu only, where switching happens; full pages do not repeat it.
+it('AUTH-SETUP-179 full pages do not repeat the remote-instance note', async () => {
+  window.history.replaceState(null, '', '/account/index.html?view=instances');
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
+  expect(screen.queryByText(en.desktopClient.auxiliaryIncomplete)).toBeNull();
+});

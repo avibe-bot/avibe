@@ -7,14 +7,14 @@ import pytest
 from sqlalchemy import event, select
 
 from storage import vault_service
-from storage.models import vault_audit, vault_requests
+from storage.models import vault_audit, vault_requests, vault_secrets
 from tests.test_vault_bitcoin_ecdsa_context import _case, _maximal_legacy_case
 from tests.test_vault_protected_bitcoin import _create, _request
 from tests.test_vault_protected_bitcoin import capable_cohort as capable_cohort
 from vibe import api
 
-NULL_FIELDS = {"secret_name", "requester", "delivery", "message_id", "card", "session"}
-SUMMARY_FIELDS = NULL_FIELDS | {"id", "request_type", "status", "created_at", "decided_at", "expires_at"}
+NULL_FIELDS = {"requester", "delivery", "message_id", "card", "session"}
+SUMMARY_FIELDS = NULL_FIELDS | {"id", "request_type", "status", "created_at", "decided_at", "expires_at", "secret_name", "protection"}
 
 
 def _compact(value):
@@ -48,6 +48,7 @@ def test_sql_limit_and_post_filter_negative_slicing_remain_distinct(capable_coho
     for row in rows:
         assert set(row) == SUMMARY_FIELDS and row["request_type"] == "sign"
         assert all(row[field] is None for field in NULL_FIELDS)
+        assert row["secret_name"] == "PUBLIC_TEST_BTC" and row["protection"] == "protected"
         assert len(_compact(row)) <= 1024
     comparison = _compact({"ok": True, "requests": rows})
     wrapper = len(_compact({"ok": True, "requests": []})) + max(0, len(rows) - 1)
@@ -138,17 +139,20 @@ def test_new_summary_and_old_kind_full_contribution_are_not_a_universal_128k_cap
     assert len(_compact({"ok": True, "requests": rows})) > 131_072
 
 
-def test_actual_list_http_writer_subtree_and_known_id_full_get(capable_cohort):
+@pytest.mark.parametrize("kind", ["p2pkh", "p2wpkh"])
+def test_actual_list_http_writer_subtree_and_known_id_full_get(capable_cohort, kind):
     from vibe.ui_server import app
 
     _create()
-    request, _ = _request("p2wpkh")
+    request, _ = _request(kind)
     client = app.test_client()
     response = client.get("/api/vault/requests")
     assert response.status_code == 200
     payload = response.get_json()
     row = next(row for row in payload["requests"] if row["id"] == request["id"])
     assert set(row) == SUMMARY_FIELDS
+    assert row["secret_name"] == "PUBLIC_TEST_BTC" and row["protection"] == "protected"
+    assert all(row[field] is None for field in NULL_FIELDS)
     actual = response.content
     if isinstance(actual, str):
         actual = actual.encode()
@@ -158,7 +162,7 @@ def test_actual_list_http_writer_subtree_and_known_id_full_get(capable_cohort):
     selected = client.get(f"/api/vault/requests/{request['id']}")
     assert selected.status_code == 200
     assert selected.get_json()["request"]["id"] == request["id"]
-    assert selected.get_json()["request"]["delivery"]["signing_context"] == _case("p2wpkh")
+    assert selected.get_json()["request"]["delivery"]["signing_context"] == _case(kind)
 
 
 def test_expiry_checks_each_row_at_its_transition_even_when_list_limit_is_zero(capable_cohort, monkeypatch):
@@ -211,7 +215,9 @@ def test_viewer_acl_and_session_filter_never_materialize_new_request_bodies(capa
     monkeypatch.setattr(vault_service, "_request_row_payload", lambda *a, **k: pytest.fail("summary hydrated a full card"))
     viewer = resource_access_service.ResourceUserContext(subject="public-test-viewer", instance_role="viewer", is_remote=True)
     with api._vault_engine().begin() as conn:
-        assert [row["id"] for row in vault_service.list_requests(conn, session="wanted", limit=1)] == [request["id"]]
+        visible, = vault_service.list_requests(conn, session="wanted", limit=1)
+        assert visible["id"] == request["id"]
+        assert visible["secret_name"] == "PUBLIC_TEST_BTC" and visible["protection"] == "protected"
         assert vault_service.list_requests(conn, session="wanted", limit=-1) == []  # Existing Python slicing.
         assert vault_service.list_requests(conn, user_context=viewer) == []
         assert vault_service.list_requests(conn, session="wanted", user_context=viewer) == []
@@ -254,3 +260,81 @@ def test_B16_real_http_hundred_summaries_with_two_maximum_parents_and_outside_fo
     full = client.get(f"/api/vault/requests/{requests[0]}")
     assert full.status_code == 200 and full.get_json()["request"]["id"] == requests[0]
     assert full.get_json()["request"]["delivery"]["signing_context"] == native
+
+
+@pytest.mark.parametrize("kind", ["p2pkh", "p2wpkh"])
+@pytest.mark.parametrize("character", ["A", "é", '"', "\\"], ids=["legal-ascii-name", "legacy-utf8-metadata", "escaped-quote-metadata", "escaped-backslash-metadata"])
+@pytest.mark.parametrize("overflow", [0, 1], ids=["exactly-1024", "1025-name-fallback"])
+def test_summary_whole_name_boundary_preserves_actual_wire_bytes_and_row(capable_cohort, kind, character, overflow):
+    """Full names must not make a valid collection fail, truncate or lose rows.
+
+    ASCII names have no global length cap. Non-ASCII SQL metadata additionally
+    pins byte (not character) accounting; it is not a new accepted name syntax.
+    """
+    from vibe.ui_server import app
+
+    _create()
+    request, _ = _request(kind)
+    expected = {
+        "id": request["id"], "request_type": "sign", "status": "pending",
+        "created_at": request["created_at"], "decided_at": None, "expires_at": request["expires_at"],
+        "secret_name": "", "protection": "protected", "requester": None, "delivery": None,
+        "message_id": None, "card": None, "session": None,
+    }
+    budget = 1024 - len(_compact(expected)) + overflow
+    width = len(_compact(character)) - 2  # Count JSON escaping as well as UTF-8.
+    name = character * (budget // width) + "A" * (budget % width)
+    expected["secret_name"] = name
+    assert len(_compact(expected)) == 1024 + overflow
+    # Persisted metadata fixtures, not signed releases or real owner records.
+    with api._vault_engine().begin() as conn:
+        conn.execute(vault_requests.update().where(vault_requests.c.id == request["id"]).values(secret_name=name))
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "PUBLIC_TEST_BTC").values(name=name))
+    response = app.test_client().get("/api/vault/requests")
+    assert response.status_code == 200
+    summary, = response.get_json()["requests"]
+    if overflow:
+        expected["secret_name"] = None
+    assert summary == expected
+    encoded = _compact(summary)
+    assert len(encoded) <= 1024 and encoded in response.content
+    if not overflow:
+        assert len(encoded) == 1024
+
+
+@pytest.mark.parametrize("captured", ["protected", "standard", None, {"nested": "protected"}, "missing"])
+def test_summary_protection_uses_only_captured_scalar_not_card_or_live_secret(capable_cohort, captured):
+    _create()
+    request, _ = _request("p2wpkh")
+    with api._vault_engine().begin() as conn:
+        delivery = json.loads(conn.execute(select(vault_requests.c.delivery).where(vault_requests.c.id == request["id"])).scalar_one())
+        if captured == "missing":
+            delivery.pop("bitcoin_identity")
+        else:
+            delivery["bitcoin_identity"]["protection"] = captured
+        # Both of these alternate sources disagree with the valid capture.
+        delivery["card"]["protection"] = "standard" if captured == "protected" else "protected"
+        conn.execute(vault_requests.update().where(vault_requests.c.id == request["id"]).values(delivery=json.dumps(delivery)))
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "PUBLIC_TEST_BTC").values(protection=delivery["card"]["protection"]))
+        summary, = vault_service.list_requests(conn)
+    assert summary["secret_name"] == "PUBLIC_TEST_BTC"
+    assert summary["protection"] == ("protected" if captured == "protected" else None)
+    assert all(summary[field] is None for field in NULL_FIELDS)
+
+
+def test_summary_acl_keeps_names_private_and_rejects_replaced_saved_identity(capable_cohort):
+    from storage import resource_access_service
+
+    _create()
+    request, _ = _request("p2wpkh")
+    owner = resource_access_service.ResourceUserContext(subject="test-owner", instance_role="owner", is_remote=True)
+    viewer = resource_access_service.ResourceUserContext(subject="test-viewer", instance_role="viewer", is_remote=True)
+    with api._vault_engine().begin() as conn:
+        metadata = dict(conn.execute(select(*vault_service._request_collection_columns()).where(vault_requests.c.id == request["id"])).mappings().one())
+        vault_service._require_summary_secret_access(conn, metadata, owner)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service._require_summary_secret_access(conn, metadata, viewer)
+        assert vault_service.list_requests(conn, user_context=viewer) == []
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "PUBLIC_TEST_BTC").values(id="vsec_public_test_replacement"))
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service._require_summary_secret_access(conn, metadata, owner)

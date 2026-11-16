@@ -7,7 +7,7 @@ struct RootView: View {
     // leave it untouched, and an account transition can release that runtime
     // without reloading the account page above it.
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             if let runtime = appModel.route.runtime {
                 if appModel.presentsDirectFaultOnly(runtime) {
                     // Opened under the listener fault: no WebView is made
@@ -30,8 +30,36 @@ struct RootView: View {
                 .ignoresSafeArea(.container, edges: .all)
             }
             if appModel.route == .loading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let attempt = appModel.runtimeOpenAttempt {
+                    RuntimeOpenProgressOverlay(
+                        attempt: attempt,
+                        cancel: {
+                            appModel.cancelRuntimeOpen(attemptID: attempt.id)
+                        }
+                    )
+                } else {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            if appModel.route == .onboarding(.instances),
+               let notice = appModel.runtimeOpenNotice
+            {
+                // The page's current block is the one way to open the
+                // instance again; the notice only explains. At the bottom it
+                // leaves the page's title, account button and current block
+                // uncovered.
+                RuntimeOpenNoticeBanner(
+                    notice: notice,
+                    dismiss: appModel.dismissRuntimeOpenNotice
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .bottom
+                )
             }
         }
         .sheet(
@@ -69,9 +97,6 @@ private struct BrowserScreen: View {
     @Environment(\.colorScheme) private var colorScheme
     let runtime: MobileRuntimeContext
 
-    @State private var reloadID = UUID()
-    @State private var isLoading = true
-    @State private var failed = false
     @State private var showsAccountFallback = false
     @State private var pageColorScheme: PageColorScheme?
 
@@ -91,6 +116,15 @@ private struct BrowserScreen: View {
 
     var body: some View {
         let instance = runtime.instance
+        let attempt = appModel.runtimeOpenAttempt.flatMap {
+            $0.runtime == runtime ? $0 : nil
+        }
+        let attemptID = attempt?.id ?? appModel.runtimeIdentity
+        let failed = attempt?.phase == .failed
+        let overlay = BrowserOverlay(
+            attemptPhase: attempt?.phase,
+            directFault: appModel.directFaultCovers(runtime)
+        )
         if let instanceOrigin = WebOrigin(url: instance.url) {
             VStack(spacing: 0) {
                 if showsAccountFallback && !failed {
@@ -102,8 +136,21 @@ private struct BrowserScreen: View {
                     )
                     .environment(\.colorScheme, chromeColorScheme)
                 }
+                if overlay == .awaitingUser, let attempt {
+                    RuntimeOpenAwaitingUserBanner(
+                        instanceName: instance.name,
+                        cancel: {
+                            appModel.cancelRuntimeOpen(
+                                attemptID: attempt.id
+                            )
+                        }
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color(uiColor: .systemBackground))
+                }
 
-                ZStack {
+                ZStack(alignment: .top) {
                     WebViewContainer(
                         instanceOrigin: instanceOrigin,
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
@@ -123,28 +170,27 @@ private struct BrowserScreen: View {
                         pageColorSchemeChanged: {
                             pageColorScheme = $0
                         },
+                        runtimeNavigationChanged: { event in
+                            appModel.handleRuntimeNavigation(
+                                event,
+                                attemptID: attemptID,
+                                runtime: runtime
+                            )
+                        },
                         didCreateController: {
-                            appModel.registerRuntimeController($0, for: runtime)
+                            appModel.registerRuntimeController(
+                                $0,
+                                for: runtime,
+                                attemptID: attemptID
+                            )
                         },
                         didReleaseWebViews: {
                             appModel.recordRuntimeReleaseBarrier($0)
                         },
-                        didStartLoading: {
-                            isLoading = true
-                            failed = false
-                        },
-                        didFinishLoading: {
-                            isLoading = false
-                            failed = false
-                            appModel.didFinishRuntimeLoading()
-                        },
-                        didFailLoading: {
-                            isLoading = false
-                            failed = true
-                            showsAccountFallback = false
-                        }
+                        didStartLoading: {},
+                        didFinishLoading: {},
+                        didFailLoading: {}
                     )
-                    .id(reloadID)
                     .ignoresSafeArea(.keyboard)
                     // The controller decides where the page ends; the Web
                     // UI reserves the status bar and the Home indicator
@@ -152,20 +198,15 @@ private struct BrowserScreen: View {
                     // is not the screen's, so the page starts there.
                     .ignoresSafeArea(.container, edges: [.top, .bottom])
 
-                    let overlay = BrowserOverlay(
-                        isLoading: isLoading,
-                        failed: failed,
-                        directFault: appModel.directFaultCovers(runtime)
-                    )
-
-                    if overlay == .loading {
-                        ProgressView("browser.loading")
-                            .padding(14)
-                            .background(
-                                .regularMaterial,
-                                in: RoundedRectangle(cornerRadius: 8)
-                            )
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if overlay == .loading, let attempt {
+                        RuntimeOpenProgressOverlay(
+                            attempt: attempt,
+                            cancel: {
+                                appModel.cancelRuntimeOpen(
+                                    attemptID: attempt.id
+                                )
+                            }
+                        )
                     }
 
                     if overlay == .loadFailure {
@@ -190,13 +231,13 @@ private struct BrowserScreen: View {
                             // shown; it returns when the return settles.
                             if appModel.mayReload(runtime) {
                                 Button("browser.error.retry") {
-                                    // Decided again at the tap, for the
-                                    // reload itself.
-                                    guard appModel.authorizeReload(of: runtime) else {
+                                    showsAccountFallback = false
+                                    guard let attempt else {
                                         return
                                     }
-                                    showsAccountFallback = false
-                                    reloadID = UUID()
+                                    _ = appModel.retryRuntimeOpen(
+                                        attemptID: attempt.id
+                                    )
                                 }
                                 .buttonStyle(.borderedProminent)
                             }
@@ -246,6 +287,192 @@ private struct BrowserScreen: View {
     }
 }
 
+private struct RuntimeOpenProgressOverlay: View {
+    let attempt: RuntimeOpenAttempt
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+            Text(
+                runtimeOpenPhaseText(
+                    attempt.phase,
+                    instanceName: attempt.runtime.instance.name
+                )
+            )
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            if attempt.isTakingLong {
+                Text("runtime.open.long_wait")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            Button("common.cancel", action: cancel)
+                .buttonStyle(.bordered)
+        }
+        .padding(22)
+        .frame(maxWidth: 320)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.08))
+        .accessibilityIdentifier("runtime-open-progress")
+    }
+}
+
+private struct RuntimeOpenAwaitingUserBanner: View {
+    let instanceName: String
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "person.crop.circle.badge.clock")
+                .font(.title2)
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    String(
+                        format: NSLocalizedString(
+                            "runtime.open.awaiting_user.title.named",
+                            comment: ""
+                        ),
+                        instanceName
+                    )
+                )
+                .font(.subheadline.weight(.semibold))
+                Text("runtime.open.awaiting_user.body")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("common.cancel", action: cancel)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+        .padding(14)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .accessibilityIdentifier("runtime-open-awaiting-user")
+    }
+}
+
+private struct RuntimeOpenNoticeBanner: View {
+    let notice: RuntimeOpenNotice
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "clock.badge.exclamationmark")
+                .font(.title2)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(
+                    String(
+                        format: NSLocalizedString(
+                            "runtime.open.timeout.title.named",
+                            comment: ""
+                        ),
+                        notice.instanceName
+                    )
+                )
+                .font(.subheadline.weight(.semibold))
+                Text(
+                    String(
+                        format: NSLocalizedString(
+                            "runtime.open.timeout.last_stage",
+                            comment: ""
+                        ),
+                        runtimeOpenPhaseLabel(notice.lastPhase)
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                // The page's current block, above the notice, reopens it.
+                Text(
+                    String(
+                        format: NSLocalizedString(
+                            "runtime.open.timeout.reopen_hint.named",
+                            comment: ""
+                        ),
+                        notice.instanceName
+                    )
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
+        }
+        .padding(14)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .accessibilityIdentifier("runtime-open-timeout-notice")
+    }
+}
+
+private func runtimeOpenPhaseText(
+    _ phase: RuntimeOpenPhase,
+    instanceName: String
+) -> String {
+    let key: String
+    switch phase {
+    case .preparingRoute:
+        key = "runtime.open.phase.preparing_route.named"
+    case .connecting:
+        key = "runtime.open.phase.connecting.named"
+    case .authenticating:
+        key = "runtime.open.phase.authenticating.named"
+    case .loadingPage:
+        key = "runtime.open.phase.loading_page.named"
+    case .awaitingUser:
+        key = "runtime.open.awaiting_user.title.named"
+    case .documentLoaded:
+        key = "runtime.open.phase.document_loaded.named"
+    case .failed:
+        key = "runtime.open.phase.failed.named"
+    }
+    return String(
+        format: NSLocalizedString(key, comment: ""),
+        instanceName
+    )
+}
+
+private func runtimeOpenPhaseLabel(_ phase: RuntimeOpenPhase) -> String {
+    let key: String
+    switch phase {
+    case .preparingRoute:
+        key = "runtime.open.stage.preparing_route"
+    case .connecting:
+        key = "runtime.open.stage.connecting"
+    case .authenticating:
+        key = "runtime.open.stage.authenticating"
+    case .loadingPage:
+        key = "runtime.open.stage.loading_page"
+    case .awaitingUser:
+        key = "runtime.open.stage.awaiting_user"
+    case .documentLoaded:
+        key = "runtime.open.stage.document_loaded"
+    case .failed:
+        key = "runtime.open.stage.failed"
+    }
+    return NSLocalizedString(key, comment: "")
+}
+
 /// The listener fault's message: reopen the App. It has no Retry and no other
 /// action, because nothing in this process reaches a working listener.
 private struct DirectFaultMessage: View {
@@ -272,8 +499,26 @@ private struct DirectFaultMessage: View {
 enum BrowserOverlay: Equatable {
     case none
     case loading
+    case awaitingUser
     case loadFailure
     case directFault
+
+    init(attemptPhase: RuntimeOpenPhase?, directFault: Bool) {
+        if directFault {
+            self = .directFault
+            return
+        }
+        switch attemptPhase {
+        case .preparingRoute, .connecting, .authenticating, .loadingPage:
+            self = .loading
+        case .awaitingUser:
+            self = .awaitingUser
+        case .failed:
+            self = .loadFailure
+        case .documentLoaded, nil:
+            self = .none
+        }
+    }
 
     init(isLoading: Bool, failed: Bool, directFault: Bool) {
         if directFault {

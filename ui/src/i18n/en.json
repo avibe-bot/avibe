@@ -6463,6 +6463,10 @@
       "createNeedsAvault": "Install or update avault as shown above first.",
       "createNeedsPassphraseAgain": "Enter the passphrase again to create the wallet."
     },
+    "handoff": {
+      "done": "Done. You can close this tab and go back to the desktop app.",
+      "openApp": "Open the desktop app"
+    },
     "requests": {
       "title": "Pending requests",
       "subtitle": "Agents are waiting for your approval.",
@@ -6745,7 +6749,8 @@
           "vault_already_initialized": "The protected vault was just set up elsewhere"
         },
         "nameTakenCreate": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold a wallet for the words just shown; don’t send funds to its addresses. Create it again with a different name; you’ll get a new set of words.",
-        "nameTakenImport": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold the wallet you just imported; don’t send funds to its addresses. Import it again with a different name, using the same words."
+        "nameTakenImport": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold the wallet you just imported; don’t send funds to its addresses. Import it again with a different name, using the same words.",
+        "windowWhy": "The recovery words appear only in a separate secure window that Avibe can't read or cover, which keeps them safer."
       },
       "nameTakenAfterSave": "Another key already uses this name, so the wallet isn’t saved yet. Change the name and save again; your recovery words stay the same.",
       "standardTierLine": "You're using Standard: the words are entered on this page and stored encrypted on the computer that runs Avibe."
@@ -7575,7 +7580,7 @@
     "accountService": "avibe.bot",
     "switchInstance": "Switch instance",
     "localRemoteAccess": "Remote access to this Mac",
-    "auxiliaryIncomplete": "Mini and native notifications are unavailable for remote instances in Phase 1. Return to this Mac to use them.",
+    "auxiliaryIncomplete": "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them.",
     "signOut": "Sign out",
     "signOutBody": "Sign out on this Desktop and return to this Mac. Registration, remote access preferences and running tasks are kept.",
     "localVersion": "Local Desktop version {{version}}",

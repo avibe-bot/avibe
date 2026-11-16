@@ -171,7 +171,6 @@ export function AccountApp() {
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
     <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
-    {state?.remote_auxiliary === 'disabled_incomplete' && <footer className="shrink-0 border-t border-edge bg-surface px-4 py-2 text-xs text-muted">{t('desktopClient.auxiliaryIncomplete')}</footer>}
   </div>;
 }
 

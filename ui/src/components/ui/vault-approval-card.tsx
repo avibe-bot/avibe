@@ -228,7 +228,6 @@ const SignMessage: React.FC<{ messageHex: string; scheme: string; address?: stri
         <span className="text-[13px] text-foreground">
           {bytes > 0 ? t('vaults.approval.messageBytes', { count: bytes }) : t('vaults.approval.emptyMessage')}
         </span>
-        <Badge variant="secondary">{scheme}</Badge>
         {bytes > 0 ? (
           <button
             type="button"
@@ -240,11 +239,12 @@ const SignMessage: React.FC<{ messageHex: string; scheme: string; address?: stri
               });
             }}
             aria-label={t('vaults.approval.copyMessage')}
-            className="ml-auto shrink-0 text-muted transition-colors hover:text-foreground"
+            className="shrink-0 text-muted transition-colors hover:text-foreground"
           >
             {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
           </button>
         ) : null}
+        <Badge variant="secondary">{scheme}</Badge>
       </DetailRow>
       {address || bytes > 0 ? (
         <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
@@ -805,7 +805,7 @@ export const VaultApprovalCard: React.FC<{
               {/* Full digest in a copyable code box (break-all) — it's the exact bytes being
                   signed, so the user can verify it rather than trust an elision. */}
               <div className="flex min-w-0 items-start gap-2">
-                <code className="min-w-0 flex-1 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground">
+                <code className="min-w-0 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground">
                   {signInput}
                 </code>
                 <button
