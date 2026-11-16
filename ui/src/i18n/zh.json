@@ -6548,6 +6548,10 @@
       },
       "account": "账户",
       "path": "派生路径 {{path}}",
+      "btcInput": "比特币输入",
+      "btcInputType": "{{type}} {{code}}",
+      "btcInputNetwork": "网络：{{network}}（请求方填写的标签）",
+      "btcInputReview": "金额、收款方和手续费，点「签名」后在安全窗口里显示和核对。",
       "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。",
       "solanaBlockhashHint": "Solana 交易通常只在一两分钟内有效。批准晚了，这笔交易可能已经过期，需要重新发起；使用持久 nonce 的交易不受此限。"
     },
@@ -6665,8 +6669,8 @@
       "back": "上一步",
       "wallet": {
         "badge": "助记词 · {{count}} 个账户",
-        "used": "已用 {{count}} / {{limit}} 个账户 · 账户编号与 MetaMask、Phantom 的账户顺序一致",
-        "agentUsage": "Agent 用 --chain 选链，--account 选账户",
+        "used": "已用 {{count}} / {{limit}} 个账户 · EVM 和 Solana 的账户编号与 MetaMask、Phantom 的顺序一致",
+        "agentUsage": "Agent 用 --chain 选链，--account 选账户；比特币再用 --address-type 选地址类型。",
         "ask": "签名前问我",
         "askLocked": "已打开。目前不能在这里关闭。",
         "rename": "重命名",

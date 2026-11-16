@@ -6548,6 +6548,10 @@
       },
       "account": "Account",
       "path": "Derivation path {{path}}",
+      "btcInput": "Bitcoin input",
+      "btcInputType": "{{type}} {{code}}",
+      "btcInputNetwork": "Network: {{network}} (the requester’s label)",
+      "btcInputReview": "Amount, recipients and fee are shown and checked in the secure window after Sign.",
       "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise.",
       "solanaBlockhashHint": "Solana transactions are usually valid for only a minute or two. If you approve later, this one may have expired and will need to be requested again. Transactions that use a durable nonce are not affected."
     },
@@ -6665,8 +6669,8 @@
       "back": "Back",
       "wallet": {
         "badge": "Seed phrase · {{count}} accounts",
-        "used": "{{count}} of {{limit}} accounts · numbered as in MetaMask and Phantom",
-        "agentUsage": "Agents pick the chain with --chain and the account with --account",
+        "used": "{{count}} of {{limit}} accounts · EVM and Solana accounts are numbered in the same order as MetaMask and Phantom",
+        "agentUsage": "Agents pick the chain with --chain and the account with --account; for Bitcoin, --address-type picks the address type",
         "ask": "Ask before signing",
         "askLocked": "On. It can’t be turned off here for now.",
         "rename": "Rename",

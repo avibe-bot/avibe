@@ -59,8 +59,8 @@ const card = (type: 'p2pkh' | 'p2wpkh') => () => (
 const designFrames = frames([
   { name: 'standard', title: '标准档 · 审批卡写明账户 #1、链和派生路径', width: 1192, height: 960, status: 'shipped', route: '/vaults', fixtures, click: review, render: consolePage(<VaultsPage />) },
   { name: 'standard-phone', title: '标准档 · 审批 · 手机', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: review, render: phoneShell('/vaults', <VaultsPage />) },
-  { name: 'protected-legacy', title: '保护档 · 传统（Legacy）BTC 签名请求：账户 #1、BTC · 传统、m/44′ 路径（桌面端，在浏览器中完成）', width: 640, height: 480, status: 'shipped', fixtures: desktopFixtures, render: card('p2pkh') },
-  { name: 'protected-segwit', title: '保护档 · SegWit BTC 签名请求：账户 #1、BTC · SegWit、m/84′ 路径（桌面端，在浏览器中完成）', width: 640, height: 480, status: 'shipped', fixtures: desktopFixtures, render: card('p2wpkh') },
+  { name: 'protected-legacy', title: '保护档 · 传统（Legacy）BTC 签名请求：账户 #1、BTC · 传统、m/44′ 路径（桌面端，在浏览器中完成）', width: 640, height: 580, status: 'shipped', fixtures: desktopFixtures, render: card('p2pkh') },
+  { name: 'protected-segwit', title: '保护档 · SegWit BTC 签名请求：账户 #1、BTC · SegWit、m/84′ 路径（桌面端，在浏览器中完成）', width: 640, height: 580, status: 'shipped', fixtures: desktopFixtures, render: card('p2wpkh') },
   { name: 'protected', title: '保护档 · 沙箱窗口新增「钱包账户」一行（镜像，后续）', width: 520, height: 760, status: 'approved', fixtures, render: () => <SandboxSignMirror /> },
   { name: 'protected-create-window', title: '保护档 · 安全窗口里显示助记词（镜像，后续）', width: 520, height: 820, status: 'approved', fixtures, render: () => <SandboxWordsMirror mode="create" /> },
   { name: 'protected-import-window', title: '保护档 · 安全窗口里输入并核对（镜像，后续）', width: 520, height: 860, status: 'approved', fixtures, render: () => <SandboxWordsMirror mode="import" /> },

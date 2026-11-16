@@ -125,6 +125,28 @@ const hdBitcoinSigningAddress = (account: HdApprovalAccount): SigningAddresses =
   return type === 'p2wpkh' ? { btc_segwit: address } : type === 'p2pkh' ? { btc_legacy: address } : { btc_taproot: address };
 };
 
+/** A protected Bitcoin request's input, read from its persisted context, which the daemon validated
+ *  when the request was made: the script type it spends and the network the requester named. The
+ *  amount, recipients and fee are decoded and checked only in the secure window, never shown here.
+ *  Anything that is not exactly one of the three typed contexts shows nothing. */
+const BTC_INPUT_CONTEXTS = {
+  'bitcoin-p2pkh-v1': { type: 'p2pkh', code: 'P2PKH' },
+  'bitcoin-p2wpkh-v1': { type: 'p2wpkh', code: 'P2WPKH' },
+  'bitcoin-taproot-keypath-v1': { type: 'p2tr', code: null },
+} as const;
+const BTC_NETWORKS = new Set(['bitcoin', 'testnet', 'signet', 'regtest']);
+
+function protectedBitcoinInput(context: unknown): { type: BitcoinAddressType; code: string | null; network: string } | null {
+  if (typeof context !== 'object' || context === null || Array.isArray(context)) return null;
+  const { kind, addressType, network } = context as Record<string, unknown>;
+  if (typeof kind !== 'string' || !Object.hasOwn(BTC_INPUT_CONTEXTS, kind)) return null;
+  const input = BTC_INPUT_CONTEXTS[kind as keyof typeof BTC_INPUT_CONTEXTS];
+  // The typed ECDSA contexts name their type twice; both must agree. Taproot's names it by kind alone.
+  if (input.code !== null ? addressType !== input.type : addressType !== undefined) return null;
+  if (typeof network !== 'string' || !BTC_NETWORKS.has(network)) return null;
+  return { type: input.type, code: input.code, network };
+}
+
 function hdSigningPath(account: HdApprovalAccount | null, chain: 'evm' | 'bitcoin' | 'solana', type: BitcoinAddressType | undefined): string | undefined {
   if (!account) return undefined;
   if (chain !== 'bitcoin') return account.paths?.[chain];
@@ -628,6 +650,8 @@ export const VaultApprovalCard: React.FC<{
   const deleteNeedsHold = isKeypair || isProtected;
   // The path this request signs with. A Bitcoin request names its type, whose path is the snapshot's
   // `bitcoin_path`; the account's `paths.bitcoin` is Taproot's, so it stands in only for Taproot.
+  // Protected requests only: a standard request's context is never decoded, so it says nothing more.
+  const bitcoinInput = isSign && isProtected ? protectedBitcoinInput(delivery.signing_context ?? delivery.signingContext) : null;
   const signingPath = hdDerivation ? hdSigningPath(hdAccount, hdDerivation.chain, hdAccount?.bitcoin_address_type ?? delivery.derivation?.address_type) : undefined;
 
   const deny = () =>
@@ -761,6 +785,18 @@ export const VaultApprovalCard: React.FC<{
               {signingPath ? (
                 <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', { path: signingPath })}</span>
               ) : null}
+            </span>
+          </DetailRow>
+        ) : null}
+        {bitcoinInput ? (
+          // ui/design: vault/signing/protected-btc-*
+          <DetailRow label={t('vaults.approval.btcInput')}>
+            <span className="flex min-w-0 flex-col gap-1">
+              <Badge variant="outline" className="self-start">{bitcoinInput.code
+                ? t('vaults.approval.btcInputType', { type: t(BTC_TYPE_LABEL[bitcoinInput.type]), code: bitcoinInput.code })
+                : t(BTC_TYPE_LABEL[bitcoinInput.type])}</Badge>
+              <span className="text-[12px] text-muted">{t('vaults.approval.btcInputNetwork', { network: bitcoinInput.network })}</span>
+              <span className="text-[12px] leading-snug text-muted">{t('vaults.approval.btcInputReview')}</span>
             </span>
           </DetailRow>
         ) : null}
