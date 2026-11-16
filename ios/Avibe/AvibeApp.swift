@@ -51,6 +51,9 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         ]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        #if DEBUG
+        VoiceCaptureProbeSetup.runIfRequested()
+        #endif
         return true
     }
 

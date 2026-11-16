@@ -151,6 +151,7 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
+            -only-testing:AvibeTests/NativeBadgeTests \
             CODE_SIGNING_ALLOWED=NO \
             test
 
@@ -162,6 +163,14 @@ jobs:
           path: ${{ runner.temp }}/AvibeTests.xcresult
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Start the voice capture probe's stand-in instance (draft only)
+        run: |
+          set -euo pipefail
+          nohup python3 ios/scripts/voice_capture_probe_server.py 8765 "$RUNNER_TEMP/probe-server.log" >/dev/null 2>&1 &
+          sleep 1
+          curl -sf http://127.0.0.1:8765/api/csrf-token
+          xcrun simctl privacy "$SIMULATOR_ID" grant microphone bot.avibe.ios || echo "microphone grant failed"
 
       - name: Run sheet gesture XCUITest fixture
         if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
@@ -175,7 +184,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
-            -skip-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests \
+            -only-testing:AvibeSheetFixtureTests/VoiceCaptureProbeUITests \
             CODE_SIGNING_ALLOWED=NO \
             test-without-building
 
@@ -185,5 +194,32 @@ jobs:
         with:
           name: ios-sheet-fixture-xcresult
           path: ${{ runner.temp }}/AvibeSheetFixtureTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Collect the voice capture probe logs (draft only)
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/probe"
+          cp "$RUNNER_TEMP/probe-server.log" "$RUNNER_TEMP/probe/" || true
+          container="$(xcrun simctl get_app_container "$SIMULATOR_ID" bot.avibe.ios data 2>/dev/null)"
+          cp "$container/Library/Caches/voice-capture-probe.log" "$RUNNER_TEMP/probe/" || true
+          ls -la "$container/Library/Caches/VoiceCapture" > "$RUNNER_TEMP/probe/takes.txt" 2>&1 || true
+          xcrun simctl spawn "$SIMULATOR_ID" log show --last 15m --style compact \
+            --predicate 'process == "Avibe" OR process == "AvibeLiveActivity" OR eventMessage CONTAINS[c] "bot.avibe.ios"' \
+            > "$RUNNER_TEMP/probe/simulator.log" 2>&1 || true
+          echo "== app probe log"; cat "$RUNNER_TEMP/probe/voice-capture-probe.log" || true
+          echo "== stand-in instance log"; cat "$RUNNER_TEMP/probe/probe-server.log" || true
+          echo "== takes"; cat "$RUNNER_TEMP/probe/takes.txt"
+          echo "== simulator log (filtered tail)"
+          grep -iE "audio|record|activity|intent|VoiceCapture|background|suspend|assertion" "$RUNNER_TEMP/probe/simulator.log" | tail -200 || true
+
+      - name: Upload the voice capture probe logs (draft only)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: voice-capture-probe
+          path: ${{ runner.temp }}/probe
           if-no-files-found: ignore
           retention-days: 7

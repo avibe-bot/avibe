@@ -261,6 +261,17 @@ final class VoiceCaptureController {
             await self?.finish(send: true)
         }
         record("start: listening")
+        #if DEBUG
+        // Probe: does the process keep running (and recording) after the
+        // intent returns?
+        Task { [weak self] in
+            for second in 1...20 {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, case .listening(let current) = self.state, current.id == id else { return }
+                self.record("heartbeat \(second)s recording=\(current.recorder.isRecording) activities=\(Activity<VoiceCaptureAttributes>.activities.count) state=\(current.activity.activityState)")
+            }
+        }
+        #endif
         return .started
     }
 
