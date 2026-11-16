@@ -11,7 +11,8 @@ import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-LOG = open(sys.argv[2] if len(sys.argv) > 2 else "/dev/stdout", "a", buffering=1)
+LOG_PATH = sys.argv[2] if len(sys.argv) > 2 else "/tmp/voice-capture-probe-server.log"
+LOG = open(LOG_PATH, "a", buffering=1)
 SESSION = "probe-session"
 CSRF = "probe-csrf"
 
@@ -52,6 +53,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._cookies().get("vibe_probe_session") == SESSION
 
     def do_GET(self):
+        if self.path == "/probe/log":
+            with open(LOG_PATH) as source:
+                return self._send(200, source.read(), ctype="text/plain")
         if self.path == "/probe/login":
             self._log(200)
             return self._send(200, "<!doctype html><title>probe</title>signed in", [
