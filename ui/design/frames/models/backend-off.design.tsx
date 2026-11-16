@@ -35,8 +35,6 @@ const expiredRoutes = (id: string) => (spec: AgentSpec): AgentSpec => ({
   routes: Object.fromEntries(Object.entries(spec.routes ?? {}).map(([model, chain]) => [model, { ...chain, health: { [id]: 'needs_action' } }])),
 });
 
-const directAll: AgentSpec[] = [{ backend: 'claude', mode: 'direct' }, { backend: 'codex', mode: 'direct' }, { backend: 'opencode', mode: 'direct' }];
-
 const gateway = (name: string, title: string, agents: AgentSpec[], { width = 1440, height = 1720, sources = demoSources } = {}): FrameSpec => ({
   name, title, width, height, themes, status: 'shipped', route,
   fixtures: settingsFixtures(hubApi({ sources, agents })),
@@ -54,9 +52,6 @@ const designFrames = frames([
   gateway('all-off-phone', '模型网关 · 三个本机后端都已停用 · 手机', demoAgents.map(off('claude', 'codex', 'opencode')), { width: 390, height: 1500 }),
   gateway('signed-out-codex-off', '模型网关 · ChatGPT 登录过期，Codex 已停用', demoAgents.map(off('codex')).map(expiredRoutes(chatgptPro.id)), { sources: expire(chatgptPro.id) }),
   gateway('signed-out-claude-off', '模型网关 · Claude 登录过期，Claude Code 已停用', demoAgents.map(off('claude')).map(expiredRoutes(claudeMax.id)), { sources: expire(claudeMax.id) }),
-  gateway('direct-codex-off', '模型网关 · Agent 管理首页，Codex 已停用', directAll.map(off('codex')), { height: 760, sources: [] }),
-  gateway('direct-all-off', '模型网关 · Agent 管理首页，三个都已停用', directAll.map(off('claude', 'codex', 'opencode')), { height: 760, sources: [] }),
-  gateway('direct-off-phone', '模型网关 · Agent 管理首页，Claude Code 已停用 · 手机', directAll.map(off('claude')).map(missing('opencode')), { width: 390, height: 1100, sources: [] }),
 ]);
 
 export default designFrames;

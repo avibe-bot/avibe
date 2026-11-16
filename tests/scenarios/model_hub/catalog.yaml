@@ -2193,7 +2193,7 @@ scenarios:
     status: covered
     kind: migration
     layer: unit
-    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-MIG-010 reports a refused switch to the gateway on the direct-only screen
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-MIG-010 reports a refused switch to the gateway on a gateway card with no provider and retries in place
     related_tests:
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
   - id: MH-MIG-011

@@ -4,7 +4,6 @@ import {
   MODEL_HUB_DISABLED_REDIRECT,
   MODEL_HUB_SETTINGS_PATH,
 } from '../src/components/settings/models/modelHubRoutes';
-import { surfaceKind } from './support/api';
 import { hub as copy } from './support/copy';
 import { expect, requireModelHub, requireRuntimeRunning, test } from './support/fixtures';
 
@@ -45,20 +44,5 @@ test.describe('A · capability gate and runtime recovery', () => {
     await expect(hub.header.getByRole('switch')).toHaveCount(0);
     await expect(hub.closedState).toHaveCount(0);
     await expect(hub.tab('hub')).toBeVisible();
-  });
-
-  test('C6-direct-home · a machine with no sources lands on the direct home', async ({ hub, api }) => {
-    await requireModelHub(api);
-    await requireRuntimeRunning(api);
-    const surface = surfaceKind(await api.agents(), await api.sources());
-    test.skip(surface === 'gateway', 'This instance already has sources or a Gateway backend.');
-    test.skip(surface === 'direct-no-backend', 'No native CLI is installed, so the direct home shows its install prompt.');
-
-    await hub.goto();
-    await expect(hub.directHome).toBeVisible();
-    await expect(hub.directHome).toContainText(copy('direct.card.current'));
-    await expect(
-      hub.directHome.getByRole('button', { name: copy('direct.action.switchToGateway') }).first(),
-    ).toBeVisible();
   });
 });

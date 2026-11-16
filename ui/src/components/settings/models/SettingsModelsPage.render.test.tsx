@@ -12,7 +12,6 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
-import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
@@ -317,27 +316,6 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
-  // DirectHome is a separate render path from gateway cards; its neutral tile
-  // and API order previously hid backend identity even when the cards were right.
-  it('keeps direct-only backends in Settings order and colors', async () => {
-    renderPage([], [directAgent('opencode'), directAgent('codex'), directAgent('claude')]);
-    await screen.findByText('Claude Code');
-    const rows = [...document.querySelectorAll('.model-hub-direct-row--backend')];
-    expect.soft(rows.map((row) => row.querySelector('.model-hub-direct-backend-name')?.textContent))
-      .toEqual(['Claude Code', 'Codex', 'OpenCode']);
-    for (const [label, tile, ink, glyph] of [
-      ['Claude Code', 'bg-cyan-soft', 'text-cyan-ink', 'lucide-sparkles'],
-      ['Codex', 'bg-gold', 'text-gold-foreground', 'lucide-bot'],
-      ['OpenCode', 'bg-violet-soft', 'text-violet-ink', 'lucide-terminal'],
-    ]) {
-      const row = screen.getByText(label).closest('.model-hub-direct-row--backend')!;
-      const svg = row.querySelector('svg')!;
-      expect.soft(svg.parentElement?.classList.contains(tile)).toBe(true);
-      expect.soft(svg.classList.contains(ink)).toBe(true);
-      expect(svg.classList.contains(glyph)).toBe(true);
-    }
-  });
-
   it.each([
     ['right away', false],
     ['after a refused takeover', true],
@@ -390,11 +368,11 @@ describe('SettingsModelsPage surface branches', () => {
 
   // A refused switch to the gateway used to leave the Direct row exactly as it
   // was: the failure was recorded, then pruned by the next read because the
-  // backend was still Direct, and no Direct surface rendered it anyway.
+  // backend was still Direct.
   it.each([
-    ['the direct-only screen', []],
-    ['a gateway card', [retainedSource]],
-  ] as const)('MH-MIG-010 reports a refused switch to the gateway on %s and retries in place', async (_, sources) => {
+    ['with no provider', []],
+    ['with a provider', [retainedSource]],
+  ] as const)('MH-MIG-010 reports a refused switch to the gateway on a gateway card %s and retries in place', async (_, sources) => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [] });
     const setMode = vi.spyOn(modelsApi, 'setAgentMode')
       .mockRejectedValueOnce(new ApiCallError('mode_switch_blocked'))
@@ -595,38 +573,6 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.getByTestId('location').textContent).toBe('/settings/backends/codex');
   });
 
-  it('shows the own-login home with every backend switched off as off, not as a running gateway', async () => {
-    const offDirect = (backend: 'claude' | 'codex' | 'opencode'): AgentSupply => ({
-      ...takeoverAgent, backend, mode: 'direct', backend_enabled: false, sources: null, routes: null, supply_status: null, model_supply: null,
-    });
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([offDirect('claude'), offDirect('codex'), offDirect('opencode')]);
-    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
-    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
-    const LocationProbe = () => <output data-testid="location">{useLocation().pathname}</output>;
-    const view = render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <MemoryRouter initialEntries={['/settings/models']}>
-            <SettingsModelsRoute />
-            <LocationProbe />
-          </MemoryRouter>
-        </I18nextProvider>
-      </ToastProvider>,
-    );
-
-    await waitFor(() => expect(view.container.querySelectorAll('[data-agent-backend-off]')).toHaveLength(3));
-    expect(screen.queryByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeNull();
-    expect(await screen.findByText(/^Local backends are all turned off$|^本机后端都已停用$/)).toBeTruthy();
-    expect(screen.queryByText(/^Model Hub running$|^模型网关运行中$/)).toBeNull();
-
-    const opencode = view.container.querySelector<HTMLElement>('[data-agent-backend-off="opencode"]') as HTMLElement;
-    await userEvent.click(within(opencode).getByRole('button', { name: /Turn on OpenCode|去启用 OpenCode/ }));
-    expect(screen.getByTestId('location').textContent).toBe('/settings/backends/opencode');
-  });
-
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
     const ids = Array.from({ length: 6 }, (_, index) => `catalog-model-${index + 1}`);
     const addedId = 'catalog-model-added';
@@ -777,44 +723,6 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
-    renderPage([], [directAgent('claude'), directAgent('codex'), directAgent('opencode')]);
-
-    expect(await screen.findByText(/^Currently: own login$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
-    expect(screen.getByText(/^Switch to Model Hub and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeTruthy();
-    // Frame 09 is what the `sources` tab shows here — not what the Hub shows
-    // instead of its tabs. It is still Frame 09's body: none of the gateway
-    // overview leaks in beside it.
-    expect(screen.getAllByRole('tab')).toHaveLength(5);
-    expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
-  });
-
-  it('renders the no-backend state when every authoritative CLI is absent', async () => {
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
-      { ...directAgent('claude'), cli_present: false },
-      { ...directAgent('codex'), cli_present: false },
-      { ...directAgent('opencode'), cli_present: false },
-    ]);
-    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-
-    render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <SettingsModelsPage />
-        </I18nextProvider>
-      </ToastProvider>,
-    );
-
-    expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeNull();
-    expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
-    // Nothing is installed, so nothing was turned off.
-    expect(screen.queryByText(/^Local backends are all turned off$|^本机后端都已停用$/)).toBeNull();
-  });
-
   it('publishes a newly discovered backend into the already-open page', async () => {
     const unavailable = [
       { ...directAgent('claude'), cli_present: false },
@@ -843,7 +751,6 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeTruthy();
-    expect(screen.queryByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeNull();
     expect(modelsApi.refreshAgentPresence).toHaveBeenCalledOnce();
   });
 
@@ -877,9 +784,9 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
     const retry = await screen.findByRole('button', { name: /Detect Agent backends again|重新检测 Agent 后端/i });
     await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+    expect(document.querySelector('[data-agent-backend]')).toBeNull();
     const user = userEvent.setup();
     await user.click(retry);
 
@@ -887,7 +794,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(modelsApi.refreshAgentPresence).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps an unread runtime visible on the direct-only surface', async () => {
+  it('keeps an unread runtime visible when every backend uses its own login', async () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
       directAgent('claude'),
@@ -906,7 +813,6 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByText(/^Model Hub status unavailable$|^模型网关状态不可用$/i)).toBeTruthy();
-    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
   });
 
   it('recovers a previously disabled runtime without exposing an on/off switch', async () => {
@@ -932,7 +838,6 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByRole('heading', { name: /^Model Hub is unavailable$|^模型网关暂不可用$/i })).toBeTruthy();
     expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.queryAllByRole('tab')).toHaveLength(0);
-    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
 
     await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
 
@@ -1022,7 +927,6 @@ describe('SettingsModelsPage surface branches', () => {
     expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为 Agent 管理/i })).toBeNull();
     await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));
     expect(screen.queryByRole('switch')).toBeNull();
-    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
     if (!configured) {
       expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
     }
@@ -1033,7 +937,6 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getAllByRole('tab')).toHaveLength(5);
-    expect(screen.queryByText(/^Switch to Model Hub and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeNull();
   });
 
   it('keeps manual-model draft Escape local to the provider dialog', async () => {
@@ -1369,8 +1272,7 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/^Currently: own login$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
+    expect(await screen.findAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
     expect(events).not.toHaveBeenCalled();
   });
 
@@ -1937,14 +1839,14 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await userEvent.click(await screen.findByRole('button', { name: /^Retry$/i }));
-    expect(await screen.findByText(/^Currently: own login$/i)).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Let Model Hub manage$/i })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Retry$/i })).toBeNull();
     expect(modelsApi.listSources).toHaveBeenCalledTimes(2);
     await flushRouteFocus();
     expect(document.activeElement?.closest('.model-hub-shell')).toBeTruthy();
     await act(async () => { sources.resolve([]); });
     await flushRouteFocus();
-    expect(screen.getByText(/^Currently: own login$/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Let Model Hub manage$/i })).toBeTruthy();
     expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
   });
 
@@ -2211,7 +2113,6 @@ describe('SettingsModelsPage surface branches', () => {
 
     const retry = screen.getByRole('button', { name: /^Retry$/i }) as HTMLButtonElement;
     expect(retry.disabled).toBe(false);
-    expect(screen.queryByText(/^Currently: own login$/i)).toBeNull();
     if (!empty) expect(screen.getByText('Refreshed source')).toBeTruthy();
     expect(modelsApi.getAgentChains).toHaveBeenCalledTimes(chainReads);
     const agentsBeforeRetry = vi.mocked(modelsApi.listAgents).mock.calls.length;
@@ -2222,7 +2123,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(modelsApi.listSources).toHaveBeenCalledTimes(sourcesBeforeRetry + 1);
     expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
     if (empty) {
-      expect(await screen.findByText(/^Currently: own login$/i)).toBeTruthy();
+      expect(await screen.findByRole('button', { name: /^Let Model Hub manage$/i })).toBeTruthy();
     } else {
       // M6 settlement releases its backend again; an unrelated ready read must
       // not leave the backend silently excluded from all future chain probes.
@@ -2558,13 +2459,13 @@ describe('SettingsModelsPage usage region', () => {
   // to read what it cost, and a user reading the report may not be thrown off it
   // by their own deletion.
   it('MH-USAGE-022: reaches the report from every landing the Hub can draw', async () => {
-    // Keyed by the landing itself: a `Record<ModelsSurfaceKind, …>` cannot omit
-    // one, so a landing added later fails to compile here rather than quietly
-    // shipping without a route. The loop stays inside one case because a row's
-    // evidence has to be a case the catalog can resolve by name.
-    const landings: Record<ModelsSurfaceKind, Source[]> = {
-      direct_empty: [],
-      gateway: [retainedSource],
+    // With no provider left and with one: the gateway page is the only landing,
+    // and deleting the last provider may not take the route away. The loop stays
+    // inside one case because a row's evidence has to be a case the catalog can
+    // resolve by name.
+    const landings: Record<string, Source[]> = {
+      'no provider': [],
+      'a provider': [retainedSource],
     };
 
     for (const [landing, sources] of Object.entries(landings)) {
