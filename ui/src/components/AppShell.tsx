@@ -497,7 +497,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar (ui/design: workbench/home/desktop) — 248 wide by default, 16px horizontal/bottom padding,
+      {/* Sidebar (ui/design: workbench/home/desktop) — 248 wide by default, 16px horizontal and 8px bottom padding,
           a 16px native brand inset and the original 10px web inset. The top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
@@ -528,7 +528,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
         </div>
 
         {/* Bottom cluster: Apps fills the row beside the compact Settings icon,
-            then version on the left and the live service status on the right.
+            then the shared bottom row: status on the left, version on the right.
             AppsLauncher keeps its layout slot here while its interactive surface
             floats above app windows. */}
         {(() => {

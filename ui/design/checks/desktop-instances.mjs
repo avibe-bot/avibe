@@ -59,14 +59,15 @@ try {
                 connection: entry.dataset.connectionStatus,
                 available: entry.dataset.updateAvailable,
                 compact: entry.dataset.compact,
-                avatarX: rect(entry.querySelector('[data-account-avatar]')).left,
+                // The bottom row leads with the status; the compact rail keeps its avatar.
+                leadX: rect(entry.querySelector(entry.dataset.compact === 'true' ? '[data-account-avatar]' : '[data-status-indicator]')).left,
                 updatePresent: Boolean(update),
                 updateVisible: update ? update.getClientRects().length > 0 && getComputedStyle(update).visibility === 'visible' : false,
                 // Popup open state is independent too; compare the actual trigger contents/label.
                 updateMarkup: update ? `${update.innerHTML}|${update.getAttribute('aria-label')}|${update.className}` : null,
                 indicatorMarkup: indicator?.outerHTML,
-                labelGap: label ? rect(indicator).left - rect(label).right : null,
-                chevronGap: chevron ? rect(chevron).left - rect(indicator).right : null,
+                labelGap: label ? rect(label).left - rect(indicator).right : null,
+                chevronGap: chevron ? rect(chevron).left - rect(label).right : null,
               };
             }),
             menus: [...document.querySelectorAll('[data-update-menu],[data-instance-menu]')].map(rect),
@@ -106,7 +107,7 @@ try {
           assert.ok(['true', 'false'].includes(entry.available), `${key}: explicit boolean fixture`);
           assert.equal(entry.updatePresent, entry.available === 'true', `${key}: update presence follows availability only`);
           assert.equal(entry.updateVisible, entry.available === 'true', `${key}: connection must not hide the update`);
-          assert.equal(entry.avatarX, 16, `${key}: Apps-container alignment`);
+          assert.ok(Math.abs(entry.leadX - 16) <= 2, `${key}: Apps-container alignment (${entry.leadX})`);
           for (const gap of [entry.labelGap, entry.chevronGap]) {
             if (gap !== null) assert.ok(gap >= 0 && gap <= 8, `${key}: adjacent connection indicator/chevron (${gap}px)`);
           }

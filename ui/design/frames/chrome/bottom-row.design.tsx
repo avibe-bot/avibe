@@ -29,24 +29,27 @@ const fixturesFor = (lang: Lang) => workbenchFixtures({
   '/api/version': { current: '3.2.7', latest: '3.2.7', has_update: false, error: null },
 }, { copy: copyFor(lang === 'en' ? en : zh) });
 
-const projection = (remote: boolean, update: boolean): DesktopClientProjection => ({
+type Link = 'connected' | 'offline' | 'switching';
+const STUDIO = { kind: 'remote', name: REMOTE, instance_id: 'studio', canonical_origin: 'https://studio.avibe.bot' } as const;
+
+const projection = (remote: boolean, update: boolean, link: Link = 'connected'): DesktopClientProjection => ({
   version: 1, revision: 1, generation: 1,
   account: { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' } },
-  connection: {
-    status: remote ? 'remote' : 'local',
-    committed: remote ? { kind: 'remote', name: REMOTE, instance_id: 'studio' } : { kind: 'local', name: LOCAL, instance_id: null },
-    pending: null,
-  },
+  connection: link === 'switching'
+    ? { status: 'switching', committed: { kind: 'local', name: LOCAL, instance_id: null }, pending: STUDIO }
+    : remote
+      ? { status: link === 'offline' ? 'remote_unreachable' : 'remote_connected', committed: STUDIO, pending: null }
+      : { status: 'local', committed: { kind: 'local', name: LOCAL, instance_id: null }, pending: null },
   local: { name: LOCAL, remote_access: 'off' },
   desktop: {
     version: '3.2.7',
     update: { phase: update ? 'available' : 'current', latest: update ? '3.2.8' : null, channel: 'stable', skippedVersion: null, interactive: false },
   },
-  remote_auxiliary: remote ? 'disabled_incomplete' : 'complete',
-} as DesktopClientProjection);
+  remote_auxiliary: remote ? 'disabled_incomplete' : 'local',
+});
 
-const rowProps = (remote: boolean, update = false): Omit<DesktopAccountRowViewProps, 'localUpdater'> => ({
-  state: projection(remote, update), menuOpen: false, onMenuOpenChange: () => {}, onPresent: () => {},
+const rowProps = (remote: boolean, update = false, link: Link = 'connected'): Omit<DesktopAccountRowViewProps, 'localUpdater'> => ({
+  state: projection(remote, update, link), menuOpen: false, onMenuOpenChange: () => {}, onPresent: () => {},
 });
 
 /** The complete window, with the desktop app's row in place of the Web's when given. */
@@ -71,6 +74,15 @@ const shots: { name: string; title: string; render: () => ReactNode }[] = [
   {
     name: 'desktop-remote-update', title: '侧边栏底部 · 桌面应用连接另一台电脑 · 本机桌面应用有新版本',
     render: shell(<DesktopAccountRowView {...rowProps(true, true)} localUpdater={null} />),
+  },
+  // The leading glyph changes (dot, offline icon, spinner) in a fixed slot: the name does not move.
+  {
+    name: 'desktop-remote-offline', title: '侧边栏底部 · 桌面应用连接另一台电脑 · 连接断开',
+    render: shell(<DesktopAccountRowView {...rowProps(true, false, 'offline')} localUpdater={null} />),
+  },
+  {
+    name: 'desktop-switching', title: '侧边栏底部 · 桌面应用 · 正在切换到另一台电脑',
+    render: shell(<DesktopAccountRowView {...rowProps(false, false, 'switching')} localUpdater={<VersionBadge openUpward />} />),
   },
 ];
 

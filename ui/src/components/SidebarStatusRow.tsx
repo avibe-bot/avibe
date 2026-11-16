@@ -15,16 +15,20 @@ export function SidebarStatusRow({ status, version }: { status: ReactNode; versi
   );
 }
 
-/** The dot that leads every status: running, stopped, or needing attention. */
-export function StatusDot({ tone, label }: { tone: 'running' | 'stopped' | 'attention'; label?: string }) {
+/** The status's leading glyph, in a fixed 10px slot so the label beside it never shifts when the
+ *  glyph changes (a dot while connected, a 10px icon while offline or switching). The glyph starts
+ *  at the slot's left edge, flush with the Apps button above. */
+export function StatusGlyph({ children }: { children: ReactNode }) {
+  return <span className="flex size-2.5 shrink-0 items-center justify-start [&>svg]:size-2.5">{children}</span>;
+}
+
+/** The dot that leads a status: running or stopped. */
+export function StatusDot({ tone, label }: { tone: 'running' | 'stopped'; label?: string }) {
   return (
     <span
       data-status-indicator
       aria-label={label}
-      className={cn(
-        'size-2 shrink-0 rounded-full',
-        tone === 'running' ? 'bg-mint shadow-glow-dot-mint' : tone === 'attention' ? 'bg-gold' : 'bg-muted',
-      )}
+      className={cn('size-2 shrink-0 rounded-full', tone === 'running' ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted')}
     />
   );
 }
@@ -33,8 +37,8 @@ export function StatusDot({ tone, label }: { tone: 'running' | 'stopped' | 'atte
 export function RunningStatus({ running }: { running: boolean }) {
   const { t } = useTranslation();
   return (
-    <span className="flex min-w-0 items-center gap-2 text-xs text-muted">
-      <StatusDot tone={running ? 'running' : 'stopped'} />
+    <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted">
+      <StatusGlyph><StatusDot tone={running ? 'running' : 'stopped'} /></StatusGlyph>
       <span className="truncate">{t(running ? 'common.running' : 'common.stopped')}</span>
     </span>
   );
