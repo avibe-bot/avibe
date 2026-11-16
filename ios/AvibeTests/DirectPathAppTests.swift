@@ -167,9 +167,14 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testAListenerFaultCoversOnlyARoutedRuntimeOnceAndIsMarkedOnce() async throws {
         let marker = FaultMarkerSpy(marked: false)
+        let timing = RuntimeOpenManualTiming()
         let transport = StandInDirectTransport()
         var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(directTransport: transport, directFaultMarker: marker) {
+        let app = try await makeApp(
+            directTransport: transport,
+            directFaultMarker: marker,
+            runtimeOpenTiming: timing
+        ) {
             listening = try listeningSockets()
         }
         let first = try await select("instance-1", in: app)
@@ -252,6 +257,16 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
         XCTAssertFalse(app.mayReload(reopened))
         XCTAssertEqual(marker.marks, 1)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertNil(app.runtimeOpenAttempt?.deadline)
+
+        // The process-terminal fault has no later callback to end a new
+        // attempt. Its automatic timer is already retired, so advancing far
+        // past the ordinary budget cannot replace the reopen message.
+        timing.advance(by: .seconds(120))
+        XCTAssertEqual(app.route, .browser(reopened))
+        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
+        XCTAssertNil(app.runtimeOpenNotice)
     }
 
     // MARK: The creation and reload boundaries
@@ -1215,6 +1230,54 @@ final class DirectPathAppTests: XCTestCase {
 
         XCTAssertEqual(try localized("en"), "Connection lost — reopen the app")
         XCTAssertEqual(try localized("zh-Hans"), "连接中断，请重新打开 App")
+    }
+
+    func testRuntimeOpeningCopyIsApprovedInBothLocales() throws {
+        func localized(_ key: String, language: String) throws -> String {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+            let bundle = try XCTUnwrap(Bundle(path: path))
+            return bundle.localizedString(
+                forKey: key,
+                value: "missing",
+                table: nil
+            )
+        }
+
+        let expected = [
+            (
+                key: "runtime.open.phase.preparing_route.named",
+                en: "Preparing to connect to %@…",
+                zhHans: "正在准备连接 %@…"
+            ),
+            (
+                key: "runtime.open.stage.preparing_route",
+                en: "preparing to connect",
+                zhHans: "准备连接"
+            ),
+            (
+                key: "runtime.open.stage.authenticating",
+                en: "verifying sign-in",
+                zhHans: "验证登录"
+            ),
+            (
+                key: "runtime.open.awaiting_user.body",
+                en: "Finish signing in on this page.",
+                zhHans: "请在此页面完成登录。"
+            ),
+            (
+                key: "runtime.open.timeout.last_stage",
+                en: "Stopped while %@. Your account and data are unaffected.",
+                zhHans: "停在“%@”这一步。账号和数据不受影响。"
+            ),
+        ]
+
+        for copy in expected {
+            XCTAssertEqual(try localized(copy.key, language: "en"), copy.en)
+            XCTAssertEqual(
+                try localized(copy.key, language: "zh-Hans"),
+                copy.zhHans
+            )
+        }
     }
 
     // MARK: The App as shipped, with notifications on

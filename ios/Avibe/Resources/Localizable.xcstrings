@@ -182,13 +182,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Complete the sign-in in this page. The loading timer is paused."
+            "value" : "Finish signing in on this page."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请在当前页面完成登录，加载计时已暂停。"
+            "value" : "请在此页面完成登录。"
           }
         }
       }
@@ -310,21 +310,21 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Preparing a secure route to %@…"
+            "value" : "Preparing to connect to %@…"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在准备连接 %@ 的安全线路…"
+            "value" : "正在准备连接 %@…"
           }
         }
       }
     },
     "runtime.open.stage.authenticating" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "sign-in" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开登录" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "verifying sign-in" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证登录" } }
       }
     },
     "runtime.open.stage.awaiting_user" : {
@@ -359,8 +359,8 @@
     },
     "runtime.open.stage.preparing_route" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "preparing the route" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "准备连接线路" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "preparing to connect" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "准备连接" } }
       }
     },
     "runtime.open.timeout.dismiss" : {
@@ -374,13 +374,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Stopped while %@. Your account and app data are unchanged."
+            "value" : "Stopped while %@. Your account and data are unaffected."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在“%@”阶段停止。你的账号与 App 数据保持不变。"
+            "value" : "停在“%@”这一步。账号和数据不受影响。"
           }
         }
       }

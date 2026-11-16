@@ -1017,6 +1017,13 @@ final class AppModel: ObservableObject {
         case .held:
             deferredOpen = (runtime, identity)
         case .fault:
+            // The fault is already terminal for this process. There will be
+            // no new listener callback to end an attempt started after it,
+            // so retire the automatic budget at the gate decision itself.
+            finishRuntimeOpenAutomaticBudget(
+                phase: .failed,
+                attemptID: identity
+            )
             deferredOpen = nil
             directFaultOnlyIdentity = identity
             route = .browser(runtime)
