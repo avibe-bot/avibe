@@ -159,3 +159,25 @@ def test_persisted_release_mutation_cannot_rebind_the_initial_hd_capture(field):
         complete(signing, pending, signature)
     assert rows(vault_requests)[0]["status"] == "pending" and stored()["use_count"] == 0
     assert not [row for row in rows(vault_audit) if row["event"] == "signed"]
+
+
+@pytest.mark.parametrize("pin,types", [("current", TYPES), ("historical", ["p2tr"]), ("unknown", ["p2tr"])])
+def test_cli_listing_warning_names_only_the_pin_listed_hd_forms(pin, types, monkeypatch, capfd):
+    from vibe import cli
+
+    if pin == "historical":
+        pins = json.loads((Path(__file__).parent / "fixtures/vault-sandbox-legacy-pins.json").read_text())
+        monkeypatch.setattr(vault_sandbox_release, "load_packaged_pin",
+                            lambda: pins["9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a"])
+    elif pin == "unknown":
+        monkeypatch.setattr(vault_sandbox_release, "CAPABILITIES_BY_PIN_ID", {})
+    wallet("p2wpkh")
+    parser = cli.build_parser()
+    for argv in (["vault", "list"], ["vault", "find"]):
+        assert getattr(cli, f"cmd_vault_{argv[1]}")(parser.parse_args(argv)) == 0
+        secret, = json.loads(capfd.readouterr().out)["secrets"]
+        assert all(account["bitcoin_address_types"] == types for account in secret["accounts"])
+        warning = secret["bitcoin_signing_warning"]
+        assert "Taproot key-path" in warning and "fresh browser approval" in warning and "unsupported" not in warning
+        assert ("Legacy (with the parent transaction)" in warning) == ("p2pkh" in types)
+        assert ("Native SegWit (with the BIP143 amount)" in warning) == ("p2wpkh" in types)

@@ -276,22 +276,53 @@ def test_vault_skill_cli_examples_are_parser_backed():
         assert parsed.command == "vault"
 
 
-@pytest.mark.parametrize("protection", ["standard", "protected"])
+PROTECTED_BITCOIN_FORMS = {
+    "p2tr": "Taproot key-path",
+    "p2pkh": "Legacy (with the parent transaction)",
+    "p2wpkh": "Native SegWit (with the BIP143 amount)",
+}
+
+
+@pytest.mark.parametrize(
+    "protection,pin,types",
+    [
+        ("standard", "current", ["p2pkh", "p2wpkh", "p2tr"]),
+        ("protected", "current", ["p2pkh", "p2wpkh", "p2tr"]),
+        ("protected", "7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b", ["p2tr"]),
+        ("protected", "9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a", ["p2tr"]),
+        ("protected", "unknown", []),
+    ],
+)
 @pytest.mark.parametrize("command", [cli.cmd_vault_list, cli.cmd_vault_find])
-def test_keypair_listing_warns_about_bitcoin_signing_capability(capfd, protection, command):
+def test_keypair_listing_warns_about_bitcoin_signing_capability(capfd, monkeypatch, protection, pin, types, command):
+    from vibe import vault_sandbox_release
+
+    if pin == "unknown":
+        monkeypatch.setattr(vault_sandbox_release, "CAPABILITIES_BY_PIN_ID", {})
+    elif pin != "current":
+        legacy_pins = json.loads((Path(__file__).parent / "fixtures" / "vault-sandbox-legacy-pins.json").read_text())
+        monkeypatch.setattr(vault_sandbox_release, "load_packaged_pin", lambda: legacy_pins[pin])
     _create_standard_secret("BTC_KEY", kind="keypair", protection=protection, public_meta=PROTECTED_SIGNING_PUBLIC_META)
     assert command(_ns()) == 0
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
-    assert secret["signing_addresses"]["btc_taproot"].startswith("bc1p")
+    assert secret.get("bitcoin_address_types", []) == types
     assert "solana_signing_note" not in secret
     warning = secret["bitcoin_signing_warning"]
-    if protection == "protected":
-        assert "typed" in warning
-        assert "legacy" in warning
-        assert "requester-selected metadata" in warning
-    else:
+    if protection == "standard":
+        assert secret["signing_addresses"]["btc_taproot"].startswith("bc1p")
         assert "schnorr-secp256k1-bip341-keypath" in warning
         assert "raw BIP340 cannot spend" in warning
+        return
+    assert "unsupported" not in warning
+    for address_type, form in PROTECTED_BITCOIN_FORMS.items():
+        assert (form in warning) == (address_type in types)
+    if types:
+        assert "typed, bounded" in warning
+        assert "fresh browser approval" in warning
+        assert "requester-selected label" in warning
+        assert "does not broadcast" in warning
+    else:
+        assert "do not request Bitcoin signatures" in warning
 
 
 def test_vault_parser_does_not_expose_plaintext_set_command():
