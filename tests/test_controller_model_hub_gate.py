@@ -128,7 +128,12 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
 
     monkeypatch.setattr(api, "resolve_cli_paths", resolve_cli_paths)
     controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(language="zh")
+    controller.config = SimpleNamespace(
+        language="zh",
+        claude=SimpleNamespace(enabled=False),
+        codex=SimpleNamespace(enabled=True),
+        opencode=None,
+    )
     controller._loop = None
     controller._shutdown_requested = False
     controller.vibe_agent_store = SimpleNamespace(
@@ -149,6 +154,11 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
     assert captured["requested_model_override"]("claude") is None
     assert captured["cli_present_override"]("codex") is True
     assert captured["cli_present_override"]("claude") is False
+    # Enablement is the applied runtime config: Claude keeps a config with its
+    # flag, Codex and OpenCode have none while switched off.
+    assert captured["backend_enabled_override"]("claude") is False
+    assert captured["backend_enabled_override"]("codex") is True
+    assert captured["backend_enabled_override"]("opencode") is False
     service.reconcile_builtin_models.assert_awaited_once_with(notify=False)
     assert refresh_callbacks == [controller._model_hub_snapshot_refresh_completed]
     # MH-LIMITS-001: a models.dev copy landing takes the same refresh path.

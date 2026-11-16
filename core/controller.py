@@ -3095,6 +3095,13 @@ class Controller:
             # complete worker-produced snapshot here.
             return cli_presence.get(backend, False)
 
+        def backend_enabled(backend: str) -> bool:
+            # The applied runtime config: Claude keeps a config with its
+            # enabled flag, Codex and OpenCode have none while switched off.
+            # In memory, so payload assembly on the loop reads no file.
+            runtime_config = getattr(self.config, backend, None)
+            return runtime_config is not None and getattr(runtime_config, "enabled", True) is not False
+
         def refresh_cli_presence(
             include_npm_global: bool,
             backends: tuple[str, ...] | None = None,
@@ -3166,6 +3173,7 @@ class Controller:
             named_agents_override=named_vibe_agents,
             builtin_agent_models_override=self._builtin_agent_models,
             cli_present_override=cli_present,
+            backend_enabled_override=backend_enabled,
             cli_presence_refresh=refresh_cli_presence,
             backend_catalog_changed=self._model_hub_catalog_changed,
             repair_model_selections=repair_model_selections,

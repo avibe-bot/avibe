@@ -1521,6 +1521,11 @@
           "cancel": "Cancel",
           "add": "Add model",
           "apply": "Save model"
+        },
+        "off": {
+          "status": "Turned off",
+          "enable": "Turn on",
+          "enableLabel": "Turn on {{backend}} in Settings › Backends"
         }
       },
       "takeover": {

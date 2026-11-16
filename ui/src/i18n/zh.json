@@ -1521,6 +1521,11 @@
           "cancel": "取消",
           "add": "添加模型",
           "apply": "保存模型"
+        },
+        "off": {
+          "status": "已停用",
+          "enable": "去启用",
+          "enableLabel": "在「设置 › 后端」中启用 {{backend}}"
         }
       },
       "takeover": {

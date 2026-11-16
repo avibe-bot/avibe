@@ -1211,7 +1211,9 @@ takeover label synchronized across both locale sets.
 AgentSupply also carries two orthogonal read facts. `cli_present` is the server-
 authoritative per-backend executable-presence boolean; false on every backend is the
 complete zero-installed-backend state, and the field proves neither login nor process
-readiness. Every `model_supply` row carries `has_runnable_hop`, computed with §4.3's
+readiness. A third, `backend_enabled` (2026-11-16, additive), says whether the backend
+is switched on in Settings · Backends; the Models page draws an installed but switched-off
+backend as one folded off row, without routes or wires. Every `model_supply` row carries `has_runnable_hop`, computed with §4.3's
 exact-chain live predicate. Thus `chain_length > 0 && !has_runnable_hop` is an all-stale
 Route, while `chain_length == 0 && !has_runnable_hop` is structurally empty.
 

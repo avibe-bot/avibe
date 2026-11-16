@@ -462,6 +462,8 @@ export type AgentSupply = {
   backend: AgentBackend;
   /** Server-authoritative CLI installation fact for this backend. */
   cli_present: boolean;
+  /** Switched on in Settings · Backends. Absent reads as on; Vibey is always on. */
+  backend_enabled?: boolean;
   mode: AgentMode;
   menu_kind: MenuKind;
   /** The named Agent whose explicit selection `selected_model_id` came from.

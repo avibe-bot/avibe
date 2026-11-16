@@ -542,6 +542,59 @@ describe('SettingsModelsPage surface branches', () => {
     }
   });
 
+  // Owner report 11-16: Codex switched off in Settings · Backends still drew a
+  // live card with wires, and providers still named it as a user.
+  it('draws a switched-off backend as one off row: no wires, no attribution, a way to turn it on', async () => {
+    const shared: Source = {
+      ...retainedSource,
+      id: 'src_head',
+      display_name: 'Shared relay',
+      adopted_by: [{ backend: 'codex', menu_model: 'gpt-5.6-sol' }, { backend: 'vibey', menu_model: 'gpt-5.6-sol' }],
+    };
+    const vibeyModel: BackendModel = {
+      id: 'gpt-5.6-sol', display_name: null, origin: 'manual', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    const vibey: AgentSupply = { ...takeoverAgent, backend: 'vibey', cli_present: false, catalog_models: [vibeyModel] };
+    const codexOff: AgentSupply = { ...takeoverAgent, backend_enabled: false };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([shared]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([codexOff, vibey]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const LocationProbe = () => {
+      const location = useLocation();
+      return <output data-testid="location">{location.pathname}</output>;
+    };
+    const view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter initialEntries={['/settings/models']}>
+            <SettingsModelsRoute />
+            <LocationProbe />
+          </MemoryRouter>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const offRow = await waitFor(() => {
+      const row = view.container.querySelector<HTMLElement>('[data-agent-backend-off="codex"]');
+      expect(row).not.toBeNull();
+      return row as HTMLElement;
+    });
+    expect(view.container.querySelector('[data-agent-backend="codex"]')).toBeNull();
+    expect(view.container.querySelector('[data-agent-backend="vibey"]')).not.toBeNull();
+    expect(within(offRow).queryByRole('button', { name: /^Manage models$|^管理模型$/i })).toBeNull();
+    const sourceRow = (await screen.findByText('Shared relay')).closest('[data-source-id]') as HTMLElement;
+    expect(sourceRow.textContent).toMatch(/Vibey/);
+    expect(sourceRow.textContent).not.toMatch(/Codex/);
+
+    await userEvent.click(within(offRow).getByRole('button', { name: /Turn on Codex in Settings › Backends|在「设置 › 后端」中启用 Codex/ }));
+    expect(screen.getByTestId('location').textContent).toBe('/settings/backends/codex');
+  });
+
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
     const ids = Array.from({ length: 6 }, (_, index) => `catalog-model-${index + 1}`);
     const addedId = 'catalog-model-added';

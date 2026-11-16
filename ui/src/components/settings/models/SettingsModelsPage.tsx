@@ -375,14 +375,22 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
   );
 };
 
+/** Installed but switched off in Settings · Backends. A payload without the
+ *  fact reads as on, and the built-in Vibey has no switch. */
+const isSwitchedOff = (agent: AgentSupply): boolean =>
+  getBackendUiMeta(agent.backend).capabilities.supports_cli && agent.backend_enabled === false;
+
 const DirectHome: React.FC<{
   agents: (AgentSupply & { backend: NativeCliBackend })[];
+  /** Installed but switched off in Settings · Backends: shown as off, never offered the switch. */
+  switchedOff: (AgentSupply & { backend: NativeCliBackend })[];
   switchFailures: ReadonlySet<string>;
   connectingBackend: string | null;
   onSwitch: (agent: AgentSupply) => void;
-}> = ({ agents, switchFailures, connectingBackend, onSwitch }) => {
+  onEnable: (agent: AgentSupply) => void;
+}> = ({ agents, switchedOff, switchFailures, connectingBackend, onSwitch, onEnable }) => {
   const { t } = useModelsTranslation();
-  if (agents.length === 0) {
+  if (agents.length === 0 && switchedOff.length === 0) {
     return <section className="model-hub-direct-empty"><h2>{t('settings.models.direct.empty.title')}</h2><p>{t('settings.models.direct.empty.body')}</p><span>{t('settings.models.direct.empty.install')}</span></section>;
   }
   return (
@@ -409,6 +417,21 @@ const DirectHome: React.FC<{
                       : <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>}
                   </span>
                   <Button variant="secondary" size="sm" className="model-hub-direct-switch h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)} disabled={connectingBackend === agent.backend}>{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.direct.action.switchToGateway')}</Button>
+                </div>
+              );
+            })}
+            {[...switchedOff].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend)).map((agent) => {
+              const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
+              return (
+                <div key={agent.backend} className="model-hub-direct-row model-hub-direct-row--backend flex flex-wrap items-center gap-2.5 bg-background px-3 sm:flex-nowrap" data-agent-backend-off={agent.backend}>
+                  <span className={cn('flex size-[34px] shrink-0 items-center justify-center rounded-[9px] opacity-60 grayscale', tileCls)}><Icon className={cn('size-[17px]', iconCls)} /></span>
+                  <span className="model-hub-direct-backend-copy">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="model-hub-direct-backend-name truncate text-muted">{label}</span>
+                      <span className="model-hub-pill model-hub-fill-0a border border-edge text-muted">{t('settings.models.gateway.off.status')}</span>
+                    </span>
+                  </span>
+                  <Button variant="secondary" size="sm" className="model-hub-direct-switch h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" aria-label={t('settings.models.gateway.off.enableLabel', { backend: label }) as string} onClick={() => onEnable(agent)}>{t('settings.models.gateway.off.enable')}</Button>
                 </div>
               );
             })}
@@ -1152,10 +1175,18 @@ export const SettingsModelsPage: React.FC = () => {
   const installedAgents = agents.filter(
     (agent) => !getBackendUiMeta(agent.backend).capabilities.supports_cli || agent.cli_present,
   );
-  const installedNativeAgents = installedAgents.filter(
+  // Installed but switched off in Settings · Backends: still part of the page
+  // (it decides which surface shows), drawn as a folded off row with no routes,
+  // wires or "in use" attribution.
+  const switchedOffAgents = installedAgents.filter(isSwitchedOff);
+  const liveAgents = installedAgents.filter((agent) => !isSwitchedOff(agent));
+  const installedNativeAgents = liveAgents.filter(
     (agent): agent is AgentSupply & { backend: NativeCliBackend } => isNativeCliBackend(agent.backend),
   );
-  const hubBackends = agents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
+  const switchedOffNativeAgents = switchedOffAgents.filter(
+    (agent): agent is AgentSupply & { backend: NativeCliBackend } => isNativeCliBackend(agent.backend),
+  );
+  const hubBackends = liveAgents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
   const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
   const canRetryRuntime = runtimeRead.kind === 'ready'
     && !runtimeRunning
@@ -1163,9 +1194,9 @@ export const SettingsModelsPage: React.FC = () => {
     && retainedRuntime?.manifest.resolution !== 'unsupported';
   const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyDisplayRead, {
     loading: () => loadingRegion(),
-    ready: () => readyRegion(installedAgents),
+    ready: () => readyRegion(liveAgents),
     unread: (retryable) => unreadRegion(retryable),
-    degraded: (_staleData, cause, retryable) => degradedRegion(installedAgents, cause, retryable),
+    degraded: (_staleData, cause, retryable) => degradedRegion(liveAgents, cause, retryable),
   });
   type SourceDetailSelection = {
     sourceId: string;
@@ -1493,7 +1524,7 @@ export const SettingsModelsPage: React.FC = () => {
       }
     }
   }, [chainsRead, routeCommitted, suspendedRouteAttempts]);
-  const supplyRelations = React.useMemo(() => buildSupplyRelations(installedAgents, sources, chains, runtime), [chains, installedAgents, runtime, sources]);
+  const supplyRelations = React.useMemo(() => buildSupplyRelations(liveAgents, sources, chains, runtime), [chains, liveAgents, runtime, sources]);
   /** The Sources this page has read, by id — for the surfaces that show a hop and
    *  have to name whose it is. Only what was read: an id no Source answers for is
    *  left unnamed rather than rendered raw. */
@@ -1659,7 +1690,7 @@ export const SettingsModelsPage: React.FC = () => {
                     : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} onAddService={openSearchServices} onOpenService={openSearchSource} onRetryService={(sourceId) => void hostedTools.retryService(sourceId)} onRetryFetch={(sourceId) => void hostedTools.retryFetch(sourceId)} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
-                    : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
+                    : directEmpty ? <DirectHome agents={installedNativeAgents} switchedOff={switchedOffNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} onEnable={(agent) => navigate(`/settings/backends/${agent.backend}`)} />
                     : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
@@ -1739,7 +1770,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onAddModels={(agent) => setAddBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
+                        <GatewayModule supply={installedSupplyRead} switchedOff={switchedOffAgents} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onAddModels={(agent) => setAddBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
