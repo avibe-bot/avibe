@@ -7,7 +7,8 @@ support Mini. Return to this Mac to use it.") or not shown at all.
 
 The scan covers every shipped string catalog: the Web/Desktop/Mini UI bundles,
 the service and IM reply bundles, and the iOS catalogs, plus the bundled Skill
-text (``skills/*/SKILL.md``) that Agents read and relay. A legitimate match must
+text (``skills/**/*.md``, entry points and the references they load) that
+Agents read and relay. A legitimate match must
 be listed in ``ALLOWED`` with the reason it is not roadmap or unfinished-state
 copy; keep that list short and specific.
 
@@ -116,7 +117,7 @@ def _entries() -> Iterator[tuple[str, str]]:
             match = re.match(r'\s*"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"\s*;', line)
             if match:
                 yield f"{rel}:{match.group(1)}", match.group(2)
-    for path in sorted(ROOT.glob("skills/*/SKILL.md")):
+    for path in sorted(ROOT.glob("skills/**/*.md")):
         rel = path.relative_to(ROOT).as_posix()
         for number, paragraph in _paragraphs(path.read_text(encoding="utf-8")):
             yield f"{rel}:{number}", paragraph
