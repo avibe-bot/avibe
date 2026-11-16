@@ -4661,7 +4661,8 @@
     "desktopManagedUpdateMemberHint": "请在运行 Avibe 的那台电脑上的桌面应用中更新此主机。",
     "desktopRemoteUpdateLocalRequest": "有人远程请求更新到 {{target}}。你可以立即安装或忽略此请求。",
     "desktopRemoteUpdateIgnore": "忽略此请求",
-    "runtimeVersionSkew": "本应用为 v{{app}}，但连接的 Avibe 运行时为 v{{runtime}}"
+    "runtimeVersionSkew": "本应用为 v{{app}}，但连接的 Avibe 运行时为 v{{runtime}}",
+    "audioTranscriptionDisclosure": "开启后，聊天平台里的语音消息会交给第三方 AI 语音服务转成文字，avibe.bot 不保存录音。"
   },
   "doctor": {
     "title": "系统状态",
@@ -7289,7 +7290,8 @@
       "stop": "停止语音输入",
       "startFailed": "无法使用麦克风。请在系统设置里检查麦克风权限，或直接打字。",
       "empty": "没听到说话。可以再说一次，或直接打字。",
-      "failed": "没能转成文字。可以再说一次，或直接打字。"
+      "failed": "没能转成文字。可以再说一次，或直接打字。",
+      "consentOff": "语音输入已关闭，可以在设置 › 常规里开启。"
     },
     "keyboard": {
       "open": "输入消息",
@@ -7420,6 +7422,21 @@
       "lost": "这段录音没能保存在这台设备上。",
       "insert": "放进输入框",
       "truncated": "录音的结尾没能保存在这台设备上，这里是保存下来的部分。"
+    },
+    "consent": {
+      "title": "开启语音输入？",
+      "body": "你说的话会交给第三方 AI 服务转成文字，为了更准确，也会带上当前对话里的少量文字。",
+      "learnMore": "了解详情",
+      "details": "录音和这些文字经 avibe.bot 转给阿里云百炼（新加坡）识别，再由同一平台上的模型整理。avibe.bot 不保存录音和文字。随时可以在设置 › 常规里更改。",
+      "privacyPolicy": "隐私政策",
+      "allow": "允许",
+      "deny": "不允许",
+      "saveFailed": "没能保存你的选择，请再试一次。",
+      "offTitle": "语音输入已关闭",
+      "offBody": "可以直接打字，或在设置 › 常规里开启。",
+      "turnOn": "开启",
+      "settingTitle": "语音输入",
+      "settingDescription": "用第三方 AI 语音服务把你说的话转成文字，avibe.bot 不保存录音。只对你的账号在这个 Avibe 上生效。"
     }
   },
   "mcpHub": {

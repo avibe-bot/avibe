@@ -99,7 +99,9 @@ INSTANCE_SCOPED_REFETCH_EVENTS = frozenset(
         VAULTS_UPDATED_EVENT,
     }
 )
-_EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated"}) | INSTANCE_SCOPED_REFETCH_EVENTS
+#: ``voice.consent.updated`` reaches only the account whose answer changed
+#: (``ui_server._workbench_event_visible_to_context``), at the role of the voice routes.
+_EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "voice.consent.updated"}) | INSTANCE_SCOPED_REFETCH_EVENTS
 #: Remote-access link quality describes the instance's own connection, which is
 #: instance management, and stays member-only.
 _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset({"remote_access.quality.changed"})
@@ -691,6 +693,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/browse/favorites$"),
         ("GET", r"^/api/cloud/token$"),
         ("GET", r"^/api/asr/status$"),
+        ("PUT", r"^/api/asr/consent$"),
         ("GET", r"^/api/sessions/[^/]+/(?:archive-preview|queue|draft)$"),
         ("POST", r"^/api/sessions$"),
         ("POST", r"^/api/desktop-mini/session$"),

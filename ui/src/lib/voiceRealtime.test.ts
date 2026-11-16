@@ -6,6 +6,7 @@ import {
   VoiceRealtimeSession,
   VOICE_REALTIME_PROTOCOL,
 } from './voiceRealtime';
+import { noteVoiceStatus } from './voiceConsent';
 
 class FakeSocket {
   readyState = 0;
@@ -136,6 +137,30 @@ describe('voice realtime client protocol', () => {
 
     await expectation;
     expect(socket.readyState).toBe(3);
+  });
+
+  // ui/design: composer/voice-consent/*
+  it('closes an open take and sends no more audio once this account takes back its yes', async () => {
+    vi.stubGlobal('WebSocket', { OPEN: 1, CLOSED: 3 });
+    const socket = new FakeSocket();
+    const onError = vi.fn();
+    const session = new VoiceRealtimeSession({ before: '', after: '', onError, openSocket: connect(socket) });
+    try {
+      noteVoiceStatus({ available: true, consent: 'granted' });
+      const start = session.start();
+      socket.open();
+      await start;
+      expect(session.sendPcm(new Int16Array([1]))).toBe(true);
+      const sent = socket.sent.length;
+
+      noteVoiceStatus({ available: true, consent: 'declined' });
+      expect(session.sendPcm(new Int16Array([2]))).toBe(false);
+      expect(socket.sent).toHaveLength(sent);
+      expect(socket.readyState).toBe(3);
+      expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'realtime_consent_withdrawn' }));
+    } finally {
+      noteVoiceStatus({ available: true });
+    }
   });
 
   it('reports an active socket failure and stops accepting PCM', async () => {

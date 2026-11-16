@@ -3781,6 +3781,7 @@ def test_cloud_token_endpoint_mints_device_token_for_same_origin_loopback_browse
     can reach the cloud directly."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _cloud_broker_config().save()
+    _allow_voice("local")
     urls = _record_device_mints(monkeypatch)
 
     response = ui_server.app.test_client().get(
@@ -3855,6 +3856,7 @@ def test_cloud_token_endpoint_falls_back_when_device_mint_is_refused(
     tunnel down) keeps today's relay fallback."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _cloud_broker_config().save()
+    _allow_voice("local")
 
     def refused(*args, **kwargs):
         raise remote_access.BackendRequestError(404, {"error": "not_found"})
@@ -3899,6 +3901,7 @@ def test_cloud_token_endpoint_remote_origin_with_session_mints_token(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _cloud_broker_config()
     config.save()
+    _allow_voice("remote:user-1")
     monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
     monkeypatch.setattr(
         remote_access,
@@ -3922,6 +3925,49 @@ def test_cloud_token_endpoint_remote_origin_with_session_mints_token(
     assert payload["token"] == "ct_abc"
     assert payload["scope"] == "asr"
     assert response.headers["Cache-Control"] == "no-store, private"
+
+
+def _allow_voice(user_key: str, choice: str = "granted") -> None:
+    """The account has answered voice input's question (core/voice_consent.py)."""
+    from core.voice_consent import set_voice_consent
+
+    set_voice_consent(user_key, choice)
+
+
+@pytest.mark.parametrize("answer", [None, "declined"], ids=["not-asked", "declined"])
+def test_cloud_token_endpoint_mints_no_voice_token_without_the_accounts_yes(
+    monkeypatch,
+    tmp_path,
+    answer,
+) -> None:
+    """The token only reaches avibe.bot's voice routes, which send speech to a
+    third-party AI service: neither the machine's own Workbench nor a remote
+    user gets one before that account allowed voice input, and another
+    account's yes does not count."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _cloud_broker_config()
+    config.save()
+    _allow_voice("remote:someone-else")
+    if answer:
+        _allow_voice("local", answer)
+        _allow_voice("remote:user-1", answer)
+    minted: list[object] = []
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    monkeypatch.setattr(remote_access, "_json_request", lambda *a, **k: minted.append(a) or {"access_token": "ct"})
+
+    local = ui_server.app.test_client().get(
+        "/api/cloud/token",
+        headers={"Origin": "http://127.0.0.1:5123"},
+        base_url="http://127.0.0.1:5123",
+    )
+    client = ui_server.app.test_client()
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, _session_cookie(config), domain="alex.avibe.bot")
+    remote = client.get("/api/cloud/token", base_url="https://alex.avibe.bot")
+
+    for response in (local, remote):
+        assert response.status_code == 403
+        assert response.get_json() == {"ok": False, "error": "voice_consent_required"}
+    assert minted == []
 
 
 def test_ra_tq_029_connector_environment_applies_ip_and_interface_controls() -> None:

@@ -90,6 +90,9 @@ export type ShowPageVoiceHostDependencies = {
   /** Where a take's words go if this page is gone before they land (lib/voiceTakeStore): the
    *  take is kept on the device until then. */
   keep?: () => VoiceTakeKeep | null;
+  /** Whether this reader allowed voice input (lib/voiceConsent). Asked at each start; a start
+   *  without it records nothing and is refused as `unavailable` (the host asks the reader). */
+  allowed?: () => boolean;
 };
 
 type StartingVoiceSession = {
@@ -170,6 +173,7 @@ export class ShowPageVoiceHost {
       createSession: dependencies.createSession
         ?? ((input) => new ShowPageVoiceDictation(input)),
       keep: dependencies.keep ?? (() => null),
+      allowed: dependencies.allowed ?? (() => true),
     };
   }
 
@@ -251,7 +255,7 @@ export class ShowPageVoiceHost {
     try {
       const availability = await this.dependencies.availability();
       if (this.disposed || pending.cancelled || this.starting !== pending) return;
-      if (!availability.available) {
+      if (!availability.available || !this.dependencies.allowed()) {
         this.postError(request.requestId, 'unavailable', false);
         return;
       }

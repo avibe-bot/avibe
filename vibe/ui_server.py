@@ -7368,6 +7368,43 @@ def _web_push_user_key() -> str:
     return "local"
 
 
+def _voice_consent_user_key() -> str | None:
+    """The account a voice consent answer belongs to (core/voice_consent.py).
+
+    The same key as ``_web_push_user_key``, except that a remote-access request
+    whose user cannot be told yields ``None`` instead of falling back to this
+    machine's own ``local`` answer.
+    """
+
+    config = _load_remote_access_config()
+    if config is not None and _is_remote_access_request(config):
+        try:
+            payload = _resolved_remote_session_payload(config)
+        except Exception:
+            logger.debug("voice consent: could not resolve remote user key", exc_info=True)
+            return None
+        sub = payload.get("sub") if isinstance(payload, dict) else None
+        return f"remote:{sub}" if isinstance(sub, str) and sub else None
+    return _web_push_user_key()
+
+
+def _voice_consent_for(user_key: str | None) -> str | None:
+    """The account's answer, or ``None`` (not asked, or unreadable: never a yes)."""
+    from core.voice_consent import get_voice_consent
+
+    if user_key is None:
+        return None
+    try:
+        return get_voice_consent(user_key)
+    except Exception:
+        logger.warning("voice consent: could not read the stored answer", exc_info=True)
+        return None
+
+
+def _voice_consent_required_response():
+    return jsonify({"ok": False, "error": "voice_consent_required"}), 403
+
+
 @app.route("/api/notifications/preferences", methods=["GET", "PUT"])
 def notification_preferences_route():
     from core.notification_preferences import (
@@ -8815,11 +8852,12 @@ def api_cloud_token():
             # principal is this paired device. Without one it has no realtime
             # voice. Proxies, LAN setup hosts, and pages without same-origin
             # evidence keep the relay fallback.
-            local_result = (
-                remote_access.cloud_token_for_local_device(config)
-                if _is_direct_loopback_browser_request()
-                else None
-            )
+            if not _is_direct_loopback_browser_request():
+                return jsonify({"error": "cloud_unavailable"}), 503
+            # The token only reaches avibe.bot's voice routes (scope ``asr``).
+            if _voice_consent_for(_voice_consent_user_key()) != "granted":
+                return _voice_consent_required_response()
+            local_result = remote_access.cloud_token_for_local_device(config)
             if local_result is None:
                 return jsonify({"error": "cloud_unavailable"}), 503
             return _cloud_token_response(local_result)
@@ -8831,11 +8869,12 @@ def api_cloud_token():
         return jsonify(
             {"ok": False, "error": "remote_access_authorization_unavailable"}
         ), 503
-    result = (
-        remote_access.cloud_token_for_authorization(config, resolution.payload)
-        if resolution.current
-        else None
-    )
+    if not resolution.current:
+        return jsonify({"error": "cloud_unavailable"}), 503
+    sub = resolution.payload.get("sub") if isinstance(resolution.payload, dict) else None
+    if _voice_consent_for(f"remote:{sub}" if isinstance(sub, str) and sub else None) != "granted":
+        return _voice_consent_required_response()
+    result = remote_access.cloud_token_for_authorization(config, resolution.payload)
     if result is None:
         return jsonify({"error": "cloud_unavailable"}), 503
     return _cloud_token_response(result)
@@ -13328,6 +13367,9 @@ async def asr_transcribe():
     service = AudioAsrService(config)
     if not service.is_available():
         return jsonify({"error": "asr_unavailable"}), 400
+    consent_user_key = _voice_consent_user_key()
+    if await asyncio.to_thread(_voice_consent_for, consent_user_key) != "granted":
+        return _voice_consent_required_response()
     audio_asr_config = getattr(config, "audio_asr", None)
     max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
     if max_file_bytes is not None and raw and len(raw) > max_file_bytes:
@@ -13728,10 +13770,33 @@ def asr_status():
             {
                 "available": available,
                 "max_file_bytes": max_file_bytes,
+                # This account's answer to the voice disclosure: "granted",
+                # "declined", or null when it has not been asked.
+                "consent": _voice_consent_for(_voice_consent_user_key()),
             }
         )
     except Exception:
-        return jsonify({"available": False, "max_file_bytes": None})
+        return jsonify({"available": False, "max_file_bytes": None, "consent": None})
+
+
+@app.route("/api/asr/consent", methods=["PUT"])
+def asr_consent():
+    """Record this account's answer to the voice disclosure (core/voice_consent.py)."""
+    from core.voice_consent import set_voice_consent
+
+    payload = request.json
+    choice = payload.get("choice") if isinstance(payload, dict) else None
+    if choice not in ("granted", "declined"):
+        return jsonify({"ok": False, "error": "invalid_choice"}), 400
+    user_key = _voice_consent_user_key()
+    if user_key is None:
+        return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
+    set_voice_consent(user_key, choice)
+    from vibe.sse_broker import broker
+
+    # The account's other tabs and devices re-read the answer: a "no" stops their sends at once.
+    broker.publish("voice.consent.updated", {"user_key": user_key})
+    return jsonify({"ok": True, "consent": choice})
 
 
 def _publish_visible_input_message(
@@ -14582,7 +14647,7 @@ def _inbox_row_hidden_from(context, payload: str) -> bool:
 
 
 def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
-    if event_type == "notifications.preferences.updated":
+    if event_type in {"notifications.preferences.updated", "voice.consent.updated"}:
         data = _workbench_event_data(payload)
         return bool(
             data is not None

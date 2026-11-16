@@ -12,8 +12,18 @@ from core.audio_asr import (
     AudioAsrTimeoutError,
     AudioAsrUnavailableError,
 )
+import pytest
+
 from tests.ui_server_test_helpers import csrf_headers
 from vibe.ui_server import app
+
+
+@pytest.fixture(autouse=True)
+def voice_allowed():
+    """These cases cover transcription itself: this machine's account has said yes to voice."""
+    from core.voice_consent import set_voice_consent
+
+    set_voice_consent("local", "granted")
 
 
 def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
@@ -35,11 +45,11 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
     response = client.get("/api/asr/status")
 
     assert response.status_code == 200
-    assert response.get_json() == {"available": True, "max_file_bytes": 160_044}
+    assert response.get_json() == {"available": True, "max_file_bytes": 160_044, "consent": "granted"}
 
     config.audio_asr.max_file_bytes = 160_043
     response = client.get("/api/asr/status")
-    assert response.get_json() == {"available": False, "max_file_bytes": 160_043}
+    assert response.get_json() == {"available": False, "max_file_bytes": 160_043, "consent": "granted"}
 
 
 def test_asr_transcribe_preserves_compatibility_timeout(monkeypatch):
@@ -381,3 +391,85 @@ def test_asr_transcribe_preserves_dictation_and_protocol_errors(monkeypatch):
     response = client.post("/api/asr/transcribe", json=payload, headers=csrf_headers(client))
     assert response.status_code == 502
     assert response.get_json() == {"error": "transcription_failed"}
+
+
+def _paired_asr(monkeypatch):
+    monkeypatch.setattr(
+        "core.services.settings.load_config",
+        lambda: SimpleNamespace(
+            audio_asr=AudioAsrConfig(enabled=True),
+            remote_access=RemoteAccessConfig(
+                vibe_cloud=VibeCloudRemoteAccessConfig(
+                    enabled=True,
+                    backend_url="https://avibe.bot",
+                    instance_id="instance",
+                    instance_secret="secret",
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(AudioAsrService, "is_available", lambda _self: True)
+
+
+def test_voice_consent_is_asked_answered_and_enforced_per_account(monkeypatch):
+    """Voice input sends speech to a third-party AI service: the status reports this
+    account's answer, the answer is saved per account, and the relay transcribes only
+    after a yes to the current disclosure (core/voice_consent.py)."""
+    from core.chat_discovery import set_state_meta
+    from core.voice_consent import VOICE_DISCLOSURE_REVISION, consent_key, set_voice_consent
+
+    _paired_asr(monkeypatch)
+    sent: list[object] = []
+
+    async def transcribe(_self, attachment, **_kwargs):
+        sent.append(attachment)
+        return {"text": "hi", "cleanup": "success"}
+
+    monkeypatch.setattr(AudioAsrService, "transcribe_voice_segment", transcribe)
+    client = app.test_client()
+    body = {"name": "voice.webm", "mime": "audio/webm", "data": base64.b64encode(b"audio").decode()}
+
+    # An answer to an older disclosure, or another account's yes, does not count.
+    set_state_meta(consent_key("local"), {"voice": {"choice": "granted", "revision": VOICE_DISCLOSURE_REVISION - 1}})
+    set_voice_consent("remote:someone-else", "granted")
+    assert client.get("/api/asr/status").get_json()["consent"] is None
+    response = client.post("/api/asr/transcribe", json=body, headers=csrf_headers(client))
+    assert response.status_code == 403
+    assert response.get_json() == {"ok": False, "error": "voice_consent_required"}
+
+    response = client.put("/api/asr/consent", json={"choice": "declined"}, headers=csrf_headers(client))
+    assert response.get_json() == {"ok": True, "consent": "declined"}
+    assert client.get("/api/asr/status").get_json()["consent"] == "declined"
+    assert client.post("/api/asr/transcribe", json=body, headers=csrf_headers(client)).status_code == 403
+    assert sent == []
+
+    assert client.put("/api/asr/consent", json={"choice": "yes"}, headers=csrf_headers(client)).status_code == 400
+    client.put("/api/asr/consent", json={"choice": "granted"}, headers=csrf_headers(client))
+    response = client.post("/api/asr/transcribe", json=body, headers=csrf_headers(client))
+    assert response.status_code == 200
+    assert len(sent) == 1
+
+
+def test_a_changed_answer_reaches_only_the_same_accounts_other_tabs_and_devices(monkeypatch):
+    """Saving an answer announces it so the account's other open pages stop sending at once
+    on a "no"; the frame reaches only that account, at the voice routes' Editor role."""
+    import json
+
+    from vibe.authorization import AuthorizationContext, can_receive_workbench_event
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _workbench_event_visible_to_context
+
+    published: list[tuple[str, object]] = []
+    monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
+    client = app.test_client()
+    client.put("/api/asr/consent", json={"choice": "declined"}, headers=csrf_headers(client))
+    assert published == [("voice.consent.updated", {"user_key": "local"})]
+
+    payload = json.dumps({"type": "voice.consent.updated", "data": {"user_key": "remote:alice"}})
+    alice = AuthorizationContext(instance_role="editor", is_remote=True, subject="alice")
+    bob = AuthorizationContext(instance_role="editor", is_remote=True, subject="bob")
+    viewer = AuthorizationContext(instance_role="viewer", is_remote=True, subject="alice")
+    assert _workbench_event_visible_to_context(alice, "voice.consent.updated", payload)
+    assert not _workbench_event_visible_to_context(bob, "voice.consent.updated", payload)
+    assert can_receive_workbench_event(alice, "voice.consent.updated")
+    assert not can_receive_workbench_event(viewer, "voice.consent.updated")

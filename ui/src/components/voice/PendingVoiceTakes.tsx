@@ -21,6 +21,7 @@ import {
   subscribeVoiceTakeRetries,
 } from '@/lib/voiceTakeRetry';
 import { Button } from '../ui/button';
+import { askVoiceConsent, knownVoiceConsent, useVoiceConsent } from '@/lib/voiceConsent';
 
 // The takes kept on this device whose words have not landed yet (lib/voiceTakeStore), as small
 // items above the composer of the conversation they were spoken into (ui/design:
@@ -178,9 +179,13 @@ const triedOnLoad = new Set<string>();
  *  browser reports no network. */
 function useAutoRetry(takes: VoiceTake[], onFailed: (id: string) => void) {
   const retryAll = useRef<(only?: (take: VoiceTake) => boolean) => void>(() => undefined);
+  // Re-rendered when this account's voice answer is known or changes: a kept take is sent again
+  // only after it said yes (ui/design: composer/voice-consent/*).
+  useVoiceConsent();
   useEffect(() => {
     retryAll.current = (only) => {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      if (knownVoiceConsent() !== 'granted') return;
       for (const take of takes) {
         if (take.status === 'transcribed' || isRetryingVoiceTake(take.id) || !keptVoiceTakeHasAudio(take)) continue;
         if (only && !only(take)) continue;
@@ -237,6 +242,10 @@ export function PendingVoiceTakes({
             retrying={isRetryingVoiceTake(take.id)}
             failed={failed.has(take.id)}
             onRetry={() => {
+              if (knownVoiceConsent() !== 'granted') {
+                askVoiceConsent();
+                return;
+              }
               void retryKeptVoiceTake(take).then(
                 () => setFailed((current) => {
                   const next = new Set(current);

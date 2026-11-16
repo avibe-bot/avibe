@@ -13,7 +13,9 @@
 //  - fallback: before any cloud request, throws CloudUnavailableError when no
 //    token can be obtained so callers may use the local relay instead
 import { apiFetch } from './apiFetch';
+import { subscribeLocalSnapshotPrincipal } from './localSnapshots';
 import { onPageReactivated } from './pageActivity';
+import { subscribeVoiceConsent, VOICE_CONSENT_REQUIRED_EVENT, voiceSendAllowed } from './voiceConsent';
 
 export type CloudToken = {
   token: string;
@@ -73,6 +75,9 @@ let current: CloudToken | null = null;
 let inflight: Promise<CloudToken | null> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let listenersBound = false;
+// Bumped when the held token is dropped, so a mint already on its way is not kept.
+let generation = 0;
+
 
 const isFresh = (token: CloudToken | null): token is CloudToken =>
   !!token && token.expiresAt * 1000 - Date.now() > EXPIRY_SKEW_MS;
@@ -93,7 +98,7 @@ const bindActivityListeners = (): void => {
   // Background tabs don't fire timers reliably; top the token up when the user
   // returns or the network comes back so it's warm on the next action.
   const topUp = (): void => {
-    if (!isFresh(current)) void mint().catch(() => undefined);
+    if (!isFresh(current) && voiceSendAllowed()) void mint().catch(() => undefined);
   };
   onPageReactivated(topUp);
   window.addEventListener('online', topUp);
@@ -102,6 +107,7 @@ const bindActivityListeners = (): void => {
 // Single-flight: concurrent callers share one in-flight /api/cloud/token request.
 const mint = (): Promise<CloudToken | null> => {
   if (inflight) return inflight;
+  const mintGeneration = generation;
   inflight = (async () => {
     const controller = new AbortController();
     const timeoutError = new DOMException('cloud token mint timed out', 'TimeoutError');
@@ -119,6 +125,12 @@ const mint = (): Promise<CloudToken | null> => {
       ]);
       if (!res.ok) {
         current = null;
+        if (res.status === 403 && typeof window !== 'undefined') {
+          const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+          if (body?.error === 'voice_consent_required') {
+            window.dispatchEvent(new Event(VOICE_CONSENT_REQUIRED_EVENT));
+          }
+        }
         return null;
       }
       const data = (await res.json().catch(() => null)) as
@@ -133,6 +145,8 @@ const mint = (): Promise<CloudToken | null> => {
         current = null;
         return null;
       }
+      // Dropped while it was on its way (lib/voiceConsent: the account said no).
+      if (mintGeneration !== generation) return null;
       current = {
         token: data.token,
         baseUrl: data.base_url,
@@ -153,8 +167,11 @@ const mint = (): Promise<CloudToken | null> => {
   return inflight;
 };
 
-const ensureToken = (): Promise<CloudToken | null> =>
-  isFresh(current) ? Promise.resolve(current) : mint();
+// Nothing goes to avibe.bot's voice routes once this account said no (lib/voiceConsent).
+const ensureToken = (): Promise<CloudToken | null> => {
+  if (!voiceSendAllowed()) return Promise.resolve(null);
+  return isFresh(current) ? Promise.resolve(current) : mint();
+};
 
 export const openAvibeWebSocket = async (
   path: string,
@@ -214,6 +231,22 @@ const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Pr
       },
     );
   });
+};
+
+// The token only reaches avibe.bot's voice routes. It goes when this account takes back its yes
+// (here or, through the event stream, on another device) and when the reader changes.
+subscribeVoiceConsent(() => {
+  if (!voiceSendAllowed()) forgetCloudToken();
+});
+subscribeLocalSnapshotPrincipal(() => forgetCloudToken());
+
+/** Drop the held token and its refresh: this account no longer allows voice input, or the
+ *  reader changed. The next use mints again, which the instance refuses without a yes. */
+export const forgetCloudToken = (): void => {
+  generation += 1;
+  current = null;
+  if (refreshTimer != null) clearTimeout(refreshTimer);
+  refreshTimer = null;
 };
 
 // Prewarm at app load (fire-and-forget): get a token before the first real use

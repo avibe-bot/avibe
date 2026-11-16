@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { actionShortcutMatches, isPlainEscape, useActionShortcuts } from '../../lib/actionShortcuts';
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
+import { askVoiceConsent, beginVoiceConsentRead, noteVoiceStatus, voiceConsentForPress } from '../../lib/voiceConsent';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import {
@@ -190,10 +191,12 @@ export function useShowPageAnnotation(src: string | null, keepTarget?: string | 
     let availability: Promise<ShowPageVoiceAvailability> | null = null;
     const loadAvailability = async (): Promise<ShowPageVoiceAvailability> => {
       try {
+        const consentRead = beginVoiceConsentRead();
         const response = await apiFetch('/api/asr/status');
         const data = response.ok ? await response.json() : null;
         const available = data?.available === true;
-        if (available) primeCloudToken();
+        noteVoiceStatus(data, consentRead);
+        if (available && voiceConsentForPress() === 'granted') primeCloudToken();
         return {
           available,
           maxFileBytes: (
@@ -217,6 +220,13 @@ export function useShowPageAnnotation(src: string | null, keepTarget?: string | 
       keep: () => {
         const target = keepTargetRef.current ?? showPageSessionId(iframe.src);
         return target ? { target, intent: 'insert' } : null;
+      },
+      // Voice goes to a third-party AI service: a page's dictation asks until this account said
+      // yes (ui/design: composer/voice-consent/*).
+      allowed: () => {
+        if (voiceConsentForPress() === 'granted') return true;
+        askVoiceConsent();
+        return false;
       },
       availability: () => {
         if (availability) return availability;
