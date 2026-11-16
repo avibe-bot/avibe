@@ -50,6 +50,13 @@ mod macos_new_context;
 mod macos_terminate;
 #[cfg(target_os = "macos")]
 mod macos_title_bar;
+#[cfg(target_os = "macos")]
+mod macos_vault_window;
+#[cfg(all(target_os = "macos", feature = "vault-window-probe"))]
+pub use macos_vault_window::{
+    install as install_vault_window, install_for_probe as install_vault_window_for_probe,
+    opener_navigated as vault_window_opener_navigated,
+};
 
 use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]
@@ -1920,6 +1927,11 @@ fn build_main_window(
         .on_new_window(|url, _features| handle_new_window_request(url));
     let generation = instance_client::epoch(app);
     let builder = builder.on_page_load(move |webview, payload| {
+        // The document that opened a Vault sandbox window is gone.
+        #[cfg(target_os = "macos")]
+        if payload.event() == tauri::webview::PageLoadEvent::Started {
+            macos_vault_window::opener_navigated(&webview);
+        }
         if payload.event() == tauri::webview::PageLoadEvent::Finished {
             if let Some(generation) = generation {
                 instance_client::navigation_loaded(webview.app_handle(), generation, payload.url());
@@ -1950,6 +1962,7 @@ fn build_main_window(
     #[cfg(target_os = "macos")]
     {
         macos_new_context::install(&window);
+        macos_vault_window::install(&window);
     }
     Some(window)
 }
@@ -2026,11 +2039,13 @@ fn new_window_decision(url: &Url) -> NewWindowDecision {
     }
 }
 
-/// The page never gets a second webview. On macOS a returned webview must share
-/// the opener's `WKWebViewConfiguration`, and wry registers each webview's init
-/// scripts and IPC handler on that shared content controller: every such window
-/// would add a copy of the scripts to this one and, when dropped, remove this
-/// window's IPC handler, leaving the bootstrap page unable to reach the shell.
+/// wry never builds the page a second webview. On macOS a returned webview must
+/// share the opener's `WKWebViewConfiguration`, and wry registers each webview's
+/// init scripts and IPC handler on that shared content controller: every such
+/// window would add a copy of the scripts to this one and, when dropped, remove
+/// this window's IPC handler, leaving the bootstrap page unable to reach the
+/// shell. The one window the shell does open, the Vault sandbox's on macOS, is
+/// built by `macos_vault_window` before a request reaches this handler.
 fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
     if new_window_decision(&url) == NewWindowDecision::OpenInSystemBrowser {
         // Off the main thread: this runs inside the webview's own delegate callback.

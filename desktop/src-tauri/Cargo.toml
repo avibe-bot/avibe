@@ -18,6 +18,13 @@ bundled-runtime = []
 # Test-only builds may redirect Computer Use state and assets to a hermetic lane.
 # Release packaging never enables this feature.
 computer-use-test-overrides = []
+# Test-only builds may point the Vault sandbox window at a loopback origin for
+# the hermetic WebView probe. Release packaging never enables this feature.
+vault-window-probe = []
+
+[[example]]
+name = "vault_window_probe"
+required-features = ["vault-window-probe"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -95,17 +102,21 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSArray",
   "NSDate",
   "NSData",
+  "NSDictionary",
   "NSSet",
   "NSEnumerator",
   "NSError",
   "NSGeometry",
   "NSNotification",
   "NSOperation",
+  "NSProcessInfo",
   "NSString",
   "NSURL",
   "NSURLRequest",
+  "NSURLResponse",
   "NSUserDefaults",
   "NSUserNotification",
+  "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -121,9 +132,21 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "block2",
   "objc2-app-kit",
   "WKFrameInfo",
+  "WKNavigation",
   "WKNavigationAction",
   "WKNavigationDelegate",
+  "WKNavigationResponse",
+  "WKSecurityOrigin",
+  "WKUIDelegate",
+  "WKURLSchemeHandler",
+  "WKURLSchemeTask",
+  "WKUserContentController",
+  "WKUserScript",
   "WKWebView",
   "WKWebViewConfiguration",
   "WKWebsiteDataStore",
+  "WKWindowFeatures",
 ] }
+# Reads the running app's own signed entitlements for the Vault passkey marker.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecTask"] }

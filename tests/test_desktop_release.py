@@ -1043,6 +1043,7 @@ def test_workflow_signs_every_macos_layer_before_recording():
     assert steps[-1]["if"] == "always() && runner.os == 'macOS'"
     workflow_text = (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
     assert "computer-use-test-overrides" not in workflow_text
+    assert "vault-window-probe" not in workflow_text
     assert "AVIBE_COMPUTER_USE_DRIVER_PATH" not in workflow_text
     assert "AVIBE_COMPUTER_USE_POLICY_PATH" not in workflow_text
     assert "AVIBE_COMPUTER_USE_SNAPSHOT_PATH" not in workflow_text

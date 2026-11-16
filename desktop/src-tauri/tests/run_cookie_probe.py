@@ -1,4 +1,4 @@
-"""Run the native cookie probe with disposable HOME/XDG/WebView state."""
+"""Run a native WebView probe with disposable HOME/XDG/WebView state."""
 
 from __future__ import annotations
 
@@ -13,8 +13,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", type=Path)
     parser.add_argument("--log", type=Path, required=True)
+    parser.add_argument("--root-env", default="AVIBE_COOKIE_PROBE_ROOT", help="variable that names the test root")
+    parser.add_argument("--timeout", type=int, default=45)
+    parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE", help="extra probe variable")
     args = parser.parse_args()
-    root = Path(tempfile.mkdtemp(prefix="avibe-cookie-probe-"))
+    root = Path(tempfile.mkdtemp(prefix="avibe-webview-probe-"))
     environment = {
         key: os.environ[key]
         for key in ("PATH", "LANG", "LC_ALL", "__CF_USER_TEXT_ENCODING")
@@ -30,7 +33,8 @@ def main() -> int:
         path = root / directory
         path.mkdir()
         environment[key] = str(path)
-    environment["AVIBE_COOKIE_PROBE_ROOT"] = str(root)
+    environment[args.root_env] = str(root)
+    environment.update(item.split("=", 1) for item in args.set)
     args.log.parent.mkdir(parents=True, exist_ok=True)
     with args.log.open("w") as log:
         log.write(f"probe root: {root}\n")
@@ -42,7 +46,7 @@ def main() -> int:
             cwd=root,
             stdout=log,
             stderr=subprocess.STDOUT,
-            timeout=45,
+            timeout=args.timeout,
             check=False,
         )
     print(args.log.read_text(), end="")

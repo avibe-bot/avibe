@@ -155,6 +155,72 @@ these two window commands through their parent; they are intentionally inside
 this window-control boundary. No remote bootstrap, notification, updater, file,
 or Runtime lifecycle permission is granted.
 
+### The Vault sandbox window (macOS)
+
+A protected Vault step ends in a top-level window of the Vault sandbox,
+`https://sandbox.avibe.bot`, which finds its request through `window.opener`.
+Every other request for a new window goes to the system browser, where that
+link does not exist. On macOS the shell therefore opens this one window itself,
+as a native child window of the main window. `src-tauri/src/macos_vault_window.rs`
+answers WebKit's request before wry does and builds the window by hand; the
+rules are stated at the top of that file. In short:
+
+- **Only the sandbox.** A window is opened for a request to exactly
+  `https://sandbox.avibe.bot` (that scheme and host, default port), or for the
+  `about:blank` the Workbench reserves before it points the window there. Inside
+  the window every navigation that leaves that origin is refused: by the
+  opener, by the page, by a redirect, or as another window. Requests for any
+  other address are untouched: web links open in the browser, the rest are
+  dropped.
+- **Never a window the opener draws in.** The Workbench origin also serves
+  Show Pages, and an opener can script the blank page it reserved. The native
+  window stays off screen until a sandbox document has committed in it, and its
+  title is the host, not the page's title. A window with no sandbox document
+  after 60 seconds is closed. On macOS WebKit lets scripts open windows without
+  a user gesture, so none of this relies on one; a page can hold at most four.
+- **Nothing of the shell inside it.** The window has an empty
+  `WKUserContentController`: no init script, no marker, no `ipc` message
+  handler, and closing it removes nothing from the main window. WebKit copies
+  the main webview's custom URL schemes (`ipc`, `tauri`) into the window and
+  offers no way to remove them, so each scheme handler is guarded: a request
+  from the window fails before wry's handler runs. Tauri never learns the
+  window exists, so it has no label, no capability, and no page Tauri could
+  take for the shell's own or the Workbench's.
+- **Opener, data and lifetime.** The window keeps the opener link and the
+  opener's website data store, including the disposable store of a remote
+  instance. `window.close()` closes it; the user closing it destroys the page,
+  which the opener sees as a closed popup. Reloading, closing or destroying the
+  main window closes it. It becomes the key window when shown, and the main
+  window is key again when it closes.
+
+The Workbench learns that passkey steps can stay in the app from
+`window.__AVIBE_DESKTOP_VAULT_PASSKEY__`, which the same code defines on the
+top-level document only when all of this holds: the hooks above are installed
+on that webview; the system is macOS 15 or later, the first with passkey PRF;
+and the running app's own code signature carries
+`com.apple.developer.associated-domains` with
+`webcredentials:sandbox.avibe.bot`, read from the process with `SecTask`. A
+development or ad-hoc build, or one signed without that entitlement, installs
+nothing and behaves exactly as before. Windows and Linux do not compile the
+module.
+
+The pure rules are unit-tested in the module, the wiring in
+`src-tauri/tests/shell_boundaries.rs`, and the behavior with real WebKit
+windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs on macOS.
+The probe plays the Workbench and the sandbox from two loopback origins with a
+disposable data store; the test-only `vault-window-probe` feature exists to
+let it name that origin, and release packaging never enables it. Locally:
+
+```sh
+cargo build -p avibe-desktop --example vault_window_probe --features vault-window-probe
+python3 src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_probe \
+  --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log /tmp/vault-window-probe.log
+```
+
+Without `--set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` the probe never activates the
+app. A real passkey ceremony in this window is not covered by any automated
+test; it is checked by hand on a signed build.
+
 ## Product packages
 
 The consumer DMG/NSIS build is self-contained. It embeds target-specific
@@ -642,8 +708,8 @@ Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
 `.github/workflows/desktop-shell.yml` runs on macOS and Windows whenever
 `desktop/**` or the two central bootstrap locale sections change: `npm ci`,
 `npm run test:i18n`, `npm run build`, `cargo fmt --check`,
-`cargo clippy -D warnings`, `cargo test`, `cargo build`. It does not bundle or
-sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
+`cargo clippy -D warnings`, `cargo test`, `cargo build`, and on macOS the
+Vault sandbox window probe. It does not bundle or sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
 self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
 build unit for `.github/workflows/release_ai.yml`. Its signing policy is
 described above. Release builds restore the Rust dependency cache and the
