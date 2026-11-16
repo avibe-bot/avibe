@@ -45,39 +45,107 @@ function useSubline() {
   };
 }
 
-/** Where you are. Tapping it returns to it: you are already here. */
+/**
+ * Where you are. In the sheet, tapping it returns to it, unchanged; on the full page (nothing open
+ * behind it) it opens it again, so it reports opening, a failure, or offline as a row does.
+ */
 export function CurrentInstance({
   instance,
+  label,
+  status = { kind: 'idle' },
+  expanded = false,
   disabled,
   onClick,
+  onRetry,
+  onRefresh,
 }: {
   instance: MobileInstance;
+  /** What tapping it does, for assistive tech (`mobileApp.sheet.returnTo` or `…reopen`). */
+  label: string;
+  status?: RowStatus;
+  expanded?: boolean;
   disabled?: boolean;
   onClick: () => void;
+  onRetry?: () => void;
+  onRefresh?: () => void;
 }) {
   const { t } = useTranslation();
   const subline = useSubline();
+  const offline = !instance.available;
+  const body = (
+    <>
+      <InstanceIcon instance={instance} current />
+      <span className="min-w-0 flex-1">
+        <span className="block break-words text-base font-semibold leading-6">{instance.name}</span>
+        {status.kind === 'opening' ? (
+          <span role="status" className="mt-0.5 block text-xs leading-5 text-mint-ink">{t('mobileApp.sheet.opening')}</span>
+        ) : status.kind === 'failed' ? (
+          <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
+            {t(status.reason, { name: instance.name })}
+          </span>
+        ) : (
+          <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
+        )}
+      </span>
+    </>
+  );
+  const frame = 'flex w-full items-center gap-3 p-4 text-left';
   return (
     <section>
       <h2 className={sectionLabel}>{t('mobileApp.sheet.youreIn')}</h2>
-      <button
-        type="button"
-        disabled={disabled}
-        aria-label={t('mobileApp.sheet.returnTo', { name: instance.name })}
-        className="flex w-full items-center gap-3 rounded-2xl border border-mint/50 bg-surface p-4 text-left disabled:opacity-60"
-        onClick={onClick}
-      >
-        <InstanceIcon instance={instance} current />
-        <span className="min-w-0 flex-1">
-          <span className="block break-words text-base font-semibold leading-6">{instance.name}</span>
-          <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
-        </span>
-        <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-mint-ink">
-          <Check className="size-4" />
-          {t('mobileApp.instances.current')}
-        </span>
-      </button>
+      <div className={cn('rounded-2xl border border-mint/50 bg-surface', status.kind === 'waiting' && 'opacity-50')}>
+        {status.kind === 'failed' ? (
+          // The block holds its own Retry, so the block itself is not a button.
+          <div className={frame}>
+            {body}
+            <Button type="button" variant="outline" size="sm" disabled={disabled} className="shrink-0 rounded-full" onClick={onRetry}>
+              {t('common.retry')}
+            </Button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={disabled || (status.kind !== 'idle')}
+            // Offline on the page, tapping explains rather than opens: named by its lines, as a row is.
+            aria-label={offline && onRefresh ? undefined : label}
+            aria-expanded={offline && onRefresh ? expanded : undefined}
+            className={frame}
+            onClick={onClick}
+          >
+            {body}
+            {status.kind === 'opening' ? (
+              <Loader2 className="size-4 shrink-0 animate-spin text-mint-ink" aria-hidden="true" />
+            ) : (
+              <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-mint-ink">
+                <Check className="size-4" />
+                {t('mobileApp.instances.current')}
+              </span>
+            )}
+          </button>
+        )}
+        {offline && expanded && onRefresh ? <OfflineHelp instance={instance} disabled={disabled} onRefresh={onRefresh} /> : null}
+      </div>
     </section>
+  );
+}
+
+function OfflineHelp({ instance, disabled, onRefresh }: { instance: MobileInstance; disabled?: boolean; onRefresh: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div role="status" className="mx-4 mb-4 rounded-xl bg-field p-3 text-xs leading-5 text-muted">
+      <p className="break-words">{t('mobileApp.sheet.offlineBody', { name: instance.name })}</p>
+      <Button
+        type="button"
+        variant="link"
+        size="sm"
+        disabled={disabled}
+        className="mt-1 h-auto gap-1 px-0 text-xs text-foreground"
+        onClick={onRefresh}
+      >
+        <RotateCw className="size-3" />
+        {t('mobileApp.sheet.refreshList')}
+      </Button>
+    </div>
   );
 }
 
@@ -158,22 +226,7 @@ export function InstanceListRow({
           )}
         </button>
       )}
-      {offline && expanded ? (
-        <div role="status" className="mx-4 mb-4 rounded-xl bg-field p-3 text-xs leading-5 text-muted">
-          <p className="break-words">{t('mobileApp.sheet.offlineBody', { name: instance.name })}</p>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            disabled={disabled}
-            className="mt-1 h-auto gap-1 px-0 text-xs text-foreground"
-            onClick={onRefresh}
-          >
-            <RotateCw className="size-3" />
-            {t('mobileApp.sheet.refreshList')}
-          </Button>
-        </div>
-      ) : null}
+      {offline && expanded ? <OfflineHelp instance={instance} disabled={disabled} onRefresh={onRefresh} /> : null}
     </div>
   );
 }

@@ -277,10 +277,8 @@
     },
     "instances": {
       "title": "想从哪里开始？",
-      "switchTitle": "切换实例",
       "subtitle": "自己的实例，以及别人共享的实例",
       "refresh": "刷新实例",
-      "refreshing": "正在刷新…",
       "loading": "正在加载实例…",
       "unavailable": "暂时无法加载实例",
       "online": "在线",
@@ -380,6 +378,7 @@
       "title": "实例",
       "close": "关闭，回到 {{name}}",
       "returnTo": "{{name}}，当前实例。回到这里",
+      "reopen": "重新打开 {{name}}",
       "youreIn": "正在使用",
       "others": "其他实例",
       "recent": "最近使用的在前",

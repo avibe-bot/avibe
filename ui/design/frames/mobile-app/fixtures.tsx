@@ -27,17 +27,6 @@ export const loginStates: { name: string; title: string; fixture: MobileLoginFix
 ];
 export const smallCodeFixture: MobileLoginFixture = { ...codeSent, email: 'alexandra.chen+research-and-product-planning@international.example.com', compact: true, cooldown: 15, error: 'resend-failed' };
 export const personal: MobileInstance = { id: 'personal', name: 'Personal Workbench', host: 'personal-app.avibe.bot', online: true };
-const lab: MobileInstance = { id: 'lab', name: 'Lab', host: 'lab-app.avibe.bot', online: true };
-export const ownInstances = [personal, lab];
-export const mixedInstances: MobileInstance[] = [
-  personal,
-  { id: 'team', name: 'Product team', host: 'team-app.avibe.bot', owner: 'Zhou Min', online: true },
-  { id: 'weekend', name: 'Weekend lab', host: 'weekend-app.avibe.bot', online: false },
-];
-export const longInstances: MobileInstance[] = [
-  { ...personal, name: 'Personal Workbench for research and product planning' },
-  { ...mixedInstances[1], owner: 'Alexandra Chen · Product Research' },
-];
 
 /** Locale is explicit so both translations survive the exporter's id+theme key. */
 export function bilingual(name: string, title: string, render: () => ReactNode, size: [number, number] = [390, 844]): FrameSpec[] {

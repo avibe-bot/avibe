@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   Sparkles,
   UserRound,
+  Loader2,
 } from 'lucide-react';
 import {
   createContext,
@@ -76,6 +77,7 @@ import {
   SheetHeader,
   StaleBanner,
 } from './InstanceList';
+import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
 import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
 import { LicensesContent, LicensesEntry } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
@@ -317,12 +319,15 @@ const noop = () => {};
 function Brand({
   back,
   account,
+  email,
   disabled,
   onBack,
   onAccount,
 }: {
   back?: boolean;
   account?: boolean;
+  /** The signed-in account: the account button shows its initial, as Home's avatar does. */
+  email?: string | null;
   disabled?: boolean;
   onBack?: () => void;
   onAccount?: () => void;
@@ -355,11 +360,15 @@ function Brand({
           variant="ghost"
           size="icon"
           disabled={disabled}
-          className="rounded-full border border-edge bg-field"
+          className={email ? 'size-11 rounded-full' : 'rounded-full border border-edge bg-field'}
           aria-label={t('mobileApp.account.title')}
           onClick={onAccount}
         >
-          <UserRound className="size-4" />
+          {email ? (
+            <span className={accountHeaderAvatarClassName} aria-hidden="true">{accountInitialFor(email)}</span>
+          ) : (
+            <UserRound className="size-4" />
+          )}
         </Button>
       ) : (
         <span className="text-xs text-muted">{t('mobileApp.brand.agentOs')}</span>
@@ -1458,7 +1467,85 @@ function InstanceRows({ instances, locked, openingId, failure, expandedId, onOpe
   );
 }
 
-/** The full-screen list: first use, or no instance open. The same rows as the sheet, and pull to refresh. */
+/**
+ * The instance list the full page and the sheet share (ui/design: mobile-app/switcher/*): where you
+ * are, the other instances by recent use (or none yet), and Add an instance. With nothing selected
+ * (first use) there is no current block and no recency to name, only the rows.
+ */
+function InstanceListBody({
+  session,
+  locked,
+  refreshing,
+  stale,
+  rows,
+  firstUse,
+  current,
+  onRefresh,
+  onAdd,
+}: {
+  session: Extract<MobileSessionState, { status: 'signedIn' }>;
+  locked: boolean;
+  refreshing: boolean;
+  /** Nothing selected yet: only the rows. Otherwise where you are, then the others by recent use. */
+  firstUse: boolean;
+  /** A refresh failed: the list stays, under a banner that retries. */
+  stale: boolean;
+  rows: Omit<RowsProps, 'instances' | 'locked' | 'onRefresh'>;
+  /** The current block: what tapping it does, and how it says so. */
+  current: { label: (name: string) => string; onClick: (instance: MobileInstance) => void; reportsOpening: boolean };
+  onRefresh: () => void;
+  onAdd: () => void;
+}) {
+  const { t } = useTranslation();
+  const selected = session.instances.find((instance) => instance.id === session.selected_instance_id) ?? null;
+  const others = session.instances.filter((instance) => instance.id !== selected?.id);
+  return (
+    <>
+      {stale ? <StaleBanner disabled={refreshing || locked} onRetry={onRefresh} /> : null}
+      {selected ? (
+        <CurrentInstance
+          instance={selected}
+          label={current.label(selected.name)}
+          {...(current.reportsOpening ? {
+            status: rowStatus(selected, rows.openingId, rows.failure),
+            expanded: rows.expandedId === selected.id,
+            disabled: locked,
+            onRetry: () => current.onClick(selected),
+            onRefresh,
+          } : {})}
+          onClick={() => current.onClick(selected)}
+        />
+      ) : null}
+      {!firstUse ? (
+        <section className={selected ? 'mt-6' : undefined} aria-busy={refreshing || Boolean(rows.openingId)}>
+          <OtherInstancesHeader refreshing={refreshing} />
+          {others.length === 0 ? (
+            <NoOtherInstances />
+          ) : (
+            <InstanceRows {...rows} instances={others} locked={locked} onRefresh={onRefresh} />
+          )}
+        </section>
+      ) : (
+        <section aria-busy={refreshing || Boolean(rows.openingId)}>
+          {refreshing ? (
+            <p role="status" className="mb-2 flex items-center gap-1.5 px-1 text-xs text-muted">
+              <Loader2 className="size-3 animate-spin" />
+              {t('mobileApp.sheet.updating')}
+            </p>
+          ) : null}
+          <InstanceRows {...rows} instances={others} locked={locked} onRefresh={onRefresh} />
+        </section>
+      )}
+      <AddInstanceRow disabled={locked} onClick={onAdd} />
+    </>
+  );
+}
+
+/**
+ * The full-screen list: first use, or no instance open (say after one failed to load). The sheet's
+ * list in a page: the current instance opens again from here, and the page refreshes by its button
+ * or a pull.
+ */
 function Instances({
   session,
   busy,
@@ -1469,10 +1556,12 @@ function Instances({
   onAccount,
   onAdd,
   onBack,
+  onReopen,
 }: {
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
   busy: BusyAction | null;
   locked: boolean;
+  /** The last refresh failed: a banner over the list, or the recovery card when there is no list. */
   errorKey: MobileErrorKey | null;
   rows: Omit<RowsProps, 'instances' | 'locked' | 'onRefresh'>;
   onRefresh: () => void;
@@ -1480,26 +1569,31 @@ function Instances({
   onAdd: () => void;
   /** Present while the page covers an instance: Back returns to it. */
   onBack?: () => void;
+  /** Opens the selected instance again. */
+  onReopen: (instance: MobileInstance) => void;
 }) {
   const { t } = useTranslation();
   const refreshing = busy === 'refresh';
+  const switching = Boolean(session.selected_instance_id);
+  // Over a live instance (`#runtime-account` → Switch) the current block returns to it, as in the
+  // sheet; with nothing open it opens it again.
+  const current = onBack
+    ? { label: (name: string) => t('mobileApp.sheet.returnTo', { name }), onClick: onBack, reportsOpening: false }
+    : { label: (name: string) => t('mobileApp.sheet.reopen', { name }), onClick: onReopen, reportsOpening: true };
   return (
     <CloudScreen onPull={locked ? undefined : onRefresh}>
       <Brand
         back={Boolean(onBack)}
         account
+        email={session.account.email}
         disabled={locked}
         onBack={onBack}
         onAccount={onAccount}
       />
       <div className="flex items-start justify-between gap-3">
         <PageTitle
-          title={session.selected_instance_id
-            ? t('mobileApp.instances.switchTitle')
-            : t('mobileApp.instances.title')}
-          subtitle={session.selected_instance_id
-            ? t('mobileApp.instances.subtitle')
-            : t('mobileApp.sheet.firstRunSubtitle')}
+          title={switching ? t('mobileApp.sheet.title') : t('mobileApp.instances.title')}
+          subtitle={switching ? undefined : t('mobileApp.sheet.firstRunSubtitle')}
         />
         <Button
           type="button"
@@ -1513,19 +1607,21 @@ function Instances({
           <RotateCw className={cn('size-4', refreshing && 'animate-spin')} />
         </Button>
       </div>
-      {refreshing ? (
-        <p role="status" className="mb-4 text-center text-sm text-muted">
-          {t('mobileApp.instances.refreshing')}
-        </p>
-      ) : null}
-      {errorKey ? (
+      {errorKey && session.instances.length === 0 ? (
         <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRefresh} />
       ) : (
-        <div aria-busy={refreshing || busy === 'select'}>
-          <InstanceRows {...rows} instances={session.instances} locked={locked} onRefresh={onRefresh} />
-        </div>
+        <InstanceListBody
+          session={session}
+          locked={locked}
+          refreshing={refreshing}
+          stale={Boolean(errorKey)}
+          rows={rows}
+          firstUse={!switching}
+          current={current}
+          onRefresh={onRefresh}
+          onAdd={onAdd}
+        />
       )}
-      <AddInstanceRow disabled={locked} onClick={onAdd} />
     </CloudScreen>
   );
 }
@@ -1571,22 +1667,22 @@ function InstanceSheet({
   /** Absent when the sheet was opened from the instance's name (`#sheet-instances`). */
   onAccount?: () => void;
 }) {
+  const { t } = useTranslation();
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id) ?? null;
-  const others = session.instances.filter((instance) => instance.id !== current?.id);
   return (
     <CloudScreen>
       <SheetHeader currentName={current?.name ?? null} onClose={onClose} />
-      {stale ? <StaleBanner disabled={refreshing || locked} onRetry={onRefresh} /> : null}
-      {current ? <CurrentInstance instance={current} onClick={onClose} /> : null}
-      <section className={current ? 'mt-6' : undefined}>
-        <OtherInstancesHeader refreshing={refreshing} />
-        {others.length === 0 ? (
-          <NoOtherInstances />
-        ) : (
-          <InstanceRows {...rows} instances={others} locked={locked} onRefresh={onRefresh} />
-        )}
-      </section>
-      <AddInstanceRow disabled={locked} onClick={onAdd} />
+      <InstanceListBody
+        session={session}
+        locked={locked}
+        refreshing={refreshing}
+        stale={stale}
+        rows={rows}
+        firstUse={false}
+        current={{ label: (name) => t('mobileApp.sheet.returnTo', { name }), onClick: onClose, reportsOpening: false }}
+        onRefresh={onRefresh}
+        onAdd={onAdd}
+      />
       {onAccount ? <AccountRow email={session.account.email} disabled={locked} onClick={onAccount} /> : null}
     </CloudScreen>
   );
@@ -1736,6 +1832,7 @@ function Account({
   onLogout,
   onLicenses,
   inSheet = false,
+  showCurrent = !inSheet,
   onClose,
 }: {
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
@@ -1743,8 +1840,13 @@ function Account({
   locked: boolean;
   errorKey: MobileErrorKey | null;
   licenses: boolean;
-  /** Pushed inside the instance sheet, whose list already names the current instance. */
+  /** Pushed inside the instance sheet. */
   inSheet?: boolean;
+  /**
+   * The current instance and Switch: only where Back does not lead to the list, which already
+   * shows the current instance (the sheet, and the full page).
+   */
+  showCurrent?: boolean;
   /**
    * The sheet's root (`#sheet-account`, ui/design: mobile-app/switcher/b-account): ✕ returns to the
    * instance, and there is no Back to swipe to.
@@ -1803,7 +1905,7 @@ function Account({
           <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onLogout} />
         </div>
       ) : null}
-      {inSheet ? null : <section className="mt-8">
+      {showCurrent ? <section className="mt-8">
         <h2 className="mb-4 text-sm font-semibold">{t('mobileApp.account.current')}</h2>
         {current ? (
           <InstanceRow
@@ -1828,7 +1930,7 @@ function Account({
           {t(current ? 'mobileApp.account.switch' : 'mobileApp.account.choose')}
           <ChevronRight className="size-4" />
         </Button>
-      </section>}
+      </section> : null}
       {licenses ? <LicensesEntry disabled={locked} onOpen={onLicenses} /> : null}
     </CloudScreen>
   );
@@ -2631,6 +2733,8 @@ function MobileOnboardingScreens() {
         errorKey={errorKey}
         licenses={licenses !== null}
         inSheet={inSheet}
+        // Back leads to the list, which shows the current instance, unless this page covers it.
+        showCurrent={!inSheet && coversInstance}
         onClose={inSheet && accountRoot ? () => void closeSheet() : undefined}
         onBack={() => void leaveAccount()}
         onSwitch={() => {
@@ -2739,6 +2843,7 @@ function MobileOnboardingScreens() {
         }
       }}
       onBack={coversInstance ? () => void leaveAccount() : undefined}
+      onReopen={(instance) => void select(instance)}
     />
   );
 }

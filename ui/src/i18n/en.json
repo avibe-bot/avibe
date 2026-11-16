@@ -277,10 +277,8 @@
     },
     "instances": {
       "title": "Where shall we begin?",
-      "switchTitle": "Switch instance",
       "subtitle": "Your instances and those shared with you",
       "refresh": "Refresh instances",
-      "refreshing": "Refreshing…",
       "loading": "Loading instances…",
       "unavailable": "Couldn’t load instances",
       "online": "Online",
@@ -380,6 +378,7 @@
       "title": "Instances",
       "close": "Close and return to {{name}}",
       "returnTo": "{{name}}, current instance. Return to it",
+      "reopen": "Open {{name}} again",
       "youreIn": "You’re in",
       "others": "Other instances",
       "recent": "Recently used first",
