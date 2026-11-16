@@ -342,6 +342,22 @@ def test_vault_access_command_flag_does_not_shadow_root_command():
     assert cli._vault_cli_delivery(args)["command"] == "deploy sync"
 
 
+def test_vault_sign_help_names_the_accepted_protected_contexts_and_hd_only_type():
+    """Agents copy context kinds, schemes and flags from `vault sign --help`; each must be one the CLI and signer accept."""
+    from storage import vault_bitcoin, vault_solana
+
+    sign = cli.build_parser()._subparsers._group_actions[0].choices["vault"]._subparsers._group_actions[0].choices["sign"]
+    options = {option: action for action in sign._actions for option in action.option_strings}
+    description = sign.description
+    for kind in (vault_solana.CONTEXT_KIND, vault_bitcoin.BITCOIN_CONTEXT_KIND, *vault_bitcoin.ECDSA_CONTEXT_TYPES):
+        assert kind in description
+    assert "ecdsa-secp256k1-der" in description and "ecdsa-secp256k1-der" in options["--scheme"].choices
+    for flag in ("--chain", "--digest", "--message-hex", "--signing-context-file"):
+        assert flag in description and flag in options
+    assert options["--address-type"].help.startswith("HD only")
+    assert "bitcoin_address_types" in options["--address-type"].help
+
+
 def test_vault_sign_command_flag_does_not_shadow_root_command():
     args = cli.build_parser().parse_args(
         [

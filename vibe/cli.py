@@ -20145,14 +20145,14 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message (protected and ask-first standard keys need approval)",
         description=(
-            "HD needs --chain. secp256k1 uses --digest; Solana uses exact --message-hex, not a hash. "
-            "Protected/ask-first keys need approval. For Solana, use a durable nonce "
-            "(use-avibe-vault recipe); the caller creates and funds the nonce account. "
-            'Protected Solana context: {"kind":"solana-transaction-v1","messageHex":"HEX"} '
-            "matching --message-hex."
+            "HD needs --chain. secp256k1 takes --digest; Solana takes exact --message-hex, not a hash. "
+            "Protected/ask-first keys need approval (Solana: use a durable nonce; the caller creates and funds the nonce account). "
+            'Protected contexts: {"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex; '
+            "bitcoin-taproot-keypath-v1, or bitcoin-p2wpkh-v1/bitcoin-p2pkh-v1 with ecdsa-secp256k1-der "
+            "(p2pkh holds its parent tx: use --signing-context-file). Details: use-avibe-vault."
         ),
         epilog=(
-            "Example ($MESSAGE_HEX: full serialized message, without signatures):\n"
+            "Example ($MESSAGE_HEX: unsigned serialized message):\n"
             '  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -20161,7 +20161,7 @@ def build_parser():
     vault_sign_parser.add_argument("name", help="Keypair secret name")
     vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="HD only; selects chain and scheme")
     vault_sign_parser.add_argument("--account", type=int, help="HD index 0..19 (default: 0)")
-    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="Default p2tr; must be listed in the account's bitcoin_address_types")
+    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="HD only, default p2tr; one of bitcoin_address_types")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",
@@ -20180,7 +20180,7 @@ def build_parser():
         help="Ordinary key scheme; HD chain/type fixes it",
     )
     vault_sign_parser.add_argument("--session-id", help="Session ID (Agent default: AVIBE_SESSION_ID)")
-    vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
+    vault_sign_parser.add_argument("--skill", help="Requesting Skill")
     vault_sign_parser.add_argument("--command", dest="operation_command", help="Operation shown to the user")
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
     vault_signing_context_input = vault_sign_parser.add_mutually_exclusive_group()
@@ -20195,7 +20195,7 @@ def build_parser():
     vault_sign_parser.add_argument(
         "--no-callback",
         action="store_true",
-        help="Don't auto-resume; re-check the signature with 'vault await'",
+        help="Don't auto-resume; check later with 'vault await'",
     )
     _add_json_noop(vault_sign_parser)
 
