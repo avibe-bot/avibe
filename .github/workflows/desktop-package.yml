@@ -487,21 +487,11 @@ jobs:
             echo "Avibe executable not found at $binary" >&2
             exit 1
           }
-          # Control: this runner must refuse what macOS refuses on a user's Mac.
-          # A trivial program claiming the Developer ID app's restricted
-          # entitlements with no profile to authorize them must be killed at
-          # exec, or a green launch below would not show that the profile works.
+          # Control: this runner must refuse what macOS refuses on a user's Mac,
+          # or a green launch below would not show that the embedded profile
+          # works. Pull request CI runs the same check on this image.
           if [ "${apple_signing:-absent}" = "enabled" ]; then
-            control="$RUNNER_TEMP/restricted-entitlement-control"
-            printf 'int main(void) { return 0; }\n' | xcrun clang -x c -o "$control" -
-            codesign --force --sign - --options runtime \
-              --entitlements entitlements/app-developer-id.plist "$control"
-            control_status=0
-            "$control" || control_status=$?
-            [ "$control_status" -eq 137 ] || {
-              echo "This runner did not refuse an unauthorized restricted entitlement (status $control_status); the launch smoke test cannot prove the provisioning profile" >&2
-              exit 1
-            }
+            sh scripts/check-restricted-entitlement-refusal.sh
           fi
           launch_log="$RUNNER_TEMP/avibe-desktop-launch.log"
           smoke_home="$(mktemp -d)"

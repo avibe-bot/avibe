@@ -261,7 +261,11 @@ notarize on its own.
    app. Before launching a signed app, the smoke test checks that the runner
    kills an ad-hoc program claiming the app's restricted entitlements without
    a profile, as a user's Mac does, and fails otherwise; only then does a
-   launch that survives show that macOS accepted the embedded profile. A notary request that times out, loses its connection, or meets a 5xx
+   launch that survives show that macOS accepted the embedded profile. The
+   `desktop-shell` pull request job runs the same check
+   (`scripts/check-restricted-entitlement-refusal.sh`) on the same hosted
+   image without credentials, so an image that stops refusing fails there
+   first. A notary request that times out, loses its connection, or meets a 5xx
    is tried up to three times; once the upload has an id, the retry waits on
    that submission rather than submitting again. A verdict such as `Invalid`
    fails at once.
@@ -328,7 +332,8 @@ first callback hangs. Python on Apple silicon and the helper need none. GitHub's
 macOS runners enforce neither library validation nor the JIT restriction, so CI
 proves signing and notarization but not that entitlements are sufficient. Whether
 they refuse a restricted entitlement no profile authorizes is a separate
-question, which the smoke test's control answers on every signed build. Check
+question, which that control answers in pull request CI and on every signed
+build. Check
 an entitlement change on a Mac with System Integrity Protection enabled, for
 example by running the release-signed `python` and `node` from an extracted
 `runtime.zip` in a scratch directory, the Intel ones under Rosetta
