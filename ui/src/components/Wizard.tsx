@@ -32,6 +32,7 @@ import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
 import { APP_LANGUAGES, type AppLanguage } from '../i18n/options';
+import { languageChoice } from '../lib/useLanguageSelection';
 import { ASSISTANT_ORDER, SETUP_LINEUP } from './onboarding/collaborationTimeline';
 import { createAgentCollectionReadAuthority } from './settings/models/collectionReadAuthority';
 import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, type EntryRefusal } from './onboarding/entryGate';
@@ -286,10 +287,12 @@ const AssistantsEntry = forwardRef<SetupScreenHandle, ComponentProps<typeof Agen
   },
 );
 
-/** The app language the setup screens are showing, if it is one the app ships. */
-const setupLanguage = (i18n: { resolvedLanguage?: string; language: string }): AppLanguage | null => {
-  const code = (i18n.resolvedLanguage ?? i18n.language ?? '').split('-')[0];
-  return (APP_LANGUAGES as readonly string[]).includes(code) ? (code as AppLanguage) : null;
+/** The app language the setup screens are showing, as the instance language: a
+ *  regional or script code saves its base (`zh-CN` -> `zh`), anything the app does
+ *  not ship saves English, which is what such a reader sees. */
+const setupLanguage = (code: string): AppLanguage => {
+  const base = code.split('-')[0].toLowerCase();
+  return (APP_LANGUAGES as readonly string[]).includes(base) ? (base as AppLanguage) : 'en';
 };
 
 export function Wizard() {
@@ -565,10 +568,11 @@ export function Wizard() {
       // The language this setup was read in becomes the instance language: until
       // now the stored one was a default nobody chose (AppShell does not adopt it
       // while setup is pending). A pick from the language switch is that language.
-      const language = setupLanguage(i18n);
+      // Read now, not from this render's `i18n`: a pick made while setup was
+      // finishing (or still downloading its copy) is the language to save.
       await api.mutateConfig([
         setConfigField(['setup_completed'], true),
-        ...(language ? [setConfigField(['language'], language)] : []),
+        setConfigField(['language'], setupLanguage(languageChoice(i18n))),
       ]);
     } catch {
       // Unknown, not failed. The readback below is what decides.

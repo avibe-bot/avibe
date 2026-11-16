@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Wizard } from '../Wizard';
 import { CONTRACT_VERSION, type AgentBackend, type AgentSupply, type NamedAgentSupply, type RuntimeDependency, type Source } from '../settings/models/types';
 import en from '../../i18n/en.json';
+import { selectLanguage } from '../../lib/useLanguageSelection';
 
 const mock = vi.hoisted(() => ({ presentDesktop: vi.fn(), control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, apiFetch: vi.fn(), api: {
   saveSettings: vi.fn(), discordAuthTest: vi.fn(), discordGuilds: vi.fn(), slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
@@ -1098,6 +1099,31 @@ describe('AUTH-SETUP-161 set up later', () => {
 
       expect(await screen.findByTestId('destination')).toBeTruthy();
       expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([
+        { kind: 'set', path: ['setup_completed'], value: true },
+        { kind: 'set', path: ['language'], value: 'zh' },
+      ]);
+    } finally {
+      await act(async () => { await i18n.changeLanguage('en'); });
+      i18n.removeResourceBundle('zh', 'translation');
+    }
+  });
+
+  it('saves a language picked as setup finishes, not the one the screen was drawn in', async () => {
+    i18n.addResourceBundle('zh', 'translation', en);
+    try {
+      const later = await arriveWithNothing();
+      // The pick and the click land before the screen re-renders: the handler still
+      // holds the English render's `i18n`.
+      await act(async () => {
+        void selectLanguage(i18n, 'zh');
+        fireEvent.click(later);
+      });
+
+      expect(await screen.findByTestId('destination')).toBeTruthy();
+      const finish = mock.api.mutateConfig.mock.calls
+        .map(([mutations]) => mutations)
+        .find((mutations) => mutations.some((m: { path: string[] }) => m.path[0] === 'setup_completed'));
+      expect(finish).toEqual([
         { kind: 'set', path: ['setup_completed'], value: true },
         { kind: 'set', path: ['language'], value: 'zh' },
       ]);
