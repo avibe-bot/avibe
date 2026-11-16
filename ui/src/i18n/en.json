@@ -6258,6 +6258,7 @@
       "show": "Show value",
       "copy": "Copy value",
       "showInBrowser": "Show in browser",
+      "browserFallback": "Showing this value didn't work in the app, so choose Show in browser from its menu.",
       "errors": {
         "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
@@ -6349,6 +6350,7 @@
       "passkeyAck": "I understand: if I lose this passkey, these secrets can't be recovered.",
       "unlockUnavailableHere": "Use a compatible browser. On the computer running Avibe, open Vaults from localhost or 127.0.0.1; on other devices, use your HTTPS avibe.bot address. LAN HTTP addresses (such as 192.168.x.x) are not supported.",
       "browserNote": "Passkeys don't work in the desktop app. Continue in your browser, on this same Avibe, and fill in this secret there.",
+      "browserFallbackNote": "The passkey step didn't work in the app, so continue in your browser, on this same Avibe, and fill in this secret there.",
       "openInBrowser": "Open in browser",
       "errors": {
         "prfUnavailable": "This passkey doesn’t support the encryption Protected needs, so setup didn’t finish. On a Mac, choose iCloud Keychain when your browser asks where to save the passkey. On Windows, you can use Chrome signed in to your Google account and save it to Google Password Manager. Then try again.",
@@ -6540,6 +6542,7 @@
       "signNote": "The private key never leaves your browser — only the signature is returned.",
       "protectedWarning": "Protected signing happens in the secure browser sandbox. Only the public signature returns to Avibe.",
       "browserNote": "This needs your passkey, which the desktop app can't use. Review and approve it in your browser.",
+      "browserFallbackNote": "The passkey step didn't work in the app, so review and approve this in your browser.",
       "continueInBrowser": "Continue in browser",
       "errors": {
         "failed": "Couldn't complete the approval. Please try again.",

@@ -4,7 +4,7 @@ import { ArrowRight, ExternalLink, KeyRound, LockKeyhole, PenTool, Trash2, Walle
 import { useTranslation } from 'react-i18next';
 
 import type { VaultRequest } from '@/context/ApiContext';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { vaultRequestNeedsFullRead } from '@/lib/vaultFullRequest';
 import { partitionTags } from '@/lib/vaultTags';
@@ -119,7 +119,8 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
   const isProtected = card.protection === 'protected' || (card.protected_secret_names?.length ?? 0) > 0 || request.protection === 'protected';
   // An approval that needs a passkey this app can't use is reviewed once, in the browser, instead
   // of in a dialog that could only send it there.
-  const reviewInBrowser = type !== 'provision' && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(request);
+  const handoff = useVaultPasskeyHandoff();
+  const reviewInBrowser = type !== 'provision' && handoff !== null && vaultApprovalNeedsPasskey(request);
   // A selector-based access request matches multiple secrets, so `secret_name` is null and the
   // members/selector live on the card. Fall back to those so the card is never nameless.
   const { name, extra } = useMemo(() => {

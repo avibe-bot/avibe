@@ -15,6 +15,9 @@ declare global {
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
     /** The shell also turns Computer Use off from the page; older shells only turn it on. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE_DISABLE__?: true;
+    /** The macOS shell can run the vault sandbox's passkey steps in its own windows (macOS 15+,
+     *  signed with the sandbox association). A display capability, not a security decision. */
+    readonly __AVIBE_DESKTOP_VAULT_PASSKEY__?: true;
     /** The shell brings its main window forward on the Workbench's request (`focus_main_window`). */
     readonly __AVIBE_DESKTOP_FOCUS__?: true;
     /** The main Workbench can ask the shell to open standalone native app windows. */
@@ -70,6 +73,15 @@ export function canShowInDesktopPet(): boolean {
 /** Probe the settings contract itself so an older shell cannot render a broken control. */
 export function canConfigureDesktopPet(): boolean {
   return isDesktopShell() && window.__AVIBE_DESKTOP_PET_SETTINGS__ === true;
+}
+
+/**
+ * The shell can host the vault sandbox's passkey steps itself: `window.open` from this page returns
+ * a window that only the sandbox may load, the sandbox frame may open its own, and WebAuthn reaches
+ * the sandbox's passkey. Older shells, Windows, Linux, macOS 14 and unsigned builds never say so.
+ */
+export function canRunDesktopVaultPasskey(): boolean {
+  return isDesktopShell() && window.__AVIBE_DESKTOP_VAULT_PASSKEY__ === true;
 }
 
 /** Probe the native desktop notification settings contract before rendering its switch. */
