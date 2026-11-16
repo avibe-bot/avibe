@@ -43,7 +43,8 @@ try {
               count: document.querySelectorAll('[data-desktop-account-row]').length,
               inSidebar: Boolean(productFooter?.closest('aside')),
               toolsHeight: productFooter?.firstElementChild.getBoundingClientRect().height,
-              avatarX: rect(productRow.querySelector('[data-account-avatar]')).left,
+              // The shared bottom row (ui/design: chrome/bottom-row) leads with the status dot.
+              statusX: rect(productRow.querySelector('[data-sidebar-status-row] [data-status-indicator]')).left,
               expanded: accountTrigger?.getAttribute('aria-expanded'),
               chevron: Boolean(productRow.querySelector('[data-account-chevron]')),
               menu: Boolean(document.querySelector('[data-instance-menu]')),
@@ -90,7 +91,7 @@ try {
           assert.equal(actual.product.count, 1, `${key}: one product row`);
           assert.equal(actual.product.inSidebar, true, `${key}: real AppShell sidebar footer`);
           assert.equal(actual.product.toolsHeight, 39, `${key}: real Apps/Settings tools row`);
-          assert.equal(actual.product.avatarX, 16, `${key}: product Apps-container alignment`);
+          assert.equal(actual.product.statusX, 16, `${key}: product Apps-container alignment`);
           assert.equal(actual.product.version, 'v3.2.6rc9', `${key}: product VersionBadge`);
           const signedIn = frame.id.includes('/account-');
           assert.equal(actual.product.chevron, signedIn, `${key}: signed-out entry has no menu chevron`);
