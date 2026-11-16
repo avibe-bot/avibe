@@ -385,6 +385,12 @@
         }
       }
     },
+    "runtime.open.timeout.reopen_hint.named" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tap %@ above to open it again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "点上面的 %@ 重新打开。" } }
+      }
+    },
     "runtime.open.timeout.title.named" : {
       "localizations" : {
         "en" : {
