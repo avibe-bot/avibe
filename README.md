@@ -48,7 +48,7 @@ Avibe runs on your computer, so the work continues for as long as that computer 
 2. **Open** the download, drag Avibe to Applications, and start it.
 3. **Connect a model.** Sign in with your Claude or ChatGPT subscription, or paste an API key, pick a model for Vibey, and say hello.
 
-The app is signed and notarized by Apple. The first time you open it, macOS asks whether you are sure you want to open an app downloaded from the Internet, and says Apple checked it for malicious software. Click **Open**. The app needs nothing else installed and checks for its own updates.
+The app is signed with a Developer ID and notarized by Apple. The first time you open it, macOS asks whether you are sure you want to open an app downloaded from the Internet, and says Apple checked it for malicious software. Click **Open**. The app needs nothing else installed and checks for its own updates.
 
 ### Windows
 
