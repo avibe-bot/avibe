@@ -79,6 +79,30 @@ describe('entry notice takes precedence over stale vault status', () => {
   });
 });
 
+// A desktop app whose in-app passkey step failed may have left this page checking, unlocked or in
+// error. Nothing runs here any more, so the panel offers the browser, where the step starts over.
+describe('browser hand-off takes precedence over stale vault status', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+  });
+
+  it.each(['checking', 'error', 'unlocked'] as const)('offers the browser instead of %s in the desktop app', async (status) => {
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    const i18n = createInstance();
+    await i18n.use(initReactI18next).init({ lng: 'en', resources: { en: { translation: en } } });
+    const vault = { ...lockedVault('locked'), status };
+    const continueInBrowser = vi.fn();
+    render(<I18nextProvider i18n={i18n}><VaultProtectedUnlock vault={vault} onContinueInBrowser={continueInBrowser} /></I18nextProvider>);
+    expect(screen.getByText(en.vaults.protectedUnlock.browserNote)).toBeTruthy();
+    expect(screen.queryByText(en.vaults.protectedUnlock.checking)).toBeNull();
+    expect(screen.queryByText(en.vaults.protectedUnlock.unlocked)).toBeNull();
+    expect(screen.queryByText(en.vaults.protectedUnlock.retry)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.protectedUnlock.openInBrowser }));
+    expect(continueInBrowser).toHaveBeenCalledOnce();
+  });
+});
+
 describe.each(['needs-setup', 'locked'] as const)('protected vault %s entry guidance', (status) => {
   it.each(locales)('renders actionable, loopback-aware $lng guidance only while WebCrypto is missing, without starting a ceremony', async ({ lng, guidance, title, setup, unlock }) => {
     vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));

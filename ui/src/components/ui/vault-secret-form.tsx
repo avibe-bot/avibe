@@ -59,7 +59,7 @@ import { askTurnOffNoteShown, useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { DEFAULT_PASSWORD_RECIPE, recipeFromSpec, type GenerateRecipe } from '@/lib/vaultGenerate';
-import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
@@ -392,6 +392,8 @@ export const VaultSecretForm: React.FC<{
   }, [api]);
 
   const protectedVault = useProtectedVault();
+  // Re-render when a failed in-app passkey step moves the desktop app to the browser hand-off.
+  useVaultPasskeyHandoff();
   const entryIssue = vaultEntryIssue();
   // Protected seed-phrase wallets (contract rev0.7): made in the sandbox window, saved, then confirmed.
   const protectedHd = useProtectedHdCreate();

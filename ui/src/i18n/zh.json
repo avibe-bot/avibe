@@ -6255,6 +6255,7 @@
       "show": "查看值",
       "copy": "复制值",
       "showInBrowser": "在浏览器中查看",
+      "browserFallback": "没能在桌面端显示这个值，请在它的菜单中选择「在浏览器中查看」。",
       "errors": {
         "staleField": "此链接指向的字段已不存在。请打开密钥并选择当前字段。",
         "contextFailed": "无法准备查看，请重试。",
@@ -6346,6 +6347,7 @@
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
       "unlockUnavailableHere": "请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。",
       "browserNote": "桌面端无法使用 passkey。请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
+      "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
       "openInBrowser": "在浏览器中打开",
       "errors": {
         "prfUnavailable": "这个 Passkey 不支持保护档需要的加密，没有设置成功。在 Mac 上，浏览器问保存到哪里时请选 iCloud 钥匙串；在 Windows 上，可以用已登录 Google 账号的 Chrome，保存到 Google 密码管理工具。然后再试一次。",
@@ -6533,6 +6535,7 @@
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
       "protectedWarning": "保护档签名在安全浏览器沙箱中完成，只有公开签名会返回 Avibe。",
       "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
+      "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",
       "errors": {
         "failed": "批准未能完成，请重试。",

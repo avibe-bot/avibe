@@ -43,6 +43,7 @@ import {
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
 import { assertVaultEntryAvailable } from './vaultEntry';
+import { recordVaultPasskeyOutcome } from './vaultBrowserHandoff';
 import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
@@ -78,6 +79,11 @@ export const PROTECTED_HD_OP = 'sealHdWallet' as const;
 const PROTECTED_HD_TIMEOUT_MS = 2_105_000;
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | OptionalSandboxOp | 'handshake';
 type ParentOnlySandboxOp = 'set-appearance';
+// The operations that may open a sandbox window or ask for the passkey; how each ends tells whether
+// a desktop shell that runs them itself still can (`recordVaultPasskeyOutcome`).
+const PASSKEY_OPS: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>([
+  'setup', 'unlock', 'seal', 'reveal', 'sign', 'approveRelease', POLICY_DOWNGRADE_OP, PROTECTED_HD_OP,
+]);
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -701,6 +707,23 @@ export class VaultSandboxClient {
     op: VaultSandboxOp,
     payload?: unknown,
     options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string } = {},
+  ): Promise<T> {
+    if (!PASSKEY_OPS.has(op)) return this.send<T>(op, payload, options);
+    let result: T;
+    try {
+      result = await this.send<T>(op, payload, options);
+    } catch (error) {
+      recordVaultPasskeyOutcome(error);
+      throw error;
+    }
+    recordVaultPasskeyOutcome(null);
+    return result;
+  }
+
+  private async send<T>(
+    op: VaultSandboxOp,
+    payload: unknown,
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string },
   ): Promise<T> {
     await this.readyPromise;
     this.assertLive();

@@ -1,16 +1,101 @@
-import { isDesktopShell } from './desktopShell';
+import { useSyncExternalStore } from 'react';
+
+import { canRunDesktopVaultPasskey, isDesktopShell } from './desktopShell';
 import { openLinkInNewContext } from './pwaNavigation';
 
 /**
- * Whether this document must hand protected-vault passkey steps to the user's
- * browser. The desktop shell's WKWebView offers WebAuthn only to apps holding a
- * matching associated-domains entitlement, and the shell sends every new window
- * to the system browser, so the sandbox's top-level authorization window never
- * reaches its opener. Setup, unlock, protected approvals, and reveals therefore
- * run in the same local Workbench opened in the browser.
+ * Why this document hands protected-vault passkey steps to the user's browser, or null when it
+ * runs them itself.
+ *
+ * - `desktop`: a desktop shell without the passkey capability. Its web view offers WebAuthn only
+ *   to apps associated with the sandbox, and it sends every new window to the system browser, so
+ *   the sandbox's top-level authorization window never reaches its opener.
+ * - `fallback`: a shell with the capability, where a passkey step already failed in the app during
+ *   this page's life (see {@link recordVaultPasskeyOutcome}).
+ *
+ * Either way setup, unlock, protected approvals, and reveals run in the same Workbench opened in
+ * the browser. This decides what the page offers, never what is allowed: the sandbox enforces.
  */
+export type VaultPasskeyHandoff = 'desktop' | 'fallback';
+
+// In memory for the page's life, never stored. What makes a step fail in the app (the shell
+// refusing the window, the system not offering this app the passkey, a passkey without PRF) does
+// not change while the page is open, so another in-app try could only fail again. A reload or a
+// relaunch tries the app again, by which time the system may have fetched the association (it does
+// so after first launch) or a fixed shell may be running; a stored flag would keep the user in
+// the browser after the cause is gone, with nothing in the app to undo it.
+let failedInApp = false;
+// A system refusal before any passkey sheet reaches the sandbox as the same `NotAllowedError` a
+// user's cancel does, so it reports `passkey_cancelled`. One cancel is respected; a second in a row
+// with no passkey step succeeding in between offers the browser rather than loop on the same prompt.
+let cancelsInARow = 0;
+const CANCELS_BEFORE_BROWSER = 2;
+const listeners = new Set<() => void>();
+
+export function vaultPasskeyHandoff(): VaultPasskeyHandoff | null {
+  if (!isDesktopShell()) return null;
+  if (!canRunDesktopVaultPasskey()) return 'desktop';
+  return failedInApp ? 'fallback' : null;
+}
+
+/** Whether this document must hand protected-vault passkey steps to the user's browser. */
 export function vaultPasskeyNeedsBrowser(): boolean {
-  return isDesktopShell();
+  return vaultPasskeyHandoff() !== null;
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/**
+ * {@link vaultPasskeyHandoff}, re-rendering when an in-app failure switches to the browser, so a
+ * surface already on screen never offers a step that can only fail again.
+ */
+export function useVaultPasskeyHandoff(): VaultPasskeyHandoff | null {
+  return useSyncExternalStore(subscribe, vaultPasskeyHandoff, () => null);
+}
+
+// The user ended the step: a passkey prompt or the sandbox window dismissed, or the attempt
+// superseded. `passkey_cancelled` is counted separately (see `cancelsInARow`).
+const CANCELLED = new Set([
+  'authorization_cancelled', 'authorization_window_closed', 'setup_window_closed', 'vault_operation_aborted', 'sandbox_reset',
+]);
+// The same answer would come back in a browser: the request or its context is stale or invalid,
+// this Avibe and the pinned sandbox disagree, or the vault itself is in a state the user must change.
+const NOT_WHERE_IT_RUNS = new Set([
+  'sandbox_integrity_failed', 'sandbox_build_mismatch', 'sandbox_capability_mismatch', 'build_hash_mismatch',
+  'passkey_not_configured', 'passkey_multiple_not_supported', 'parent_value_seal_disabled',
+  'policy_downgrade_unavailable', 'protected_hd_unavailable', 'sandbox_curve_unsupported',
+  'sandbox_browser_required', 'sandbox_entry_unavailable', 'sandbox_browser_unavailable',
+]);
+const notWhereItRuns = (code: string): boolean =>
+  NOT_WHERE_IT_RUNS.has(code) || code.startsWith('invalid_') || code.startsWith('context_')
+  || code.startsWith('policy_context_') || code.endsWith('_invalid');
+
+/**
+ * The vault sandbox client reports how each passkey-bearing step ended (`null` for success). In a
+ * shell that runs these steps itself, any failure other than the user cancelling switches this
+ * page to the browser hand-off: the window could not be opened, the passkey was not offered, or
+ * the ceremony errored. Elsewhere it does nothing.
+ */
+export function recordVaultPasskeyOutcome(error: unknown): void {
+  if (!canRunDesktopVaultPasskey() || failedInApp) return;
+  if (error == null) {
+    cancelsInARow = 0;
+    return;
+  }
+  const code = typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'sandbox_error';
+  if (code === 'passkey_cancelled') {
+    cancelsInARow += 1;
+    if (cancelsInARow < CANCELS_BEFORE_BROWSER) return;
+  } else if (CANCELLED.has(code) || notWhereItRuns(code)) {
+    return;
+  }
+  failedInApp = true;
+  for (const listener of [...listeners]) listener();
 }
 
 /**

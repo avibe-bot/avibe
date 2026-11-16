@@ -17,7 +17,7 @@ import {
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
-import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff, vaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
@@ -423,7 +423,9 @@ export const VaultApprovalCard: React.FC<{
 
   const needsProtectedApproval = useMemo(() => vaultApprovalNeedsPasskey(request), [request]);
   // Where passkeys can't run, the approver finishes this request in the browser instead; nothing
-  // (no binding contexts, no sandbox ceremony) starts here.
+  // (no binding contexts, no sandbox ceremony) starts here. That includes a desktop app whose
+  // in-app passkey step already failed on this page.
+  const handoff = useVaultPasskeyHandoff();
   const entryIssue = needsProtectedApproval ? vaultEntryIssue() : null;
   const approveInBrowser = entryIssue === 'desktop';
   const entryBlocked = !!entryIssue && !approveInBrowser;
@@ -460,6 +462,8 @@ export const VaultApprovalCard: React.FC<{
       setNeedsAvaultAuthorization(false);
       run()
         .catch((err: unknown) => {
+          // This attempt moved the app to the browser hand-off, whose note now says what happened.
+          if (vaultPasskeyHandoff() === 'fallback') return;
           setError(vaultErrorMessage(t, err, t('vaults.approval.errors.failed')));
           setNeedsAvaultAuthorization(isAvaultAuthorizationRequired(err));
         })
@@ -876,7 +880,7 @@ export const VaultApprovalCard: React.FC<{
         <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
           <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint-ink" />
           {approveInBrowser
-            ? t('vaults.approval.browserNote')
+            ? t(handoff === 'fallback' ? 'vaults.approval.browserFallbackNote' : 'vaults.approval.browserNote')
             : isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
         </span>
       ) : null}

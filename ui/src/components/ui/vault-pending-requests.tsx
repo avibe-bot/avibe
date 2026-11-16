@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi, type VaultRequest } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { readFullVaultRequest, vaultRequestNeedsFullRead } from '@/lib/vaultFullRequest';
 import { vaultRequestReviewType } from '@/lib/vaultPendingRequests';
@@ -30,7 +30,8 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
   const isProtected = card.protection === 'protected';
   const Icon = isDelete ? Trash2 : isSign || card.kind === 'keypair' ? Wallet : KeyRound;
   const session = vaultRequestSessionDisplay(r);
-  const reviewInBrowser = !isProvision && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(r);
+  const handoff = useVaultPasskeyHandoff();
+  const reviewInBrowser = !isProvision && handoff !== null && vaultApprovalNeedsPasskey(r);
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-gold/40 bg-gold/[0.06] px-4 py-3">
       <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gold/10 text-gold-ink">

@@ -355,3 +355,109 @@ describe('VaultSandboxClient protected seed-phrase wallet (contract rev0.7 §4)'
     await expect(instance.sealHdWallet({ name: 'COLD', mode: 'create', wrapMeta: '{}' }, 'win1')).rejects.toMatchObject({ code: 'protected_hd_result_invalid' });
   });
 });
+
+// A desktop shell that runs passkey steps itself must not trap the user there: when a step fails
+// in the app for any reason other than the user cancelling, the page moves to the browser
+// hand-off. The client is where every passkey-bearing step ends, so it is where that is decided;
+// a new code the sandbox adds counts as a failure unless it is known to mean otherwise.
+describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => {
+  type Shell = 'browser' | 'desktop' | 'in-app';
+  const failure = (code: string) => ({ code });
+
+  async function freshPage(shell: Shell) {
+    // The hand-off is page-lifetime state; each case starts from a new page.
+    vi.resetModules();
+    const client = await import('./vaultSandboxClient');
+    const handoff = await import('./vaultBrowserHandoff');
+    if (shell !== 'browser') Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    if (shell === 'in-app') Object.defineProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__', { configurable: true, value: true });
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    const instance = Object.create(client.VaultSandboxClient.prototype) as TestVaultSandboxClient & {
+      pending: Map<string, TestPendingRequest & { reject: (error: Error) => void }>;
+    };
+    Object.assign(instance, {
+      iframe, backdrop: null, pending: new Map(), readyPromise: Promise.resolve({}), handshaken: true,
+      modalVisible: false, interactiveRequests: new Set(), surfaceRefreshTimer: null,
+    });
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+    // One sandbox step, answered as the sandbox would: `null` succeeds, a code fails.
+    const step = async (op: string, outcome: { code: string } | null) => {
+      const calls = postMessage.mock.calls.length;
+      const result = instance.request(op, {}, {});
+      await vi.waitFor(() => expect(postMessage.mock.calls.length).toBe(calls + 1));
+      const pending = instance.pending.get((postMessage.mock.calls[calls][0] as { id: string }).id)!;
+      window.clearTimeout(pending.timer);
+      if (outcome) pending.reject(new client.VaultSandboxError(outcome.code, 'sandbox failure'));
+      else pending.resolve({});
+      await result.catch(() => undefined);
+    };
+    return { step, handoff: handoff.vaultPasskeyHandoff };
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__');
+  });
+
+  it.each([
+    ['the window could not be opened', 'approveRelease', 'authorization_popup_blocked'],
+    ['the setup window could not be opened', 'setup', 'setup_popup_blocked'],
+    ['the passkey gave no PRF', 'unlock', 'passkey_prf_unavailable'],
+    ['the ceremony errored', 'sign', 'sign_failed'],
+    ['the window never answered', 'reveal', 'authorization_window_timeout'],
+    ['a code this Avibe does not know', 'seal', 'some_future_failure'],
+  ])('moves to the browser when %s', async (_label, op, code) => {
+    const page = await freshPage('in-app');
+    expect(page.handoff()).toBeNull();
+    await page.step(op, failure(code));
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  it.each([
+    ['the user closed the sandbox window', 'authorization_cancelled'],
+    ['the user closed the window before confirming', 'authorization_window_closed'],
+    ['the attempt was superseded', 'sandbox_reset'],
+    ['the request expired, as it would in a browser', 'context_expired'],
+    ['the request was invalid, as it would be in a browser', 'invalid_context'],
+    ['this Avibe and the sandbox disagree, as they would in a browser', 'sandbox_integrity_failed'],
+    ['the vault has no passkey, as in a browser', 'passkey_not_configured'],
+  ])('stays in the app when %s', async (_label, code) => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure(code));
+    expect(page.handoff()).toBeNull();
+  });
+
+  // A system refusal before any passkey sheet reaches the sandbox as a cancel.
+  it('respects one passkey cancel and offers the browser after a second in a row', async () => {
+    const page = await freshPage('in-app');
+    await page.step('unlock', failure('passkey_cancelled'));
+    expect(page.handoff()).toBeNull();
+    await page.step('unlock', failure('passkey_cancelled'));
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  it('starts counting cancels again after a passkey step succeeds', async () => {
+    const page = await freshPage('in-app');
+    await page.step('unlock', failure('passkey_cancelled'));
+    await page.step('unlock', null);
+    await page.step('reveal', failure('passkey_cancelled'));
+    expect(page.handoff()).toBeNull();
+  });
+
+  it('ignores steps that never ask for the passkey', async () => {
+    const page = await freshPage('in-app');
+    await page.step('status', failure('sandbox_error'));
+    expect(page.handoff()).toBeNull();
+  });
+
+  it.each([
+    ['a desktop shell without the capability', 'desktop' as const, 'desktop'],
+    ['a browser', 'browser' as const, null],
+  ])('changes nothing in %s', async (_label, shell, expected) => {
+    const page = await freshPage(shell);
+    expect(page.handoff()).toBe(expected);
+    await page.step('approveRelease', failure('authorization_popup_blocked'));
+    expect(page.handoff()).toBe(expected);
+  });
+});
