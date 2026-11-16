@@ -114,7 +114,7 @@ private final class SheetFixtureRootViewController: UIViewController {
         guard !hasStarted else { return }
         hasStarted = true
         if let captureState {
-            precondition(["default", "offline-open", "open-failed", "stale", "account", "first-run", "instances-named", "account-root"].contains(captureState))
+            precondition(["default", "offline-open", "open-failed", "stale", "account", "first-run", "instances-named", "account-root", "page-switching"].contains(captureState))
             overrideUserInterfaceStyle = captureTheme == "dark" ? .dark : .light
             Task { @MainActor in
                 do {
@@ -148,7 +148,9 @@ private final class SheetFixtureRootViewController: UIViewController {
         )!
         let controller = MobileOnboardingViewController(
             coordinator: coordinator,
-            startScreen: startScreen ?? (captureState == "first-run" ? .instances : .sheet),
+            // `page-switching`: the full page with a selection, as after an
+            // instance failed to load.
+            startScreen: startScreen ?? (showsFullPage ? .instances : .sheet),
             resourceURL: resourceURL,
             returnToRuntime: { [weak self] in
                 self?.dismissFixtureSheet() ?? false
@@ -158,7 +160,7 @@ private final class SheetFixtureRootViewController: UIViewController {
             }
         )
         controller.view.accessibilityIdentifier = "fixture-document-surface"
-        if captureState == "open-failed" {
+        if captureState == "open-failed" || captureState == "page-switching" {
             let webView = controller.view.subviews.compactMap { $0 as? WKWebView }.first!
             let observer = FixtureSelectionReceiptObserver { [weak self, weak controller, weak webView] event in
                 guard let self, let controller, let webView else { return }
@@ -196,7 +198,7 @@ private final class SheetFixtureRootViewController: UIViewController {
         publishReadiness()
         observeDocument(in: controller)
         controller.overrideUserInterfaceStyle = overrideUserInterfaceStyle
-        if captureState == "first-run" {
+        if showsFullPage {
             addChild(controller)
             controller.view.frame = view.bounds
             controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -301,6 +303,12 @@ private final class SheetFixtureRootViewController: UIViewController {
     /// The B capture states exercise the real capable-shell bridge routes. They
     /// intentionally do not set a URL hash or replace the production page.
     /// The fixture-only invocation happens after the real bundled document is ready.
+    /// The full-screen page rather than the sheet: first use, or the page
+    /// with a selection.
+    private var showsFullPage: Bool {
+        captureState == "first-run" || captureState == "page-switching"
+    }
+
     private func publishReadiness() {
         sheetController?.view.accessibilityValue =
             "\(documentReady ? "document-ready" : "document-loading");fetch-\(fetchCount)"
@@ -366,6 +374,11 @@ private final class SheetFixtureRootViewController: UIViewController {
         _ event: [String: Any], in controller: MobileOnboardingViewController, webView: WKWebView
     ) {
         let kind = event["kind"] as? String ?? "unknown"
+        if kind == "bridge", let id = event["id"] as? String {
+            var ids = selectionEvidence["selectionIDs"] as? [String] ?? []
+            ids.append(id)
+            selectionEvidence["selectionIDs"] = ids
+        }
         if kind == "bridge", let stage = event["stage"] as? String {
             selectionEvidence["bridgeStage"] = stage
             var stages = selectionEvidence["bridgeStages"] as? [String] ?? []
@@ -417,7 +430,8 @@ private final class SheetFixtureRootViewController: UIViewController {
     }
 }
 
-// Observe only the synthetic open-failed fixture's real WebKit request/reply.
+// Observe only the synthetic open-failed and page-switching fixtures' real
+// WebKit request/reply.
 // Do not replace the frozen avibeMobile API, the native handler, or its result.
 @MainActor
 private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHandler {
@@ -489,7 +503,9 @@ private final class FixtureSelectionReceiptObserver: NSObject, WKScriptMessageHa
       }
       handler.postMessage = (request) => {
         if (request?.method !== "session.selectInstance") return original(request);
-        receipt("selection-submitted");
+        window.webkit.messageHandlers.fixtureSelectionReceipt.postMessage({
+          kind: "bridge", stage: "selection-submitted", id: String(request?.params?.id ?? "")
+        });
         const result = original(request);
         Promise.resolve(result).then((reply) => {
           receipt(reply?.ok === true ? "selection-accepted"
