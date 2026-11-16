@@ -196,6 +196,29 @@ it('applies a preparation answer even when the page rerenders with a new handler
   expect(second).toHaveBeenCalledWith(prepared);
 });
 
+it('a protected wallet offers the Bitcoin types the server lists, with no hint and nothing to prepare', () => {
+  const types = ['p2pkh', 'p2wpkh', 'p2tr'] as const;
+  const secret = {
+    ...wallet([account(0, { always_ask: true, btc_segwit: 'bc1qBTC0', btc_legacy: '1BTC0', bitcoin_address_types: [...types] })]),
+    protection: 'protected' as const,
+    bitcoin_profile: 'bitcoin-address-types-v1' as const,
+  };
+  open(secret);
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.addresses.btcTypeChoose.replace('{{type}}', en.vaults.addresses.typeTaproot) }));
+  expect(screen.getAllByRole('radio').map((option) => option.textContent)).toEqual([
+    `${en.vaults.addresses.typeTaproot}${en.vaults.addresses.prefixTaproot}`,
+    `${en.vaults.addresses.typeSegwit}${en.vaults.addresses.prefixSegwit}`,
+    `${en.vaults.addresses.typeLegacy}${en.vaults.addresses.prefixLegacy}`,
+  ]);
+  expect(screen.queryByRole('button', { name: en.vaults.dialog.moreInfo })).toBeNull();
+  expect(api.prepareVaultBitcoinAddressTypes).not.toHaveBeenCalled();
+});
+
+it('names a Bitcoin signature as BTC: the record does not say which type signed', () => {
+  open(wallet([account(0, { last_signer: { session_id: 'sesabc', at: new Date().toISOString(), chain: 'bitcoin' } })]));
+  expect(screen.getByText(/^Last signed on BTC (?!Taproot)/)).toBeTruthy();
+});
+
 it('a protected wallet: every account approves every signature, with no switch, a plain Taproot label and nothing to prepare', () => {
   const secret = { ...wallet([account(0, { always_ask: true, bitcoin_address_types: ['p2tr'] }), account(1, { always_ask: true, bitcoin_address_types: ['p2tr'] })]), protection: 'protected' as const };
   open(secret);

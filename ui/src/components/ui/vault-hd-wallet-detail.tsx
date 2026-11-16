@@ -72,8 +72,9 @@ function LastSigned({ account }: { account: VaultHdAccount }) {
     <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted">
       <Clock3 className="size-3 shrink-0" />
       <span className="truncate">
+        {/* The record names the chain, not which Bitcoin type signed: BTC, never a guessed type. */}
         {chain
-          ? t('vaults.hd.wallet.lastSignedChain', { chain: t(chain === 'evm' ? 'vaults.addresses.eth' : chain === 'bitcoin' ? 'vaults.addresses.btcTaproot' : 'vaults.addresses.solana'), when, session })
+          ? t('vaults.hd.wallet.lastSignedChain', { chain: t(chain === 'evm' ? 'vaults.addresses.eth' : chain === 'bitcoin' ? 'vaults.addresses.btc' : 'vaults.addresses.solana'), when, session })
           : t('vaults.hd.wallet.lastSigned', { when, session })}
       </span>
     </span>

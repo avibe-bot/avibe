@@ -125,6 +125,13 @@ const hdBitcoinSigningAddress = (account: HdApprovalAccount): SigningAddresses =
   return type === 'p2wpkh' ? { btc_segwit: address } : type === 'p2pkh' ? { btc_legacy: address } : { btc_taproot: address };
 };
 
+function hdSigningPath(account: HdApprovalAccount | null, chain: 'evm' | 'bitcoin' | 'solana', type: BitcoinAddressType | undefined): string | undefined {
+  if (!account) return undefined;
+  if (chain !== 'bitcoin') return account.paths?.[chain];
+  if (account.bitcoin_path) return account.bitcoin_path;
+  return (type ?? 'p2tr') === 'p2tr' ? account.paths?.bitcoin : undefined;
+}
+
 /** Whether a protected request's persisted derivation and its signed release name the same account:
  *  both absent (an ordinary key), or the same chain, account and (Bitcoin only) type. */
 function sameProtectedDerivation(
@@ -619,6 +626,9 @@ export const VaultApprovalCard: React.FC<{
   }, [api, onResolved, request.id, t]);
 
   const deleteNeedsHold = isKeypair || isProtected;
+  // The path this request signs with. A Bitcoin request names its type, whose path is the snapshot's
+  // `bitcoin_path`; the account's `paths.bitcoin` is Taproot's, so it stands in only for Taproot.
+  const signingPath = hdDerivation ? hdSigningPath(hdAccount, hdDerivation.chain, hdAccount?.bitcoin_address_type ?? delivery.derivation?.address_type) : undefined;
 
   const deny = () =>
     finish(async () => {
@@ -748,11 +758,8 @@ export const VaultApprovalCard: React.FC<{
                   // The type this request signs as; older requests without one are Taproot.
                   : t('vaults.addresses.btcWithType', { type: t(BTC_TYPE_LABEL[hdAccount?.bitcoin_address_type ?? delivery.derivation?.address_type ?? 'p2tr']) })}</Badge>
               </span>
-              {hdAccount?.paths?.[hdDerivation.chain] ? (
-                <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', {
-                  // A Bitcoin request names the type it signs as; its path differs from Taproot's.
-                  path: hdDerivation.chain === 'bitcoin' && hdAccount.bitcoin_path ? hdAccount.bitcoin_path : hdAccount.paths[hdDerivation.chain],
-                })}</span>
+              {signingPath ? (
+                <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', { path: signingPath })}</span>
               ) : null}
             </span>
           </DetailRow>

@@ -6,6 +6,7 @@
 // nothing was saved; after saving started, the wallet stays unconfirmed until an exact match.
 import type { ReactElement } from 'react';
 
+import type { BitcoinAddressType } from '@/context/ApiContext';
 import { VaultHdWalletDialog } from '@/components/ui/vault-hd-wallet-detail';
 import { ProtectedHdDone } from '@/components/ui/vault-protected-hd-create';
 import { VaultSecretDialog } from '@/components/ui/vault-secret-dialog';
@@ -38,10 +39,18 @@ const add = (phase: ProtectedHdPhase) => () => (
 );
 const phone = (phase: ProtectedHdPhase) => consolePage(<><VaultsPage />{add(phase)()}</>);
 const account0 = { ...IMPORTED_ADDRESSES[0] };
-const done = alone(T, <ProtectedHdDone name="COLD_WALLET" account0={account0} onFinish={noop} />);
-// A protected wallet's accounts: Taproot only for Bitcoin, and every signature approved.
-const protectedWallet = { ...walletSecret(walletAccounts.slice(0, 2).map((a) => ({ ...a, always_ask: true, bitcoin_address_types: ['p2tr' as const] }))), name: 'COLD_WALLET', protection: 'protected' as const };
-const accounts = (): ReactElement => <VaultHdWalletDialog secret={protectedWallet} open onOpenChange={noop} onChanged={noop} />;
+// Bitcoin offers the types the server lists: all three with a sandbox that signs them, else Taproot
+// (an older sandbox, or a save whose answer was lost and confirmed by a later read).
+const ALL_TYPES: BitcoinAddressType[] = ['p2pkh', 'p2wpkh', 'p2tr'];
+const done = (types?: BitcoinAddressType[]) => alone(T, <ProtectedHdDone name="COLD_WALLET" account0={account0} bitcoinTypes={types} onFinish={noop} />);
+// A protected wallet's accounts: every signature approved, and Bitcoin as the server lists it.
+const protectedWallet = (types: BitcoinAddressType[]) => ({
+  ...walletSecret(walletAccounts.slice(0, 2).map((a) => ({ ...a, always_ask: true, bitcoin_address_types: types }))),
+  name: 'COLD_WALLET',
+  protection: 'protected' as const,
+});
+const accounts = (types: BitcoinAddressType[]) => (): ReactElement => <VaultHdWalletDialog secret={protectedWallet(types)} open onOpenChange={noop} onChanged={noop} />;
+const chip = ['role=button[name^="{t:vaults.addresses.btcType}"] >> nth=0'];
 
 const designFrames = frames([
   { name: 'create', title: '保护档 · 新建 · 完整弹窗，在安全窗口中创建', width: 800, height: 1500, status: 'shipped', fixtures, click: create, render: add({ kind: 'idle' }) },
@@ -60,8 +69,12 @@ const designFrames = frames([
   { name: 'name-taken-import', title: '保护档 · 导入时名称已被占用：没有保存，换名称用同一组词再导入', width: 800, height: 1600, status: 'shipped', fixtures, click: importing, render: add({ kind: 'nameTaken', mode: 'import' }) },
   { name: 'standard-import-tier', title: '标准档 · 导入：词框旁说明助记词在这个页面输入', width: 800, height: 1400, status: 'shipped', fixtures, click: standardImport, render: add({ kind: 'idle' }) },
   { name: 'mismatch', title: '保护档 · 保存的和窗口生成的对不上，不要转账', width: 800, height: 1600, status: 'shipped', fixtures, click: create, render: add({ kind: 'mismatch' }) },
-  { name: 'done', title: '回到页面 · 已创建（保护档）· 恢复说明', width: 800, height: 900, status: 'shipped', fixtures, render: done },
-  { name: 'accounts', title: '保护档钱包 · 账户卡：BTC 只有 Taproot，每次签名都批准', width: 860, height: 900, status: 'shipped', fixtures: walletFixtures, render: accounts },
+  { name: 'done', title: '回到页面 · 已创建（保护档）· BTC 可切换 Taproot、SegWit、传统 · 恢复说明', width: 800, height: 900, status: 'shipped', fixtures, render: done(ALL_TYPES) },
+  { name: 'done-open', title: '回到页面 · 已创建（保护档）· 打开 BTC 类型：Taproot、SegWit、传统', width: 800, height: 900, status: 'shipped', fixtures, click: chip, render: done(ALL_TYPES) },
+  { name: 'done-taproot', title: '回到页面 · 已创建（保护档）· 旧沙箱或保存回复丢失后核对：BTC 只有 Taproot', width: 800, height: 900, status: 'shipped', fixtures, render: done() },
+  { name: 'accounts', title: '保护档钱包 · 账户卡：BTC 可切换三种类型，每次签名都批准', width: 860, height: 900, status: 'shipped', fixtures: walletFixtures, render: accounts(ALL_TYPES) },
+  { name: 'accounts-open', title: '保护档钱包 · 账户卡：打开 BTC 类型', width: 860, height: 900, status: 'shipped', fixtures: walletFixtures, click: chip, render: accounts(ALL_TYPES) },
+  { name: 'accounts-taproot', title: '保护档钱包 · 旧沙箱：BTC 只有 Taproot，没有切换', width: 860, height: 900, status: 'shipped', fixtures: walletFixtures, render: accounts(['p2tr']) },
   { name: 'create-phone', title: '保护档 · 新建 · 手机', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: create, render: phone({ kind: 'idle' }) },
   { name: 'unconfirmed-phone', title: '保护档 · 仍无法确认 · 手机', width: 390, height: 844, status: 'shipped', route: '/vaults', fixtures, click: create, render: phone({ kind: 'unconfirmed', refusal: null }) },
 ]);

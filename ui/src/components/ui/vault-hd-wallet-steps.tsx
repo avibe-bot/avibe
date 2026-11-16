@@ -207,8 +207,8 @@ export function HdAccountAddressList({ account, types, hint = true }: {
     bitcoin_address_types?: BitcoinAddressType[];
   };
   types?: BitcoinAddressType[];
-  /** The ⓘ beside a lone Taproot (other wallets show SegWit by default). A protected wallet, which
-   *  can sign for Taproot only, shows the plain label instead. */
+  /** The ⓘ beside a lone Taproot (other wallets show SegWit by default). A protected wallet shows the
+   *  plain label instead. */
   hint?: boolean;
 }) {
   const { t } = useTranslation();
@@ -227,15 +227,18 @@ export function HdAccountAddressList({ account, types, hint = true }: {
 }
 
 /** Done: account #0 is ready and checked, and the user learns how to point an Agent at it. */
-export function HdDoneStep({ name, account, withPassphrase = false, protectedTier = false }: {
+export function HdDoneStep({ name, account, withPassphrase = false, protectedTier = false, bitcoinTypes }: {
   name: string;
-  account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'>;
+  account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> & Partial<Pick<HdAccountAddresses, 'btc_segwit' | 'btc_legacy'>>;
   /** The wallet was made with a passphrase: recovery names both, not "if one was set". */
   withPassphrase?: boolean;
   /** A protected wallet (made in the sandbox window). The same screen, with three differences its
-   *  custody forces: Bitcoin is Taproot only (plain label), the check is the daemon's snapshot against
-   *  the window's result, and recovery also covers a lost Passkey. */
+   *  custody forces: Bitcoin offers only the types the server lists (`bitcoinTypes`, else Taproot;
+   *  plain label), the check is the daemon's snapshot against the window's result, and recovery also
+   *  covers a lost Passkey. */
   protectedTier?: boolean;
+  /** A protected wallet's `bitcoin_address_types` for account #0, as the save answer listed them. */
+  bitcoinTypes?: BitcoinAddressType[];
 }) {
   const { t } = useTranslation();
   return (
@@ -252,7 +255,7 @@ export function HdDoneStep({ name, account, withPassphrase = false, protectedTie
           <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
           {t('vaults.hd.mainAccount')}
         </span>
-        {protectedTier ? <HdAccountAddressList account={account} types={['p2tr']} hint={false} /> : <HdAccountAddressList account={account} />}
+        {protectedTier ? <HdAccountAddressList account={account} types={bitcoinTypes ?? ['p2tr']} hint={false} /> : <HdAccountAddressList account={account} />}
         <span className="flex items-center gap-1.5 text-[11.5px] text-mint-ink">
           <CircleCheck className="size-3.5 shrink-0" />
           {t(protectedTier ? 'vaults.hd.protected.verified' : 'vaults.hd.done.verified')}

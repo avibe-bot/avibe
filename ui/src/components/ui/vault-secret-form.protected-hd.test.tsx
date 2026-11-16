@@ -174,6 +174,26 @@ it.each([
   expect((screen.getByRole('button', { name: p.launchCreate }) as HTMLButtonElement).disabled).toBe(false);
 });
 
+it.each([
+  ['all three types the save answer lists', { name: NAME, accounts: [{ account: 0, bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'] }] }, true],
+  ['a save answer that lists Taproot only', { name: NAME, accounts: [{ account: 0, bitcoin_address_types: ['p2tr'] }] }, false],
+  ['a save answer with no list', {}, false],
+  ['a list for another name', { name: 'OTHER', accounts: [{ account: 0, bitcoin_address_types: ['p2pkh', 'p2wpkh', 'p2tr'] }] }, false],
+])('the done screen offers BTC as the server lists it: %s', async (_label, secret, switchable) => {
+  await openProtected();
+  api.createVaultSecret.mockResolvedValue({ ok: true, secret, reconciliation: snapshot() });
+  await launch();
+  await screen.findByText(fill(en.vaults.hd.done.title, { name: NAME }));
+  const chip = screen.queryByRole('button', { name: fill(en.vaults.addresses.btcTypeChoose, { type: en.vaults.addresses.typeTaproot }) });
+  expect(Boolean(chip)).toBe(switchable);
+  expect(screen.getByText(wallet.expected_account0.btc_taproot)).toBeTruthy();
+  if (!chip) return;
+  // The other types are the window's own confirmed #0 addresses, never ones from the answer.
+  fireEvent.click(chip);
+  fireEvent.click(await screen.findByRole('radio', { name: new RegExp(`^${en.vaults.addresses.typeSegwit}`) }));
+  expect(await screen.findByText(wallet.expected_account0.btc_segwit)).toBeTruthy();
+});
+
 it('a lost save reply is checked, never retried: unconfirmed until the exact wallet is found by name', async () => {
   await openProtected();
   api.createVaultSecret.mockRejectedValue(new TypeError('Failed to fetch'));

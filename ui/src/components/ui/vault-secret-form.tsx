@@ -1863,10 +1863,10 @@ export const VaultSecretForm: React.FC<{
 
   // ---- Seed-phrase wallet steps after setup — ui/design: vault/mnemonic/create/* -------
   if (isProtectedHd && protectedHd.phase.kind === 'done') {
-    const { name: savedName, account0 } = protectedHd.phase;
+    const { name: savedName, account0, bitcoinTypes } = protectedHd.phase;
     return (
       <div className={cn('flex min-w-0 flex-col gap-4', className)}>
-        <ProtectedHdDone name={savedName} account0={account0} onFinish={() => onCreated(savedName, 'created')} />
+        <ProtectedHdDone name={savedName} account0={account0} bitcoinTypes={bitcoinTypes} onFinish={() => onCreated(savedName, 'created')} />
       </div>
     );
   }

@@ -302,21 +302,25 @@ describe('VaultApprovalCard protected wallet account signing', () => {
   const material = { name: 'COLD_WALLET', kind: 'keypair', envelope };
   const derivation = { chain: 'bitcoin', account: 1, address_type: 'p2tr' };
   const btcContext = { kind: 'bitcoin-taproot-keypath-v1', network: 'bitcoin', digest: '11'.repeat(32) };
-  const walletSign = (released: unknown): VaultRequest => ({
+  const walletSign = (released: unknown, over: { delivery?: Record<string, unknown>; account?: Record<string, unknown> } = {}): VaultRequest => ({
     ...protectedAccess,
     id: 'vrq_wallet_sign',
     request_type: 'sign',
     secret_name: 'COLD_WALLET',
     delivery: {
       scheme: 'schnorr-secp256k1-bip341-keypath', digest: '11'.repeat(32), signing_context: btcContext, derivation,
+      ...over.delivery,
       operation_context: { v: 2, purpose: 'sign', requestId: 'vrq_wallet_sign', release: { name: 'COLD_WALLET', derivation: released } },
     },
-    card: { request_type: 'sign', secret_name: 'COLD_WALLET', kind: 'keypair', protection: 'protected', secret_unlock_material: material },
+    card: {
+      request_type: 'sign', secret_name: 'COLD_WALLET', kind: 'keypair', protection: 'protected', secret_unlock_material: material,
+      ...(over.account ? { derivation: over.delivery?.derivation ?? derivation, account: over.account } : {}),
+    },
   });
-  const approve = async (request: VaultRequest) => {
+  const approve = async (request: VaultRequest, result: Record<string, unknown> = { scheme: 'schnorr-secp256k1-bip341-keypath', signature: 'ef'.repeat(64), recovery_id: null }) => {
     api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
     api.signVaultDigest.mockResolvedValue({ ok: true });
-    vault.signProtectedRequest.mockResolvedValue({ scheme: 'schnorr-secp256k1-bip341-keypath', signature: 'ef'.repeat(64), recovery_id: null });
+    vault.signProtectedRequest.mockResolvedValue(result);
     openWindow();
     const onResolved = vi.fn();
     render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={onResolved} onCancel={vi.fn()} /></I18nextProvider>);
@@ -335,8 +339,52 @@ describe('VaultApprovalCard protected wallet account signing', () => {
     });
   });
 
+  // Legacy and SegWit (docs/plans/vault-protected-bitcoin-address-types.md): the card names the type and
+  // its own path from the request's account snapshot, and the sandbox gets the persisted type, scheme and
+  // context; the completion repeats them with the DER signature as the sandbox returned it.
+  const ecdsa = {
+    p2pkh: { label: en.vaults.addresses.typeLegacy, path: "m/44'/0'/0'/0/1", address: '1Ak8PffB2meyfYnbXZR9EGfLfFZVpzJvQP', field: 'btc_legacy' },
+    p2wpkh: { label: en.vaults.addresses.typeSegwit, path: "m/84'/0'/0'/0/1", address: 'bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g', field: 'btc_segwit' },
+  } as const;
+  const der = `3044022011${'11'.repeat(31)}022022${'22'.repeat(31)}`;
+  const accountSnapshot = (type: 'p2pkh' | 'p2wpkh', extra: Record<string, unknown> = {}) => ({
+    account: 1, name: 'cold', eth: '0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0',
+    btc_taproot: 'bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh',
+    btc_segwit: ecdsa.p2wpkh.address, btc_legacy: ecdsa.p2pkh.address, solana: 'Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb',
+    paths: { evm: "m/44'/60'/0'/0/1", bitcoin: "m/86'/0'/0'/0/1", solana: "m/44'/501'/1'/0'" }, always_ask: true, last_signer: null,
+    bitcoin_address_type: type, bitcoin_address: ecdsa[type].address, ...extra,
+  });
+  const ecdsaSign = (type: 'p2pkh' | 'p2wpkh', account: Record<string, unknown>, released?: unknown) => {
+    const typed = { chain: 'bitcoin', account: 1, address_type: type };
+    const context = { kind: `bitcoin-${type}-v1`, addressType: type, network: 'bitcoin', digest: '11'.repeat(32) };
+    return { typed, context, request: walletSign(released ?? typed, { delivery: { scheme: 'ecdsa-secp256k1-der', signing_context: context, derivation: typed }, account }) };
+  };
+
+  it.each(['p2pkh', 'p2wpkh'] as const)('a %s request names its type and path, then completes with them and the DER signature', async (type) => {
+    const { typed, context, request } = ecdsaSign(type, accountSnapshot(type, { bitcoin_path: ecdsa[type].path }));
+    const onResolved = await approve(request, { scheme: 'ecdsa-secp256k1-der', signature: der, recovery_id: null });
+    expect(screen.getByText(en.vaults.addresses.btcWithType.replace('{{type}}', ecdsa[type].label))).toBeTruthy();
+    expect(screen.getByText(en.vaults.approval.path.replace('{{path}}', ecdsa[type].path))).toBeTruthy();
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    const [, sentContext, scheme] = vault.signProtectedRequest.mock.calls[0];
+    expect([sentContext, scheme]).toEqual([context, 'ecdsa-secp256k1-der']);
+    expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({
+      name: 'COLD_WALLET', request_id: 'vrq_wallet_sign', digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-der',
+      signature: { signature: der }, chain: 'bitcoin', account: 1, address_type: typed.address_type, signing_context: context,
+    });
+  });
+
+  it.each(['p2pkh', 'p2wpkh'] as const)('a %s request whose snapshot has no path of its own never shows Taproot\'s', (type) => {
+    const { request } = ecdsaSign(type, accountSnapshot(type));
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText(en.vaults.addresses.btcWithType.replace('{{type}}', ecdsa[type].label))).toBeTruthy();
+    expect(screen.queryByText(/m\/86'/)).toBeNull();
+  });
+
   it.each([
     ['another account', { chain: 'bitcoin', account: 2, address_type: 'p2tr' }],
+    ['another Bitcoin type', { chain: 'bitcoin', account: 1, address_type: 'p2wpkh' }],
     ['no type', { chain: 'bitcoin', account: 1 }],
     ['no derivation at all', undefined],
     ['an extra field', { ...derivation, path: "m/86'/0'/0'/0/1" }],

@@ -4,6 +4,7 @@
 import { AlertTriangle, ExternalLink, Loader2, Lock, RefreshCw, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import type { BitcoinAddressType } from '@/context/ApiContext';
 import type { ProtectedHdPhase } from '@/lib/useProtectedHdCreate';
 import type { ProtectedHdAccount0 } from '@/lib/vaultProtectedHd';
 
@@ -91,11 +92,17 @@ export function ProtectedHdLaunchButton({ phase, mode, disabled, onCheckAgain }:
 }
 
 /** Back on the page once the saved wallet matched: the standard done screen, protected variant. */
-export function ProtectedHdDone({ name, account0, onFinish }: { name: string; account0: ProtectedHdAccount0; onFinish: () => void }) {
+export function ProtectedHdDone({ name, account0, bitcoinTypes, onFinish }: {
+  name: string;
+  account0: ProtectedHdAccount0;
+  /** The types the save answer lists for account #0; absent: Taproot only. */
+  bitcoinTypes?: BitcoinAddressType[];
+  onFinish: () => void;
+}) {
   const { t } = useTranslation();
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <HdDoneStep name={name} account={account0} protectedTier />
+      <HdDoneStep name={name} account={account0} protectedTier bitcoinTypes={bitcoinTypes} />
       <div className="mt-1 flex justify-end">
         <Button type="button" onClick={onFinish}>{t('vaults.hd.done.finish')}</Button>
       </div>
