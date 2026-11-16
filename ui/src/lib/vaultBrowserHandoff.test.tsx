@@ -51,7 +51,7 @@ const vault = vi.hoisted(() => ({
   sealValue: vi.fn(),
   approveProtectedRelease: vi.fn(),
   signProtectedRequest: vi.fn(),
-  revealProtectedValue: vi.fn(),
+  revealProtectedSecret: vi.fn(),
 }));
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
@@ -189,10 +189,10 @@ const expectProtectedForm = async (fixedName?: string) => {
   if (fixedName) expect(dialog.getAllByText(fixedName).length).toBeGreaterThan(0);
   await expectPasskeyReady();
 };
-const expectRevealReady = async (field = 'value') => {
-  const button = await screen.findByRole('menuitem', { name: /^show value$/i }) as HTMLButtonElement;
+const expectRevealReady = async (fields = ['value']) => {
+  const button = await screen.findByRole('menuitem', { name: /^view secret$/i }) as HTMLButtonElement;
   await waitFor(() => expect(button.disabled).toBe(false));
-  expect(api.createVaultRevealContext).toHaveBeenCalledWith('SEED_PHRASE', { session_label: 'Vaults', field });
+  for (const field of fields) expect(api.createVaultRevealContext).toHaveBeenCalledWith('SEED_PHRASE', { session_label: 'Vaults', field });
   expect(useVaultSandboxWarm).toHaveBeenCalledWith(true);
 };
 
@@ -211,7 +211,7 @@ type Ui = {
 };
 const staticUi: Ui = { VaultApprovalCard, VaultRequestCard, VaultSecretForm, VaultsPage };
 
-const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue];
+const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedSecret];
 
 const cases: Array<{
   surface: string;
@@ -318,12 +318,12 @@ const cases: Array<{
     desktop: ({ VaultsPage }) => <VaultsPage />,
     clicks: [
       { role: 'button', name: /^more actions$/i },
-      { role: 'menuitem', name: /^show in browser$/i },
+      { role: 'menuitem', name: /^view in browser$/i },
     ],
     secrets: [protectedSecret],
     resumed: () => expectRevealReady(),
-    inApp: { clicks: [moreActions, { role: 'menuitem', name: /^show value$/i }], ceremony: vault.revealProtectedValue },
-    afterFailure: [moreActions, { role: 'menuitem', name: /^show in browser$/i }],
+    inApp: { clicks: [moreActions, { role: 'menuitem', name: /^view secret$/i }], ceremony: vault.revealProtectedSecret },
+    afterFailure: [moreActions, { role: 'menuitem', name: /^view in browser$/i }],
   },
   {
     surface: 'protected field edit',
@@ -471,9 +471,9 @@ async function handOffToBrowser(c: Case) {
 // Positive controls must reach enabled setup/unlock/approval/reveal and its permitted preparation.
 // Presence plus no ceremony used to pass even when the real entry assessment blocked every resume.
 describe('desktop shell protected-vault browser handoff', () => {
-  // Field labels must survive the same round trip as the secret name; reopening just the
-  // secret silently changes an extra-field reveal into a default-field reveal.
-  it('resumes the selected extra field in the browser without revealing anything automatically', async () => {
+  // The whole secret is viewed in the browser: the handoff names the secret, and the resumed menu
+  // prepares every field without revealing anything automatically.
+  it('resumes View secret for every field in the browser without revealing anything automatically', async () => {
     const user = userEvent.setup();
     api.getVaultRequests.mockResolvedValue({ requests: [] });
     api.listVaultSecrets.mockResolvedValue({
@@ -483,18 +483,17 @@ describe('desktop shell protected-vault browser handoff', () => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
     renderAt('/vaults', <VaultsPage />);
     await user.click(await screen.findByRole('button', { name: /^more actions$/i }));
-    fireEvent.change(screen.getByRole('combobox', { name: 'Field to reveal' }), { target: { value: 'username' } });
-    await user.click(screen.getByRole('menuitem', { name: /^show in browser$/i }));
+    expect(within(screen.getByRole('menu')).queryByRole('combobox')).toBeNull();
+    await user.click(screen.getByRole('menuitem', { name: /^view in browser$/i }));
     const target = new URL(String(open.mock.calls[0][0]));
-    expect(target.searchParams.get('field')).toBe('username');
+    expect(target.searchParams.get('field')).toBeNull();
     expect(api.createVaultRevealContext).not.toHaveBeenCalled();
     expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
     expectNoProtectedOperations();
     cleanup();
     delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
     renderAt(`${target.pathname}${target.search}`, <VaultsPage />);
-    expect((await screen.findByRole('combobox', { name: 'Field to reveal' }) as HTMLSelectElement).value).toBe('username');
-    await expectRevealReady('username');
+    await expectRevealReady(['password', 'username']);
     expect(open).toHaveBeenCalledTimes(1);
     expectNoProtectedOperations();
   });
@@ -557,7 +556,7 @@ describe('desktop shell that runs protected-vault passkey steps in the app', () 
   beforeEach(() => {
     vault.approveProtectedRelease.mockResolvedValue([{}]);
     vault.signProtectedRequest.mockResolvedValue({ signature: 'inert-signature' });
-    vault.revealProtectedValue.mockResolvedValue({ completed: true });
+    vault.revealProtectedSecret.mockResolvedValue({ completed: true });
     vault.setupPasskey.mockResolvedValue(undefined);
     vault.unlockPasskey.mockResolvedValue(undefined);
   });

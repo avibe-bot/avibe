@@ -23,7 +23,7 @@ const vault = (status: Vault['status'], error: string | null = null): Vault => (
   sealHdWallet: unavailable,
   signProtectedRequest: unavailable,
   approveProtectedRelease: unavailable,
-  revealProtectedValue: unavailable,
+  revealProtectedSecret: unavailable,
   afterCreated: () => {},
   lock: () => {},
   lockAndResetForPolicyChange: () => {},

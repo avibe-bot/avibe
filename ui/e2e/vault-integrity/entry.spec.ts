@@ -290,8 +290,7 @@ test('unsupported reveal/edit stops before preparation, but metadata and cancel 
   const url = `${origin}${fixturePath}?reveal=${secret.name}`;
   await page.goto(url);
   await expect(page.getByRole('menu').getByText(en.vaults.entry.addressTitle)).toBeVisible();
-  await expect(page.getByRole('menuitem', { name: en.vaults.reveal.show, exact: true })).toBeDisabled();
-  await expect(page.getByRole('menuitem', { name: en.vaults.reveal.copy, exact: true })).toBeDisabled();
+  await expect(page.getByRole('menuitem', { name: en.vaults.reveal.view, exact: true })).toBeDisabled();
   page.setDefaultTimeout(8_000);
   await page.getByRole('menuitem', { name: en.vaults.editSecret }).click();
   expect(observed.errors).toEqual([]);
