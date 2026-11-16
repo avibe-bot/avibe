@@ -1860,7 +1860,7 @@ final class DirectPathAppTests: XCTestCase {
     /// Renders the real `RootView` over a real `AppModel` (no transport, as
     /// shipped) at the two runtime-open screens #3848 added, for review:
     /// the long wait (8 s into the open) and the timeout notice over the
-    /// instance list (30 s). Time is the manual open clock; nothing else is
+    /// instance list (60 s in 23.1). Time is the manual open clock; nothing else is
     /// stubbed beyond the fixture control plane. Fixture data only.
     @MainActor
     func testCaptureRuntimeOpenScreensForReview() async throws {
@@ -1907,7 +1907,11 @@ final class DirectPathAppTests: XCTestCase {
         capture(window, app, "01-long-wait-dark")
         window.overrideUserInterfaceStyle = .light
 
-        timing.advance(by: .seconds(22))
+        // 23.1: the budget is 60 s of foreground time; 59 s still loads.
+        timing.advance(by: .seconds(51))
+        try await Task.sleep(for: .milliseconds(600))
+        capture(window, app, "01b-still-loading-at-59s-light")
+        timing.advance(by: .seconds(1))
         try await Task.sleep(for: .seconds(6))
         capture(window, app, "02-timeout-light")
         window.overrideUserInterfaceStyle = .dark
