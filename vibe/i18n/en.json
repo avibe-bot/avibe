@@ -43,6 +43,8 @@
     "systemEntry": {
       "defaultTitle": "Show Page",
       "cta": "Add to Home Screen or Dock",
+      "iosCta": "Add to Home Screen",
+      "macCta": "Add to Dock",
       "title": "Add this Show Page",
       "iosTitle": "Add to Home Screen",
       "macTitle": "Add to Dock",
@@ -51,7 +53,8 @@
       "otherBody": "Open this page in Safari, then use Share or File to add it.",
       "copyLink": "Copy link",
       "copied": "Link copied",
-      "close": "Close"
+      "close": "Close",
+      "collapse": "Collapse guidance"
     },
     "event": {
       "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",

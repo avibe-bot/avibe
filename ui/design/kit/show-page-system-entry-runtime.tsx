@@ -7,10 +7,12 @@ const content = {
   ios: {
     title: 'Add to Home Screen',
     body: 'In Safari, tap Share, then Add to Home Screen.',
+    cta: 'Add to Home Screen',
   },
   mac: {
     title: 'Add to Dock',
     body: 'In Safari, choose File, then Add to Dock.',
+    cta: 'Add to Dock',
   },
 } as const;
 
@@ -41,7 +43,7 @@ export const ShowPageSystemEntryRuntimePreview = ({
 
   return (
     <div className="relative h-full overflow-hidden bg-background text-foreground">
-      <main className="mx-auto flex h-full max-w-4xl flex-col px-6 pb-28 pt-8 sm:px-10">
+      <main className="mx-auto flex h-full max-w-4xl flex-col px-6 pb-56 pt-8 sm:px-10">
         <div className="flex items-center justify-between border-b border-border pb-4">
           <div>
             <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted">Show Page</div>
@@ -82,11 +84,14 @@ export const ShowPageSystemEntryRuntimePreview = ({
               </div>
               <RuntimeEntryButton ariaLabel="Close guidance">×</RuntimeEntryButton>
             </div>
+            <div className="mt-3">
+              <RuntimeEntryButton ariaLabel="Collapse guidance">Collapse guidance</RuntimeEntryButton>
+            </div>
           </section>
         ) : null}
-        <RuntimeEntryButton ariaLabel={copy.title}>
-          Add to Home Screen or Dock
-        </RuntimeEntryButton>
+        {state === 'collapsed' ? (
+          <RuntimeEntryButton ariaLabel={copy.title}>{copy.cta}</RuntimeEntryButton>
+        ) : null}
       </div>
     </div>
   );

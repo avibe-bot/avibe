@@ -140,6 +140,10 @@ def test_show_runtime_entry_script_keeps_limited_page_copy_localized():
 
     assert english["copy"]["cta"] == "Add to Home Screen or Dock"
     assert chinese["copy"]["cta"] == "添加到主屏幕或程序坞"
+    assert english["copy"]["iosCta"] == "Add to Home Screen"
+    assert english["copy"]["macCta"] == "Add to Dock"
+    assert chinese["copy"]["iosCta"] == "添加到主屏幕"
+    assert chinese["copy"]["macCta"] == "添加到程序坞"
     assert english["copy"]["cta"] != chinese["copy"]["cta"]
 
 
@@ -153,6 +157,9 @@ def test_show_runtime_entry_script_is_small_dismissible_and_standalone_safe():
     assert "window.localStorage" in script
     assert "savePreference('dismissed')" in script
     assert "root.remove()" in script
+    assert "data-avibe-show-system-entry-spacer" in script
+    assert "button.hidden = open" in script
+    assert "collapseButton" in script
     assert "aria-labelledby" in script
     assert "aria-live" in script
 

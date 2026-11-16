@@ -294,6 +294,7 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
     .panel-head { display: flex; align-items: flex-start; gap: 10px; }
     .title { min-width: 0; flex: 1; margin: 0 0 6px; font: 700 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .close { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; padding: 0; box-shadow: none; font-size: 18px; line-height: 1; }
+    .collapse { margin-top: 10px; }
     .body { margin: 0; color: #53616d; font: 400 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .steps { margin: 10px 0 0; padding-left: 20px; color: #17202a; font: 500 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .copy { display: none; margin-top: 10px; padding: 7px 10px; }
@@ -342,7 +343,12 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   closeButton.setAttribute('aria-label', copy.close || 'Close');
   closeButton.title = copy.close || 'Close';
   panelHead.append(title, closeButton);
-  panel.append(panelHead, body, steps, copyButton, status);
+  const collapseButton = document.createElement('button');
+  collapseButton.className = 'button collapse';
+  collapseButton.type = 'button';
+  collapseButton.textContent = copy.collapse || copy.cta || 'Collapse guidance';
+  collapseButton.setAttribute('aria-label', copy.collapse || 'Collapse guidance');
+  panel.append(panelHead, body, steps, copyButton, status, collapseButton);
   const button = document.createElement('button');
   button.className = 'button';
   button.type = 'button';
@@ -359,6 +365,11 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   const safari = /Safari/.test(userAgent) && /Version\//.test(userAgent) &&
     !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chrome|Chromium/i.test(userAgent);
   const mac = /Macintosh|Mac OS X/.test(userAgent) && !ios;
+  if (ios) {
+    button.textContent = copy.iosCta || copy.cta || 'Add to Home Screen';
+  } else if (mac) {
+    button.textContent = copy.macCta || copy.cta || 'Add to Dock';
+  }
   if (ios && safari) {
     title.textContent = copy.iosTitle || copy.title || 'Add to Home Screen';
     body.textContent = copy.iosBody || '';
@@ -374,17 +385,33 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
     copyButton.setAttribute('data-visible', 'true');
   }
 
+  const safeArea = document.createElement('div');
+  safeArea.setAttribute('aria-hidden', 'true');
+  safeArea.setAttribute('data-avibe-show-system-entry-spacer', 'true');
+  safeArea.style.cssText = 'width:1px;height:0;pointer-events:none;';
+  document.body.append(safeArea);
+  const updateSafeArea = () => {
+    safeArea.style.height = panel.hidden
+      ? '0px'
+      : `${Math.ceil(panel.getBoundingClientRect().height + 24)}px`;
+  };
   const setPanelOpen = (open) => {
     panel.hidden = !open;
+    button.hidden = open;
     button.setAttribute('aria-expanded', String(open));
     savePreference(open ? 'expanded' : 'collapsed');
+    window.requestAnimationFrame(updateSafeArea);
   };
   setPanelOpen(readPreference() === 'expanded');
   button.addEventListener('click', () => {
     setPanelOpen(panel.hidden);
   });
+  collapseButton.addEventListener('click', () => {
+    setPanelOpen(false);
+  });
   closeButton.addEventListener('click', () => {
     savePreference('dismissed');
+    safeArea.remove();
     root.remove();
   });
   copyButton.addEventListener('click', async () => {
@@ -18345,6 +18372,8 @@ def _show_system_entry_config(
         "iconUrl": icon_url,
         "copy": {
             "cta": t("show.systemEntry.cta", language),
+            "iosCta": t("show.systemEntry.iosCta", language),
+            "macCta": t("show.systemEntry.macCta", language),
             "title": t("show.systemEntry.title", language),
             "iosTitle": t("show.systemEntry.iosTitle", language),
             "macTitle": t("show.systemEntry.macTitle", language),
@@ -18354,6 +18383,7 @@ def _show_system_entry_config(
             "copyLink": t("show.systemEntry.copyLink", language),
             "copied": t("show.systemEntry.copied", language),
             "close": t("show.systemEntry.close", language),
+            "collapse": t("show.systemEntry.collapse", language),
         },
     }
 

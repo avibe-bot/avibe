@@ -43,6 +43,8 @@
     "systemEntry": {
       "defaultTitle": "Show Page",
       "cta": "添加到主屏幕或程序坞",
+      "iosCta": "添加到主屏幕",
+      "macCta": "添加到程序坞",
       "title": "添加此 Show Page",
       "iosTitle": "添加到主屏幕",
       "macTitle": "添加到程序坞",
@@ -51,7 +53,8 @@
       "otherBody": "在 Safari 中打开此页面，再通过分享或文件菜单添加。",
       "copyLink": "复制链接",
       "copied": "已复制链接",
-      "close": "关闭提示"
+      "close": "关闭提示",
+      "collapse": "收起提示"
     },
     "event": {
       "acceptanceUnknown": "Show 事件可能仍在处理中，未在本地重复提交。",
