@@ -51,3 +51,15 @@ it('a protected key the server lists as Taproot-only gets no switch even though 
   expect(screen.queryByRole('button', { name: new RegExp(`^${a.btcType}`) })).toBeNull();
   expect(screen.queryByText(ADDR.p2wpkh)).toBeNull();
 });
+
+it('puts each copy button right after its address: the address box is sized to the address, not the row', () => {
+  wrap(<KeyAddressList types={['p2tr']} addresses={{ eth: '0xE', btc_taproot: ADDR.p2tr }} />);
+  for (const value of ['0xE', ADDR.p2tr]) {
+    const box = screen.getByText(value);
+    // It may shrink and truncate on a narrow row, but never grows to fill it.
+    expect(box.className).toContain('truncate');
+    expect(box.className).not.toMatch(/\bflex-1\b/);
+    // The copy button is the next element after the address.
+    expect(box.nextElementSibling?.getAttribute('aria-label')).toMatch(/Copy/);
+  }
+});
