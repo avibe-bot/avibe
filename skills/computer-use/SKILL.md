@@ -154,10 +154,11 @@ owner must restart the service), `starting`, `error`, `unavailable`,
 `target_busy` (another call holds the target), and `observe_first` (observe it
 in this Session first).
 
-## Windows (Preview)
+## Windows
 
-On Windows x64 the Avibe desktop app hosts Computer Use as a Preview. The
-kernel, SDK, saved flows, and safety rules above are the same.
+On Windows x64 the Avibe desktop app hosts Computer Use. The kernel, SDK,
+saved flows, and safety rules above are the same. Display scaling, multiple
+monitors, and input methods may not work as expected on Windows.
 
 - Windows apps have no bundle IDs: select them by `name` or `nameContains`,
   using the names that `observe apps` reports.
@@ -224,7 +225,7 @@ kernel, SDK, saved flows, and safety rules above are the same.
   `app.waitFor`, observe, and continue there. Never start it through a shell
   command (such as `Start-Process`) and then attach, try another launch route,
   or elevate, and do not retry the launch. If Avibe refuses a launch
-  ("Avibe cannot launch this app in the Windows Preview"), do the same.
+  ("Avibe cannot launch this app …"), do the same.
 - To open a menu, `await win.activate()` and observe that this exact window is
   focused before the click: foreground delivery restores the previous window,
   which closes the menu again.
