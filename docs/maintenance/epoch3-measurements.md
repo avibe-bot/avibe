@@ -34,9 +34,10 @@ provisioning with the exercise owner; do not bypass the guard or fill the pool.
 The driver neither changes quotas nor starts/stops services. Every worker uses
 an isolated HOME/Avibe/XDG/temp tree and only synthetic state.
 
-## Run four phases
+## Run the phases
 
-In the pinned candidate checkout inside the approved guest, invoke:
+In the pinned candidate checkout inside the approved guest, invoke the base
+preparation phase:
 
 ```bash
 python -m scripts.sqlite_epoch3_measure \
@@ -44,49 +45,60 @@ python -m scripts.sqlite_epoch3_measure \
   --quota-bytes "$VERIFIED_ROOT_QUOTA_BYTES" --phase prepare
 ```
 
-Repeat the same command and arguments with `--phase refusal`, `--phase upgrade`
-and `--phase growth`, in that order. Defaults are 4,500,000,000 logical database
-bytes and 1,000 operations per writer group. Use managed Watches or another
-lead-owned re-checkable execution path, not a detached shell. Each phase writes
-started/completed markers, logs and JSON receipts. Intent markers are fsynced
-before mutation; results are atomically published and fsynced before completion.
-Every worker also checks the existing DB/WAL/journal size, so a small requested
-workload cannot bypass the large-fixture guest guard. A started phase cannot be
-replayed: inspect its evidence and use a fresh isolated exercise after an
-interruption. The script never silently resumes partially written workloads.
+Then run the three S2 phases in order with the S2 driver:
+
+```bash
+for phase in copy no-copy transaction-full; do
+  python -m scripts.sqlite_epoch3_s2_measure \
+    --root "$NEW_TEST_ROOT" --previous-python "$PUBLISHED_326_PYTHON" \
+    --quota-bytes "$VERIFIED_ROOT_QUOTA_BYTES" --phase "$phase"
+done
+```
+
+Finally run the independent matched-growth phase with the base driver:
+
+```bash
+python -m scripts.sqlite_epoch3_measure \
+  --root "$NEW_TEST_ROOT" --previous-python "$PUBLISHED_326_PYTHON" \
+  --quota-bytes "$VERIFIED_ROOT_QUOTA_BYTES" --phase growth
+```
+
+Defaults are 4,500,000,000 logical database bytes and 1,000 operations per
+writer group. Use managed Watches or another lead-owned re-checkable execution
+path, not a detached shell. Each phase writes started/completed markers, logs
+and JSON receipts. Intent markers are fsynced before mutation; results are
+atomically published and fsynced before completion. Every worker also checks the
+existing DB/WAL/journal size, so a small requested workload cannot bypass the
+large-fixture guest guard. A started phase cannot be replayed: inspect its
+evidence and use a fresh isolated exercise after an interruption. The scripts
+never silently resume partially written workloads.
 
 1. **Prepare:** the real predecessor creates the schema, Session, conversations,
    cache writes, Vault audit rows and Skill observations. Bulk synthetic message
    rows clone a real API-written message shape until the main database exceeds
    4.5 GB. This tests upgrade of populated history, not message ingestion speed.
    A streamed history digest and row counts provide preservation evidence.
-2. **Refusal (historical, before S2):** this phase was written for the earlier
-   policy, which refused the conversion whenever the full-copy reserve did not
-   fit. Since S2 (November 16) the exact `0088 → 0089` conversion on such a disk
-   converts without the copy. The three S2
-   outcomes (backup made; converted without the copy; transaction out of disk
-   and rolled back) are to be measured on a real disk that cannot clone. No S2
-   results are recorded here yet. The original phase follows for the record: an
-   exclusively created test-owned filler brings guest filesystem
-   usage to approximately 91%. Record actual available bytes, not just percent.
-   Candidate admission must refuse with required reserve and actionable deficit;
-   DB/WAL/backup/lifecycle hashes must remain unchanged. The filler is removed in
-   `finally`, and no other file is deleted. A conservative full-copy reserve is
-   expected to refuse at this occupancy; do not describe it as a successful
-   near-full upgrade.
-3. **Upgrade:** with the filler removed, run the candidate's real migration and
-   rollback-backup path. Record total seconds, backup seconds, before/after bytes
-   and a 200 ms free-space series high-water observation. Verify history digest,
-   row counts and quick-check. The actual predecessor reads the upgraded history;
-   a separate small extended contract exercises old writes/clear/ACL and candidate
-   return. Compatibility rollback means selecting the supported reader binary,
-   never restamping or Alembic downgrade.
-4. **Growth:** each group gets two independent predecessor-created databases.
-   Only the candidate half is upgraded. Run identical API workloads: 1,000 cache
-   turns across four provider/model states with 32 valid cumulative prefix
-   boundaries (the producer's bound), 1,000 proxied requests sharing
-   one full historical access snapshot, and 1,000 distinct receipts for one
-   25-entry Skill catalog page. Report logical file growth, used-page growth and
+2. **Copy:** the candidate proves the destination filesystem cannot clone, then
+   runs the exact `0088 → 0089` conversion with enough space for the ordinary
+   full copy. The receipt proves one SQLite online-backup copy, the converted
+   schema and epoch, and unchanged history.
+3. **No-copy:** after retiring only the prior trial database, the worker leaves
+   insufficient space for a full copy and converts without one. It checks the
+   permanent omission record, exactly one approved workspace notice, unchanged
+   history, real 3.2.6 read/write on the same large database, and candidate
+   return. Pending importer repair remains part of the ordinary conversion.
+4. **Transaction-full:** a real SQLite allocation fails with ENOSPC during the
+   0089 transaction. The worker verifies `DatabaseDiskFullError`,
+   `rollback_confirmed=True`, unchanged schema/epoch/marker/history, and the
+   exact status/Desktop outcome after releasing only a small owned filler tail
+   for reporting. Zero-free-byte publication is a documented limitation, not a
+   passed acceptance claim.
+5. **Growth:** each group gets two independent predecessor-created databases.
+   Only the candidate half is upgraded. Run identical API workloads: 1,000
+   cache turns across four provider/model states with 32 valid cumulative prefix
+   boundaries (the producer's bound), 1,000 proxied requests sharing one full
+   historical access snapshot, and 1,000 distinct receipts for one 25-entry
+   Skill catalog page. Report logical file growth, used-page growth and
    per-table/index pages before/after, including reference/state table overhead.
    These are specified synthetic workloads, not a claim about every user's daily
    workload. No writer is dropped on assumed low benefit.

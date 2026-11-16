@@ -151,7 +151,7 @@ def main(argv=None) -> int:
     parser.add_argument("--root", required=True, type=Path, help="fresh test-owned directory, never a runtime home")
     parser.add_argument("--previous-python", type=Path, help="isolated interpreter containing actual published avibe-os 3.2.6")
     parser.add_argument("--quota-bytes", type=int, default=0)
-    parser.add_argument("--phase", choices=("prepare", "refusal", "upgrade", "growth"))
+    parser.add_argument("--phase", choices=("prepare", "growth"))
     parser.add_argument("--count", type=int, default=1000)
     parser.add_argument("--target-bytes", type=int, default=4_500_000_000)
     parser.add_argument("--worker", choices=("seed", "workload", "populate", "history", "refuse", "upgrade",
@@ -214,37 +214,6 @@ def main(argv=None) -> int:
             probe(previous, "workload", large, root / f"large-{group}.json", group=group, count=args.count)
         probe(previous, "populate", large, root / "large-populate.json", target_bytes=args.target_bytes)
         probe(previous, "history", large, root / "history-before.json")
-    elif args.phase == "refusal":
-        if not (root / "prepare.complete").exists():
-            raise RuntimeError("prepare must complete first")
-        before = protected_files(large)
-        # The published predecessor may already have left its own backups; the
-        # refused upgrade must not add, remove or alter any entry (files or dirs).
-        backups_before = backup_entries(large)
-        fill = fill_to_usage(root, 0.91, args.quota_bytes)
-        durable_write(root / "near-full.json", json.dumps(fill, indent=2))
-        try:
-            result = probe(Path(sys.executable), "refuse", large, root / "refusal.json", current=True)
-            assert result["refused"] and protected_files(large) == before
-            assert backup_entries(large) == backups_before
-        finally:
-            # Only this script's exclusive-created filler is removed.
-            (root / "test-owned-filler").unlink()
-    elif args.phase == "upgrade":
-        if not (root / "refusal.complete").exists():
-            raise RuntimeError("near-full refusal must complete first")
-        probe(Path(sys.executable), "upgrade", large, root / "upgrade.json", current=True)
-        after = probe(Path(sys.executable), "history", large, root / "history-after.json", current=True)
-        before = json.loads((root / "history-before.json").read_text())
-        assert after["history_sha256"] == before["history_sha256"] and after["rows"] == before["rows"]
-        # Actual old binary still reads all retained history after the switch.
-        old = probe(previous, "history", large, root / "history-rollback.json")
-        assert old["history_sha256"] == before["history_sha256"]
-        # Use the separate extended contract for old writes/GC and candidate return.
-        from scripts.sqlite_predecessor_contract import verify_predecessor
-        contract_home = root / "rollback-contract"
-        contract_home.mkdir()
-        assert verify_predecessor(previous, contract_home, expected_version="3.2.6") == 3
     else:
         results = {}
         for group in ("cache", "vault", "skill"):
