@@ -1,0 +1,195 @@
+name: desktop first-start diagnosis (draft only)
+
+# Diagnosis-only lane for the false "stopped responding" message on the Mac
+# Desktop App's first start. It lives on a draft PR that is never merged.
+# pull_request-only, contents/actions read, no secrets. It installs a Desktop
+# App fresh on a hosted macOS runner, launches it cold and then warm, and
+# records one window capture per second, the shell's bootstrap log, the app's
+# stdout/stderr and the WebKit/app system log.
+#
+# Build under test: the released 3.2.6 DMG (SHA-256 verified), or, when
+# DIAG_BUILD_RUN is set, the unsigned macOS artifact of that desktop-package run.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/desktop-first-start-diagnosis.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-first-start-diagnosis-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  DIAG_BUILD_RUN: ""
+  DIAG_BUILD_ARTIFACT: ""
+  RELEASE_BASE: https://dl.avibe.bot/releases/v3.2.6
+  MAC_ASSET: Avibe_3.2.6_aarch64-apple-darwin.dmg
+  MAC_SUMS: Avibe_3.2.6_aarch64-apple-darwin.SHA256SUMS
+
+jobs:
+  mac:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'diag/desktop-first-start' &&
+      github.event.pull_request.base.ref == 'master'
+    runs-on: macos-26
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # en: the runner's default English system.
+        # zh-system: Chinese set the way a real Chinese Mac reports it, in the
+        # global domain (System Settings > Language & Region), not per app.
+        scenario: [en, zh-system]
+    env:
+      SCENARIO: ${{ matrix.scenario }}
+    steps:
+      - name: Prepare the machine
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/diag"
+          mkdir -p "$W/frames" "$W/logs"
+          if [ "$SCENARIO" = zh-system ]; then
+            defaults write -g AppleLanguages -array zh-Hans-CN en-US
+            defaults write -g AppleLocale zh_CN
+          fi
+          # Ask WebKit to copy page console messages (the bootstrap page's
+          # console.error) into the system log. Diagnostic only.
+          defaults write bot.avibe.desktop WebKitDebugLogsPageMessagesToSystemConsoleEnabled -bool YES
+          defaults write bot.avibe.desktop WebKitLogsPageMessagesToSystemConsoleEnabled -bool YES
+          defaults read -g AppleLanguages || true
+          sw_vers; sysctl -n hw.ncpu hw.memsize
+
+      - name: Get the build under test
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/diag"
+          cd "$W"
+          if [ -n "$DIAG_BUILD_RUN" ]; then
+            gh run download "$DIAG_BUILD_RUN" --repo "$GITHUB_REPOSITORY" --name "$DIAG_BUILD_ARTIFACT" --dir build
+            find build -maxdepth 4 | head -50
+            dmg="$(find build -name '*.dmg' | head -1)"
+            app_src=""
+            if [ -n "$dmg" ]; then
+              mount="$(hdiutil attach -nobrowse "$dmg" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)"
+              app_src="$(find "$mount" -maxdepth 1 -name '*.app' | head -1)"
+            else
+              app_src="$(find build -name '*.app' -maxdepth 4 | head -1)"
+            fi
+            echo "build: run $DIAG_BUILD_RUN artifact $DIAG_BUILD_ARTIFACT" > "$W/logs/build.txt"
+          else
+            curl --fail --location --retry 3 --output "$MAC_ASSET" "$RELEASE_BASE/$MAC_ASSET"
+            curl --fail --location --retry 3 --output SHA256SUMS "$RELEASE_BASE/$MAC_SUMS"
+            grep "  $MAC_ASSET\$" SHA256SUMS | shasum -a 256 -c -
+            mount="$(hdiutil attach -nobrowse "$MAC_ASSET" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)"
+            app_src="$(find "$mount" -maxdepth 1 -name '*.app' | head -1)"
+            echo "build: released 3.2.6, $MAC_ASSET" > "$W/logs/build.txt"
+          fi
+          test -n "$app_src"
+          ditto "$app_src" /Applications/Avibe.app
+          xattr -dr com.apple.quarantine /Applications/Avibe.app 2>/dev/null || true
+          ls /Applications/Avibe.app/Contents/MacOS
+          du -sh /Applications/Avibe.app
+
+      - name: Build the window capture helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          W="$RUNNER_TEMP/diag"
+          cat > "$W/capwin.swift" <<'SWIFT'
+          import CoreGraphics
+          import Foundation
+
+          // capwin <file-prefix> : captures every on-screen Avibe window.
+          let prefix = CommandLine.arguments[1]
+          let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+          var count = 0
+          for window in windows {
+            let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+            guard owner == "Avibe" || owner == "avibe-desktop" else { continue }
+            let bounds = window[kCGWindowBounds as String] as? [String: Double] ?? [:]
+            guard (bounds["Width"] ?? 0) >= 300, (bounds["Height"] ?? 0) >= 200,
+                  let id = window[kCGWindowNumber as String] as? Int else { continue }
+            count += 1
+            let capture = Process()
+            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            capture.arguments = ["-x", "-o", "-l", String(id), "\(prefix)-\(count).png"]
+            try? capture.run()
+            capture.waitUntilExit()
+          }
+          print(count)
+          SWIFT
+          swiftc -O -o "$W/capwin" "$W/capwin.swift"
+
+      - name: Cold start, then warm start
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -uo pipefail
+          W="$RUNNER_TEMP/diag"
+          SUPPORT="$HOME/Library/Application Support/bot.avibe.desktop"
+
+          launch_and_watch() {
+            local tag="$1" seconds="$2"
+            log stream --style syslog --level info \
+              --predicate 'process == "Avibe" OR process == "avibe-desktop" OR process BEGINSWITH "com.apple.WebKit"' \
+              > "$W/logs/$tag-system.log" 2>&1 &
+            local logger=$!
+            sleep 2
+            local start; start=$(python3 -c 'import time; print(time.time())')
+            echo "$tag launch at $(date -u +%H:%M:%S.%N)" >> "$W/logs/timeline.txt"
+            open --stdout "$W/logs/$tag-stdout.log" --stderr "$W/logs/$tag-stderr.log" \
+              --env RUST_BACKTRACE=1 /Applications/Avibe.app
+            local sampled=0
+            for i in $(seq 0 "$seconds"); do
+              local target; target=$(python3 -c "print($start + $i)")
+              python3 -c "import time; d=$target-time.time(); time.sleep(d if d>0 else 0)"
+              local n; n=$("$W/capwin" "$W/frames/$tag-t$(printf '%02d' "$i")s")
+              echo "$tag t=${i}s windows=$n $(date -u +%H:%M:%S.%N)" >> "$W/logs/timeline.txt"
+              if [ "$sampled" = 0 ] && [ "$i" -ge 2 ]; then
+                local pid; pid=$(pgrep -x avibe-desktop || pgrep -x Avibe || true)
+                if [ -n "$pid" ]; then
+                  (sample "$pid" 3 -file "$W/logs/$tag-sample-t${i}s.txt" >/dev/null 2>&1 &)
+                  sampled=1
+                fi
+              fi
+            done
+            ps -axo pid,ppid,etime,%cpu,rss,command | grep -iE 'avibe|vibe|python' | grep -v grep > "$W/logs/$tag-ps.txt" || true
+            top -l 1 -n 15 -o cpu > "$W/logs/$tag-top.txt" 2>&1 || true
+            kill "$logger" 2>/dev/null || true
+          }
+
+          launch_and_watch cold 45
+
+          # Stop the shell and the Runtime it started, keeping the prepared files.
+          pkill -x avibe-desktop 2>/dev/null; pkill -x Avibe 2>/dev/null
+          sleep 3
+          pkill -f "bot.avibe.desktop" 2>/dev/null || true
+          sleep 3
+          launch_and_watch warm 25
+
+          cp "$SUPPORT"/*.log "$W/logs/" 2>/dev/null || true
+          find "$SUPPORT" -maxdepth 2 \( -name '*.log' -o -name '*.json' -o -name '*.jsonl' \) -size -5M \
+            -exec cp {} "$W/logs/" \; 2>/dev/null || true
+          ls -la "$SUPPORT" > "$W/logs/support-dir.txt" 2>&1 || true
+          for d in "$HOME/.avibe/logs" "$SUPPORT/runtime-home/logs"; do
+            [ -d "$d" ] && tail -n 400 "$d"/*.log > "$W/logs/runtime-$(basename "$(dirname "$d")").log" 2>/dev/null || true
+          done
+          grep -iE 'console|bootstrap|ipc|webview|not allowed|acquire' "$W/logs/"*-system.log | head -200 > "$W/logs/system-grep.txt" || true
+          cat "$W/logs/timeline.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: desktop-first-start-${{ matrix.scenario }}
+          path: ${{ runner.temp }}/diag/
+          retention-days: 1
+          if-no-files-found: warn
