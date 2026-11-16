@@ -326,6 +326,7 @@ export const ShowPageShareControl: React.FC<{
             mode={systemEntryMode}
             link={link}
             onOpenBrowser={openInBrowser}
+            onCopyLink={copyLink}
           />
         ) : null}
 

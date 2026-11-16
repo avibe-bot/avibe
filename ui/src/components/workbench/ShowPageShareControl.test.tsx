@@ -192,7 +192,9 @@ describe('ShowPageShareControl installation guidance', () => {
     native.shell = true;
     await renderOpenControl();
     expect(screen.getByText('Add to Home Screen or Dock')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Open in Safari' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open in browser' })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Copy link' })).toHaveLength(2);
+    expect(screen.getByText(/default browser.*not Safari/i)).toBeTruthy();
   });
 
   it('shows macOS Safari Dock guidance without using the Avibe Dock pin control', async () => {
@@ -201,7 +203,7 @@ describe('ShowPageShareControl installation guidance', () => {
     await renderOpenControl();
 
     expect(screen.getByText('Add to Dock')).toBeTruthy();
-    expect(screen.getByText(/File.*Add to Dock/)).toBeTruthy();
+    expect(screen.getByText(/Open this Show Page.*File.*Add to Dock/)).toBeTruthy();
     expect(screen.queryByRole('switch', { name: 'Pin to Dock' })).toBeNull();
   });
 });

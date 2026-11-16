@@ -50,7 +50,8 @@
       "macBody": "在 Safari 中选择“文件”，然后选择“添加到程序坞”。",
       "otherBody": "在 Safari 中打开此页面，再通过分享或文件菜单添加。",
       "copyLink": "复制链接",
-      "copied": "已复制链接"
+      "copied": "已复制链接",
+      "close": "关闭提示"
     },
     "event": {
       "acceptanceUnknown": "Show 事件可能仍在处理中，未在本地重复提交。",

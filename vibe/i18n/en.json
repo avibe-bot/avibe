@@ -50,7 +50,8 @@
       "macBody": "In Safari, choose File, then Add to Dock.",
       "otherBody": "Open this page in Safari, then use Share or File to add it.",
       "copyLink": "Copy link",
-      "copied": "Link copied"
+      "copied": "Link copied",
+      "close": "Close"
     },
     "event": {
       "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",

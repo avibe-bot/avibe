@@ -256,20 +256,44 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   } catch {
     return;
   }
+  const standalone = Boolean(
+    (navigator.standalone === true) ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+  );
+  if (standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
+  const storageKey = `avibe-show-system-entry:${window.location.pathname}`;
+  const readPreference = () => {
+    try {
+      return window.localStorage.getItem(storageKey);
+    } catch {
+      return null;
+    }
+  };
+  const savePreference = (value) => {
+    try {
+      window.localStorage.setItem(storageKey, value);
+    } catch {
+      // Private browsing may deny storage; the entry still works for this page load.
+    }
+  };
+  if (readPreference() === 'dismissed') return;
   const copy = config.copy || {};
   const root = document.createElement('div');
+  root.setAttribute('data-avibe-show-system-entry', 'true');
   root.setAttribute('aria-label', copy.title || copy.cta || 'Show Page');
   const shadow = root.attachShadow({ mode: 'open' });
   const style = document.createElement('style');
   style.textContent = `
     :host { all: initial; }
-    .wrap { position: fixed; right: 16px; bottom: 16px; z-index: 2147483000; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
-    .button, .copy { border: 1px solid rgba(23,32,42,.18); border-radius: 999px; background: rgba(255,255,255,.94); color: #17202a; box-shadow: 0 8px 26px rgba(23,32,42,.16); cursor: pointer; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .button { padding: 9px 13px; }
-    .button:hover, .copy:hover { background: #f4f7f8; }
-    .panel { display: none; width: min(300px, calc(100vw - 32px)); margin-bottom: 8px; padding: 14px; border: 1px solid rgba(23,32,42,.14); border-radius: 16px; background: rgba(255,255,255,.98); box-shadow: 0 16px 42px rgba(23,32,42,.2); }
-    .panel[data-open="true"] { display: block; }
-    .title { margin: 0 0 6px; font: 700 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .wrap { position: fixed; right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 2147483000; max-width: calc(100vw - 24px); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
+    .button, .copy, .close { border: 1px solid rgba(23,32,42,.18); border-radius: 999px; background: rgba(255,255,255,.94); color: #17202a; box-shadow: 0 8px 26px rgba(23,32,42,.16); cursor: pointer; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .button { max-width: 100%; padding: 9px 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .button:hover, .copy:hover, .close:hover { background: #f4f7f8; }
+    .panel { width: min(300px, calc(100vw - 24px)); max-height: min(40vh, 300px); margin-bottom: 8px; overflow: auto; padding: 14px; border: 1px solid rgba(23,32,42,.14); border-radius: 16px; background: rgba(255,255,255,.98); box-shadow: 0 16px 42px rgba(23,32,42,.2); }
+    .panel[hidden] { display: none; }
+    .panel-head { display: flex; align-items: flex-start; gap: 10px; }
+    .title { min-width: 0; flex: 1; margin: 0 0 6px; font: 700 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .close { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; padding: 0; box-shadow: none; font-size: 18px; line-height: 1; }
     .body { margin: 0; color: #53616d; font: 400 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .steps { margin: 10px 0 0; padding-left: 20px; color: #17202a; font: 500 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .copy { display: none; margin-top: 10px; padding: 7px 10px; }
@@ -277,8 +301,8 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
     .status { min-height: 18px; margin: 8px 0 0; color: #187c62; font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     @media (prefers-color-scheme: dark) {
       .wrap { color: #eef4f6; }
-      .button, .copy, .panel { border-color: rgba(238,244,246,.18); background: rgba(26,34,39,.96); color: #eef4f6; }
-      .button:hover, .copy:hover { background: #313d44; }
+      .button, .copy, .close, .panel { border-color: rgba(238,244,246,.18); background: rgba(26,34,39,.96); color: #eef4f6; }
+      .button:hover, .copy:hover, .close:hover { background: #313d44; }
       .body { color: #aebbc1; }
       .steps { color: #eef4f6; }
     }
@@ -289,11 +313,14 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   wrap.className = 'wrap';
   const panel = document.createElement('section');
   panel.className = 'panel';
-  panel.setAttribute('data-open', 'false');
   panel.setAttribute('role', 'dialog');
-  panel.setAttribute('aria-label', copy.title || copy.cta || 'Show Page');
+  const panelId = 'avibe-show-system-entry-panel';
+  const titleId = 'avibe-show-system-entry-title';
+  panel.id = panelId;
+  panel.setAttribute('aria-labelledby', titleId);
   const title = document.createElement('h2');
   title.className = 'title';
+  title.id = titleId;
   const body = document.createElement('p');
   body.className = 'body';
   const steps = document.createElement('ol');
@@ -305,12 +332,23 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   copyButton.setAttribute('data-visible', 'false');
   const status = document.createElement('p');
   status.className = 'status';
-  panel.append(title, body, steps, copyButton, status);
+  status.setAttribute('aria-live', 'polite');
+  const panelHead = document.createElement('div');
+  panelHead.className = 'panel-head';
+  const closeButton = document.createElement('button');
+  closeButton.className = 'close';
+  closeButton.type = 'button';
+  closeButton.textContent = '×';
+  closeButton.setAttribute('aria-label', copy.close || 'Close');
+  closeButton.title = copy.close || 'Close';
+  panelHead.append(title, closeButton);
+  panel.append(panelHead, body, steps, copyButton, status);
   const button = document.createElement('button');
   button.className = 'button';
   button.type = 'button';
   button.textContent = copy.cta || 'Add to Home Screen or Dock';
   button.setAttribute('aria-expanded', 'false');
+  button.setAttribute('aria-controls', panelId);
   wrap.append(panel, button);
   shadow.append(wrap);
   document.body.append(root);
@@ -336,10 +374,18 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
     copyButton.setAttribute('data-visible', 'true');
   }
 
+  const setPanelOpen = (open) => {
+    panel.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+    savePreference(open ? 'expanded' : 'collapsed');
+  };
+  setPanelOpen(readPreference() === 'expanded');
   button.addEventListener('click', () => {
-    const open = panel.getAttribute('data-open') === 'true';
-    panel.setAttribute('data-open', String(!open));
-    button.setAttribute('aria-expanded', String(!open));
+    setPanelOpen(panel.hidden);
+  });
+  closeButton.addEventListener('click', () => {
+    savePreference('dismissed');
+    root.remove();
   });
   copyButton.addEventListener('click', async () => {
     try {
@@ -351,6 +397,7 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   });
 })();
 """
+
 _SHOW_RUNTIME_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _SHOW_PAGE_ASSET_SUFFIXES = frozenset(
     {
@@ -18306,6 +18353,7 @@ def _show_system_entry_config(
             "otherBody": t("show.systemEntry.otherBody", language),
             "copyLink": t("show.systemEntry.copyLink", language),
             "copied": t("show.systemEntry.copied", language),
+            "close": t("show.systemEntry.close", language),
         },
     }
 
