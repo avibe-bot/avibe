@@ -355,11 +355,12 @@ const AgentModelCard: React.FC<{
  * A backend that is installed but switched off in Settings · Backends: one row,
  * after the backends that are on. It holds no models and no actions, and it is
  * not a wire endpoint (no `data-agent-backend`), so nothing reads as routed to it.
+ * ui/design: models/backend-off/owners-case
  */
 const SwitchedOffBackendRow: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
+  const { Icon, tileCls, iconCls, label, settingsRoute } = getBackendUiMeta(agent.backend);
   return (
     <section
       className="model-hub-agent-off flex min-w-0 items-center gap-[9px] rounded-lg border border-edge bg-surface px-3.5 py-2.5 shadow-elevation-0"
@@ -373,7 +374,7 @@ const SwitchedOffBackendRow: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
         size="xs"
         className="ml-auto shrink-0 rounded-md px-2.5 text-[11px] font-semibold"
         aria-label={t('settings.models.gateway.off.enableLabel', { backend: label }) as string}
-        onClick={() => navigate(`/settings/backends/${agent.backend}`)}
+        onClick={() => navigate(settingsRoute)}
       >
         {t('settings.models.gateway.off.enable')}
         <ArrowRight aria-hidden="true" />

@@ -27,6 +27,7 @@ import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { agentUsesHubRuntime, modelsSurfaceKindFromReads } from './modelHubSurfaceState';
+import { attributableBackends } from './sourceStatePresentation';
 import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
 import { MODEL_HUB_SOURCE_PARAM } from './modelHubRoutes';
 import { buildSupplyRelations } from './supplyRelations';
@@ -77,7 +78,7 @@ import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
-import { backendDisplayOrder, getBackendUiMeta, isNativeCliBackend, type NativeCliBackend } from '@/lib/agentBackends';
+import { AGENT_BACKENDS, backendDisplayOrder, getBackendUiMeta, isNativeCliBackend, type NativeCliBackend } from '@/lib/agentBackends';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -208,7 +209,11 @@ export const RuntimePill: React.FC<{
   const health = runtime.status.health;
   const unread = read.kind === 'degraded' && read.cause === 'read_failed';
   const canInstall = health === 'not_installed' && runtimeCanAttemptInstall(runtime);
-  const allDirect = authoritative && !starting && health === 'ok' && directCount !== undefined && directCount > 0;
+  const directHome = authoritative && !starting && health === 'ok' && directCount !== undefined;
+  // The own-login home with every local backend switched off routes nothing, so it
+  // does not claim the gateway is running.
+  const allDirect = directHome && directCount > 0;
+  const allOff = directHome && directCount === 0;
   const key = unread
     ? 'unread'
     : starting
@@ -218,7 +223,7 @@ export const RuntimePill: React.FC<{
     : runtime.enabled && !runtimeIsRunning(runtime)
       ? 'unavailable'
     : health === 'ok'
-      ? allDirect ? 'allDirect' : 'running'
+      ? allDirect ? 'allDirect' : allOff ? 'allOff' : 'running'
         : health === 'degraded'
           ? 'degraded'
         : health === 'down'
@@ -231,7 +236,7 @@ export const RuntimePill: React.FC<{
   const className = cn(
     'model-hub-runtime-pill',
     (health === 'down' || health === 'degraded' || unread) && 'model-hub-runtime-pill--error',
-    allDirect && 'model-hub-runtime-pill--direct',
+    (allDirect || allOff) && 'model-hub-runtime-pill--direct',
   );
   return <span className={className}><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</span>;
 };
@@ -1187,7 +1192,12 @@ export const SettingsModelsPage: React.FC = () => {
     (agent): agent is AgentSupply & { backend: NativeCliBackend } => isNativeCliBackend(agent.backend),
   );
   const hubBackends = liveAgents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
-  const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
+  const activeBackends = attributableBackends(
+    supplyRead.kind === 'ready',
+    hubBackends,
+    new Set(switchedOffAgents.map((agent) => agent.backend)),
+    AGENT_BACKENDS.map((backend) => backend.id),
+  );
   const canRetryRuntime = runtimeRead.kind === 'ready'
     && !runtimeRunning
     && runtimeHealth !== 'installing'
@@ -1690,7 +1700,7 @@ export const SettingsModelsPage: React.FC = () => {
                     : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} onAddService={openSearchServices} onOpenService={openSearchSource} onRetryService={(sourceId) => void hostedTools.retryService(sourceId)} onRetryFetch={(sourceId) => void hostedTools.retryFetch(sourceId)} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
-                    : directEmpty ? <DirectHome agents={installedNativeAgents} switchedOff={switchedOffNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} onEnable={(agent) => navigate(`/settings/backends/${agent.backend}`)} />
+                    : directEmpty ? <DirectHome agents={installedNativeAgents} switchedOff={switchedOffNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} onEnable={(agent) => navigate(getBackendUiMeta(agent.backend).settingsRoute)} />
                     : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">

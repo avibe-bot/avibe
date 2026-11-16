@@ -38,7 +38,7 @@ const expiredRoutes = (id: string) => (spec: AgentSpec): AgentSpec => ({
 const directAll: AgentSpec[] = [{ backend: 'claude', mode: 'direct' }, { backend: 'codex', mode: 'direct' }, { backend: 'opencode', mode: 'direct' }];
 
 const gateway = (name: string, title: string, agents: AgentSpec[], { width = 1440, height = 1720, sources = demoSources } = {}): FrameSpec => ({
-  name, title, width, height, themes, status: 'proposed', route,
+  name, title, width, height, themes, status: 'shipped', route,
   fixtures: settingsFixtures(hubApi({ sources, agents })),
   render: page,
 });
