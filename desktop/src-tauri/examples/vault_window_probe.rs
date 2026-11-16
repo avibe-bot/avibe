@@ -602,20 +602,17 @@ addEventListener('message', (event) => {
 
             // The user leaves while a window is still empty: when the sandbox
             // page is ready the window is closed, not revealed. With focus the
-            // user goes to another app and the windows stay where they are;
-            // without it the probe can only hide the main window.
+            // user goes to another app and the windows stay where they are.
             self.eval(&format!("probe.windows.left = window.open('{sandbox}/slow-window')"));
             self.wait_children("the window to come on screen, still empty", |children| {
                 children.len() == 1 && children[0].visible && !children[0].revealed
             });
-            if self.focus {
-                self.on_main(|mtm| NSApplication::sharedApplication(mtm).deactivate());
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
-                    assert!(Instant::now() < deadline, "the app did not leave the front");
-                    std::thread::sleep(Duration::from_millis(50));
-                }
+            if self.focus && self.go_to_another_app() {
+                println!("vault window probe: left for another app while a window was still empty");
             } else {
+                // Without focus, or where the system would not hand the front
+                // to another app, the probe can only hide the main window.
+                println!("vault window probe: hid the main window while a window was still empty");
                 self.hide_the_main_window();
             }
             let started = Instant::now();
@@ -808,6 +805,34 @@ addEventListener('message', (event) => {
             ));
             let refused = self.report("refused");
             assert_eq!(refused["closed"], true, "{what}: {refused}");
+        }
+
+        /// Makes the Finder the active app, as a user clicking its window would.
+        /// This app's windows stay where they are. (`-[NSApplication deactivate]`
+        /// alone leaves the app active when nothing else asks for the front.)
+        /// Returns whether this app stopped being the active one.
+        fn go_to_another_app(&self) -> bool {
+            self.on_main(|mtm| {
+                // SAFETY: Main thread; plain AppKit calls with constant arguments.
+                unsafe {
+                    let finder: Retained<objc2_foundation::NSArray> = objc2::msg_send![
+                        objc2::class!(NSRunningApplication),
+                        runningApplicationsWithBundleIdentifier: objc2_foundation::ns_string!("com.apple.finder")
+                    ];
+                    let finder = finder.firstObject().expect("the Finder is running");
+                    // NSApplicationActivateAllWindows: an ordinary activation.
+                    let _: bool = objc2::msg_send![&*finder, activateWithOptions: 1usize];
+                }
+                NSApplication::sharedApplication(mtm).deactivate();
+            });
+            let deadline = Instant::now() + Duration::from_millis(1500);
+            while self.on_main(|mtm| NSApplication::sharedApplication(mtm).isActive()) {
+                if Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            true
         }
 
         fn hide_the_main_window(&self) {
