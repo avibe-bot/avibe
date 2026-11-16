@@ -187,7 +187,7 @@ mod macos {
                     }
                     let mtm = MainThreadMarker::new().ok_or_else(|| ClientError::new("passkey_unavailable"))?;
                     let window = app
-                        .get_webview_window(crate::MAIN_WINDOW)
+                        .get_window(crate::MAIN_WINDOW)
                         .ok_or_else(|| ClientError::new("passkey_unavailable"))?;
                     // SAFETY: this runs on the UI thread and Tauri owns this NSWindow.
                     unsafe {

@@ -17,7 +17,9 @@ try {
   const list = await context.newPage();
   await list.goto(`${base}design.html?list`);
   await list.waitForFunction(() => window.__DESIGN__);
-  const frames = await list.evaluate(() => window.__DESIGN__.frames.filter(frame => frame.id.startsWith('desktop/instances/')));
+  const prefixes = process.argv.slice(2);
+  const frames = (await list.evaluate(() => window.__DESIGN__.frames.filter(frame => frame.id.startsWith('desktop/instances/'))))
+    .filter(frame => !prefixes.length || prefixes.some(prefix => frame.id.startsWith(prefix)));
   await list.close();
   assert.ok(frames.length, 'instance frames must be discovered');
   const tasks = frames.flatMap(frame => (frame.themes ?? ['light', 'dark']).map(theme => ({ frame, theme })));
@@ -43,13 +45,23 @@ try {
               count: document.querySelectorAll('[data-desktop-account-row]').length,
               inSidebar: Boolean(productFooter?.closest('aside')),
               toolsHeight: productFooter?.firstElementChild.getBoundingClientRect().height,
-              // The shared bottom row (ui/design: chrome/bottom-row) leads with the status dot.
               statusX: rect(productRow.querySelector('[data-sidebar-status-row] [data-status-indicator]')).left,
+              avatar: Boolean(productRow.querySelector('[data-account-avatar]')),
               expanded: accountTrigger?.getAttribute('aria-expanded'),
               chevron: Boolean(productRow.querySelector('[data-account-chevron]')),
               menu: Boolean(document.querySelector('[data-instance-menu]')),
               version: productRow.querySelector('[data-version-trigger] button')?.getAttribute('title'),
             } : null,
+            switcher: !!document.querySelector('[data-instance-switcher]'),
+            accountEntry: (() => {
+              const section = document.querySelector('[data-instance-account]');
+              const button = section?.querySelector('button');
+              return section ? { heading: section.querySelector('h2')?.textContent,
+                email: button?.textContent, arrow: !!button?.querySelector('.lucide-chevron-right'),
+                overflow: button.scrollWidth > button.clientWidth } : null;
+            })(),
+            profile: !!document.querySelector('[data-account-details],[data-account-sign-out]'),
+            add: !!document.querySelector('[data-add-instance]'),
             entries: [...document.querySelectorAll('[data-placement-entry="bottom"]')].map(entry => {
               const indicator = entry.querySelector('[data-status-indicator]');
               const label = entry.querySelector('[data-account-label]');
@@ -59,7 +71,6 @@ try {
                 connection: entry.dataset.connectionStatus,
                 available: entry.dataset.updateAvailable,
                 compact: entry.dataset.compact,
-                // The bottom row leads with the status; the compact rail keeps its avatar.
                 leadX: rect(entry.querySelector(entry.dataset.compact === 'true' ? '[data-account-avatar]' : '[data-status-indicator]')).left,
                 updatePresent: Boolean(update),
                 updateVisible: update ? update.getClientRects().length > 0 && getComputedStyle(update).visibility === 'visible' : false,
@@ -83,8 +94,9 @@ try {
           };
         });
         const key = `${frame.id}.${theme}`;
-        const productFooter = /^desktop\/instances\/(signed-out|account)-(zh|en)$/.test(frame.id);
-        const productLogin = /^desktop\/instances\/(email|code|code-error)-(zh|en)$/.test(frame.id);
+        const productFooter = /^desktop\/instances\/(signed-out|account|account-remote-disabled|account-long)-(zh|en)$/.test(frame.id);
+        const productLogin = /^desktop\/instances\/(email|code|code-error|password|password-help|two-factor|recovery)-(zh|en)$/.test(frame.id);
+        const productSwitcher = /^desktop\/instances\/(instances|empty|loading|list-error|offline|switching|consent|switch-error|upgrade-error|offline-help|long-content|current-shared|offline-shared)-(zh|en)$/.test(frame.id);
         if (productFooter) {
           assert.ok(actual.product, `${key}: canonical footer must render the product row`);
           assert.equal(frame.status, 'shipped', `${key}: product-backed frame status`);
@@ -92,12 +104,24 @@ try {
           assert.equal(actual.product.count, 1, `${key}: one product row`);
           assert.equal(actual.product.inSidebar, true, `${key}: real AppShell sidebar footer`);
           assert.equal(actual.product.toolsHeight, 39, `${key}: real Apps/Settings tools row`);
-          assert.equal(actual.product.statusX, 16, `${key}: product Apps-container alignment`);
+          assert.equal(actual.product.statusX, 16, `${key}: product status aligns with Apps`);
+          assert.equal(actual.product.avatar, false, `${key}: status replaces the avatar`);
           assert.equal(actual.product.version, 'v3.2.6rc9', `${key}: product VersionBadge`);
-          const signedIn = frame.id.includes('/account-');
-          assert.equal(actual.product.chevron, signedIn, `${key}: signed-out entry has no menu chevron`);
-          assert.equal(actual.product.menu, signedIn, `${key}: controlled account menu`);
-          assert.equal(actual.product.expanded, signedIn ? 'true' : null, `${key}: account expansion semantics`);
+          assert.equal(actual.product.chevron, false, `${key}: direct presentation has no menu chevron`);
+          assert.equal(actual.product.menu, false, `${key}: no account popup`);
+          assert.equal(actual.product.expanded, null, `${key}: direct presentation has no expansion semantics`);
+        } else if (productSwitcher) {
+          assert.ok(actual.switcher, `${key}: product switcher`);
+          assert.ok(actual.accountEntry, `${key}: account entry before details`);
+          assert.equal(actual.accountEntry.heading, frame.id.endsWith('-en') ? 'Account' : '账户', `${key}: account section heading`);
+          assert.equal(actual.accountEntry.email, frame.id.includes('/long-content-')
+            ? 'international-design-and-engineering-account@cross-region-research-and-development-workstations.example.test' : 'max@example.test', `${key}: current email in entry button`);
+          assert.equal(actual.accountEntry.arrow, true, `${key}: entry arrow`);
+          assert.equal(actual.accountEntry.overflow, false, `${key}: email stays inside the card`);
+          assert.equal(actual.entries.length, 0, `${key}: no kit footer in bundled instance view`);
+        } else if (/\/(profile|profile-disabled|profile-error|sign-out-error|add)-(en|zh)$/.test(frame.id)) {
+          assert.ok(actual.profile || actual.add, `${key}: shared product page`);
+          assert.equal(actual.entries.length, 0, `${key}: no old kit footer`);
         } else if (productLogin) {
           assert.equal(actual.entries.length, 0, `${key}: product login card has no kit footer`);
         } else {
@@ -149,13 +173,14 @@ try {
       else indicatorMarkup.set(key, entry.indicatorMarkup);
     }
   }
-  for (const lang of ['zh', 'en']) for (const theme of ['light', 'dark']) {
-    for (const connection of ['signed-in', 'signed-out', 'switching', 'offline']) {
+  if (!prefixes.length) for (const lang of ['zh', 'en']) for (const theme of ['light', 'dark']) {
+    // Offline now renders the bundled product switcher, which has no Runtime footer.
+    for (const connection of ['signed-in', 'signed-out', 'switching']) {
       assert.ok(combinations.has(`${lang}:${theme}:${connection}:true`), `${lang}/${theme}: missing ${connection}+update fixture`);
     }
     assert.ok(combinations.has(`${lang}:${theme}:signed-in:false`), `${lang}/${theme}: normal version baseline`);
   }
-  console.log(JSON.stringify({ captures: results.length, invariant: 'connection and local update availability are orthogonal', avatarX: 16, maxAdjacentGap: 8, passed: true }));
+  console.log(JSON.stringify({ captures: results.length, invariant: 'connection and local update availability are orthogonal', leadingGlyphX: 16, maxAdjacentGap: 8, passed: true }));
 } finally {
   await context.close();
   await browser.close();

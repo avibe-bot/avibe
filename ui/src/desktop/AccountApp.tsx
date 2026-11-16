@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, ArrowRight, Check, ChevronRight, Laptop, RefreshCw, Server, ShieldCheck, TriangleAlert, WifiOff } from 'lucide-react';
-import { QRCodeSVG } from 'qrcode.react';
+import { ArrowLeft, ArrowRight, Check, Laptop, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
-import { Input } from '../components/ui/input';
-import { Label } from '../components/ui/label';
 import { Skeleton } from '../components/ui/skeleton';
 import { cn } from '../lib/utils';
+import { AccountSecondFactorView } from './AccountSecondFactorView';
 import { AccountLoginView } from './AccountLoginView';
-import { isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type Instance } from './bridge';
+import { InstanceSwitcherView } from './InstanceSwitcherView';
+import { AccountSignOutView } from './AccountSignOutView';
+import { AccountDetailsView } from './AccountDetailsView';
+import { AddInstanceView } from './AddInstanceView';
+import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
 import { UpdatePanel } from '../components/update/UpdatePanel';
 import { modelFromDesktopState } from '../components/update/updatePanelModel';
@@ -98,78 +100,160 @@ export function DesktopUpdatePanel({ state, act, busy, install, close }: {
   />;
 }
 
+// Document-local replay suppression. Native owns one-time admission and consumption.
+const attemptedSignOutIntents = new Set<string>();
+
 export function AccountApp() {
-  const { t } = useTranslation();
-  const { state, error, send } = useAccountClient();
+  const { t, i18n } = useTranslation();
+  const { state, error, send, signOutIntent } = useAccountClient();
   const [popover] = useState(() => new URLSearchParams(window.location.search).get('view') === UPDATE_POPOVER);
   const install = useAcceptedInstall(state?.desktop.update.phase);
-  const [view, setView] = useState(() => {
+  const [view, setView] = useState<DesktopClientView | 'profile' | 'add'>(() => {
     const initial = new URLSearchParams(window.location.search).get('view');
     return isDesktopClientView(initial) ? initial : 'account';
   });
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
+  const [password, setPassword] = useState('');
+  const [passwordMode, setPasswordMode] = useState(false);
+  const [passwordHelp, setPasswordHelp] = useState(false);
   const [editEmail, setEditEmail] = useState(false);
   const [method, setMethod] = useState<'totp' | 'recovery'>('totp');
   const [busy, setBusy] = useState(false);
   const [reviewChange, setReviewChange] = useState(false);
+  const [selection, setSelection] = useState<{ id: string; generation: number; error: string | null } | null>(null);
   const [material, setMaterial] = useState<{ generation: number; result: DesktopClientDirectResult } | null>(null);
   const epoch = useRef(0);
   const requestBusy = useRef(false);
+  // Synchronous eligibility spans the request and direct result before React
+  // commits material. Native still owns authoritative invalidation/cleanup.
+  const recoveryProtection = useRef<{ generation: number } | null>(null);
   const direct = material && material.generation === state?.generation ? material.result : null;
+  const awaitingRecoveryAcknowledgement = direct?.type === 'totp_enrolled' && !!direct.recoveryCodes?.length;
   const [inputGeneration, setInputGeneration] = useState(state?.generation);
   if (inputGeneration !== state?.generation) {
     setInputGeneration(state?.generation);
     setCode('');
+    setPassword('');
     if (material && material.generation !== state?.generation) setMaterial(null);
   }
-  useEffect(() => () => { epoch.current += 1; }, []);
+  useLayoutEffect(() => {
+    if (recoveryProtection.current && recoveryProtection.current.generation !== state?.generation) recoveryProtection.current = null;
+  }, [state?.generation]);
+  useEffect(() => () => { epoch.current += 1; recoveryProtection.current = null; }, []);
+  useEffect(() => {
+    if (popover) return;
+    const present = (event: Event) => {
+      if (!hasDesktopClient() || !event.cancelable) return;
+      // Consume malformed input as well: it must never become a tokenless fallback.
+      event.preventDefault();
+      const detail: unknown = (event as CustomEvent).detail;
+      const view: unknown = (detail as { view?: unknown } | null)?.view;
+      const token: unknown = (detail as { presentationToken?: unknown } | null)?.presentationToken;
+      if (!isDesktopClientView(view) || typeof token !== 'string' || !token.length
+        || new TextEncoder().encode(token).length > 128 || recoveryProtection.current) return;
+      presentDesktopClient(view, token, desktopLocale(i18n.resolvedLanguage ?? i18n.language));
+    };
+    window.addEventListener(DESKTOP_PRESENT_EVENT, present);
+    return () => window.removeEventListener(DESKTOP_PRESENT_EVENT, present);
+  }, [i18n, popover]);
   const act = useCallback(async (action: DesktopClientAction): Promise<boolean> => {
     if (requestBusy.current) return false;
     requestBusy.current = true;
     setBusy(true);
     const ticket = epoch.current;
+    const generation = state?.generation ?? 0;
+    const finalization = action.type === 'finish_totp_enrollment' ? { generation } : null;
+    if (finalization) recoveryProtection.current = finalization;
+    const selectedId = action.type === 'select_instance' ? action.instance_id
+      : action.type === 'decide_consent' && action.approve ? state?.consent?.instance_id : null;
+    if (selectedId) setSelection({ id: selectedId, generation, error: null });
+    if (action.type === 'refresh_instances') setSelection(null);
     try {
       const reply = await send(action);
-      if (ticket !== epoch.current || !reply?.ok) return false;
+      if (ticket !== epoch.current) return false;
+      if (reply && 'kind' in reply) {
+        if (selectedId) setSelection({ id: selectedId, generation: reply.generation, error: reply.code });
+        return false;
+      }
+      if (!reply?.ok) {
+        if (selectedId && reply) setSelection({ id: selectedId, generation: reply.state.generation, error: reply.error.code });
+        return false;
+      }
       setCode('');
       if (action.type === 'request_otp') setEditEmail(false);
       if (action.type === 'begin_totp_enrollment' && reply.result?.type === 'totp_enrollment') {
         setMaterial({ generation: reply.state.generation, result: reply.result });
       } else if (action.type === 'finish_totp_enrollment' && reply.result?.type === 'totp_enrolled') {
+        recoveryProtection.current = reply.result.recoveryCodes?.length ? { generation: reply.state.generation } : null;
         setMaterial({ generation: reply.state.generation, result: reply.result });
       }
       return true;
     } finally {
+      if (finalization && recoveryProtection.current === finalization) recoveryProtection.current = null;
       requestBusy.current = false;
       setBusy(false);
     }
-  }, [send]);
-  const leave = (type: 'cancel' | 'return_local' | 'sign_out') => {
+  }, [send, state?.generation, state?.consent?.instance_id]);
+  const leave = useCallback((type: 'cancel' | 'return_local' | 'sign_out', recoveryAcknowledged = false) => {
+    // Only the saved-codes action acknowledges; native invalidation remains independent.
+    if (recoveryProtection.current && !recoveryAcknowledged) return;
     epoch.current += 1;
+    recoveryProtection.current = null;
     setMaterial(null);
     setCode('');
+    setPassword('');
+    setSelection(null);
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
-  };
+  }, [send]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.isComposing) return;
+      if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       event.preventDefault();
       // The popup has no account flow to cancel: Escape closes it, as it closes a popover.
       if (popover) { closeUpdatePopover(); return; }
-      epoch.current += 1;
-      setMaterial(null);
-      setCode('');
-      void send({ type: 'cancel' });
+      leave('cancel');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [send, popover]);
+  }, [leave, popover]);
+  useEffect(() => {
+    if (popover || !signOutIntent || signOutIntent.generation !== state?.generation || attemptedSignOutIntents.has(signOutIntent.intent_id)) return;
+    // Like the hook's initial native read, defer dispatch until this effect is
+    // still mounted. A replaced document/effect must not start an old intent.
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (!active || attemptedSignOutIntents.has(signOutIntent.intent_id)) return;
+      attemptedSignOutIntents.add(signOutIntent.intent_id);
+      epoch.current += 1;
+      recoveryProtection.current = null;
+      setMaterial(null);
+      setCode('');
+      setPassword('');
+      void send({ type: 'sign_out', intent_id: signOutIntent.intent_id });
+    });
+    return () => { active = false; };
+  }, [signOutIntent, state?.generation, send, popover]);
   const localButton = <Button variant="ghost" onClick={() => leave('return_local')}>{t('desktopClient.continueLocal')}</Button>;
-  const instances = () => { setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' }); };
-  const errorMessage = error && t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
-  const failure = errorMessage && <Notice warning>{errorMessage}</Notice>;
+  const instances = () => {
+    if (recoveryProtection.current) return;
+    setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
+  };
+  const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
+  const displayedError = error ?? (view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
+  const errorMessage = displayedError ? explainError(displayedError) : null;
+  const activeSelection = selection?.generation === state?.generation ? selection : null;
+  const failedPending = activeSelection?.error && activeSelection.id === state?.connection.pending?.instance_id;
+  const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null}
+    busy={busy} pendingId={failedPending ? null : state.connection.status === 'switching' ? state.connection.pending?.instance_id ?? null : busy && activeSelection ? activeSelection.id : null}
+    failure={activeSelection?.error ? { instanceId: activeSelection.id, message: explainError(activeSelection.error) } : null}
+    onAccount={() => setView('profile')} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
+    onLocal={() => leave('return_local')} onCancel={() => leave('cancel')} onRefresh={() => void act({ type: 'refresh_instances' })}
+    onConsent={(approve) => void act({ type: 'decide_consent', approve })} consentError={state.consent ? errorMessage : null} />;
+  const failure = errorMessage && (popover || view === 'updates' || view === 'setup-complete'
+    ? <Notice warning>{errorMessage}</Notice>
+    : <p role="alert" className="mt-4 text-sm leading-6 text-destructive-ink">{errorMessage}</p>);
   if (popover) {
     // Nothing is drawn until the state arrives; a failure to get it is still shown.
     return <UpdatePopover label={t('dashboard.versionAndUpdate')}>
@@ -187,99 +271,66 @@ export function AccountApp() {
     // ui/design: update/panel/trusted-view
     content = <div className="mx-auto w-full max-w-md pt-12"><Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading><div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
   } else if (view === 'sign-out') {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.signOut')}>{t('desktopClient.signOutBody')}</Heading>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" onClick={() => leave('sign_out')}>{t('desktopClient.signOut')}</Button><Button variant="outline" onClick={() => leave('cancel')}>{t('common.cancel')}</Button></div></div>;
+    content = <AccountSignOutView signingOut={!!signOutIntent} errorMessage={errorMessage} onRetry={() => leave('sign_out')} onBack={() => leave('cancel')} />;
   } else if (view === 'setup-complete') {
     content = <div className="mx-auto max-w-xl pt-12"><ShieldCheck className="mb-6 size-10 text-mint-ink" /><Heading title={t('desktopClient.setupReady')}>{t('desktopClient.setupBody')}</Heading><Notice>{t('desktopClient.registrationDisclosure')}</Notice><div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" onClick={() => leave('return_local')}>{t('desktopClient.startLocal')}</Button><Button variant="outline" onClick={() => setView('account')}>{t('desktopClient.signInAndAdd')}<ArrowRight className="size-4" /></Button></div><p className="mt-5 text-sm text-muted">{t('desktopClient.signInLater')}</p>{failure}</div>;
   } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" onClick={() => setMaterial(null)}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
+    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" disabled={busy} onClick={() => {
+      recoveryProtection.current = null;
+      setMaterial(null);
+      if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
+      else setView('account');
+    }}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
   } else if (state.account.status === 'second_factor_required') {
-    const enroll = state.account.gate === 'enroll';
-    content = <div className="mx-auto max-w-xl pt-12"><ShieldCheck className="mb-6 size-10 text-mint-ink" /><Heading title={t(enroll ? 'desktopClient.enrollFactor' : 'desktopClient.verifyFactor')}>{t(enroll ? 'desktopClient.enrollFactorBody' : 'desktopClient.verifyFactorBody')}</Heading>
-      {direct?.type === 'totp_enrollment' ? <>
-        {/* Render the URI with our QR component; never inject backend SVG markup. */}
-        <div className="mb-5 flex flex-wrap items-start gap-5"><QRCodeSVG value={direct.uri} size={160} marginSize={2} /><div className="min-w-0 flex-1"><p className="text-sm text-muted">{t('desktopClient.setupKey')}</p><p className="mt-2 break-all font-mono text-sm select-text">{direct.secret}</p></div></div>
-        <form onSubmit={(event) => { event.preventDefault(); void act({ type: 'finish_totp_enrollment', code }); }}><Label htmlFor="factor-code">{t('desktopClient.authenticatorCode')}</Label><Input id="factor-code" className="mt-2 h-12" value={code} onChange={(event) => setCode(event.target.value)} autoComplete="one-time-code" inputMode="numeric" required /><Button variant="brand" className="mt-6" disabled={busy || !code.trim()}>{t('desktopClient.finishFactor')}</Button></form>
-      </> : enroll ? <Button variant="brand" disabled={busy} onClick={() => void act({ type: 'begin_totp_enrollment' })}>{t('desktopClient.addAuthenticator')}</Button> : <>
-        {state.account.methods.includes('passkey') && <Button variant="outline" className="mb-5" disabled={busy} onClick={() => void act({ type: 'verify_passkey' })}>{t('desktopClient.usePasskey')}</Button>}
-        {(state.account.methods.includes('totp') || method === 'recovery') && <form onSubmit={(event) => { event.preventDefault(); void act({ type: 'verify_second_factor', method, code }); }}><Label htmlFor="factor-code">{t(method === 'recovery' ? 'desktopClient.recoveryCode' : 'desktopClient.authenticatorCode')}</Label><Input id="factor-code" className="mt-2 h-12" value={code} onChange={(event) => setCode(event.target.value)} autoComplete="one-time-code" inputMode={method === 'totp' ? 'numeric' : 'text'} required /><Button variant="brand" className="mt-6" disabled={busy || !code.trim()}>{t('desktopClient.verify')}</Button></form>}
-        <Button variant="link" className="mt-3 px-0" onClick={() => { setCode(''); setMethod(method === 'totp' ? 'recovery' : 'totp'); }}>{t(method === 'totp' ? 'desktopClient.useRecovery' : 'desktopClient.useAuthenticator')}</Button>
-      </>}<div className="mt-6">{failure}{localButton}</div></div>;
+    centerLogin = true;
+    content = <AccountSecondFactorView enroll={state.account.gate === 'enroll'} methods={state.account.methods}
+      method={method} code={code} busy={busy} material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
+      onCodeChange={setCode} onMethodChange={(method) => { setCode(''); setMethod(method); }}
+      onVerify={() => void act(direct?.type === 'totp_enrollment' ? { type: 'finish_totp_enrollment', code } : { type: 'verify_second_factor', method, code })}
+      onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onPasskey={() => void act({ type: 'verify_passkey' })} onLocal={() => leave('return_local')} />;
   } else if (state.account.status !== 'signed_in') {
     centerLogin = true;
     const verify = state.account.status === 'verifying' && !editEmail;
     content = <AccountLoginView verify={verify} email={state.account.email ?? ''}
       value={verify ? code : email} busy={busy} errorMessage={errorMessage}
       onValueChange={verify ? setCode : setEmail}
-      onSubmit={() => void act(verify ? { type: 'verify_otp', code } : { type: 'request_otp', email: email.trim() })}
+      password={{ active: passwordMode, value: password, forgot: passwordHelp, onChange: setPassword,
+        onToggle: () => { setPassword(''); setPasswordMode(!passwordMode); setPasswordHelp(false); },
+        onForgot: () => { setPassword(''); setPasswordMode(false); setPasswordHelp(true); } }}
+      onSubmit={() => {
+        const action: DesktopClientAction = verify ? { type: 'verify_otp', code } : passwordMode
+          ? { type: 'sign_in_password', email: email.trim(), password } : { type: 'request_otp', email: email.trim() };
+        setPassword('');
+        void act(action);
+      }}
       onChangeEmail={() => { setCode(''); setEmail(state.account.email ?? ''); setEditEmail(true); }}
       onResendCode={() => void act({ type: 'request_otp', email: state.account.email ?? email })}
       onContinueLocal={() => leave('return_local')} />;
-  } else if (state.consent) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.consentTitle', { name: state.consent.instance_name })}>{t('desktopClient.consentBody', { name: state.consent.instance_name })}</Heading><Notice><p>{state.consent.host}</p><ConsentExtras scope={state.consent.scope} /></Notice>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: true })}>{t('desktopClient.allow')}</Button><Button variant="outline" disabled={busy} onClick={() => void act({ type: 'decide_consent', approve: false })}>{t('desktopClient.deny')}</Button></div></div>;
-  } else if (state.connection.status === 'switching' || state.connection.status === 'remote_unreachable') {
-    const switching = state.connection.status === 'switching';
-    const target = state.connection.pending ?? state.connection.committed;
-    content = <div className="mx-auto max-w-xl pt-20">{switching ? <RefreshCw className="mb-6 size-8 animate-spin text-muted" /> : <WifiOff className="mb-6 size-8 text-gold-ink" />}<Heading title={t(switching ? 'desktopClient.connectingTo' : 'desktopClient.unreachable', { name: target.name })}>{t(switching ? 'desktopClient.switchBody' : 'desktopClient.offlineBody')}</Heading>{switching ? <Skeleton className="h-2 w-full rounded-full" /> : <Notice>{t('desktopClient.localStillAvailable')}</Notice>}{failure}<div className="mt-7 flex gap-3"><Button variant="brand" onClick={() => leave('return_local')}><Laptop className="size-4" />{t('desktopClient.backLocal')}</Button>{!switching && target.instance_id && <Button variant="outline" disabled={busy} onClick={() => void act({ type: 'select_instance', instance_id: target.instance_id! })}>{t('common.retry')}</Button>}</div></div>;
-  } else if (view !== 'instances' && state.enrollment.status !== 'unknown' && state.enrollment.status !== 'unpaired') {
+  } else if (state.consent || (state.connection.status === 'switching' && !failedPending) || (state.connection.status === 'remote_unreachable' && view === 'instances')) {
+    content = switcher;
+  } else if (view === 'profile' || (view === 'account' && ['unknown', 'unpaired', 'paired_this_account'].includes(state.enrollment.status))) {
+    content = <AccountDetailsView email={state.account.identity?.email ?? state.account.email ?? ''}
+      localRemoteUrl={state.local.remote_access === 'on' ? state.local.remote_access_url ?? null : null}
+      busy={busy} errorMessage={errorMessage} onBack={instances}
+      onSignOut={() => { setView('sign-out'); leave('sign_out'); }} />;
+  } else if (view === 'add') {
+    content = <AddInstanceView onBack={() => setView('instances')} onRefresh={instances} busy={busy} />;
+  } else if (view !== 'instances' && ['registering', 'conflict', 'failed', 'paired_tunnel_unavailable'].includes(state.enrollment.status)) {
     const status = state.enrollment.status;
     const conflict = status === 'conflict';
     const failed = status === 'failed';
     const tunnel = status === 'paired_tunnel_unavailable';
     const registering = status === 'registering';
-    content = <div className="mx-auto max-w-xl pt-12"><div className="mb-6 grid size-14 place-items-center rounded-2xl border border-edge bg-field">{conflict || failed || tunnel ? <TriangleAlert className="size-6 text-gold-ink" /> : registering ? <Laptop className="size-6 text-muted" /> : <ShieldCheck className="size-6 text-mint-ink" />}</div><Heading title={t(conflict ? 'desktopClient.conflictTitle' : failed ? 'desktopClient.registrationFailed' : tunnel ? 'desktopClient.tunnelUnavailable' : registering ? 'desktopClient.registering' : 'desktopClient.registered')}>{state.local.name}</Heading>
+    content = <div className="mx-auto max-w-xl pt-12"><div className="mb-6 grid size-14 place-items-center rounded-2xl border border-edge bg-field">{conflict || failed || tunnel ? <TriangleAlert className="size-6 text-gold-ink" /> : registering ? <Laptop className="size-6 text-muted" /> : <ShieldCheck className="size-6 text-mint-ink" />}</div><Heading title={t(conflict ? 'desktopClient.conflictTitle' : failed ? 'desktopClient.registrationFailed' : tunnel ? 'desktopClient.tunnelUnavailable' : 'desktopClient.registering')}>{state.local.name}</Heading>
       {conflict ? <><Notice warning>{t('desktopClient.conflictBody')}</Notice>{reviewChange && <p role="status" className="mt-5 text-sm leading-6 text-muted">{t('desktopClient.transferSteps')}</p>}<div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" onClick={() => leave('return_local')}>{t('desktopClient.keepLink')}</Button><Button variant="outline" onClick={() => setReviewChange(true)}>{t('desktopClient.reviewChange')}</Button></div><Button variant="link" className="mt-3 px-0" onClick={instances}>{t('desktopClient.otherInstances')}</Button></>
         : registering ? <><p className="mb-4 flex items-center gap-2 text-sm"><Check className="size-4 text-mint-ink" />{t('desktopClient.signedIn')}</p><Skeleton className="h-5 w-3/4" /><p className="mt-4 text-sm text-muted">{t('desktopClient.registeringBody')}</p><div className="mt-7">{localButton}</div></>
-        : <><Notice warning={failed || tunnel}>{failed ? t('desktopClient.registrationFailedBody') : <><div className="flex items-center justify-between gap-3"><p className="font-medium">{t('desktopClient.remoteAccessTitle')}</p><Badge variant={tunnel ? 'warning' : 'success'}>{t(`desktopClient.remoteAccess.${state.local.remote_access}`)}</Badge></div><p className="mt-3">{t(tunnel ? 'desktopClient.tunnelBody' : 'desktopClient.registeredBody')}</p></>}</Notice><div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" disabled={busy} onClick={() => failed ? void act({ type: 'retry_enrollment' }) : tunnel ? void act({ type: 'retry_local_remote_access' }) : instances()}>{t(failed ? 'common.retry' : tunnel ? 'desktopClient.retryRemoteAccess' : 'desktopClient.viewInstances')}</Button>{localButton}</div>{(failed || tunnel) && <Button variant="link" className="mt-3 px-0" onClick={instances}>{t('desktopClient.otherInstances')}</Button>}</>}{failure}</div>;
+        : <><Notice warning={failed || tunnel}>{failed ? t('desktopClient.registrationFailedBody') : <><div className="flex items-center justify-between gap-3"><p className="font-medium">{t('desktopClient.remoteAccessTitle')}</p><Badge variant={tunnel ? 'warning' : 'success'}>{t(`desktopClient.remoteAccess.${state.local.remote_access}`)}</Badge></div><p className="mt-3">{t('desktopClient.tunnelBody')}</p></>}</Notice><div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" disabled={busy} onClick={() => failed ? void act({ type: 'retry_enrollment' }) : void act({ type: 'retry_local_remote_access' })}>{t(failed ? 'common.retry' : 'desktopClient.retryRemoteAccess')}</Button>{localButton}</div>{(failed || tunnel) && <Button variant="link" className="mt-3 px-0" onClick={instances}>{t('desktopClient.otherInstances')}</Button>}</>}{failure}</div>;
   } else {
-    const current = state.connection.committed;
-    const remote = state.catalog.instances.filter((item) => item.id !== state.enrollment.instance_id);
-    content = <div className="mx-auto max-w-2xl pt-6"><div className="flex items-start justify-between gap-4"><Heading title={t('desktopClient.switchInstance')}>{t('desktopClient.instancesBody')}</Heading><Button variant="ghost" size="icon" aria-label={t('desktopClient.refreshInstances')} disabled={busy} onClick={() => void act({ type: 'refresh_instances' })}><RefreshCw className={cn('size-4', state.catalog.status === 'loading' && 'animate-spin')} /></Button></div><div className="mb-5"><InstanceRow name={t('desktopClient.localName', { name: state.local.name })} detail={t('desktopClient.localDetail')} selected={current.kind === 'local'} local offline={false} busy={busy} onClick={() => leave('return_local')} /></div>
-      {state.catalog.status === 'loading' ? <div className="space-y-4" aria-label={t('desktopClient.loading')}><Skeleton className="h-20 w-full rounded-xl" /><Skeleton className="h-20 w-full rounded-xl" /></div> : state.catalog.status === 'error' ? <Notice warning>{t('desktopClient.catalogError')}<Button variant="link" onClick={() => void act({ type: 'refresh_instances' })} disabled={busy}>{t('common.retry')}</Button></Notice> : remote.length === 0 ? <Notice><p className="font-semibold text-foreground">{t('desktopClient.emptyTitle')}</p><p className="mt-2">{t('desktopClient.emptyBody')}</p></Notice> : <InstanceGroups instances={remote} selectedId={current.instance_id} busy={busy} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })} />}{failure}</div>;
+    content = switcher;
   }
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
-    <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>
+    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>}
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
   </div>;
-}
-
-// Scopes the plain consent sentence already covers; anything else is named below it.
-const COVERED_SCOPES = new Set(['openid', 'email']);
-const KNOWN_SCOPES = { profile: 'desktopClient.consentScopes.profile' } as const;
-const knownScope = (token: string) => Object.hasOwn(KNOWN_SCOPES, token) ? KNOWN_SCOPES[token as keyof typeof KNOWN_SCOPES] : null;
-
-function ConsentExtras({ scope }: { scope: string }) {
-  const { t, i18n } = useTranslation();
-  const extras = [...new Set(scope.split(/\s+/).filter((token) => token && !COVERED_SCOPES.has(token)))];
-  const known = extras.flatMap((token) => { const key = knownScope(token); return key ? [t(key)] : []; });
-  const unknown = extras.filter((token) => !knownScope(token));
-  const list = (items: string[]) => new Intl.ListFormat(i18n.language, { type: 'conjunction' }).format(items);
-  return <>
-    {known.length > 0 && <p className="mt-2">{t('desktopClient.consentAlsoReceives', { items: list(known) })}</p>}
-    {unknown.length > 0 && <p className="mt-2 break-words">{t('desktopClient.consentAlsoOther', { items: list(unknown) })}</p>}
-  </>;
-}
-
-function InstanceRow({ name, detail, selected, local, offline, busy, onClick }: {
-  name: string; detail: string; selected: boolean; local: boolean; offline: boolean; busy: boolean; onClick: () => void;
-}) {
-  const { t } = useTranslation();
-  return <Button variant="ghost" className={cn('h-auto min-h-20 w-full justify-start gap-4 whitespace-normal rounded-xl border px-4 py-4 text-left', selected ? 'border-mint/40 bg-mint-soft' : 'border-edge bg-surface')} onClick={onClick} disabled={busy && !local}>
-    <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-edge bg-field">{local ? <Laptop className="size-5" /> : <Server className="size-5" />}</span>
-    <span className="min-w-0 flex-1"><span className="block text-sm font-semibold">{name}</span><span className="mt-1 block break-words text-xs font-normal leading-5 text-muted">{detail}</span></span>
-    <span className="flex shrink-0 items-center gap-2"><Badge variant={offline ? 'secondary' : 'success'}>{t(offline ? 'desktopClient.offline' : 'desktopClient.online')}</Badge>{selected ? <Check className="size-4 text-mint-ink" aria-label={t('desktopClient.current')} /> : <ChevronRight className="size-4 text-muted" />}</span>
-  </Button>;
-}
-
-function InstanceGroups({ instances, selectedId, busy, onSelect }: {
-  instances: Instance[]; selectedId: string | null; busy: boolean; onSelect: (id: string) => void;
-}) {
-  const { t } = useTranslation();
-  return (['owner', 'shared'] as const).map((relationship) => {
-    const items = instances.filter((item) => item.relationship === relationship);
-    return items.length ? <section className="mb-6" key={relationship}>
-      <h2 className="mb-3 text-sm font-medium text-muted">{t(relationship === 'owner' ? 'desktopClient.owned' : 'desktopClient.shared')}</h2>
-      <div className="space-y-3">{items.map((item) => <InstanceRow key={item.id} name={item.name} detail={item.host} selected={selectedId === item.id} local={false} offline={!item.available} busy={busy} onClick={() => onSelect(item.id)} />)}</div>
-    </section> : null;
-  });
 }

@@ -149,24 +149,54 @@
     "version": 1,
     "request_id": "request-18",
     "expected_generation": 1,
-    "action": { "type": "update_check" }
+    "action": {
+      "type": "update_check"
+    }
   },
   {
     "version": 1,
     "request_id": "request-19",
     "expected_generation": 1,
-    "action": { "type": "update_set_prereleases", "enabled": true }
+    "action": {
+      "type": "update_set_prereleases",
+      "enabled": true
+    }
   },
   {
     "version": 1,
     "request_id": "request-20",
     "expected_generation": 1,
-    "action": { "type": "update_set_auto_update", "enabled": false }
+    "action": {
+      "type": "update_set_auto_update",
+      "enabled": false
+    }
   },
   {
     "version": 1,
     "request_id": "request-21",
     "expected_generation": 1,
-    "action": { "type": "update_install", "target_version": "3.2.7" }
+    "action": {
+      "type": "update_install",
+      "target_version": "3.2.7"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "password",
+    "expected_generation": 1,
+    "action": {
+      "type": "sign_in_password",
+      "email": "xiaoming@example.test",
+      "password": "synthetic-password"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "direct-signout",
+    "expected_generation": 1,
+    "action": {
+      "type": "sign_out",
+      "intent_id": "synthetic-one-use-intent"
+    }
   }
 ]

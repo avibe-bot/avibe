@@ -56,7 +56,7 @@ const designFrames = frames((['zh', 'en'] as const).map((lang): FrameSpec => ({
     <div className="relative h-full">
       <Routes>
         <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}>
-          <DesktopAccountRowView state={projection} menuOpen={false} onMenuOpenChange={() => {}} onPresent={() => {}} localUpdater={null} />
+          <DesktopAccountRowView state={projection} onPresent={() => {}} localUpdater={null} />
         </AppShellFooter>} />}>
           <Route path="/" element={<Workbench />} />
         </Route>

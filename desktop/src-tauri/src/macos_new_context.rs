@@ -28,7 +28,7 @@ use objc2::runtime::{AnyObject, Imp, Sel};
 use objc2::sel;
 use objc2_foundation::NSObjectProtocol;
 use objc2_web_kit::{WKNavigationAction, WKNavigationActionPolicy, WKWebView};
-use tauri::WebviewWindow;
+use tauri::Webview;
 use url::Url;
 
 use crate::{new_window_decision, NewWindowDecision};
@@ -50,7 +50,7 @@ fn allows_new_context(opens_new_context: bool, should_download: bool, url: Optio
 /// Routes the webview's new-context requests to `on_new_window`. wry installs
 /// one navigation delegate class for every webview it builds; the shell builds
 /// only the main window, and the first call adopts that class for the process.
-pub fn install(window: &WebviewWindow) {
+pub fn install(window: &Webview) {
     let _ = window.with_webview(|webview| {
         if WRY_POLICY.get().is_some() {
             return;

@@ -130,7 +130,7 @@ fn main() {
                     assert_eq!(exported.iter().find(|cookie|cookie.name()=="vibe_csrf_token").unwrap().http_only(),Some(false));
                     let epoch = avibe_runtime_host::instance_client::transport::Epoch::new(
                         std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),1);
-                    avibe_desktop_lib::instance_store::project(&first,&exported,&epoch).unwrap();
+                    avibe_desktop_lib::instance_store::project(first.as_ref(),&exported,&epoch).unwrap();
                     assert_eq!(first.cookies().unwrap().iter().find(|cookie|cookie.name()=="vibe_csrf_token").unwrap().http_only(),Some(false));
                     first.navigate(format!("http://{address}/first").parse().unwrap()).unwrap();
                     let text = results.recv_timeout(Duration::from_secs(20)).unwrap();
@@ -144,7 +144,7 @@ fn main() {
                     let text = results.recv_timeout(Duration::from_secs(20)).unwrap();
                     assert!(text.starts_with("POST /result/second "));
                     assert!(!text.to_lowercase().contains("cookie:"), "cookie crossed disposable stores");
-                    avibe_desktop_lib::instance_store::retire(&first).unwrap();
+                    avibe_desktop_lib::instance_store::retire(first.as_ref()).unwrap();
                     assert!(handle.get_webview_window("probe-first").is_none());
                     release.send(()).unwrap();
                     late.recv_timeout(Duration::from_secs(10)).unwrap();

@@ -1,21 +1,22 @@
+import i18n from 'i18next';
 import { createElement, useCallback, useEffect, useState } from 'react';
 import { useUnsavedChangesActionGuard } from '../context/useUnsavedChangesActionGuard';
 import {
   DESKTOP_CLIENT_STATE_EVENT, DESKTOP_PRESENT_EVENT, hasDesktopClient, isClientProjection,
-  isDesktopClientView, isNewerClientState, presentDesktopClient,
+  isDesktopClientView, isNewerClientState, presentDesktopClient, withLocalIdentity, desktopLocale,
   type DesktopClientProjection, type DesktopClientView,
 } from './bridge';
 
 export function useDesktopClientProjection(): DesktopClientProjection | null {
   const [state, setState] = useState<DesktopClientProjection | null>(() => {
     const initial = hasDesktopClient() && window.__AVIBE_DESKTOP_CLIENT_STATE__;
-    return isClientProjection(initial) ? initial : null;
+    return isClientProjection(initial) ? withLocalIdentity(initial) : null;
   });
   useEffect(() => {
     if (!hasDesktopClient()) return;
     const update = (event: Event) => {
       const next: unknown = (event as CustomEvent).detail;
-      if (isClientProjection(next)) setState((previous) => isNewerClientState(next, previous) ? next : previous);
+      if (isClientProjection(next)) setState((previous) => isNewerClientState(next, previous) ? withLocalIdentity(next) : previous);
     };
     window.addEventListener(DESKTOP_CLIENT_STATE_EVENT, update);
     return () => window.removeEventListener(DESKTOP_CLIENT_STATE_EVENT, update);
@@ -27,11 +28,12 @@ export function usePresentDesktopClient() {
   const authorize = useUnsavedChangesActionGuard();
   return useCallback((view: DesktopClientView | 'updates', presentationToken?: string) => {
     if (!hasDesktopClient()) return false;
+    const locale = desktopLocale(i18n.resolvedLanguage ?? i18n.language);
     const permission = authorize();
     if (!permission) return false;
     // The token is captured here, so an approval given later still answers this request.
     permission.runNavigation(() => {
-      presentDesktopClient(view, presentationToken);
+      presentDesktopClient(view, presentationToken, locale);
     });
     return true;
   }, [authorize]);

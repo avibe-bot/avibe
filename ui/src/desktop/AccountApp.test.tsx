@@ -17,7 +17,7 @@ vi.mock('./useAccountClient', () => ({
       version: 1, revision: 1, generation: 4,
       account: { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' }, email: null, gate: null, methods: [] },
       connection: { status: 'remote_connected', committed: { kind: 'remote', name: 'Studio', instance_id: 'studio', canonical_origin: 'https://studio.example' }, pending: null },
-      enrollment: { status: 'unknown', instance_id: null, error_code: null },
+      enrollment: { status: 'failed', instance_id: null, error_code: 'persistence_failed' },
       catalog: { status: 'idle', instances: [] },
       local: { name: '小麦的 Mac', remote_access: 'off' },
       desktop: {
@@ -38,6 +38,7 @@ it('AUTH-SETUP-178 the trusted update view acts on this computer\'s desktop app 
   render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
   expect(screen.getByText(en.update.trustedView.title)).toBeTruthy();
   expect(screen.getByText(en.update.status.available)).toBeTruthy();
+  expect(screen.queryByText(en.desktopClient.errors.request)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: en.update.action.update }));
   expect(send).toHaveBeenCalledWith({ type: 'update_install', target_version: '3.2.7' });
 });

@@ -30,7 +30,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -46,7 +49,8 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null
   },
   "signed_in": {
     "version": 1,
@@ -92,7 +96,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -108,7 +115,8 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null
   },
   "challenge": {
     "version": 1,
@@ -144,7 +152,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -160,7 +171,8 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null
   },
   "enroll": {
     "version": 1,
@@ -196,7 +208,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -212,7 +227,8 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null
   },
   "consent": {
     "version": 1,
@@ -263,7 +279,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -284,7 +303,8 @@
       "host": "studio.avibe.bot",
       "scope": "openid profile email"
     },
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null
   },
   "remote_connected": {
     "version": 1,
@@ -331,7 +351,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -347,6 +370,15 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "disabled_incomplete"
+    "remote_auxiliary": "disabled_incomplete",
+    "current_instance": {
+      "id": "studio-1",
+      "name": "工作室 Studio",
+      "host": "studio.avibe.bot",
+      "url": "https://studio.avibe.bot",
+      "relationship": "shared",
+      "owner_email": "owner@example.test",
+      "available": true
+    }
   }
 }
