@@ -170,7 +170,8 @@ for (const width of [1200, 390]) {
     // can load — and the second is the completion itself. Reading their payloads is what
     // keeps this an exact account rather than a count: the take-over writes the Hub's
     // sources and nothing else, and no screen slipped a preference in along the way.
-    expect(configWrites).toEqual([{}, { setup_completed: true }]);
+    // Completion also saves the language the setup was read in as the instance's own.
+    expect(configWrites).toEqual([{}, { setup_completed: true, language: 'en' }]);
     // Initial/return flow must never need a running backend. App-shell reads
     // after completion are not part of this test's connection contract.
     expect(denied.filter((request) => /\/backend\/.*\/auth/.test(request))).toEqual([]);
