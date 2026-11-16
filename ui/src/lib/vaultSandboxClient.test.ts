@@ -382,9 +382,9 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     });
     const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
     // One sandbox step, answered as the sandbox would: `null` succeeds, a code fails.
-    const step = async (op: string, outcome: { code: string } | null) => {
+    const step = async (op: string, outcome: { code: string } | null, options: { authorizationWindow?: string } = {}) => {
       const calls = postMessage.mock.calls.length;
-      const result = instance.request(op, {}, {});
+      const result = instance.request(op, {}, options);
       await vi.waitFor(() => expect(postMessage.mock.calls.length).toBe(calls + 1));
       const pending = instance.pending.get((postMessage.mock.calls[calls][0] as { id: string }).id)!;
       window.clearTimeout(pending.timer);
@@ -394,7 +394,13 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
       await result.catch(() => undefined);
       return error;
     };
-    return { step, instance, postMessage, client, handoff: handoff.vaultPasskeyHandoff, isFallback: handoff.isVaultPasskeyFallback };
+    // A sandbox window this page opened from the click, as approvals, signatures and reveals do.
+    const reserveWindow = () => {
+      stubReleaseFetch();
+      stubBlankPopup();
+      return client.openVaultAuthorizationWindow()!.id;
+    };
+    return { step, instance, postMessage, client, reserveWindow, handoff: handoff.vaultPasskeyHandoff, isFallback: handoff.isVaultPasskeyFallback };
   }
 
   afterEach(() => {
@@ -449,10 +455,27 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     expect(page.handoff()).toBe('fallback');
   });
 
-  it('never counts closing an approval window as a refusal', async () => {
+  // A window this page reserved that the sandbox never loads into ends as a closed window.
+  it('counts a reserved window that closed like a passkey cancel', async () => {
     const page = await freshPage('in-app');
-    await page.step('approveRelease', failure('authorization_cancelled'));
-    await page.step('approveRelease', failure('authorization_cancelled'));
+    await page.step('approveRelease', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow() });
+    expect(page.handoff()).toBeNull();
+    await page.step('reveal', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow() });
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  it('never counts cancelling in an approval window as a refusal', async () => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow() });
+    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow() });
+    expect(page.handoff()).toBeNull();
+  });
+
+  // Without a window this page reserved, a closed window is the sandbox's own: only the user closes it.
+  it('never counts closing a window the sandbox opened itself', async () => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure('authorization_window_closed'));
+    await page.step('approveRelease', failure('authorization_window_closed'));
     expect(page.handoff()).toBeNull();
   });
 

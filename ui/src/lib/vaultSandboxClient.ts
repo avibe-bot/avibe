@@ -84,6 +84,15 @@ type ParentOnlySandboxOp = 'set-appearance';
 const PASSKEY_OPS: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>([
   'setup', 'unlock', 'seal', 'reveal', 'sign', 'approveRelease', POLICY_DOWNGRADE_OP, PROTECTED_HD_OP,
 ]);
+// Cancels that an in-app failure produces too, so they count toward the same in-a-row rule as a
+// passkey cancel: the protected seed-phrase window turns every WebAuthn refusal into its own cancel,
+// and a window this page reserved that the sandbox never loads into ends, at the frame's pairing
+// timeout, as a closed window.
+function cancelMayBeFailure(op: VaultSandboxOp, authorizationWindow: string | undefined, error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return (op === PROTECTED_HD_OP && code === 'authorization_cancelled')
+    || (authorizationWindow !== undefined && code === 'authorization_window_closed');
+}
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -721,8 +730,7 @@ export class VaultSandboxClient {
     try {
       result = await this.send<T>(op, payload, options);
     } catch (error) {
-      // The protected seed-phrase window turns every WebAuthn refusal into its own cancel.
-      recordVaultPasskeyOutcome(error, op === PROTECTED_HD_OP);
+      recordVaultPasskeyOutcome(error, cancelMayBeFailure(op, options.authorizationWindow, error));
       throw error;
     }
     recordVaultPasskeyOutcome(null);
