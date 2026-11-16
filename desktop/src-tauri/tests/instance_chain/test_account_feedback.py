@@ -29,6 +29,8 @@ def account_native(tmp_path, request):
     revocation_release = threading.Event()
     local_document_entered = threading.Event()
     local_document_release = threading.Event()
+    version_document_entered = threading.Event()
+    version_document_release = threading.Event()
     policy = {"grant": "ok", "factor": False}
     identity = {"account": {"id": "synthetic-account", "email": "user@example.test"}, "instances": []}
 
@@ -81,6 +83,7 @@ def account_native(tmp_path, request):
             elif path == "/api/two-factor/totp/setup":
                 value = {"uri": "otpauth://totp/fixture", "qrSvg": "<svg></svg>", "secret": "fixture-secret", "token": "fixture-enroll"}
             elif path == "/api/two-factor/totp":
+                policy["mobile_factor"] = False
                 value = {"method": {"id": "totp-fixture", "kind": "totp", "name": "Authenticator",
                                     "createdAt": "2026-11-15", "lastUsedAt": None},
                          "recoveryCodes": ["fixture-recovery"]}
@@ -91,6 +94,9 @@ def account_native(tmp_path, request):
                     if policy.get("hold_revocation"):
                         assert revocation_release.wait(timeout=10), "fixture revocation response not released"
                     value = {}
+                elif policy.get("mobile_factor"):
+                    status, value = 403, {"error": "two_factor_required", "email": "user@example.test",
+                                          "gate": "enroll", "methods": ["totp", "passkey"]}
                 elif "account=synthetic" in headers.get("cookie", ""):
                     value = identity
                 else:
@@ -124,6 +130,21 @@ def account_native(tmp_path, request):
             elif path == "/fixture-settings.js" and options.get("settings"):
                 content_type = "application/javascript"
                 value = Path(os.environ["DESKTOP_SETTINGS_FIXTURE"]).joinpath("settings.js").read_text()
+            elif path == "/fixture-version.js" and options.get("version"):
+                content_type = "application/javascript"
+                value = Path(os.environ["DESKTOP_VERSION_FIXTURE"]).joinpath("version.js").read_text()
+            elif path == "/fixture-load-blocker.gif" and options.get("version"):
+                # React and its native IPC execute while this subresource keeps
+                # the genuine candidate's Finished callback pending.
+                if policy.get("hold_version_document"):
+                    version_document_entered.set()
+                    assert version_document_release.wait(timeout=25), "fixture version document not released"
+                content_type = "image/gif"
+                value = bytes.fromhex("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b")
+            elif path == "/api/version" and options.get("version"):
+                value = {"current": "0.1.0", "latest": None, "update_available": False, "managed_by": "desktop",
+                         "phase": "idle", "host_actions": ["check", "prereleases", "auto_update"],
+                         "auto_update": True, "prereleases": False}
             elif path in ("/", "/settings/general", "/settings/shortcuts", "/settings/notifications"):
                 if policy.get("hold_local_document") and path == "/" and headers["host"] == urlsplit(alternate_origin).netloc:
                     local_document_entered.set()
@@ -131,12 +152,14 @@ def account_native(tmp_path, request):
                 content_type = "text/html"
                 value = (Path(os.environ["DESKTOP_SETTINGS_FIXTURE"]).joinpath("index.html").read_text()
                          if options.get("settings") and path == "/settings/notifications"
+                         else Path(os.environ["DESKTOP_VERSION_FIXTURE"]).joinpath("index.html").read_text()
+                         if options.get("version")
                          else "<!doctype html><html><body>Isolated local Workbench</body></html>")
                 if policy.get("document_redirect") and headers["host"] == "studio.avibe.bot":
                     status, location = 302, "https://other.avibe.bot/"
             else:
                 status, value = 404, {"error": "fixture_unknown_path"}
-            data = value.encode() if isinstance(value, str) else json.dumps(value).encode()
+            data = value if isinstance(value, bytes) else value.encode() if isinstance(value, str) else json.dumps(value).encode()
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
@@ -260,11 +283,13 @@ def account_native(tmp_path, request):
                "identity": identity, "hold": hold, "foreground": foreground,
                "local_origin": base, "alternate_origin": alternate_origin,
                "local_document_entered": local_document_entered, "local_document_release": local_document_release,
+               "version_document_entered": version_document_entered, "version_document_release": version_document_release,
                "revocation_received": revocation_received, "revocation_release": revocation_release}
     finally:
         hold.release.set()
         revocation_release.set()
         local_document_release.set()
+        version_document_release.set()
         if process.poll() is None:
             process.terminate()
             try:
@@ -615,6 +640,449 @@ def catalog_entry(instance_id="studio"):
             "owner_email": "owner@example.test", "available": True}
 
 
+def popup_snapshot(f):
+    f["send"](action="update_control", operation="snapshot")
+    return f["wait"]("popup_snapshot")["popup"]
+
+
+def popup_request(f, action):
+    envelope = {"version": 1, "request_id": "popup-fixture",
+                "expected_generation": f["state"]()["state"]["generation"], "action": action}
+    return f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                   + json.dumps(envelope) + "}).catch(error=>({rejected:String(error)}));", "update-popover")
+
+
+def committed_remote(f):
+    f["identity"]["instances"] = [catalog_entry()]
+    assert password(f)["ok"]
+    dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+    eventually(f, lambda state: state["state"]["connection"]["committed"]["kind"] == "remote")
+    label = active(f)["label"]
+    marker = f["js"]("""
+        window.retainedMarker=crypto.randomUUID();history.pushState({},'', '/?remote=retained');
+        const input=document.createElement('textarea');input.id='retained-draft';input.value='unsent fixture';
+        document.body.append(input);return [window.retainedMarker,location.href,history.length,input.value];
+    """)
+    return label, marker
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+def test_actual_remote_update_popup_retains_document_and_owns_only_update_actions(account_native):
+    """AUTH-SETUP-177/178: popup GetState must not borrow Account authority.
+
+    The mechanically integrated native baseline cannot find A5's physical main;
+    owner mocks cannot establish real child construction, IPC or DOM consumption.
+    """
+    f = account_native
+    remote, marker = committed_remote(f)
+    before = presentation_snapshot(f)
+    start = len(f["history"])
+    f["send"](action="menu", view="updates")
+    eventually(f, lambda _: popup_snapshot(f) is not None or any(
+        event.get("event") == "popup_open_rejected" for event in f["history"][start:]))
+    assert not [event for event in f["history"][start:] if event.get("event") == "popup_open_rejected"], (
+        "actual popup producer rejected A5's physical main", f["history"][start:])
+    eventually(f, lambda _: popup_snapshot(f)["visible"])
+    popup = popup_snapshot(f)
+    assert popup["position"]["x"] < -10000 and not popup["focused"], popup
+    eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('[data-update-popover] [role=dialog]'));", "update-popover"))
+    reply = popup_request(f, {"type": "get_state"})
+    assert reply["ok"] and "result" not in reply, reply
+    assert any(event.get("event") == "page_load" and event.get("label") == "update-popover"
+               and event.get("finished") for event in f["history"])
+    assert f["js"]("return [window.retainedMarker,location.href,history.length,document.querySelector('#retained-draft').value];", remote) == marker
+    for action in [{"type": "cancel"}, {"type": "sign_out"}, {"type": "return_local"},
+                   {"type": "select_instance", "instance_id": "studio"}]:
+        assert popup_request(f, action) == {"rejected": "untrusted_desktop_caller"}, action
+    for action in [{"type": "get_state"}, {"type": "update_set_auto_update", "enabled": False}]:
+        envelope = {"version": 1, "request_id": "remote-cannot-borrow-popup",
+                    "expected_generation": f["state"]()["state"]["generation"], "action": action}
+        assert f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                       + json.dumps(envelope) + "}).then(()=>false,()=>true);", remote)
+    # The actual AccountApp toggle invokes the actual private updater preference.
+    eventually(f, lambda _: f["js"]("return document.querySelectorAll('[role=switch]').length===2;", "update-popover"))
+    initial = f["js"]("return [...document.querySelectorAll('[role=switch]')].map(e=>({name:e.getAttribute('aria-label'),checked:e.getAttribute('aria-checked')}));", "update-popover")
+    (f["root"] / "popup-switches.json").write_text(json.dumps(initial, indent=2))
+    current = reply["state"]["desktop"]["update"]["autoUpdate"]
+    f["js"]("document.querySelectorAll('[role=switch]')[1].click();return true;", "update-popover")
+    eventually(f, lambda _: popup_request(f, {"type": "get_state"})["state"]["desktop"]["update"]["autoUpdate"] != current)
+    now = presentation_snapshot(f)
+    for key in ("owner", "window", "document", "label", "runtime", "returning", "logout"):
+        assert now[key] == before[key], (key, before, now)
+    assert not [call for call in f["calls"] if call[0] == "DELETE"]
+    assert f["state"]()["erase_calls"] == 0
+    (f["root"] / "popup-result.json").write_text(json.dumps({"popup": popup, "before": before, "after": now}, indent=2))
+    f["send"](action="eval", label="update-popover",
+              script="window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));")
+    eventually(f, lambda _: popup_snapshot(f) is None)
+    assert f["js"]("return [window.retainedMarker,location.href,history.length,document.querySelector('#retained-draft').value];", remote) == marker
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+@pytest.mark.parametrize("entry", ["menu:updates", "updater"])
+def test_remote_update_popup_requires_recovery_acknowledgement_and_fresh_request(account_native, entry):
+    """AUTH-SETUP-176: retained remote selection cannot bypass the Account guard."""
+    f = account_native
+    remote, marker = committed_remote(f)
+    f["present"]("account")
+    recovery_page(f)
+    original = presentation_snapshot(f)
+    before = f["state"]()
+    start = len(f["history"])
+    ordinary_presentation(f, entry)
+    current, callbacks = presentation_outcome(f, start, original["label"])
+    assert current["label"] == original["label"] and callbacks[-1]["result"] == '"dispatched"'
+    assert popup_snapshot(f) is None and not current["logout"]
+    assert f["js"]("return document.body.innerText.includes('fixture-recovery');")
+    assert f["state"]()["erase_calls"] == before["erase_calls"]
+    assert f["state"]()["state"]["generation"] == before["state"]["generation"]
+    assert not [call for call in f["calls"] if call[0] == "DELETE"]
+    f["js"]("[...document.querySelectorAll('button')].find(b=>b.textContent==='I have saved these codes').click();return true;")
+    eventually(f, lambda _: f["js"]("return !document.body.innerText.includes('fixture-recovery');"))
+    f["send"](action="shell_control", operation="finished")
+    f["wait"]("shell_control", lambda event: event["operation"] == "finished")
+    assert popup_snapshot(f) is None
+    ordinary_presentation(f, entry)
+    eventually(f, lambda _: popup_snapshot(f) is not None)
+    eventually(f, lambda _: popup_snapshot(f)["visible"])
+    assert popup_request(f, {"type": "get_state"})["ok"]
+    assert presentation_snapshot(f)["label"] == original["label"]
+    assert f["js"]("return [window.retainedMarker,location.href,history.length,document.querySelector('#retained-draft').value];", remote) == marker
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+@pytest.mark.parametrize("phase", ["build", "finished"])
+def test_popup_delayed_native_work_cannot_show_after_source_retirement(account_native, phase):
+    """AUTH-SETUP-176: real build/Finished retains its original presentation."""
+    f = account_native
+    committed_remote(f)
+    f["send"](action="update_control", operation="hold", phase=phase)
+    f["wait"]("update_control", lambda event: event["operation"] == "hold")
+    f["send"](action="menu", view="updates")
+    f["wait"]("update_held", lambda event: event["phase"] == phase)
+    held = popup_snapshot(f)
+    if held:
+        assert not held["focused"] and held["position"]["x"] < -10000
+        assert not held["visible"], "parented popup became visible before source-fenced Finished"
+    # The remote Runtime fixture has no Workbench discard listener. Its actual
+    # explicit presentation URL is the independent document-retirement trigger.
+    f["present"]("account")
+    eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('h1'));"))
+    account = active(f)["label"]
+    f["send"](action="update_control", operation="release", phase=phase)
+    f["wait"]("update_released", lambda event: event["phase"] == phase)
+    if phase == "finished":
+        f["wait"]("popup_stale_finished")
+        eventually(f, lambda _: popup_snapshot(f) is None)
+    else:
+        f["wait"]("popup_build_settled")
+        assert popup_snapshot(f) is None
+    # A fresh explicit request supplies the new Account source and remains live.
+    f["send"](action="menu", view="updates")
+    eventually(f, lambda _: popup_snapshot(f) is not None)
+    eventually(f, lambda _: popup_request(f, {"type": "get_state"}).get("ok"))
+    assert active(f)["label"] == account
+    assert not any(event.get("event") == "popup_shown" for event in f["history"][:next(
+        index for index, event in enumerate(f["history"])
+        if event.get("event") == "update_released" and event.get("phase") == phase)])
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+@pytest.mark.parametrize("retirement", ["rebuild", "reload"])
+def test_popup_get_state_reply_cannot_cross_same_label_rebuild(account_native, retirement):
+    """AUTH-SETUP-177: hold the real result before the actual receiver recheck."""
+    f = account_native
+    committed_remote(f)
+    f["send"](action="menu", view="updates")
+    eventually(f, lambda _: popup_snapshot(f) is not None)
+    # Initial IPC can complete before the initial Finished. Establish the actual
+    # mounted receiver first so that a later Finished belongs to the reload.
+    eventually(f, lambda _: popup_snapshot(f)["visible"])
+    eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('[data-update-popover] [role=dialog]'));", "update-popover"))
+    eventually(f, lambda _: popup_request(f, {"type": "get_state"}).get("ok"))
+    f["send"](action="update_control", operation="hold", phase="client")
+    f["wait"]("update_control", lambda event: event["operation"] == "hold")
+    generation = f["state"]()["state"]["generation"]
+    f["send"](action="eval", label="update-popover", script="window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+              + json.dumps({"version": 1, "request_id": "held-popup-state", "expected_generation": generation,
+                            "action": {"type": "get_state"}}) + "}).catch(()=>{});")
+    f["wait"]("update_held", lambda event: event["phase"] == "client")
+    if retirement == "rebuild":
+        f["send"](action="update_control", operation="close")
+        eventually(f, lambda _: popup_snapshot(f) is None)
+        f["send"](action="menu", view="updates")
+        eventually(f, lambda _: popup_snapshot(f) is not None)
+    else:
+        start = len(f["history"])
+        f["send"](action="eval", label="update-popover", script="location.reload();")
+        eventually(f, lambda _: any(event.get("event") == "page_load" and event.get("label") == "update-popover"
+                                   and event.get("finished") for event in f["history"][start:]))
+    eventually(f, lambda _: popup_request(f, {"type": "get_state"}).get("ok"))
+    marker = f["js"]("window.popupMarker=crypto.randomUUID();return window.popupMarker;", "update-popover")
+    f["send"](action="update_control", operation="release", phase="client")
+    f["wait"]("update_released", lambda event: event["phase"] == "client")
+    stale = f["wait"]("reply", lambda event: event.get("label") == "update-popover" and event.get("error") is not None)
+    assert stale["error"] == "untrusted_desktop_caller", stale
+    assert f["js"]("return window.popupMarker;", "update-popover") == marker
+    assert popup_request(f, {"type": "get_state"})["ok"]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True}], indirect=True)
+def test_recovery_finalization_retires_an_approved_loading_remote_popup(account_native):
+    """AUTH-SETUP-176: material-producing action defeats an approved popup."""
+    f = account_native
+    committed_remote(f)
+    f["present"]("account")
+    recovery_page(f, submit=False)
+    f["send"](action="update_control", operation="hold", phase="build")
+    f["wait"]("update_control", lambda event: event["operation"] == "hold")
+    f["send"](action="menu", view="updates")
+    f["wait"]("update_held", lambda event: event["phase"] == "build")
+    f["send"](action="eval", script="document.querySelector('#factor-code').form.requestSubmit();")
+    eventually(f, lambda _: f["js"]("return document.body.innerText.includes('fixture-recovery');"))
+    current = presentation_snapshot(f)
+    f["send"](action="update_control", operation="release", phase="build")
+    f["wait"]("popup_build_settled")
+    assert popup_snapshot(f) is None
+    start = len(f["history"])
+    f["send"](action="menu", view="updates")
+    refused, callbacks = presentation_outcome(f, start, current["label"])
+    assert callbacks[-1]["result"] == '"dispatched"' and refused["label"] == current["label"]
+    assert popup_snapshot(f) is None
+    f["js"]("[...document.querySelectorAll('button')].find(b=>b.textContent==='I have saved these codes').click();return true;")
+    eventually(f, lambda _: f["js"]("return !document.body.innerText.includes('fixture-recovery');"))
+    assert popup_snapshot(f) is None
+    f["send"](action="menu", view="updates")
+    eventually(f, lambda _: popup_snapshot(f) is not None)
+    assert popup_request(f, {"type": "get_state"})["ok"]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "lifecycle": True, "version": True}], indirect=True)
+@pytest.mark.parametrize("entry", ["rebind", "signout", "preserved-account"])
+@pytest.mark.parametrize("late_rejection", [False, True])
+def test_actual_version_badge_recovers_after_candidate_publication(account_native, entry, late_rejection):
+    """AUTH-SETUP-178: candidate denial must not permanently disable its badge.
+
+    Unlike consumer mocks this holds a real load-blocking image, executes native
+    admission and observes the actual JS Any listener on the published child.
+    """
+    f = account_native
+    if entry == "signout":
+        assert password(f)["ok"]
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)["label"]
+    if entry in ("signout", "preserved-account"):
+        f["present"]("account")
+        eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('h1'));"))
+    f["policy"]["hold_version_document"] = True
+    if late_rejection:
+        f["send"](action="update_control", operation="hold", phase="state", exclude=original)
+        f["wait"]("update_control", lambda event: event["operation"] == "hold")
+    start = len(f["history"])
+    if entry == "signout":
+        f["policy"]["hold_revocation"] = True
+        f["send"](action="menu", view="sign-out")
+    else:
+        f["send"](action="runtime_rebind", origin=f["alternate_origin"])
+        f["wait"]("runtime_rebind")
+    assert f["version_document_entered"].wait(timeout=8), "React document's subresource did not start"
+    denied = f["wait"]("updater_probe", lambda event: event["label"] != original and "Err" in event["result"])
+    candidate = denied["label"]
+    assert "Workbench" in denied["result"]["Err"]
+    if late_rejection:
+        f["wait"]("update_held", lambda event: event["phase"] == "state")
+    assert not any(event.get("event") == "page_load" and event.get("label") == candidate
+                   and event.get("finished") for event in f["history"][start:])
+    marker = f["js"]("""
+        document.querySelector('#retained-draft').value='candidate draft';
+        return [window.fixtureDocument,location.href,history.length,document.querySelector('#retained-draft').value];
+    """, candidate)
+    f["version_document_release"].set()
+    f["wait"]("replacement_finished", lambda event: event["ok"])
+    if entry == "preserved-account":
+        denied_retained = f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_update_state').then(()=>false,()=>true);", candidate)
+        assert denied_retained
+        account_return_action(f, "back")
+    eventually(f, lambda _: active(f)["label"] == candidate)
+    if late_rejection:
+        # A real post-unlock projection reaches the mounted listener while the
+        # earlier genuine rejection is still waiting to return.
+        observations = f["js"]("return window.fixtureObservations;", candidate)
+        assert any(item.get("event") == "avibe:desktop-client-state" for item in observations)
+        f["send"](action="update_control", operation="release", phase="state")
+        f["wait"]("update_released", lambda event: event["phase"] == "state")
+    admitted = f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_update_state');", candidate)
+    assert "autoUpdate" in admitted, admitted
+    # Retain the independent positive native read even when the old consumer
+    # remains permanently disabled and the following assertion fails.
+    (f["root"] / "candidate-admission.json").write_text(json.dumps({
+        "denied": denied, "admitted": admitted, "marker": marker,
+        "observations": f["js"]("return window.fixtureObservations;", candidate),
+    }, indent=2))
+    deadline = time.monotonic() + 5
+    while not f["js"]("return window.fixtureListenerSnapshot().length>0;", candidate):
+        assert time.monotonic() < deadline, {
+            "regression": "same admitted document never restored its updater subscription",
+            "native_available": admitted, "candidate": candidate, "original_denial": denied,
+        }
+        time.sleep(.03)
+    f["js"]("document.querySelector('button[aria-controls]').click();return true;", candidate)
+    eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('[role=switch][aria-label=\"Update automatically\"]:not(:disabled)'));", candidate))
+    listens = f["js"]("return window.fixtureListenerSnapshot();", candidate)
+    assert listens and listens[-1]["target"] == {"kind": "Any"}, listens
+    assert any(event.get("event") == "updater_ready" and event.get("label") == candidate
+               and event["result"] == {"Ok": None} for event in f["history"])
+    start_setting = len(f["history"])
+    f["js"]("document.querySelector('[role=switch][aria-label=\"Update automatically\"]').click();return true;", candidate)
+    eventually(f, lambda _: any(event.get("event") == "updater_setting" and event.get("label") == candidate
+                               for event in f["history"][start_setting:]))
+    setting = next(event for event in f["history"][start_setting:] if event.get("event") == "updater_setting")
+    assert setting["result"] == {"Ok": not admitted["autoUpdate"]}
+    eventually(f, lambda _: f["js"]("return window.fixtureObservations.some(item=>item.event==='avibe:desktop-update-state'&&item.payload.autoUpdate==="
+                                   + json.dumps(not admitted["autoUpdate"]) + ");", candidate))
+    assert f["js"]("return document.querySelector('[role=switch][aria-label=\"Update automatically\"]').getAttribute('aria-checked');", candidate) == str(not admitted["autoUpdate"]).lower()
+    assert f["js"]("return [window.fixtureDocument,location.href,history.length,document.querySelector('#retained-draft').value];", candidate) == marker
+    if entry == "signout":
+        assert f["state"]()["credential_count"] == 0
+        assert f["revocation_received"].wait(timeout=5)
+        assert sum(method == "DELETE" and path == "/api/mobile/session" for method, path, _, _ in f["calls"]) == 1
+        f["revocation_release"].set()
+    (f["root"] / "version-consumer-result.json").write_text(json.dumps(f["js"]("return window.fixtureObservations;", candidate), indent=2))
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "lifecycle": True, "version": True}], indirect=True)
+def test_recovered_version_badge_consumes_only_the_correlated_pending_open(account_native):
+    """AUTH-SETUP-178: observe readiness/receipt before the held follow-up read.
+
+    The pending-open listener normally starts an explicit update check after its
+    read. Teardown ends this fixture while that genuine read is held, so this
+    case proves delivery/consumption without invoking discovery or installation.
+    """
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)["label"]
+    f["policy"]["hold_version_document"] = True
+    f["send"](action="runtime_rebind", origin=f["alternate_origin"])
+    assert f["version_document_entered"].wait(timeout=8)
+    denied = f["wait"]("updater_probe", lambda event: event["label"] != original and "Err" in event["result"])
+    candidate = denied["label"]
+    f["send"](action="update_control", operation="hold", phase="state", exclude=original, skip=1)
+    f["wait"]("update_control", lambda event: event["operation"] == "hold")
+    f["send"](action="shell_control", operation="queue_updates")
+    f["wait"]("shell_control", lambda event: event["operation"] == "queue_updates")
+    f["send"](action="shell_status")
+    pending = f["wait"]("shell_status")["pending_update"]
+    assert pending is not None
+    start = len(f["history"])
+    f["version_document_release"].set()
+    eventually(f, lambda _: any(event.get("event") == "update_held" and event["phase"] == "state"
+                               for event in f["history"][start:]))
+    eventually(f, lambda _: any(event.get("event") == "update_delivery" and event["id"] == pending
+                               and event["result"] == '"handled"' for event in f["history"][start:]))
+    assert active(f)["label"] == candidate
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending_update"] is None
+    f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_update_panel_ready');", candidate)
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending_update"] is None
+    handled = [event for event in f["history"][start:] if event.get("event") == "update_delivery"
+               and event["result"] == '"handled"']
+    assert len(handled) == 1 and handled[0]["id"] == pending, handled
+    assert f["js"]("return Boolean(document.querySelector('[role=dialog]'));", candidate)
+    (f["root"] / "pending-open-result.json").write_text(json.dumps({
+        "pending": pending, "handled": handled, "consumer": f["js"]("return window.fixtureObservations;", candidate),
+        "boundary": "terminated while genuine follow-up state result held, before check/install",
+    }, indent=2))
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "version": True}], indirect=True)
+def test_candidate_cannot_borrow_a_live_popup_receiver(account_native):
+    """AUTH-SETUP-177: an actual candidate cannot borrow a valid popup's admission.
+
+    The live popup is a positive control while an actual remote load remains
+    unpublished; role mocks alone do not exercise this simultaneous IPC path.
+    """
+    f = account_native
+    remote, _ = committed_remote(f)
+    f["present"]("instances")
+    account = active(f)["label"]
+    f["identity"]["instances"] = [catalog_entry(), catalog_entry("other")]
+    assert f["request"]({"type": "refresh_instances"})["ok"]
+    f["send"](action="menu", view="updates")
+    eventually(f, lambda _: popup_snapshot(f) is not None)
+    eventually(f, lambda _: popup_request(f, {"type": "get_state"}).get("ok"))
+    f["policy"]["hold_version_document"] = True
+    dispatch(f, {"type": "select_instance", "instance_id": "other"})
+    assert f["version_document_entered"].wait(timeout=8)
+    candidate = next(view["label"] for view in f["state"]()["views"]
+                     if view["label"] not in [remote, account, "update-popover"])
+    assert popup_request(f, {"type": "get_state"})["ok"]
+    for action in [{"type": "get_state"}, {"type": "update_set_auto_update", "enabled": True}]:
+        envelope = {"version": 1, "request_id": "candidate-cannot-borrow-popup",
+                    "expected_generation": f["state"]()["state"]["generation"], "action": action}
+        result = f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                         + json.dumps(envelope) + "}).then(()=>({allowed:true}),error=>({error:String(error)}));", candidate)
+        # The real capability boundary rejects this remote candidate before the
+        # Rust command owner. A live popup must not lend its local capability.
+        assert result.get("error", "").startswith(
+            f'desktop_client_request not allowed on window "main", webview "{candidate}"'), result
+    assert f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_update_state').then(()=>false,()=>true);", candidate)
+    f["policy"]["hold_version_document"] = False
+    f["version_document_release"].set()
+    eventually(f, lambda _: active(f)["label"] == candidate)
+    assert f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_update_state').then(()=>false,()=>true);", candidate)
+    assert f["js"]("return window.fixtureListenerSnapshot();", candidate) == []
+    assert not [event for event in f["history"] if event.get("event") == "updater_setting"
+                and event.get("label") == candidate]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "version": True}], indirect=True)
+def test_retired_version_document_cannot_apply_a_delayed_success_to_remote(account_native):
+    """AUTH-SETUP-177/178: a real successful read cannot revive a retired document.
+
+    Hold the original local consumer's real native result, commit a remote
+    document, then deliver it. This adds native receiver retirement to UI's
+    callback-order controls without manufacturing state or completion events.
+    """
+    f = account_native
+    f["identity"]["instances"] = [catalog_entry()]
+    assert password(f)["ok"]
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    local = active(f)["label"]
+    eventually(f, lambda _: f["js"]("return window.fixtureListenerSnapshot().length>0;", local))
+    eventually(f, lambda _: any(event.get("event") == "updater_ready" and event.get("label") == local
+                               and "Ok" in event["result"] for event in f["history"]))
+    f["send"](action="update_control", operation="hold", phase="state")
+    f["wait"]("update_control", lambda event: event["operation"] == "hold")
+    start = len(f["history"])
+    f["send"](action="shell_control", operation="queue_updates")
+    f["wait"]("shell_control", lambda event: event["operation"] == "queue_updates")
+    f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_update_panel_ready');", local)
+    eventually(f, lambda _: any(event.get("event") == "update_held" and event["phase"] == "state"
+                               for event in f["history"][start:]))
+    held = [event for event in f["history"][start:] if event.get("event") == "updater_probe"
+            and event.get("label") == local]
+    assert held and "Ok" in held[-1]["result"], held
+    f["present"]("instances")
+    dispatch(f, {"type": "select_instance", "instance_id": "studio"})
+    eventually(f, lambda state: state["state"]["connection"]["committed"]["kind"] == "remote")
+    remote = active(f)["label"]
+    assert local not in [view["label"] for view in f["state"]()["views"]]
+    marker = f["js"]("return window.fixtureDocument;", remote)
+    f["send"](action="update_control", operation="release", phase="state")
+    f["wait"]("update_released", lambda event: event["phase"] == "state")
+    assert f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_update_state').then(()=>false,()=>true);", remote)
+    assert f["js"]("return [window.fixtureDocument,window.fixtureListenerSnapshot()];", remote) == [marker, []]
+    assert not [event for event in f["history"] if event.get("event") == "updater_ready"
+                and event.get("label") == remote and "Ok" in event["result"]]
+    (f["root"] / "retired-success-result.json").write_text(json.dumps({
+        "held": held, "retired": local, "remote": remote, "marker": marker,
+    }, indent=2))
+
+
 def dispatch(f, action, request_id="a5-operation"):
     envelope = {"version": 1, "request_id": request_id, "expected_generation": f["state"]()["state"]["generation"],
                 "action": action}
@@ -953,7 +1421,14 @@ def test_final_account_ui_recovery_ack_obeys_native_persistence_result(account_n
 def recovery_page(f, *, hold_finish=False, submit=True):
     """Produce material through the actual AccountApp submit/result owner."""
     f["policy"].update({"paired": True, "factor": True, "gate": "enroll"})
-    assert password(f)["state"]["account"]["gate"] == "enroll"
+    if f["state"]()["state"]["account"]["status"] == "signed_in":
+        # A retained remote connection can encounter a newly required factor
+        # on the actual discovery endpoint, without signing out that Runtime.
+        f["policy"]["mobile_factor"] = True
+        reply = f["request"]({"type": "refresh_instances"})
+    else:
+        reply = password(f)
+    assert reply["state"]["account"]["gate"] == "enroll"
     eventually(f, lambda _: f["js"]("return [...document.querySelectorAll('button')].some(b=>b.textContent==='Add authenticator');"))
     f["js"]("[...document.querySelectorAll('button')].find(b=>b.textContent==='Add authenticator').click();return true;")
     eventually(f, lambda _: f["js"]("return Boolean(document.querySelector('#factor-code'));"))

@@ -40,3 +40,38 @@ observations:
       - keep CLI stderr out of Claude auth evidence while the diagnostic still shows it
       - let a signal exit outrank auth words in the diagnostic
       - keep the prompt for an auth failure the CLI reports itself
+  - id: OBS-AUTH-004
+    source: isolated_native_regression
+    related_scenarios:
+      - AUTH-SETUP-176
+      - AUTH-SETUP-178
+    summary: A parented macOS popup was visible before its source-fenced Finished callback.
+    previous_assumption: WebviewWindowBuilder visible(false) kept a parented popup hidden until explicit show.
+    observed_behavior: >-
+      The actual held-Finished fixture reported visible=true while the popup was
+      offscreen and unfocused. Pinned tao 0.37.1 attaches the child above its parent
+      but does not hide it for visible(false). Explicit hide after construction,
+      while the existing window serializer is held, makes that same observation
+      false; normal Finished still shows and a retired source does not.
+    required_updates:
+      - hide the constructed receiver before releasing the window serializer and fail construction if hiding fails
+      - assert actual native visibility during held Finished, independently from absence of a show callback
+      - retain the limit that offscreen snapshots do not prove compositor-frame or OS-focus behavior
+  - id: OBS-AUTH-005
+    source: isolated_native_regression
+    related_scenarios:
+      - AUTH-SETUP-177
+      - AUTH-SETUP-178
+    summary: VersionBadge mounted before local role admission and permanently disabled its native controls.
+    previous_assumption: An initial native updater-state refusal meant the shell lacked that command.
+    observed_behavior: >-
+      A real load-blocking subresource allowed React to mount in a candidate
+      before publication. The actual native command refused that role. After
+      publication and unlock, an independent native read succeeded while the old
+      same-document consumer still lacked its updater subscription. The fixed
+      consumer recovered from the existing client completion projection, then
+      received actual Any-target events and saved a private setting.
+    required_updates:
+      - keep getState as authority and use validated client completion only to request another read
+      - retain rebind, receipt-admitted signout, preserved Account return and delayed-result native controls
+      - distinguish this real component/native loop from full Workbench and installed acceptance

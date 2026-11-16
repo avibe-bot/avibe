@@ -1244,6 +1244,9 @@ scenarios:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_cannot_reauthorize_a_navigated_return_receipt
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_new_owner_retires_only_the_held_candidate
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_return_receipt_survives_lifecycle_retry_after_retirement
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_remote_update_popup_requires_recovery_acknowledgement_and_fresh_request
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_popup_delayed_native_work_cannot_show_after_source_retirement
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_finalization_retires_an_approved_loading_remote_popup
   - id: AUTH-SETUP-177
     name: Remote and embedded documents gain no Desktop local capability or account credentials
     status: gap
@@ -1255,13 +1258,21 @@ scenarios:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_menu_guard_receipt_keeps_actual_source_and_owner
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_material_stays_in_owned_receiver_until_ack_and_late_full_event_dies_on_reload
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_remote_update_popup_retains_document_and_owns_only_update_actions
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_popup_get_state_reply_cannot_cross_same_label_rebuild
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_candidate_cannot_borrow_a_live_popup_receiver
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retired_version_document_cannot_apply_a_delayed_success_to_remote
   - id: AUTH-SETUP-178
     name: Desktop footer geometry and local updater scope hold across locale, theme, window size, and target
     status: gap
     kind: accessibility
     layer: contract
     backend: desktop
-    reason: Production UI geometry and bundled asset evidence is owned by the Phase 1 UI PR.
+    reason: Real UI geometry and isolated native popup/VersionBadge consumers exist; the narrow component/native loop is not full Workbench, canonical scenario-harness or installed acceptance.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_remote_update_popup_retains_document_and_owns_only_update_actions
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_version_badge_recovers_after_candidate_publication
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovered_version_badge_consumes_only_the_correlated_pending_open
   - id: AUTH-SETUP-179
     name: Remote Phase 1 disables local Mini and notifications visibly and local return restores local sources
     status: gap

@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--target-dir", type=Path, required=True)
     parser.add_argument("--shell-consumers", action="store_true")
     parser.add_argument("--account-feedback", action="store_true")
+    parser.add_argument("--update-consumers", action="store_true")
     parser.add_argument("--shell-fixture", type=Path)
     args = parser.parse_args()
     assert not any(part.endswith(".app") for part in args.output.resolve().parts), "native fixture must stay outside an application bundle"
@@ -57,7 +58,7 @@ def main():
         library.write_text(library.read_text() + """
 pub fn fixture_account_menu(app: &tauri::AppHandle, view: &str) {
     instance_client::menu_present(app, match view {
-        "account" => "account", "instances" => "instances", "sign-out" => "sign-out",
+        "account" => "account", "instances" => "instances", "sign-out" => "sign-out", "updates" => "updates",
         _ => panic!("unsupported fixture menu"),
     });
 }
@@ -291,6 +292,7 @@ pub fn fixture_initial_account(app: &AppHandle) {
         example.write_text(text.replace(needle, '''                            let origin = command["origin"].as_str()
                                 .map(|value|LoopbackOrigin::parse(value).unwrap()).unwrap_or_else(||lifecycle.local.clone());
                             lifecycle.change(Some(origin));'''))
+        update_adaptations = adapt_update_consumers(source) if args.update_consumers else {}
         build(args, source, "", {
             "head":args.head, "bundle_sha256":args.bundle_sha256, "mode":"account-feedback",
             "library_original_sha256":hashlib.sha256(original_library).hexdigest(),
@@ -298,7 +300,7 @@ pub fn fixture_initial_account(app: &AppHandle) {
             "native_original_sha256":hashlib.sha256(native_original).hexdigest(),
             "native_fixture_sha256":hashlib.sha256(native.read_bytes()).hexdigest(),
             "updater_sha256":hashlib.sha256((source / "desktop/src-tauri/src/updater.rs").read_bytes()).hexdigest(),
-            "updater_key":"empty", "shell_adaptations": shell_adaptations, "adaptations":["archive-only call to existing native menu owner",
+            "updater_key":"empty", "shell_adaptations": shell_adaptations, "update_adaptations": update_adaptations, "adaptations":["archive-only call to existing native menu owner",
                                                  "optional one-shot failure after actual store retirement",
                                                  "bounded pause before error presentation owner check", "optional one-shot failure after actual native show/focus",
                                                  "quiet default: offscreen main and suppressed final OS focus/clamp only; foreground batch explicitly opts out",
@@ -347,6 +349,200 @@ pub fn fixture_initial_account(app: &AppHandle) {
         "fixture_public_key": "desktop/runtime-host/tests/fixtures/updater/public-key.txt",
         "recorded_peripheral_calls": peripheral_calls, "shell_adaptations": shell_adaptations,
     })
+
+
+def adapt_update_consumers(source):
+    """Observe real popup/Workbench commands; delay results, never fabricate them.
+
+    The popup's initial focus and final placement are additional OS effects not
+    covered by the older main-only quiet adapter. This adapter keeps the actual
+    parent, receiver, navigation, presentation and updater admission.
+    """
+    library = source / "desktop/src-tauri/src/lib.rs"
+    example = source / "desktop/src-tauri/examples/instance_client_probe.rs"
+    popup = source / "desktop/src-tauri/src/update_popover.rs"
+    native = source / "desktop/src-tauri/src/instance_client.rs"
+    paths = (library, example, popup, native)
+    before = {str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    needle = ".eval_with_callback(open_updates_script(id, legacy_fallback), move |result| {\n"
+    assert library.read_text().count(needle) == 1
+    library.write_text(library.read_text().replace(needle, needle + '''
+            println!("{}",serde_json::json!({"event":"update_delivery","id":id,"result":result}));
+'''))
+    library.write_text(library.read_text() + """
+pub mod fixture_updates {
+    use super::{instance_client, update_popover, updater};
+    use tauri::{AppHandle, Manager, Webview};
+    use url::Url;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HOLDS: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+    static RELEASES: [tokio::sync::Notify; 4] = [const { tokio::sync::Notify::const_new() }; 4];
+    static STATE_EXCLUDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    static STATE_SKIP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn index(name: &str) -> usize {
+        match name { "build"=>0, "finished"=>1, "state"=>2, "client"=>3, _=>panic!("unknown update hold") }
+    }
+    pub async fn pause(name: &str) {
+        let index = index(name);
+        if HOLDS[index].swap(false, Ordering::SeqCst) {
+            println!("{}",serde_json::json!({"event":"update_held","phase":name}));
+            tokio::time::timeout(std::time::Duration::from_secs(30), RELEASES[index].notified())
+                .await.expect("fixture update release");
+            println!("{}",serde_json::json!({"event":"update_released","phase":name}));
+        }
+    }
+    pub fn navigation(view: &Webview, url: &Url) -> bool {
+        instance_client::bundle(view.app_handle())
+            .is_some_and(|bundle| update_popover::navigation_allowed(url, &bundle))
+    }
+    pub fn snapshot(app: &AppHandle) -> serde_json::Value { updater::client_snapshot(app) }
+    pub fn control(app: &AppHandle, command: serde_json::Value) {
+        let operation = command["operation"].as_str().unwrap();
+        match operation {
+            "hold" => {
+                if command["phase"] == "state" {
+                    *STATE_EXCLUDE.lock().unwrap()=command["exclude"].as_str().map(str::to_owned);
+                    STATE_SKIP.store(command["skip"].as_u64().unwrap_or(0) as usize, Ordering::SeqCst);
+                }
+                HOLDS[index(command["phase"].as_str().unwrap())].store(true, Ordering::SeqCst);
+            },
+            "release" => RELEASES[index(command["phase"].as_str().unwrap())].notify_one(),
+            "close" => { app.get_webview_window("update-popover").expect("actual popup").destroy().unwrap(); },
+            "snapshot" => {
+                let handle=app.clone();
+                app.run_on_main_thread(move || {
+                    let popup=handle.get_webview_window("update-popover");
+                    println!("{}",serde_json::json!({"event":"popup_snapshot","popup":popup.map(|view|
+                        serde_json::json!({"label":view.label(),"physical":view.as_ref().window().label(),
+                        "url":view.url().unwrap(),"visible":view.is_visible().unwrap(),
+                        "focused":view.is_focused().unwrap(),"position":view.outer_position().unwrap()}))}));
+                }).unwrap();
+            },
+            _=>panic!("unsupported update control"),
+        }
+        println!("{}",serde_json::json!({"event":"update_control","operation":operation}));
+    }
+    #[tauri::command]
+    async fn desktop_update_state(window: Webview, app: AppHandle) -> Result<updater::DesktopUpdateState,String> {
+        let label=window.label().to_owned();
+        let result=updater::desktop_update_state(window, app);
+        println!("{}",serde_json::json!({"event":"updater_probe","label":label,"result":result}));
+        let excluded=STATE_EXCLUDE.lock().unwrap().as_deref()==Some(&label);
+        if !excluded && STATE_SKIP.fetch_update(Ordering::SeqCst,Ordering::SeqCst,|n|n.checked_sub(1)).is_err() {
+            pause("state").await;
+        }
+        result
+    }
+    #[tauri::command]
+    fn desktop_update_auto_update_set(window: Webview, app: AppHandle, enabled: bool) -> Result<bool,String> {
+        let label=window.label().to_owned();
+        let result=updater::desktop_update_auto_update_set(window, app, enabled);
+        println!("{}",serde_json::json!({"event":"updater_setting","label":label,"result":result}));
+        result
+    }
+    #[tauri::command]
+    fn desktop_update_panel_ready(window: Webview) -> Result<(),String> {
+        let label=window.label().to_owned();
+        let result=super::desktop_update_panel_ready(window);
+        println!("{}",serde_json::json!({"event":"updater_ready","label":label,"result":result}));
+        result
+    }
+    pub fn invoke(invoke: tauri::ipc::Invoke) -> bool {
+        let handler: Box<dyn Fn(tauri::ipc::Invoke)->bool+Send+Sync> = Box::new(tauri::generate_handler![
+            self::desktop_update_state,self::desktop_update_auto_update_set,self::desktop_update_panel_ready,
+            super::bootstrap_status,super::notifications::desktop_notifications_state,
+            super::notifications::desktop_notifications_set_enabled
+        ]);
+        handler(invoke)
+    }
+}
+""")
+    text = example.read_text()
+    needle = 'json!({"phase":"idle","channel":"stable","prereleases":false,"interactive":false})'
+    # Initial client state must use the actual initialized updater snapshot,
+    # like production. A minimal historical fixture value lacks its actions.
+    start = text.index("record,store,local_origin:")
+    prefix, suffix = text[:start], text[start:]
+    assert prefix.count(needle) == 1
+    text = prefix.replace(needle, "avibe_desktop_lib::fixture_updates::snapshot(app.handle())") + suffix
+    needle = '    let fixture_action = serde_json::to_value(&request.action)'
+    assert text.count(needle) == 1
+    text = text.replace(needle, '    let fixture_label = window.label().to_owned();\n' + needle)
+    text = text.replace('"event":"reply","action":fixture_action', '"event":"reply","label":fixture_label,"action":fixture_action')
+    needle = ".invoke_handler(tauri::generate_handler![desktop_client_request])"
+    assert text.count(needle) == 1
+    text = text.replace(needle, """.invoke_handler(|invoke| {
+        if invoke.message.command() == "desktop_client_request" {
+            let handler: Box<dyn Fn(tauri::ipc::Invoke)->bool+Send+Sync> =
+                Box::new(tauri::generate_handler![desktop_client_request]);
+            handler(invoke)
+        } else { avibe_desktop_lib::fixture_updates::invoke(invoke) }
+    })""")
+    needle = '                        "state"=>emit('
+    assert text.count(needle) == 1
+    text = text.replace(needle, '''                        "update_control"=>avibe_desktop_lib::fixture_updates::control(&handle,command.clone()),
+''' + needle)
+    needle = "                if instance_client::presentation_request("
+    assert text.count(needle) == 1
+    text = text.replace(needle, '''                if view.label()=="update-popover" {
+                    return avibe_desktop_lib::fixture_updates::navigation(view,url);
+                }
+''' + needle)
+    # A missing explicit receiver must never fall back to the active Account.
+    needle = 'command["label"].as_str().and_then(|label|handle.get_webview(label)).or_else(||instance_client::active_webview(&handle))'
+    assert text.count(needle) == 1
+    text = text.replace(needle, 'match command["label"].as_str() { Some(label)=>handle.get_webview(label), None=>instance_client::active_webview(&handle) }')
+    example.write_text(text)
+    text = popup.read_text()
+    start = text.index("pub(crate) fn open(")
+    end = text.index("    let window = app.get_webview_window(UPDATE_POPOVER);", start)
+    admission = text[start:end]
+    assert admission.count("return false;") == 1
+    admission = admission.replace("return false;", '''
+        println!("{}",serde_json::json!({"event":"popup_open_rejected",
+            "physical_main":app.get_window(crate::MAIN_WINDOW).is_some(),
+            "webview_window_main":app.get_webview_window(crate::MAIN_WINDOW).is_some()}));
+        return false;''')
+    text = text[:start] + admission + text[end:]
+    assert text.count(".focused(true)") == 1
+    text = text.replace(".focused(true)", ".focused(false)")
+    text = text.replace("window.set_focus()", "crate::fixture_focus(|| window.set_focus())")
+    assert text.count(".position(x, y)") == 1
+    text = text.replace(".position(x, y)", ".position(-20000.0, -20000.0)")
+    # The real window remains parented. Suppress only the non-macOS placement.
+    text = text.replace('if !cfg!(target_os = "macos") {', 'if false {')
+    if "struct Popup {" in text:
+        for function, phase in [("fn spawn_build(", "build"), ("fn page_loaded(", "finished")]:
+            start = text.index(function)
+            point = text.index("tauri::async_runtime::spawn(async move {", start) + len("tauri::async_runtime::spawn(async move {")
+            text = text[:point] + f'\n        crate::fixture_updates::pause("{phase}").await;\n' + text[point:]
+        needle = "        let _ = window.show();"
+        assert text.count(needle) == 1
+        text = text.replace(needle, needle + '\n        println!("{}",serde_json::json!({"event":"popup_shown"}));')
+        needle = "            retire(&app, &bundle, &popup);\n        }\n    });"
+        assert text.count(needle) == 1
+        text = text.replace(needle, needle.replace("\n    });", '\n        println!("{}",serde_json::json!({"event":"popup_build_settled"}));\n    });'))
+        needle = "            let _ = window.destroy();\n            return;"
+        assert text.count(needle) == 1
+        text = text.replace(needle, '            println!("{}",serde_json::json!({"event":"popup_stale_finished"}));\n' + needle)
+    popup.write_text(text)
+    text = native.read_text()
+    needle = "        let reply = client.coordinator.request(request).await;"
+    if needle in text:
+        assert text.count(needle) == 1
+        text = text.replace(needle, needle + '\n        crate::fixture_updates::pause("client").await;')
+    native.write_text(text)
+    support = source / "desktop/src-tauri/examples/support/fixture_shell.rs"
+    text = support.read_text()
+    needle = '"pending": app.state::<Mutex<DeepLinks>>().lock().unwrap().has_pending(),'
+    assert text.count(needle) == 1
+    text = text.replace(needle, needle + '\n        "pending_update": app.state::<PendingDesktopUpdateOpen>().current(),')
+    needle = '            "updates" => assert!(super::open_desktop_updates(&handle)),'
+    assert text.count(needle) == 1
+    support.write_text(text.replace(needle, needle + '\n            "queue_updates" => super::request_desktop_updates(&handle),'))
+    return {"before": before, "after": {
+        str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest() for path in (*paths, support)
+    }}
 
 
 def adapt_shell(args, source):

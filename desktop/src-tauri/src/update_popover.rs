@@ -336,6 +336,13 @@ fn build(app: &AppHandle, bundle: &Url, popup: Arc<Popup>, initialization: Strin
     let Ok(window) = builder.build() else {
         return false;
     };
+    // macOS parent attachment orders a child above its parent even when the
+    // builder requested visible(false). Keep the actual receiver hidden while
+    // construction owns the serializer; only the fenced Finished may reveal it.
+    if window.hide().is_err() {
+        let _ = window.destroy();
+        return false;
+    }
     popup.bind(window.as_ref());
     // macOS places windows in one space of points, which the logical position
     // above already is. Windows places them on one physical desktop, where the
