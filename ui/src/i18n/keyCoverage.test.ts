@@ -1334,14 +1334,6 @@ describe('app i18n key coverage', () => {
         'remoteAuthorization.unavailable.body',
       ]),
     );
-    // DirectHome is native-only. Widening its props to every backend made the
-    // checker demand nonexistent Avibe Direct prose. Brand names themselves
-    // now belong to catalog metadata; exact/defaulted dedup stays covered by
-    // fixture.both in the collector test above.
-    for (const backend of ['claude', 'codex', 'opencode']) {
-      expect(referenced).toContainEqual({ key: `settings.models.direct.backend.${backend}.detail`, counted: false, listed: false, demand: 'exact' });
-    }
-    expect(referenced.some(({ key }) => key === 'settings.models.direct.backend.vibey.detail')).toBe(false);
   });
 
   // A name the bundles never had is not an existence gap: nothing here can tell

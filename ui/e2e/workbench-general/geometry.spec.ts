@@ -949,7 +949,6 @@ test.describe('general settings geometry', () => {
         const { denied, unexpectedModelReads } = await serveModelHub(page);
         const backends = ['vibey', 'claude', 'codex', 'opencode'];
         const labels = ['Vibey', 'Claude Code', 'Codex', 'OpenCode'];
-        let direct = false;
         await page.route('**/api/models/agents/*/chains', (route) => {
           expect(route.request().method()).toBe('GET');
           return route.fulfill({ json: { chains: [] } });
@@ -962,9 +961,8 @@ test.describe('general settings geometry', () => {
         await page.route(/\/api\/models\/agents(?:\?.*)?$/, (route) => {
           expect(route.request().method()).toBe('GET');
           return route.fulfill({ json: { agents: [...backends].reverse()
-            .filter((backend) => !direct || backend !== 'vibey')
             .map((backend) => ({
-              backend, cli_present: backend !== 'vibey', mode: direct ? 'direct' : 'hub',
+              backend, cli_present: backend !== 'vibey', mode: 'hub',
               menu_kind: 'fixed', catalog_models: [], named_agents: [],
             })) } });
         });
@@ -991,15 +989,6 @@ test.describe('general settings geometry', () => {
           await expect.poll(() => identity(icon)).toEqual(settingsIdentities[index]);
         }
         await page.screenshot({ path: `e2e/.artifacts/workbench-general/hub-${theme}-${viewport.width}.png`, fullPage: true });
-
-        direct = true;
-        await open(page, '/settings/models', { theme });
-        const nativeRows = page.locator('.model-hub-direct-row--backend');
-        await expect(nativeRows.locator('.model-hub-direct-backend-name')).toHaveText(labels.slice(1));
-        for (let index = 0; index < 3; index += 1) {
-          await expect.poll(() => identity(nativeRows.nth(index).locator('svg').first()))
-            .toEqual(settingsIdentities[index + 1]);
-        }
         expect(denied).toEqual([]);
         expect(unexpectedModelReads).toEqual([]);
       });

@@ -14,9 +14,7 @@ import {
   requireModelHub,
   requireRuntimeRunning,
 } from './support/fixtures';
-// `gateway` rather than `fixtures` for the auto `hubSurface` fixture it carries:
-// the Add API key button lives on the gateway surface, and an instance with no
-// sources shows the direct home instead. See support/gateway.ts.
+// `gateway` rather than `fixtures`: B6 routes through the suite's own sources.
 import { expect, test } from './support/gateway';
 import { fillApiKeyForm } from './support/hub';
 import { anthropicInventory } from './support/mock';

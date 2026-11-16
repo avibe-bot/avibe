@@ -4485,6 +4485,17 @@ thicker one.
 
 ### 1.8 Frame 09 `UVR97` — Direct-only home (the page with nothing adopted)
 
+*Amendment 2026-11-17 (removed):* this home is deleted; `/settings/models` always
+draws Frame 01, and a backend on its own login is a gateway card with 「交给模型网关管理」.
+The home could not be reached by a real `GET /api/models/agents` payload. Its display
+condition needs every listed backend in 直连, but the server lists one row per
+`MODEL_HUB_BACKENDS` (`ModelHubService.list_agents`), which includes Vibey, and Vibey is
+always on the gateway: the default supply is `mode="hub"`, loading rejects any other mode
+(`model_hub.agents.vibey.mode must be hub`), and a config written before Vibey existed
+gets a hub Vibey added on load (`ModelHubConfig.__post_init__`). Only fixtures that left
+Vibey out ever drew it. The rest of this section is kept as history; the switched-off row
+and the per-backend 「交给模型网关管理」 live on the gateway cards (§1.1).
+
 **The question it answers:** *nothing here is on a gateway and there are no sources —
 what is this page, and why would I want one?* It is the same page as 01, in the state
 where nothing is adopted. Upgrading into it is the common way to arrive; it is not the

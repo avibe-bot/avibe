@@ -1237,9 +1237,6 @@
         "unread": "模型网关状态不可用",
         "notStarted": "模型网关尚未就绪",
         "notInstalled": "模型网关组件未安装",
-        "allOff": "本机后端都已停用",
-        "allDirect_one": "{{count}} 个后端都由 Agent 管理",
-        "allDirect_other": "{{count}} 个后端都由 Agent 管理",
         "starting": "正在启动…",
         "unsupported": "当前平台不支持模型网关",
         "closed": {
@@ -1289,44 +1286,8 @@
         }
       },
       "direct": {
-        "card": {
-          "current": "当前：Agent 管理",
-          "current.sub": "每个 Agent 后端使用自己的登录，直接连接模型供应商。"
-        },
-        "pill": {
-          "direct": "Agent 管理"
-        },
-        "backend": {
-          "claude": {
-            "detail": "走它自己的 Claude 登录"
-          },
-          "codex": {
-            "detail": "走它自己的 ChatGPT 登录"
-          },
-          "opencode": {
-            "detail": "用它自己的模型配置"
-          }
-        },
         "action": {
-          "switchToGateway": "交给模型网关管理",
           "refreshAgents": "重新检测 Agent 后端"
-        },
-        "benefits": {
-          "title": "切换到模型网关，有三大益处",
-          "1": "额度用尽不断线",
-          "1.detail": "Claude 订阅用满时，自动切换到下一个供应商，对话继续。",
-          "2": "一个 Key 用于多个后端",
-          "2.detail": "同一个 API Key 可以同时给 Claude Code、Codex、OpenCode 用。",
-          "3": "模型搭配随心所欲",
-          "3.detail": "哪个后端使用哪个供应商的哪个模型，都可以任意搭配。"
-        },
-        "note": {
-          "perBackend": "逐个后端切换，互不影响——其余后端仍由 Agent 管理。切换后随时可以切换回来。"
-        },
-        "empty": {
-          "title": "这台机器上没有找到 Agent 后端",
-          "body": "装好 Claude Code、Codex 或 OpenCode 之后，回到这一页，它们会出现在这里。",
-          "install": "安装一个后端 CLI，然后重新加载这一页。"
         }
       },
       "gateway": {

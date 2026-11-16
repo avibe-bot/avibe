@@ -1237,9 +1237,6 @@
         "unread": "Model Hub status unavailable",
         "notStarted": "Model Hub not ready",
         "notInstalled": "Model Hub component not installed",
-        "allOff": "Local backends are all turned off",
-        "allDirect_one": "The only backend uses its own login",
-        "allDirect_other": "All {{count}} backends use their own login",
         "starting": "Starting…",
         "unsupported": "Model Hub isn't available on this platform",
         "closed": {
@@ -1289,44 +1286,8 @@
         }
       },
       "direct": {
-        "card": {
-          "current": "Currently: own login",
-          "current.sub": "Each agent backend uses its own login and connects to the vendor directly."
-        },
-        "pill": {
-          "direct": "Own login"
-        },
-        "backend": {
-          "claude": {
-            "detail": "Uses its own Claude login"
-          },
-          "codex": {
-            "detail": "Uses its own ChatGPT login"
-          },
-          "opencode": {
-            "detail": "Uses its own model configuration"
-          }
-        },
         "action": {
-          "switchToGateway": "Let Model Hub manage",
           "refreshAgents": "Detect Agent backends again"
-        },
-        "benefits": {
-          "title": "Switch to Model Hub and you gain three things",
-          "1": "Your session survives a quota running out",
-          "1.detail": "When your Claude subscription is exhausted, it moves to the next provider you added and the conversation continues.",
-          "2": "One key supplies several backends",
-          "2.detail": "The same API key can serve Claude Code, Codex and OpenCode at once.",
-          "3": "Mix and match models freely",
-          "3.detail": "Pair any backend with any model from any provider."
-        },
-        "note": {
-          "perBackend": "Switch one backend at a time — the others keep their own login. You can switch back at any time."
-        },
-        "empty": {
-          "title": "No agent backend was found on this machine",
-          "body": "Install Claude Code, Codex or OpenCode, come back to this page, and they will appear here.",
-          "install": "Install a backend CLI, then reload this page."
         }
       },
       "gateway": {

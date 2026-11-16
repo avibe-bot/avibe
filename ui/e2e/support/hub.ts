@@ -89,12 +89,6 @@ export class ModelHubPage {
     await this.tab(id).click();
   }
 
-  /** The home a machine with no sources and every backend on Direct lands on,
-   *  instead of an empty gateway. */
-  get directHome(): Locator {
-    return this.page.locator('.model-hub-direct');
-  }
-
   // --- Upstream sources -----------------------------------------------------
 
   get addApiKeyButton(): Locator {

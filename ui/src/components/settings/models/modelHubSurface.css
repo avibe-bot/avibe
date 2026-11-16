@@ -187,10 +187,6 @@
   --model-hub-source-chip-padding-y: 4px;
   --model-hub-source-chip-padding-x: 9px;
 
-  /* Direct-connection card. */
-  --model-hub-direct-gap: 16px;
-  --model-hub-direct-radius: 14px;
-
   /* Provider order drawer. */
   --model-hub-order-row-height: 58px;
   --model-hub-order-row-radius: 8px;
@@ -436,12 +432,6 @@
   border-color: color-mix(in srgb, var(--destructive) 30%, transparent);
   background: color-mix(in srgb, var(--destructive) 10%, transparent);
   color: var(--destructive-ink);
-}
-
-.model-hub-runtime-pill--direct {
-  border-color: var(--model-hub-wash-14);
-  background: var(--model-hub-wash-0a);
-  color: var(--muted);
 }
 
 .model-hub-runtime-dot {
@@ -1874,93 +1864,6 @@
   border-radius: var(--model-hub-guard-action-radius);
   font-size: var(--model-hub-guard-action-size);
   font-weight: 600;
-}
-
-.model-hub-direct {
-  display: flex;
-  flex-direction: column;
-  gap: var(--model-hub-direct-gap);
-}
-.model-hub-direct-grid {
-  --model-hub-direct-benefits-width: 452px;
-  gap: var(--model-hub-direct-gap);
-}
-.model-hub-direct-card {
-  --model-hub-direct-card-height: 330px;
-  min-height: var(--model-hub-direct-card-height);
-  border-radius: var(--model-hub-direct-radius);
-}
-.model-hub-direct-head {
-  --model-hub-direct-head-height: 56px;
-  min-height: var(--model-hub-direct-head-height);
-}
-.model-hub-direct-content {
-  --model-hub-direct-content-gap: 10px;
-  --model-hub-direct-content-padding: 12px;
-  padding: var(--model-hub-direct-content-padding);
-  gap: var(--model-hub-direct-content-gap);
-}
-.model-hub-direct-row {
-  --model-hub-direct-row-radius: 10px;
-  border: 1px solid var(--model-hub-wash-14);
-  border-radius: var(--model-hub-direct-row-radius);
-}
-.model-hub-direct-row--backend { height: 64px; }
-.model-hub-direct-backend-copy,
-.model-hub-direct-benefit-copy {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-}
-.model-hub-direct-backend-name { font-size: 12.5px; font-weight: 600; }
-.model-hub-direct-backend-detail { color: var(--model-hub-muted-cc); font-size: 11px; line-height: normal; }
-.model-hub-direct-benefit-title-row { width: 100%; }
-.model-hub-direct-benefit-detail { width: 100%; color: var(--muted); font-size: 11.5px; line-height: 19px; }
-.model-hub-direct-note {
-  --model-hub-direct-note-height: 49px;
-  min-height: var(--model-hub-direct-note-height);
-  padding: 14px 18px;
-  border-radius: var(--model-hub-direct-radius);
-  border-color: var(--model-hub-wash-14);
-  background: var(--model-hub-wash-06);
-  color: var(--muted);
-}
-.model-hub-direct-kind-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 5px;
-  border-color: var(--model-hub-wash-14);
-  background: var(--model-hub-wash-0a);
-  color: var(--muted);
-}
-.model-hub-direct-switch { border-color: var(--model-hub-wash-24); background: var(--model-hub-wash-0a); }
-
-.model-hub-direct-empty {
-  display: flex;
-  min-height: 330px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  text-align: center;
-}
-
-.model-hub-direct-empty h2 {
-  color: var(--foreground);
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.model-hub-direct-empty p,
-.model-hub-direct-empty span {
-  max-width: 520px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 18px;
 }
 
 .model-hub-order-overlay { background: var(--model-hub-scrim); }
@@ -3419,12 +3322,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   line-height: 1.6;
 }
 
-@media (min-width: 1024px) {
-  .model-hub-direct-grid {
-    grid-template-columns: minmax(0, 1fr) var(--model-hub-direct-benefits-width);
-  }
-}
-
 /* Four cost-bearing cards need the full width; between tablet and desktop they pair up. */
 @media (max-width: 1100px) {
   .model-hub-usage-stat-grid--priced { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3437,7 +3334,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   .model-hub-source-bar { align-items: center; }
   .model-hub-source-toolbar > div:last-child { flex-wrap: wrap; }
   .model-hub-source-action { width: auto; flex: 1 1 0; }
-  .model-hub-direct-card { min-height: 0; }
   /* Stacked, each cell carries its own label, so the column gutter becomes a
    * line gap and 16px of it would read as four separate rows. */
   .model-hub-usage-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
