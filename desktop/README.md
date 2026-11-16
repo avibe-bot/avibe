@@ -204,18 +204,25 @@ development or ad-hoc build, or one signed without that entitlement, installs
 nothing and behaves exactly as before. Windows and Linux do not compile the
 module.
 
-The pure rules are unit-tested in the module, the wiring in
-`src-tauri/tests/shell_boundaries.rs`, and the behavior with real WebKit
-windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs on macOS.
-The probe plays the Workbench and the sandbox from two loopback origins with a
-disposable data store; the test-only `vault-window-probe` feature exists to
-let it name that origin, and release packaging never enables it. Locally:
+The pure rules are unit-tested in the module. The behavior is checked with
+real WebKit windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs
+on macOS. The probe plays the Workbench and the sandbox from two loopback
+origins with a disposable data store. It compiles the module's source file into
+itself, so the library exports nothing for it, and enters one step below the
+signature check, which no test executable can pass; a second run goes through
+the shell's own install and expects no marker and no window. Locally:
 
 ```sh
-cargo build -p avibe-desktop --example vault_window_probe --features vault-window-probe
+cargo build -p avibe-desktop --example vault_window_probe
 python3 src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_probe \
   --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log /tmp/vault-window-probe.log
 ```
+
+The two calls that connect the module to the main window (`install` after the
+window is built, `opener_navigated` when its page starts loading) are in
+`build_main_window` and have no automated check of their own. Without the
+first there is no marker and the browser hand-off stays; without the second a
+sandbox window stays open across a Workbench reload.
 
 Without `--set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` the probe never activates the
 app. A real passkey ceremony in this window is not covered by any automated

@@ -98,11 +98,11 @@ const MAX_CHILDREN: usize = 4;
 
 /// The one origin a child may show.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Origin {
-    scheme: String,
-    host: String,
+pub(crate) struct Origin {
+    pub(crate) scheme: String,
+    pub(crate) host: String,
     /// `None` is the scheme's default port.
-    port: Option<u16>,
+    pub(crate) port: Option<u16>,
 }
 
 impl Origin {
@@ -132,9 +132,10 @@ impl Origin {
 }
 
 #[derive(Clone)]
-struct Policy {
-    origin: Origin,
-    reserve_deadline: Duration,
+pub(crate) struct Policy {
+    pub(crate) origin: Origin,
+    /// How long a child may exist without a document of `origin`.
+    pub(crate) reserve_deadline: Duration,
 }
 
 /// What the opener asked a new window for.
@@ -239,34 +240,11 @@ pub fn install(window: &WebviewWindow) {
     );
 }
 
-/// The hermetic WebView probe has no way to serve `https://sandbox.avibe.bot`,
-/// so it names a loopback origin and a short deadline instead. Release
-/// packaging never enables the feature.
-#[cfg(feature = "vault-window-probe")]
-pub fn install_for_probe(window: &WebviewWindow, origin: &str, reserve_deadline: Duration) {
-    let url = Url::parse(origin).expect("probe origin");
-    assert!(
-        url.host().is_some_and(|host| match host {
-            url::Host::Domain(name) => name == "localhost",
-            url::Host::Ipv4(address) => address.is_loopback(),
-            url::Host::Ipv6(address) => address.is_loopback(),
-        }),
-        "the probe origin must be loopback"
-    );
-    install_with(
-        window,
-        Policy {
-            origin: Origin {
-                scheme: url.scheme().to_owned(),
-                host: url.host_str().expect("probe host").to_owned(),
-                port: url.port(),
-            },
-            reserve_deadline,
-        },
-    );
-}
-
-fn install_with(window: &WebviewWindow, policy: Policy) {
+/// [`install`] without its admission, for an origin the caller names. The
+/// shell's only caller is `install`. The hermetic WebView probe compiles this
+/// file into itself and enters here with a loopback origin, because it can
+/// neither serve `https://sandbox.avibe.bot` nor carry the entitlement.
+pub(crate) fn install_with(window: &WebviewWindow, policy: Policy) {
     let app = window.app_handle().clone();
     let events = window.clone();
     let _ = window.with_webview(move |platform| {

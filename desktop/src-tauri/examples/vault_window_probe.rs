@@ -10,9 +10,16 @@
 //! keyboard on a desktop in use. `AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` also
 //! activates the app and checks which window is key.
 //!
-//! `AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1` runs the shell's own install instead of
-//! the probe's. This executable is signed ad hoc, as a development build is, so
-//! it must come out exactly as a shell without the feature.
+//! The shell's module is compiled into this executable from its source file, so
+//! the probe runs the shipping code without the library exporting anything for
+//! it. The shell installs the window only for a build whose signature carries
+//! an Apple-issued entitlement, which no test executable can have, and only for
+//! `https://sandbox.avibe.bot`, which no test can serve. The probe therefore
+//! enters one step below that admission and names a loopback origin.
+//!
+//! `AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1` runs the shell's own install, admission
+//! included. This executable is signed ad hoc, as a development build is, so it
+//! must come out exactly as a shell without the feature.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
@@ -21,6 +28,10 @@ fn main() {}
 fn main() {
     probe::run();
 }
+
+#[cfg(target_os = "macos")]
+#[path = "../src/macos_vault_window.rs"]
+mod macos_vault_window;
 
 #[cfg(target_os = "macos")]
 mod probe {
@@ -41,6 +52,8 @@ mod probe {
     use objc2_web_kit::WKWebView;
     use serde_json::{json, Value};
     use tauri::{webview::NewWindowResponse, AppHandle, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+
+    use crate::macos_vault_window;
 
     const RESERVE_DEADLINE: Duration = Duration::from_secs(3);
     const CHILD_CLASS: &std::ffi::CStr = c"AvibeVaultSandboxWebView";
@@ -200,18 +213,24 @@ addEventListener('message', (event) => {
                     })
                     .on_page_load(|window, payload| {
                         if payload.event() == tauri::webview::PageLoadEvent::Started {
-                            avibe_desktop_lib::vault_window_opener_navigated(&window);
+                            macos_vault_window::opener_navigated(&window);
                         }
                     })
                     .build()
                     .unwrap();
                 if shipping {
-                    avibe_desktop_lib::install_vault_window(&main);
+                    macos_vault_window::install(&main);
                 } else {
-                    avibe_desktop_lib::install_vault_window_for_probe(
+                    macos_vault_window::install_with(
                         &main,
-                        &format!("http://localhost:{port}"),
-                        RESERVE_DEADLINE,
+                        macos_vault_window::Policy {
+                            origin: macos_vault_window::Origin {
+                                scheme: "http".to_owned(),
+                                host: "localhost".to_owned(),
+                                port: Some(port),
+                            },
+                            reserve_deadline: RESERVE_DEADLINE,
+                        },
                     );
                 }
                 let handle = handle.clone();

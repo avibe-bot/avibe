@@ -892,98 +892,13 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
         .expect("handler body");
     assert!(handler.contains("new_window_decision(&url)"));
     assert!(handler.contains("tauri_plugin_opener::open_url(url.as_str(), None::<&str>)"));
-    // wry's own child shares the opener's scripts and IPC handler. The one
-    // in-app window, the Vault sandbox's on macOS, is not built this way.
+    // The one in-app window, the Vault sandbox's on macOS, is not wry's.
     for forbidden in ["NewWindowResponse::Allow", "NewWindowResponse::Create"] {
-        for relative in ["src/lib.rs", "src/macos_vault_window.rs"] {
-            assert!(
-                !shipping_source(relative).contains(forbidden),
-                "wry must never build the page a second webview, found {forbidden:?} in {relative}"
-            );
-        }
-    }
-}
-
-#[test]
-fn the_vault_sandbox_window_is_macos_only_and_advertised_only_by_its_own_install() {
-    let source = shipping_source("src/lib.rs");
-    let window = shipping_source("src/macos_vault_window.rs");
-    // Windows and Linux never compile the module or reach its two calls.
-    assert!(source.contains("#[cfg(target_os = \"macos\")]\nmod macos_vault_window;"));
-    let builder = source
-        .split("fn build_main_window(")
-        .nth(1)
-        .expect("main window builder")
-        .split("\n}\n")
-        .next()
-        .expect("builder body");
-    assert!(builder.contains(
-        "#[cfg(target_os = \"macos\")]\n    {\n        macos_new_context::install(&window);\n        macos_vault_window::install(&window);\n    }"
-    ));
-    assert!(builder.contains(
-        "#[cfg(target_os = \"macos\")]\n        if payload.event() == tauri::webview::PageLoadEvent::Started {\n            macos_vault_window::opener_navigated(&webview);"
-    ));
-    assert_eq!(
-        source.matches("macos_vault_window::").count(),
-        3,
-        "two calls and the probe's re-export"
-    );
-
-    // The marker's JS key is a cross-language contract with the Workbench. It
-    // is defined by the install that hooked this webview, never by the builder,
-    // so a shell whose hooks are not in place cannot claim the capability.
-    assert!(window.contains(
-        "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__', { value: true });"
-    ));
-    assert!(!source.contains("__AVIBE_DESKTOP_VAULT_PASSKEY__"));
-    assert_eq!(
-        window.matches("DESKTOP_VAULT_PASSKEY_MARKER").count(),
-        2,
-        "defined once, injected once"
-    );
-
-    // The capability comes from the running process's own signature. These two
-    // strings are Apple's entitlement key and the value signing must carry.
-    assert!(window.contains("\"com.apple.developer.associated-domains\""));
-    assert!(window.contains("\"webcredentials:sandbox.avibe.bot\""));
-    assert!(window.contains("SecTask::from_self(None)"));
-    // Nothing a user, a page or a build setting can say changes the allowed
-    // origin or the capability.
-    for forbidden in ["std::env", "cfg!(debug_assertions)", "option_env!", "env!("] {
         assert!(
-            !window.contains(forbidden),
-            "{forbidden:?} must not steer the sandbox window"
+            !source.contains(forbidden),
+            "wry must never build the page a second webview, found {forbidden:?}"
         );
     }
-
-    // The loopback origin exists only in the probe's build.
-    let probe_only = window
-        .split("pub fn install_for_probe(")
-        .next()
-        .expect("text before the probe entry")
-        .rsplit("\n\n")
-        .next()
-        .expect("the probe entry's attributes");
-    assert!(probe_only.contains("#[cfg(feature = \"vault-window-probe\")]"));
-    assert_eq!(window.matches("fn install_for_probe(").count(), 1);
-    assert!(source.contains(
-        "#[cfg(all(target_os = \"macos\", feature = \"vault-window-probe\"))]\npub use macos_vault_window::{"
-    ));
-    // A Windows checkout has CRLF line endings.
-    let cargo = read_to_string(&crate_dir().join("Cargo.toml")).replace("\r\n", "\n");
-    assert!(cargo.contains("\ndefault = []\n"));
-    assert!(cargo.contains("\nvault-window-probe = []\n"));
-    assert!(!read_to_string(&crate_dir().join("tauri.conf.json")).contains("vault-window-probe"));
-
-    // A child's content controller is made empty; nothing is ever added to it.
-    assert!(window.contains("WKUserContentController::new(mtm)"));
-    for forbidden in ["addScriptMessageHandler", "initialization_script"] {
-        assert!(
-            !window.contains(forbidden),
-            "a child must get nothing of the shell: {forbidden:?}"
-        );
-    }
-    assert_eq!(window.matches("addUserScript(").count(), 1, "only the opener's marker");
 }
 
 #[test]

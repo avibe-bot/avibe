@@ -134,15 +134,19 @@ the sandbox's window goes to the browser with every other link.
 
 - Unit tests in the module: the origin rule, which requests open a window, what
   a child may load, when it is shown, and the marker's two conditions.
-- `desktop/src-tauri/tests/shell_boundaries.rs`: the macOS-only wiring, the
-  marker's key, the entitlement strings, and that the loopback origin exists
-  only behind the test feature.
 - `desktop/src-tauri/examples/vault_window_probe.rs`, run by CI on macOS: real
   WebKit windows on two loopback origins with a disposable data store. It covers
   each rule above, both ways a window is requested (the Workbench's reservation
   and the iframe's own window), the opener link in both directions, every close
-  path, and which window is key. A second run uses the shell's own install on
-  the unsigned test executable and expects no marker and no window.
+  path, and which window is key. The probe compiles the module's source file
+  into itself and enters one step below the signature check, so the library
+  exports nothing for tests and has no test-only feature. A second run uses the
+  shell's own install on the unsigned test executable and expects no marker and
+  no window.
+- The two calls in `build_main_window` that connect the module to the main
+  window have no automated check. Removing the install leaves the browser
+  hand-off; removing the navigation hook leaves a sandbox window open across a
+  Workbench reload. Both show in the manual check on a signed build.
 
 ## Not verified
 

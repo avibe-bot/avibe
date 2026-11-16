@@ -52,11 +52,6 @@ mod macos_terminate;
 mod macos_title_bar;
 #[cfg(target_os = "macos")]
 mod macos_vault_window;
-#[cfg(all(target_os = "macos", feature = "vault-window-probe"))]
-pub use macos_vault_window::{
-    install as install_vault_window, install_for_probe as install_vault_window_for_probe,
-    opener_navigated as vault_window_opener_navigated,
-};
 
 use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
 #[cfg(not(feature = "bundled-runtime"))]

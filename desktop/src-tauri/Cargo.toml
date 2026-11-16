@@ -18,13 +18,6 @@ bundled-runtime = []
 # Test-only builds may redirect Computer Use state and assets to a hermetic lane.
 # Release packaging never enables this feature.
 computer-use-test-overrides = []
-# Test-only builds may point the Vault sandbox window at a loopback origin for
-# the hermetic WebView probe. Release packaging never enables this feature.
-vault-window-probe = []
-
-[[example]]
-name = "vault_window_probe"
-required-features = ["vault-window-probe"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
