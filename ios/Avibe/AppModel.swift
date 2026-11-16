@@ -170,6 +170,13 @@ enum AppRoute: Equatable {
     }
 }
 
+/// A request to open an instance page that arrived before the bootstrap
+/// settled. Only the latest waits: a newer one replaces it.
+private enum PendingInstanceOpen {
+    case pushTap(PushNotificationTap)
+    case selectedInstance(path: String)
+}
+
 private struct PendingPushOpened {
     let id: String
     let accountID: String
@@ -264,7 +271,11 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] = []
     private var hasCompletedBootstrap = false
-    private var pendingPushTap: PushNotificationTap?
+    private var pendingInstanceOpen: PendingInstanceOpen?
+    /// Advances with each open request after the bootstrap, so a shortcut
+    /// that waited for a selection-keeping operation does not open after a
+    /// newer request.
+    private var instanceOpenRequest = 0
     private var pendingPushOpened: PendingPushOpened?
     private var pendingPushOpenedExpiryTask: Task<Void, Never>?
 
@@ -576,9 +587,14 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         hasCompletedBootstrap = true
-        if let pendingPushTap {
-            self.pendingPushTap = nil
-            handlePushTap(pendingPushTap)
+        if let pendingInstanceOpen {
+            self.pendingInstanceOpen = nil
+            switch pendingInstanceOpen {
+            case .pushTap(let tap):
+                handlePushTap(tap)
+            case .selectedInstance(let path):
+                openSelectedInstance(path: path)
+            }
         }
     }
 
@@ -1382,27 +1398,113 @@ final class AppModel: ObservableObject {
 
     private func handlePushTap(_ tap: PushNotificationTap) {
         guard hasCompletedBootstrap else {
-            pendingPushTap = tap
+            pendingInstanceOpen = .pushTap(tap)
             return
         }
-        guard
-            let account = sessionCoordinator.currentAccount,
-            account.id == tap.accountID,
-            let instance = sessionCoordinator.currentInstances.first(where: {
-                $0.available
-                    && WebOrigin(url: $0.url)?.serialized == tap.instanceOrigin
-            }),
-            Self.isSafeInstancePath(tap.url)
-        else {
-            clearPendingPushOpened()
+        instanceOpenRequest += 1
+        guard openInstance(
+            accountID: tap.accountID,
+            instanceOrigin: tap.instanceOrigin,
+            path: tap.url
+        ) else {
             showInstancePicker()
             return
         }
+    }
+
+    /// Opens the selected instance at `path` (a same-origin path, query,
+    /// and fragment) the way a notification tap opens a chat: the instance
+    /// opens again and its page receives `push.opened` once it has loaded.
+    /// App Shortcuts use it. Signed out, with no instance selected, with the
+    /// selected instance unavailable, or while the account may not leave the
+    /// account page (account deletion), nothing changes: the App keeps the
+    /// screen it shows, with no prompt.
+    ///
+    /// A refresh or push-management request the App runs on its own (as on
+    /// a return to the foreground, which is when a shortcut arrives) keeps
+    /// the selection but holds the account. The open waits for it, up to
+    /// `selectionKeepingWait`, then opens once, unless meanwhile a newer
+    /// open was requested or the screen, the runtime, the account, or the
+    /// selection changed: the user has moved on.
+    func openSelectedInstance(path: String) {
+        guard hasCompletedBootstrap else {
+            pendingInstanceOpen = .selectedInstance(path: path)
+            return
+        }
+        instanceOpenRequest += 1
+        guard sessionCoordinator.isHeldBySelectionKeepingOperation else {
+            openSelectedInstanceNow(path: path)
+            return
+        }
+        let request = instanceOpenRequest
+        let route = route
+        let identity = runtimeIdentity
+        let accountID = sessionCoordinator.currentAccount?.id
+        let selected = sessionCoordinator.selectedInstance
+        Task { [weak self] in
+            await self?.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            guard
+                let self,
+                self.instanceOpenRequest == request,
+                self.route == route,
+                self.runtimeIdentity == identity,
+                self.sessionCoordinator.currentAccount?.id == accountID,
+                self.sessionCoordinator.selectedInstance == selected
+            else {
+                return
+            }
+            self.openSelectedInstanceNow(path: path)
+        }
+    }
+
+    /// How long a shortcut waits for a selection-keeping operation. Someone
+    /// who pressed a button expects it to act within a few seconds; a
+    /// session read or push update normally ends well within this.
+    static let selectionKeepingWait: Duration = .seconds(5)
+
+    private func openSelectedInstanceNow(path: String) {
+        guard
+            let account = sessionCoordinator.currentAccount,
+            let instance = sessionCoordinator.selectedInstance,
+            let origin = WebOrigin(url: instance.url)
+        else {
+            return
+        }
+        openInstance(
+            accountID: account.id,
+            instanceOrigin: origin.serialized,
+            path: path
+        )
+    }
+
+    /// Selects the instance at `instanceOrigin` for `accountID` and keeps
+    /// `path` for its page. `false` when it is not this account's available
+    /// instance, the path is not a same-origin path, or the selection is
+    /// refused; the screen is then unchanged.
+    @discardableResult
+    private func openInstance(
+        accountID: String,
+        instanceOrigin: String,
+        path: String
+    ) -> Bool {
+        guard
+            let account = sessionCoordinator.currentAccount,
+            account.id == accountID,
+            let instance = sessionCoordinator.currentInstances.first(where: {
+                $0.available
+                    && WebOrigin(url: $0.url)?.serialized == instanceOrigin
+            }),
+            Self.isSafeInstancePath(path)
+        else {
+            return false
+        }
         let pending = PendingPushOpened(
             id: UUID().uuidString,
-            accountID: tap.accountID,
-            instanceOrigin: tap.instanceOrigin,
-            url: tap.url,
+            accountID: accountID,
+            instanceOrigin: instanceOrigin,
+            url: path,
             runtimeIdentity: runtimeIdentity + 1,
             createdAt: pushOpenedNow()
         )
@@ -1420,8 +1522,9 @@ final class AppModel: ObservableObject {
             _ = try sessionCoordinator.selectInstance(id: instance.id)
         } catch {
             clearPendingPushOpened()
-            showInstancePicker()
+            return false
         }
+        return true
     }
 
     private func expirePendingPushOpened(id: String) {
