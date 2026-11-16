@@ -969,9 +969,10 @@ fn the_vault_sandbox_window_is_macos_only_and_advertised_only_by_its_own_install
     assert!(source.contains(
         "#[cfg(all(target_os = \"macos\", feature = \"vault-window-probe\"))]\npub use macos_vault_window::{"
     ));
-    let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
-    assert!(cargo.contains("default = []\n"));
-    assert!(cargo.contains("vault-window-probe = []\n"));
+    // A Windows checkout has CRLF line endings.
+    let cargo = read_to_string(&crate_dir().join("Cargo.toml")).replace("\r\n", "\n");
+    assert!(cargo.contains("\ndefault = []\n"));
+    assert!(cargo.contains("\nvault-window-probe = []\n"));
     assert!(!read_to_string(&crate_dir().join("tauri.conf.json")).contains("vault-window-probe"));
 
     // A child's content controller is made empty; nothing is ever added to it.
