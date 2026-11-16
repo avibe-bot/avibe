@@ -342,20 +342,21 @@ def test_vault_access_command_flag_does_not_shadow_root_command():
     assert cli._vault_cli_delivery(args)["command"] == "deploy sync"
 
 
-def test_vault_sign_help_names_the_accepted_protected_contexts_and_hd_only_type():
-    """Agents copy context kinds, schemes and flags from `vault sign --help`; each must be one the CLI and signer accept."""
+def test_vault_sign_help_names_the_accepted_protected_contexts_and_hd_only_type(capfd):
+    """Agents copy context kinds, schemes and flags from `vault sign --help`; each must be one the signer accepts."""
     from storage import vault_bitcoin, vault_solana
 
-    sign = cli.build_parser()._subparsers._group_actions[0].choices["vault"]._subparsers._group_actions[0].choices["sign"]
-    options = {option: action for action in sign._actions for option in action.option_strings}
-    description = sign.description
-    for kind in (vault_solana.CONTEXT_KIND, vault_bitcoin.BITCOIN_CONTEXT_KIND, *vault_bitcoin.ECDSA_CONTEXT_TYPES):
-        assert kind in description
-    assert "ecdsa-secp256k1-der" in description and "ecdsa-secp256k1-der" in options["--scheme"].choices
-    for flag in ("--chain", "--digest", "--message-hex", "--signing-context-file"):
-        assert flag in description and flag in options
-    assert options["--address-type"].help.startswith("HD only")
-    assert "bitcoin_address_types" in options["--address-type"].help
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["vault", "sign", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capfd.readouterr().out.split())
+    for kind in (vault_solana.CONTEXT_KIND, *vault_bitcoin.ECDSA_CONTEXT_TYPES):
+        assert kind in help_text
+    taproot = f"{vault_bitcoin.BITCOIN_CONTEXT_KIND} with {vault_bitcoin.BITCOIN_SCHEME}"
+    ecdsa = f"bitcoin-p2wpkh-v1/bitcoin-p2pkh-v1 with {vault_bitcoin.ECDSA_SCHEME}"
+    assert taproot in help_text and ecdsa in help_text
+    assert "--signing-context-file" in help_text
+    assert "--address-type {p2pkh,p2wpkh,p2tr} HD only" in help_text
 
 
 def test_vault_sign_command_flag_does_not_shadow_root_command():

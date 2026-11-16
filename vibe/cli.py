@@ -20147,9 +20147,9 @@ def build_parser():
         description=(
             "HD needs --chain. secp256k1 takes --digest; Solana takes exact --message-hex, not a hash. "
             "Protected/ask-first keys need approval (Solana: use a durable nonce; the caller creates and funds the nonce account). "
-            'Protected contexts: {"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex; '
-            "bitcoin-taproot-keypath-v1, or bitcoin-p2wpkh-v1/bitcoin-p2pkh-v1 with ecdsa-secp256k1-der "
-            "(p2pkh holds its parent tx: use --signing-context-file). Details: use-avibe-vault."
+            'Protected contexts include {"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex; '
+            "bitcoin-taproot-keypath-v1 with schnorr-secp256k1-bip341-keypath; bitcoin-p2wpkh-v1/bitcoin-p2pkh-v1 "
+            "with ecdsa-secp256k1-der (p2pkh holds its parent tx: use --signing-context-file)."
         ),
         epilog=(
             "Example ($MESSAGE_HEX: unsigned serialized message):\n"
@@ -20186,11 +20186,11 @@ def build_parser():
     vault_signing_context_input = vault_sign_parser.add_mutually_exclusive_group()
     vault_signing_context_input.add_argument(
         "--signing-context-json", metavar="JSON",
-        help="Protected signing context JSON",
+        help="Protected context JSON",
     )
     vault_signing_context_input.add_argument(
         "--signing-context-file", metavar="PATH",
-        help="Same context: regular UTF-8 file, max 2,162,688 bytes",
+        help="Same, as a regular UTF-8 file (max 2,162,688 bytes)",
     )
     vault_sign_parser.add_argument(
         "--no-callback",
