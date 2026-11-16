@@ -990,6 +990,17 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(builder.contains(".initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)"));
     assert!(builder.contains(".initialization_script(DESKTOP_NOTIFICATIONS_MARKER)"));
     assert!(builder.contains(".initialization_script(window_return::DESKTOP_FOCUS_MARKER)"));
+    let child_builder = source
+        .split("fn build_main_child(")
+        .nth(1)
+        .expect("Runtime child builder")
+        .split("\n}\n")
+        .next()
+        .expect("child builder body");
+    assert!(
+        child_builder.contains(".initialization_script(window_return::DESKTOP_FOCUS_MARKER)"),
+        "a promoted Runtime must advertise the same focus command as the initial Workbench"
+    );
     assert!(shipping_source("src/window_return.rs").contains(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_FOCUS__', { value: true })"
     ));
@@ -1242,15 +1253,21 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
 }
 
 #[test]
-fn remote_auxiliary_controls_remain_without_a_limitation_menu() {
+fn remote_auxiliary_menu_uses_plain_copy_and_preserves_availability_controls() {
     let source = shipping_source("src/lib.rs");
     assert!(
-        !source.contains("instance-auxiliary-limitation") && !source.contains("auxiliaryIncomplete"),
-        "native menus must not present the retired remote auxiliary notice"
+        source.contains("instance_client::native_copy(\"auxiliaryIncomplete\")")
+            && source.contains("MenuItem::with_id(app, \"instance-auxiliary-limitation\", label, false, None::<&str>)"),
+        "the native limitation item must consume the shared localized copy without becoming an action"
     );
-    for locale in ["en", "zh"] {
+    for (locale, expected) in [
+        ("en", "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them."),
+        ("zh", "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。"),
+    ] {
         let catalog = read_json(crate_dir().join(format!("../../ui/src/i18n/{locale}.json")));
-        assert!(catalog["desktopClient"].get("auxiliaryIncomplete").is_none());
+        let note = catalog["desktopClient"]["auxiliaryIncomplete"].as_str().expect("remote limitation copy");
+        assert_eq!(note, expected);
+        assert!(!note.contains("Phase 1") && !note.contains("第一阶段"));
     }
     let refresh = source
         .split("fn refresh_native_controls(")
@@ -1262,6 +1279,9 @@ fn remote_auxiliary_controls_remain_without_a_limitation_menu() {
     assert!(refresh.contains("let local = instance_client::local_selected(&handle);"));
     assert!(refresh.contains("menus.notifications.set_enabled(local)"));
     assert!(refresh.contains("pet::set_native_available(&handle, local)"));
+    assert!(refresh.contains("menus.auxiliary_visible.swap(!local, Ordering::SeqCst) == local"));
+    assert!(refresh.contains("if local {\n                    let _ = menus.tray.remove(note);"));
+    assert!(refresh.contains("} else {\n                    let _ = menus.tray.append(note);"));
 }
 
 #[test]
@@ -1780,9 +1800,26 @@ fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() 
         .split("\n}\n")
         .next()
         .expect("focus command body");
-    assert!(command.contains("pub fn focus_main_window(window: WebviewWindow) -> Result<(), String>"));
-    assert!(command.contains("if !crate::pet::is_workbench(&window)"));
-    for forbidden in ["navigate", "eval(", "emit", "get_webview_window"] {
+    assert!(command.contains("pub fn focus_main_window(webview: Webview) -> Result<(), String>"));
+    let admission = command
+        .find("if !crate::pet::is_workbench(&webview)")
+        .expect("actual caller admission");
+    let physical = command
+        .find("let window = webview.window();")
+        .expect("caller's physical parent");
+    let focus = command
+        .find("window.is_focused()")
+        .expect("physical window focus observation");
+    assert!(admission < physical && physical < focus);
+    for forbidden in [
+        "navigate",
+        "eval(",
+        "emit",
+        "get_webview_window",
+        "get_window",
+        "ensure_main_window",
+        "focus_or_restore_main_window",
+    ] {
         assert!(!command.contains(forbidden), "the focus command must not {forbidden}");
     }
 }

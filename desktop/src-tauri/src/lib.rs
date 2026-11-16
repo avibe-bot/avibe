@@ -494,6 +494,8 @@ struct NativeMenus {
     settings: MenuItem<tauri::Wry>,
     login: CheckMenuItem<tauri::Wry>,
     notifications: CheckMenuItem<tauri::Wry>,
+    auxiliary_note: Option<MenuItem<tauri::Wry>>,
+    auxiliary_visible: AtomicBool,
     #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     computer_use: CheckMenuItem<tauri::Wry>,
     stop_present: AtomicBool,
@@ -599,6 +601,10 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         submenu.insert(&computer_use, 0)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
+    let auxiliary_note = instance_client::native_copy("auxiliaryIncomplete")
+        .filter(|_| instance_client::enabled(app))
+        .map(|label| MenuItem::with_id(app, "instance-auxiliary-limitation", label, false, None::<&str>))
+        .transpose()?;
     if instance_client::enabled(app) {
         for (id, key) in [
             ("desktop-client-account", "accountService"),
@@ -629,6 +635,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         settings,
         login,
         notifications,
+        auxiliary_note,
+        auxiliary_visible: AtomicBool::new(false),
         #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
         computer_use,
         stop_present: AtomicBool::new(false),
@@ -822,6 +830,15 @@ fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>)
         let local = instance_client::local_selected(&handle);
         let _ = menus.notifications.set_enabled(local);
         pet::set_native_available(&handle, local);
+        if let Some(note) = &menus.auxiliary_note {
+            if menus.auxiliary_visible.swap(!local, Ordering::SeqCst) == local {
+                if local {
+                    let _ = menus.tray.remove(note);
+                } else {
+                    let _ = menus.tray.append(note);
+                }
+            }
+        }
         let shell = handle.state::<Shell>();
         let activity = shell.activity.load(Ordering::SeqCst);
         let owned = stop_is_available(shell.host.has_owned_runtime(), activity);
@@ -1969,6 +1986,7 @@ fn build_main_child(
             .initialization_script(pet::DESKTOP_PET_MARKER)
             .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
             .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+            .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
             .initialization_script(format!(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
         serde_json::to_string(&app.package_info().version.to_string()).ok()?
