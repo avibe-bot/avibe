@@ -7577,7 +7577,7 @@
     "accountService": "avibe.bot",
     "switchInstance": "Switch instance",
     "localRemoteAccess": "Remote access to this Mac",
-    "auxiliaryIncomplete": "Mini and native notifications are unavailable for remote instances in Phase 1. Return to this Mac to use them.",
+    "auxiliaryIncomplete": "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them.",
     "signOut": "Sign out",
     "signOutBody": "Sign out on this Desktop and return to this Mac. Registration, remote access preferences and running tasks are kept.",
     "localVersion": "Local Desktop version {{version}}",
