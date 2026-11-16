@@ -253,7 +253,7 @@ final class AppModel: ObservableObject {
         // the selection, so it does not abandon the browser.
         guard
             route == .browser(runtime),
-            sessionCoordinator.keepsSelectedRuntime(runtime)
+            sessionCoordinator.isCurrentRuntime(runtime)
         else {
             recordRuntimeReleaseBarrier(
                 controller.invalidateForAccountTransition()
@@ -420,7 +420,7 @@ final class AppModel: ObservableObject {
             }
             return self.runtimeIdentity == identity
                 && self.route == .loading
-                && self.sessionCoordinator.keepsSelectedRuntime(runtime)
+                && self.sessionCoordinator.isCurrentRuntime(runtime)
         }
         Task { [weak self] in
             await directPathController.prepareRoute(
@@ -431,7 +431,7 @@ final class AppModel: ObservableObject {
                 // Something newer took the route while this one waited.
                 return
             }
-            guard self.sessionCoordinator.keepsSelectedRuntime(runtime) else {
+            guard self.sessionCoordinator.isCurrentRuntime(runtime) else {
                 // The selection ended underneath; do not leave the spinner.
                 self.route = .onboarding(.instances)
                 return
@@ -476,7 +476,7 @@ final class AppModel: ObservableObject {
         if let deferred = deferredOpen {
             if runtimeIdentity != deferred.identity || route != .loading {
                 deferredOpen = nil
-            } else if !sessionCoordinator.keepsSelectedRuntime(deferred.runtime) {
+            } else if !sessionCoordinator.isCurrentRuntime(deferred.runtime) {
                 // The selection ended underneath; do not leave the spinner.
                 // A push update in flight (one the open or the return to
                 // the foreground started) keeps it, as in `openRuntime`.
