@@ -129,6 +129,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   // The account's writer is module state; each case starts with none in flight.
   resetCoalescedWrites();
   Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
@@ -156,11 +157,16 @@ describe('Getting started reads what the UI already observes (ui/design: home/ho
   });
 
   it.each([
-    ['says so when turning notifications on fails', new Error('subscribe_failed'), true],
-    ['says nothing when the prompt was refused', new Error('permission_denied'), false],
-  ])('%s', async (_case, error, toasts) => {
+    ['says so when turning notifications on fails', new Error('subscribe_failed'), 'off', true],
+    ['says so when turning on fails and the state cannot be read', new Error('subscribe_failed'), 'unavailable', true],
+    ['says nothing when a failed attempt still left them on', new Error('subscribe_failed'), 'on', false],
+    ['says nothing when the prompt was refused', new Error('permission_denied'), 'off', false],
+  ] as const)('%s', async (_case, error, after, toasts) => {
     push.state = 'off';
-    push.enable.mockRejectedValue(error);
+    push.enable.mockImplementation(async () => {
+      push.state = after;
+      throw error;
+    });
     const user = userEvent.setup();
     renderGuide();
     await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
@@ -170,6 +176,19 @@ describe('Getting started reads what the UI already observes (ui/design: home/ho
     if (toasts) {
       expect(toast.showToast).toHaveBeenCalledWith(en.workbench.inbox.notifications.enableFailed, 'error');
     }
+  });
+
+  it('says nothing when the browser blocks notifications', async () => {
+    vi.stubGlobal('Notification', { permission: 'denied' });
+    push.state = 'off';
+    push.enable.mockRejectedValue(new Error('subscribe_failed'));
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
+    await user.click(screen.getByRole('button', { name: 'Turn on' }));
+    await waitFor(() => expect(push.read).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(toast.showToast).not.toHaveBeenCalled();
   });
 
   it('says nothing when notifications turn on', async () => {

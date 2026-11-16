@@ -112,8 +112,9 @@ export function useSetupGaps({ owner, noModel }: { owner: boolean; noModel: bool
     }
     const notifications = await readWebPushDeviceState(api);
     setFacts((current) => ({ ...current, notifications }));
-    // Still off, and not by the person's choice: say so rather than leave the item as it was.
-    if (failed && !refused && notifications === 'off') {
+    // Not on, and not by the person's choice: say so. A read that fails too (`unavailable`) drops
+    // the item from the list, which would otherwise look like success.
+    if (failed && !refused && notifications !== 'on') {
       showToast(t('workbench.inbox.notifications.enableFailed'), 'error');
     }
   }, [api, canPush, showToast, t]);
