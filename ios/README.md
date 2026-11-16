@@ -42,6 +42,13 @@ and Web resizing cannot both run.
 - Microphone capture is granted only to the configured instance main frame.
   Authentication, external, and arbitrary subframes receive neither microphone
   access nor a native bridge.
+- That main frame gets the microphone only when its page carries
+  `<meta name="avibe-voice-consent" content="1">`: such a page asks each
+  account before voice input sends speech to a third-party AI service, and the
+  App adds no question of its own. A Workbench page without it (an instance
+  older than that question) is refused with a native alert saying to update the
+  instance. Any other page, such as a Show Page opened on its own under
+  `/show/` or `/p/`, is refused without that alert.
 - Google and GitHub authorization are intercepted with an email-code
   explanation. GitHub's are the `/login/oauth/` pages on `github.com` whose
   `redirect_uri` returns to an authentication origin, that is avibe.bot's own

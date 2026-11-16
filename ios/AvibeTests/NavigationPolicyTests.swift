@@ -4622,4 +4622,32 @@ final class FormAccessoryBarTests: XCTestCase {
             NSStringFromClass(type(of: content)).hasSuffix(FormAccessoryBar.subclassSuffix)
         )
     }
+
+    // App Store 5.1.2(i): a Workbench that asks before voice goes to a third-party
+    // AI service carries the marker and gets the microphone with no second
+    // question; an older Workbench is told to update; any other page is denied
+    // without that message.
+    @MainActor
+    func testVoiceConsentMarkerIsReadFromTheInstancePage() async throws {
+        let workbench = #"<link rel="manifest" href="/manifest.webmanifest">"#
+        let cases: [(String, String, String, VoiceConsentMarker)] = [
+            ("/chat", #"<meta name="avibe-voice-consent" content="1">"# + workbench, "<div id=\"root\"></div>", .marked),
+            ("/chat", workbench, "<div id=\"root\"></div>", .unmarkedWorkbench),
+            ("/chat", #"<meta name="avibe-voice-consent" content="0">"# + workbench, "<div id=\"root\"></div>", .unmarkedWorkbench),
+            ("/show/ses_1/", workbench, "<div id=\"root\"></div>", .other),
+            ("/chat", "", "<div id=\"root\"></div>", .other),
+        ]
+        for (path, head, body, expected) in cases {
+            let webView = WKWebView(frame: .zero)
+            webView.loadHTMLString(
+                "<!doctype html><html><head>\(head)</head><body>\(body)</body></html>",
+                baseURL: URL(string: "https://alice-app.avibe.bot\(path)")
+            )
+            try await WebKitReadiness.waitForDocument(in: webView)
+            let result = try? await webView.evaluateJavaScript(VoiceConsentMarker.script)
+            XCTAssertEqual(VoiceConsentMarker(result: result), expected, "\(path) \(head)")
+        }
+        XCTAssertEqual(VoiceConsentMarker(result: nil), .other)
+        XCTAssertEqual(VoiceConsentMarker(result: true), .other)
+    }
 }
