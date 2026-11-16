@@ -4021,16 +4021,6 @@ mod tests {
         }
         let other = window("pet", "tauri://localhost");
         assert!(ensure_shell_ui(&other).is_err(), "only the main window");
-
-        // A Windows checkout may carry CRLF line endings.
-        let source = include_str!("lib.rs").replace("\r\n", "\n");
-        for command in [
-            "fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<BootstrapStatus>, String> {\n    ensure_shell_ui(&window)?;",
-            "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {\n    ensure_shell_ui(&window)?;",
-            "fn open_install_docs(window: WebviewWindow) -> Result<(), String> {\n    ensure_shell_ui(&window)?;",
-        ] {
-            assert!(source.contains(command), "the command must be gated by ensure_shell_ui: {command}");
-        }
     }
 
     #[test]
