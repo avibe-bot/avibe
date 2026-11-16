@@ -6,7 +6,8 @@ limitation is written as a fact the user can act on ("Remote instances don't
 support Mini. Return to this Mac to use it.") or not shown at all.
 
 The scan covers every shipped string catalog: the Web/Desktop/Mini UI bundles,
-the service and IM reply bundles, and the iOS catalogs. A legitimate match must
+the service and IM reply bundles, and the iOS catalogs, plus the bundled Skill
+text (``skills/*/SKILL.md``) that Agents read and relay. A legitimate match must
 be listed in ``ALLOWED`` with the reason it is not roadmap or unfinished-state
 copy; keep that list short and specific.
 
@@ -115,6 +116,10 @@ def _entries() -> Iterator[tuple[str, str]]:
             match = re.match(r'\s*"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"\s*;', line)
             if match:
                 yield f"{rel}:{match.group(1)}", match.group(2)
+    for path in sorted(ROOT.glob("skills/*/SKILL.md")):
+        rel = path.relative_to(ROOT).as_posix()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            yield f"{rel}:{number}", line
 
 
 def test_user_copy_has_no_unfinished_or_roadmap_wording() -> None:
