@@ -87,12 +87,25 @@ const PASSKEY_OPS: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>([
 // Cancels that an in-app failure produces too, so they count toward the same in-a-row rule as a
 // passkey cancel: the protected seed-phrase window turns every WebAuthn refusal into its own cancel,
 // and a window this page reserved that the sandbox never loads into ends, at the frame's pairing
-// timeout, as a closed window.
-function cancelMayBeFailure(op: VaultSandboxOp, authorizationWindow: string | undefined, error: unknown): boolean {
+// timeout, as a closed window. That window is still open then (the app gives up on it only later);
+// one that reads closed was closed by the user or declined by the app while it was not in front,
+// and either is a plain cancel: trying again works.
+function cancelMayBeFailure(op: VaultSandboxOp, reserved: ReservedWindow | undefined, error: unknown): boolean {
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
   return (op === PROTECTED_HD_OP && code === 'authorization_cancelled')
-    || (authorizationWindow !== undefined && code === 'authorization_window_closed');
+    || (reserved !== undefined && code === 'authorization_window_closed' && !reserved.windowClosed());
 }
+
+// Steps that end early once their reserved window has closed and no answer came within the grace,
+// instead of waiting out the frame's 30-second pairing timeout. Dropping a late answer is safe for
+// these: their signed contexts are minted per attempt, so a retry starts clean. A signature is not
+// one of them: its context is the request's own and the sandbox records it as used when it signs,
+// so dropping a late signature would leave a request this page can no longer sign. Nor is a
+// seed-phrase wallet, whose late answer may follow words the user has already written down.
+const ENDS_WITH_ITS_WINDOW: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>(['approveRelease', 'reveal', POLICY_DOWNGRADE_OP]);
+// The sandbox window closes itself after a confirmed step, just before its answer reaches this page.
+const WINDOW_CLOSED_GRACE_MS = 3_000;
+const WINDOW_CLOSED_POLL_MS = 250;
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -190,7 +203,13 @@ export class VaultSandboxError extends Error {
 
 let generationController = new AbortController();
 const clients = new Set<VaultSandboxClient>();
-const authorizationWindows = new Map<string, VaultAuthorizationWindow & { ready: Promise<void>; assertOpen: () => void }>();
+type ReservedWindow = VaultAuthorizationWindow & {
+  ready: Promise<void>;
+  assertOpen: () => void;
+  /** The window itself reads closed: the user closed it, or the app declined to show it. */
+  windowClosed: () => boolean;
+};
+const authorizationWindows = new Map<string, ReservedWindow>();
 let singleton: Promise<VaultSandboxClient> | null = null;
 let activeClient: VaultSandboxClient | null = null;
 // Bumped on every reset. A create() that started before a reset checks this after its handshake:
@@ -287,7 +306,10 @@ export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null 
     throw error;
   });
   void ready.catch(() => undefined); // The eventual RPC observes this rejection.
-  const handle = { id, close, ready, assertOpen };
+  const windowClosed = (): boolean => {
+    try { return popup.closed; } catch { return true; }
+  };
+  const handle = { id, close, ready, assertOpen, windowClosed };
   authorizationWindows.set(id, handle);
   return handle;
 }
@@ -746,11 +768,12 @@ export class VaultSandboxClient {
     if (vaultPasskeyHandoff() === 'fallback') {
       throw new VaultSandboxError('sandbox_browser_required', 'Continue this protected Vault step in the browser');
     }
+    const reserved = options.authorizationWindow ? authorizationWindows.get(options.authorizationWindow) : undefined;
     let result: T;
     try {
       result = await this.send<T>(op, payload, options);
     } catch (error) {
-      recordVaultPasskeyOutcome(error, cancelMayBeFailure(op, options.authorizationWindow, error));
+      recordVaultPasskeyOutcome(error, cancelMayBeFailure(op, reserved, error));
       throw error;
     }
     recordVaultPasskeyOutcome(null);
@@ -831,7 +854,32 @@ export class VaultSandboxClient {
         pending.reject(error instanceof Error ? error : new Error('Sandbox message could not be sent'));
       }
     }
+    const authorization = options.authorizationWindow ? authorizationWindows.get(options.authorizationWindow) : undefined;
+    if (authorization && ENDS_WITH_ITS_WINDOW.has(op)) this.endWhenWindowCloses(id, authorization, promise);
     return promise;
+  }
+
+  /** Ends request `id` as a closed window once its reserved window has closed and no answer came
+   *  within the grace. An answer that arrives after that is dropped: nothing is forwarded. */
+  private endWhenWindowCloses(id: string, authorization: ReservedWindow, settled: Promise<unknown>): void {
+    let grace: number | null = null;
+    const poll = window.setInterval(() => {
+      if (grace !== null || !authorization.windowClosed()) return;
+      grace = window.setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        window.clearTimeout(pending.timer);
+        this.pending.delete(id);
+        this.interactiveRequests.delete(id);
+        if (this.pending.size === 0 && this.modalVisible) this.setModalVisible(false);
+        pending.reject(new VaultSandboxError('authorization_window_closed', 'The sandbox window closed before the step finished', true));
+      }, WINDOW_CLOSED_GRACE_MS);
+    }, WINDOW_CLOSED_POLL_MS);
+    const stop = (): void => {
+      window.clearInterval(poll);
+      if (grace !== null) window.clearTimeout(grace);
+    };
+    settled.then(stop, stop);
   }
 
   status(wrapMeta?: string | null): Promise<VaultSandboxStatusResult> {

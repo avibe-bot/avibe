@@ -382,10 +382,16 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     });
     const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
     // One sandbox step, answered as the sandbox would: `null` succeeds, a code fails.
-    const step = async (op: string, outcome: { code: string } | null, options: { authorizationWindow?: string } = {}) => {
+    const step = async (
+      op: string,
+      outcome: { code: string } | null,
+      options: { authorizationWindow?: string } = {},
+      beforeAnswer?: () => void,
+    ) => {
       const calls = postMessage.mock.calls.length;
       const result = instance.request(op, {}, options);
       await vi.waitFor(() => expect(postMessage.mock.calls.length).toBe(calls + 1));
+      beforeAnswer?.();
       const pending = instance.pending.get((postMessage.mock.calls[calls][0] as { id: string }).id)!;
       window.clearTimeout(pending.timer);
       const error = outcome ? new client.VaultSandboxError(outcome.code, 'sandbox failure') : null;
@@ -397,8 +403,8 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     // A sandbox window this page opened from the click, as approvals, signatures and reveals do.
     const reserveWindow = () => {
       stubReleaseFetch();
-      stubBlankPopup();
-      return client.openVaultAuthorizationWindow()!.id;
+      const popup = stubBlankPopup();
+      return { id: client.openVaultAuthorizationWindow()!.id, popup };
     };
     return { step, instance, postMessage, client, reserveWindow, handoff: handoff.vaultPasskeyHandoff, isFallback: handoff.isVaultPasskeyFallback };
   }
@@ -458,16 +464,16 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
   // A window this page reserved that the sandbox never loads into ends as a closed window.
   it('counts a reserved window that closed like a passkey cancel', async () => {
     const page = await freshPage('in-app');
-    await page.step('approveRelease', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow() });
+    await page.step('approveRelease', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow().id });
     expect(page.handoff()).toBeNull();
-    await page.step('reveal', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow() });
+    await page.step('reveal', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow().id });
     expect(page.handoff()).toBe('fallback');
   });
 
   it('never counts cancelling in an approval window as a refusal', async () => {
     const page = await freshPage('in-app');
-    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow() });
-    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow() });
+    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow().id });
+    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow().id });
     expect(page.handoff()).toBeNull();
   });
 
@@ -522,6 +528,82 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     vi.spyOn(window, 'open').mockReturnValue(null);
     expect(page.client.openVaultAuthorizationWindow()).toBeNull();
     expect(page.handoff()).toBe('fallback');
+  });
+
+  // A reserved window that already reads closed was closed by the user, or declined by the app
+  // while it was not in front (A2's contract). Trying again works, so it is only ever a cancel.
+  it('never counts a reserved window that reads closed', async () => {
+    const page = await freshPage('in-app');
+    for (const op of ['approveRelease', 'sign']) {
+      const reserved = page.reserveWindow();
+      await page.step(op, failure('authorization_window_closed'), { authorizationWindow: reserved.id }, () => { reserved.popup.closed = true; });
+    }
+    expect(page.handoff()).toBeNull();
+  });
+});
+
+// An approval, reveal or turn-off whose reserved window closed (the user closed it, or the app
+// declined to show it) ends a few seconds later instead of after the frame's 30-second pairing
+// timeout. A signature never does: its context is the request's own, so a dropped late signature
+// would leave a request this page can no longer sign.
+describe('VaultSandboxClient request whose reserved window closed', () => {
+  async function pending(op: string) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    const instance = Object.create(VaultSandboxClient.prototype) as TestVaultSandboxClient;
+    Object.assign(instance, {
+      iframe, backdrop: null, pending: new Map(), readyPromise: Promise.resolve({}), handshaken: true,
+      modalVisible: false, interactiveRequests: new Set(), surfaceRefreshTimer: null,
+    });
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+    stubReleaseFetch();
+    const popup = stubBlankPopup();
+    const authorization = openVaultAuthorizationWindow()!;
+    const settled = vi.fn();
+    const result = instance.request(op, {}, { interactive: true, authorizationWindow: authorization.id });
+    result.then((value) => settled({ value }), (error: unknown) => settled({ error }));
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
+    const id = (postMessage.mock.calls[0][0] as { id: string }).id;
+    return { instance, popup, settled, answer: (value: unknown) => instance.pending.get(id)?.resolve(value) };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('ends an approval soon after its window closed, and drops an answer that comes later', async () => {
+    const step = await pending('approveRelease');
+    step.popup.closed = true;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(step.settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(step.settled).toHaveBeenCalledWith({ error: expect.objectContaining({ code: 'authorization_window_closed' }) });
+    expect(step.instance.pending.size).toBe(0);
+    step.answer({ blindBoxes: [{}] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(step.settled).toHaveBeenCalledTimes(1);
+  });
+
+  // The sandbox window closes itself after a confirmed step, just before its answer arrives.
+  it('keeps the answer of a confirmed step whose window closed itself', async () => {
+    const step = await pending('reveal');
+    step.popup.closed = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    step.answer({ completed: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(step.settled).toHaveBeenCalledTimes(1);
+    expect(step.settled).toHaveBeenCalledWith({ value: { completed: true } });
+  });
+
+  it('never ends a signature early', async () => {
+    const step = await pending('sign');
+    step.popup.closed = true;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(step.settled).not.toHaveBeenCalled();
+    step.answer({ signature: 'sig' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(step.settled).toHaveBeenCalledWith({ value: { signature: 'sig' } });
   });
 });
 
