@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, ArrowRight, Check, ChevronRight, Laptop, RefreshCw, Server, ShieldCheck, TriangleAlert, WifiOff } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -33,31 +33,35 @@ function closeUpdatePopover() {
 }
 
 /** This computer's update panel as a popup over another computer's page (ui/design:
- *  chrome/bottom-row/remote-popup): the panel at the window's bottom-left, the rest a
- *  transparent backdrop, so a click outside the panel closes it like a popover. */
-function UpdatePopover({ label, children }: { label: string; children: ReactNode }) {
-  const panel = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const root = document.documentElement;
-    const rootBackground = root.style.background;
-    const bodyBackground = document.body.style.background;
-    root.style.background = 'transparent';
-    document.body.style.background = 'transparent';
-    panel.current?.focus();
-    return () => { root.style.background = rootBackground; document.body.style.background = bodyBackground; };
-  }, []);
-  return <div data-update-popover className="fixed inset-0" onClick={closeUpdatePopover}>
-    <div ref={panel} role="dialog" aria-label={label} tabIndex={-1} onClick={(event) => event.stopPropagation()}
+ *  chrome/remote-update-popup): the panel at the window's bottom-left, the rest a
+ *  transparent backdrop, so a click outside the panel closes it like a popover. The
+ *  shell makes the page transparent before its first paint and shows it once loaded. */
+export function UpdatePopoverView({ label, onClose, panelRef, children }: {
+  label: string;
+  onClose: () => void;
+  panelRef?: Ref<HTMLDivElement>;
+  /** The panel; absent until the desktop client's state arrives, so no empty frame is drawn. */
+  children?: ReactNode;
+}) {
+  return <div data-update-popover className="fixed inset-0" onClick={onClose}>
+    {children && <div ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} onClick={(event) => event.stopPropagation()}
       className="absolute bottom-2 left-2 w-80 overflow-hidden rounded-xl border border-edge bg-popover text-popover-foreground shadow-elevation-2 outline-none">
       {children}
-    </div>
+    </div>}
   </div>;
+}
+
+function UpdatePopover({ label, children }: { label: string; children?: ReactNode }) {
+  const panel = useRef<HTMLDivElement>(null);
+  const ready = Boolean(children);
+  useEffect(() => { if (ready) panel.current?.focus(); }, [ready]);
+  return <UpdatePopoverView label={label} onClose={closeUpdatePopover} panelRef={panel}>{children}</UpdatePopoverView>;
 }
 
 const UPDATE_POPOVER = 'update-popover';
 
 /** The same panel as everywhere else, acting on this computer's desktop app. */
-function DesktopUpdatePanel({ state, act, busy, install, close }: {
+export function DesktopUpdatePanel({ state, act, busy, install, close }: {
   state: DesktopClientState;
   act: (action: DesktopClientAction) => Promise<boolean>;
   busy: boolean;
@@ -158,8 +162,10 @@ export function AccountApp() {
   const failure = errorMessage && <Notice warning>{errorMessage}</Notice>;
   if (popover) {
     return <UpdatePopover label={t('dashboard.versionAndUpdate')}>
-      {state && <DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />}
-      {failure && <div className="p-4 pt-0">{failure}</div>}
+      {state && <>
+        <DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />
+        {failure && <div className="p-4 pt-0">{failure}</div>}
+      </>}
     </UpdatePopover>;
   }
   let content: ReactNode;

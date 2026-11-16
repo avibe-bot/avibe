@@ -171,7 +171,7 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "update-popover"
         ])
     );
-    // The update popup (ui/design: chrome/bottom-row/remote-popup): its own bundled window only,
+    // The update popup (ui/design: chrome/remote-update-popup): its own bundled window only,
     // asking the desktop client for state and updater actions (Rust filters the actions).
     let popover = read_json(crate_dir().join("capabilities/update-popover.json"));
     assert_eq!(popover["windows"], serde_json::json!(["update-popover"]));

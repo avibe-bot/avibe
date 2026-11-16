@@ -1,26 +1,25 @@
 // This computer's update panel while the desktop app shows another computer: a popup
 // the shell draws in its own small window over the main one (desktop/src-tauri
 // update_popover.rs), the panel at its bottom-left just above the sidebar's bottom
-// row. Drawn here as the user sees it: the real window with the shipped panel on top.
+// row. Drawn as the user sees it: the real window, and the shipped popup page
+// (UpdatePopoverView with DesktopUpdatePanel) in a box placed where the shell puts
+// its 336 × 520 window, 8 px in from the left and 40 px above the bottom.
 import { Route, Routes } from 'react-router-dom';
 
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
 import { AppShell, AppShellFooter } from '@/components/AppShell';
 import { Workbench } from '@/components/Workbench';
-import { UpdatePanel } from '@/components/update/UpdatePanel';
-import { modelFromDesktopState } from '@/components/update/updatePanelModel';
 import { DesktopAccountRowView } from '@/desktop/DesktopAccountRowView';
-import type { DesktopClientProjection } from '@/desktop/bridge';
+import { DesktopUpdatePanel, UpdatePopoverView } from '@/desktop/AccountApp';
+import type { DesktopClientProjection, DesktopClientState } from '@/desktop/bridge';
 
 import { frames, type FrameSpec } from '../../frame';
 import { agentsApi } from '../agents/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
 import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
 
-const CHECKED_AT = '2026-11-01T07:52:00Z';
-
-const remote: DesktopClientProjection = {
+const projection: DesktopClientProjection = {
   version: 1, revision: 1, generation: 1,
   account: { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' } },
   connection: {
@@ -29,25 +28,16 @@ const remote: DesktopClientProjection = {
     pending: null,
   },
   local: { name: '小麦的 Mac', remote_access: 'off' },
-  desktop: { version: '3.2.7', update: { phase: 'available', latest: '3.2.8', channel: 'stable', skippedVersion: null, interactive: true } },
+  desktop: {
+    version: '3.2.7',
+    update: { phase: 'available', latest: '3.2.8', channel: 'stable', skippedVersion: null, interactive: true, autoUpdate: false, checkedAt: '2026-11-01T07:52:00Z', hostActions: ['check', 'prereleases', 'auto_update', 'install'] },
+  },
   remote_auxiliary: 'disabled_incomplete',
 };
 
-/** The popup window: 336 wide, its panel at the bottom-left, 8 px in from the main window's
- *  edge and 40 px above its bottom, as update_popover.rs places it. */
-const popup = (
-  <div className="absolute bottom-10 left-2 z-50 w-[336px]">
-    <div className="ml-2 mb-2 w-80 overflow-hidden rounded-xl border border-edge bg-popover text-popover-foreground shadow-elevation-2">
-      <UpdatePanel
-        model={modelFromDesktopState(
-          { phase: 'available', latest: '3.2.8', channel: 'stable', skippedVersion: null, interactive: true, autoUpdate: false, checkedAt: CHECKED_AT },
-          { current: '3.2.7', checkedAt: CHECKED_AT },
-        )}
-        actions={{ check: { run: () => {} }, update: { run: () => {} }, setAutoUpdate: () => {}, close: () => {} }}
-      />
-    </div>
-  </div>
-);
+// The popup page reads the full client state; only its update fields matter here.
+const state = { ...projection, account: { ...projection.account, email: null, gate: null, methods: [] } } as unknown as DesktopClientState;
+const install = { failed: false, accept: () => {}, reset: () => {} } as Parameters<typeof DesktopUpdatePanel>[0]['install'];
 
 const designFrames = frames((['zh', 'en'] as const).map((lang): FrameSpec => ({
   name: `open-${lang}`,
@@ -66,12 +56,17 @@ const designFrames = frames((['zh', 'en'] as const).map((lang): FrameSpec => ({
     <div className="relative h-full">
       <Routes>
         <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}>
-          <DesktopAccountRowView state={remote} menuOpen={false} onMenuOpenChange={() => {}} onPresent={() => {}} localUpdater={null} />
+          <DesktopAccountRowView state={projection} menuOpen={false} onMenuOpenChange={() => {}} onPresent={() => {}} localUpdater={null} />
         </AppShellFooter>} />}>
           <Route path="/" element={<Workbench />} />
         </Route>
       </Routes>
-      {popup}
+      {/* The popup window: `fixed` inside UpdatePopoverView resolves to this transformed box. */}
+      <div className="absolute bottom-10 left-2 z-50 h-[520px] w-[336px] [transform:translateZ(0)]">
+        <UpdatePopoverView label={lang === 'en' ? en.dashboard.versionAndUpdate : zh.dashboard.versionAndUpdate} onClose={() => {}}>
+          <DesktopUpdatePanel state={state} act={async () => true} busy={false} install={install} close={() => {}} />
+        </UpdatePopoverView>
+      </div>
     </div>
   ),
 })));

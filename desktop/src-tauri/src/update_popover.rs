@@ -1,9 +1,10 @@
 //! This computer's update panel as a popup while the main window shows another
-//! computer (ui/design: chrome/bottom-row/remote-popup). Everywhere else the
+//! computer (ui/design: chrome/remote-update-popup). Everywhere else the
 //! version opens a popover; here the shell draws the same panel in its own small
 //! window over the main one, from the bundled account page. The remote page only
 //! asks for it, so it never reaches this computer's installer.
 use avibe_runtime_host::instance_client::protocol::ClientAction;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use url::Url;
 
@@ -25,7 +26,7 @@ pub(crate) fn page_url(bundle: &Url) -> Option<Url> {
     Some(url)
 }
 
-pub(crate) fn is_page(window: &WebviewWindow, bundle: &Url) -> bool {
+pub(crate) fn is_page<R: tauri::Runtime>(window: &WebviewWindow<R>, bundle: &Url) -> bool {
     window.label() == UPDATE_POPOVER && window.url().ok().is_some_and(|url| Some(url) == page_url(bundle))
 }
 
@@ -39,26 +40,58 @@ pub(crate) fn navigation_allowed(url: &Url, bundle: &Url) -> bool {
     Some(url.clone()) == page_url(bundle)
 }
 
-/// Show the popup over the main window, or bring an open one forward.
+/// Keeps a double click from building the window twice while one is being built.
+static OPENING: AtomicBool = AtomicBool::new(false);
+
+/// The popup's page is transparent from its first paint: the account page's own
+/// background would otherwise flash as a solid box over the remote sidebar.
+const TRANSPARENT: &str = "(()=>{const s=document.createElement('style');s.textContent='html,body{background:transparent!important}';document.documentElement.appendChild(s);})();";
+
+/// Show the popup over the main window, or bring an open one forward. Called from
+/// navigation and menu handlers: the window is built off the handler's own thread,
+/// since building one inside them deadlocks on Windows.
 pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
     if let Some(window) = app.get_webview_window(UPDATE_POPOVER) {
         return window.set_focus().is_ok();
     }
-    let Some(main) = app.get_webview_window(crate::MAIN_WINDOW) else {
+    if app.get_webview_window(crate::MAIN_WINDOW).is_none() || page_url(bundle).is_none() {
         return false;
-    };
-    let Some(url) = page_url(bundle) else {
-        return false;
+    }
+    if OPENING.swap(true, Ordering::SeqCst) {
+        return true;
+    }
+    let app = app.clone();
+    let bundle = bundle.clone();
+    tauri::async_runtime::spawn(async move {
+        build(&app, &bundle, initialization);
+        OPENING.store(false, Ordering::SeqCst);
+    });
+    true
+}
+
+fn build(app: &AppHandle, bundle: &Url, initialization: String) {
+    if app.get_webview_window(UPDATE_POPOVER).is_some() {
+        return;
+    }
+    let (Some(main), Some(url)) = (app.get_webview_window(crate::MAIN_WINDOW), page_url(bundle)) else {
+        return;
     };
     let (Ok(origin), Ok(size), Ok(scale)) = (main.inner_position(), main.inner_size(), main.scale_factor()) else {
-        return false;
+        return;
     };
+    // The main window's content area in its own logical points, and the popup's
+    // top-left from its bottom-left corner.
+    let origin = origin.to_logical::<f64>(scale);
+    let height = size.height as f64 / scale;
+    let (x, y) = (origin.x + LEFT, origin.y + height - BOTTOM - HEIGHT);
     let builder = WebviewWindowBuilder::new(app, UPDATE_POPOVER, WebviewUrl::External(url))
+        .initialization_script(TRANSPARENT)
         .initialization_script(initialization)
         // The panel's release-notes link opens in the system browser, as in the main window.
         .on_new_window(|url, _features| crate::handle_new_window_request(url))
         .title("Avibe")
         .inner_size(WIDTH, HEIGHT)
+        .position(x, y)
         .transparent(true)
         .decorations(false)
         .shadow(false)
@@ -66,21 +99,27 @@ pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> boo
         .maximizable(false)
         .minimizable(false)
         .skip_taskbar(true)
+        // Shown once its page has loaded (lib.rs on_page_load), so nothing half-drawn appears.
         .visible(false)
         .focused(true);
     let Ok(builder) = builder.parent(&main) else {
-        return false;
+        return;
     };
     #[cfg(target_os = "macos")]
     let builder = builder.accept_first_mouse(true);
     let Ok(window) = builder.build() else {
-        return false;
+        return;
     };
-    // Place it in physical pixels from the main window's content area, the same
-    // on every platform; then show it, focused, as a click on the version does.
-    let x = origin.x as f64 + LEFT * scale;
-    let y = origin.y as f64 + size.height as f64 - (BOTTOM + HEIGHT) * scale;
-    let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+    // macOS places windows in one space of points, which the logical position
+    // above already is. Windows places them on one physical desktop, where the
+    // popup's own scale may not be the main window's yet: use main's pixels.
+    if !cfg!(target_os = "macos") {
+        let physical = (x * scale, y * scale);
+        let _ = window.set_position(PhysicalPosition::new(
+            physical.0.round() as i32,
+            physical.1.round() as i32,
+        ));
+    }
     let closing = window.clone();
     window.on_window_event(move |event| {
         // A click anywhere outside the popup moves focus away: it closes, like a popover.
@@ -88,7 +127,14 @@ pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> boo
             let _ = closing.close();
         }
     });
-    window.show().is_ok() && window.set_focus().is_ok()
+}
+
+/// The popup's page has loaded: show it, focused, as a click on the version does.
+pub(crate) fn page_loaded(window: &WebviewWindow) {
+    if window.label() == UPDATE_POPOVER {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 /// Deliver a state change to an open popup that still shows its page.

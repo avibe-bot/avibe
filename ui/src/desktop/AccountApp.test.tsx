@@ -28,7 +28,7 @@ vi.mock('./useAccountClient', () => ({
     },
   }),
 }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); update.value = {}; window.history.replaceState(null, '', '/'); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); update.value = {}; window.history.replaceState(null, '', '/'); });
 
 // ui/design: update/panel/trusted-view
 it('AUTH-SETUP-178 the trusted update view acts on this computer\'s desktop app with the same panel', async () => {
@@ -67,7 +67,7 @@ it('AUTH-SETUP-178 a rejected trusted install does not turn a later check error 
   expect(screen.queryByText(en.update.failure.install.title)).toBeNull();
 });
 
-// ui/design: chrome/bottom-row/remote-popup. While the main window shows another computer, the
+// ui/design: chrome/remote-update-popup. While the main window shows another computer, the
 // shell opens this page in its own popup window: the same panel, closed by Escape or a click
 // outside it, never sending an account action (the shell refuses those from this window).
 it('AUTH-SETUP-178 the update popup is the same panel, closed by Escape or a click outside', async () => {
@@ -88,5 +88,4 @@ it('AUTH-SETUP-178 the update popup is the same panel, closed by Escape or a cli
   fireEvent.click(document.querySelector('[data-update-popover]')!);
   expect(invoke).toHaveBeenCalledWith('plugin:window|close', { label: 'update-popover' });
   expect(send).not.toHaveBeenCalledWith({ type: 'cancel' });
-  vi.unstubAllGlobals();
 });
