@@ -22,7 +22,9 @@
       "runtime_stop_failed": "Avibe 无法确认运行时已停止，其部分或全部组件可能仍在运行。点击“重试”重新连接，如有需要可再次停止它。",
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
-      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
+      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。",
+      "database_disk_full": "磁盘已满，Avibe 无法更新数据库。数据没有任何改动。请在存放 Avibe 数据的磁盘上腾出一些空间，然后点击“重试”。",
+      "database_disk_full_unconfirmed": "磁盘已满，Avibe 无法更新数据库。请在存放 Avibe 数据的磁盘上腾出一些空间，然后点击“重试”。"
     },
     "tray": {
       "open": "打开应用",
@@ -1235,6 +1237,7 @@
         "unread": "模型网关状态不可用",
         "notStarted": "模型网关尚未就绪",
         "notInstalled": "模型网关组件未安装",
+        "allOff": "本机后端都已停用",
         "allDirect_one": "{{count}} 个后端都由 Agent 管理",
         "allDirect_other": "{{count}} 个后端都由 Agent 管理",
         "starting": "正在启动…",
@@ -1519,6 +1522,11 @@
           "cancel": "取消",
           "add": "添加模型",
           "apply": "保存模型"
+        },
+        "off": {
+          "status": "已停用",
+          "enable": "去启用",
+          "enableLabel": "去启用 {{backend}}（设置 › 后端）"
         }
       },
       "takeover": {
@@ -3213,6 +3221,7 @@
     "sandbox_browser_unavailable": "受保护的 Vault 需要具备 Web Crypto 的安全浏览器环境。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
     "sandbox_browser_required": "请在浏览器中继续此受保护的 Vault 操作，而不是在桌面应用中。",
     "sandbox_reset": "本次受保护保险库操作已取消或重置。请从 Avibe 重试，以重新验证沙箱。",
+    "authorization_window_closed": "安全窗口在这一步完成前关闭了，没有批准、签名或显示任何内容。请再试一次。",
     "sandbox_ready_timeout": "已验证的保险库沙箱未能启动。请检查网络、更新 Avibe 后重试。",
     "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
     "stale_login_session": "Avibe 仍运行在一个已经结束的 macOS 登录会话中。请在 Mac 当前桌面的终端运行 `vibe restart`，然后重试。请不要重复重试此操作。",
@@ -6520,7 +6529,6 @@
       "ttlHours": "{{count}} 小时",
       "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
-      "protectedWarning": "保护档签名在安全浏览器沙箱中完成，只有公开签名会返回 Avibe。",
       "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
       "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",

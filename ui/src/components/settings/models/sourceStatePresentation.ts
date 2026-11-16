@@ -32,6 +32,23 @@ export const activeSourceAdoption = (
   : adoptedBy;
 
 /**
+ * The backends a provider may name as its users. A ready Agent read names the
+ * Hub-mode backends that are on. Before that read is authoritative attribution
+ * stays unfiltered, except that a backend already known to be switched off in
+ * Settings · Backends is never named.
+ */
+export const attributableBackends = (
+  supplyReady: boolean,
+  hubBackends: readonly AgentBackend[],
+  switchedOff: ReadonlySet<AgentBackend>,
+  allBackends: readonly AgentBackend[],
+): ReadonlySet<AgentBackend> | undefined => supplyReady
+  ? new Set(hubBackends)
+  : switchedOff.size > 0
+    ? new Set(allBackends.filter((backend) => !switchedOff.has(backend)))
+    : undefined;
+
+/**
  * A healthy source that no route currently reaches. It is the state a source
  * lands in the moment it is added, and 备用 next to a key just created reads as
  * "the add failed" — so the authority that names the state also names the

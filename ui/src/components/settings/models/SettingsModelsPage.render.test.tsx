@@ -542,6 +542,91 @@ describe('SettingsModelsPage surface branches', () => {
     }
   });
 
+  // Owner report 11-16: Codex switched off in Settings · Backends still drew a
+  // live card with wires, and providers still named it as a user.
+  it('draws a switched-off backend as one off row: no wires, no attribution, a way to turn it on', async () => {
+    const shared: Source = {
+      ...retainedSource,
+      id: 'src_head',
+      display_name: 'Shared relay',
+      adopted_by: [{ backend: 'codex', menu_model: 'gpt-5.6-sol' }, { backend: 'vibey', menu_model: 'gpt-5.6-sol' }],
+    };
+    const vibeyModel: BackendModel = {
+      id: 'gpt-5.6-sol', display_name: null, origin: 'manual', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    const vibey: AgentSupply = { ...takeoverAgent, backend: 'vibey', cli_present: false, catalog_models: [vibeyModel] };
+    const codexOff: AgentSupply = { ...takeoverAgent, backend_enabled: false };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([shared]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([codexOff, vibey]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const LocationProbe = () => {
+      const location = useLocation();
+      return <output data-testid="location">{location.pathname}</output>;
+    };
+    const view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter initialEntries={['/settings/models']}>
+            <SettingsModelsRoute />
+            <LocationProbe />
+          </MemoryRouter>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const offRow = await waitFor(() => {
+      const row = view.container.querySelector<HTMLElement>('[data-agent-backend-off="codex"]');
+      expect(row).not.toBeNull();
+      return row as HTMLElement;
+    });
+    expect(view.container.querySelector('[data-agent-backend="codex"]')).toBeNull();
+    expect(view.container.querySelector('[data-agent-backend="vibey"]')).not.toBeNull();
+    expect(within(offRow).queryByRole('button', { name: /^Manage models$|^管理模型$/i })).toBeNull();
+    const sourceRow = (await screen.findByText('Shared relay')).closest('[data-source-id]') as HTMLElement;
+    expect(sourceRow.textContent).toMatch(/Vibey/);
+    expect(sourceRow.textContent).not.toMatch(/Codex/);
+
+    await userEvent.click(within(offRow).getByRole('button', { name: /Turn on Codex in Settings › Backends|去启用 Codex（设置 › 后端）/ }));
+    expect(screen.getByTestId('location').textContent).toBe('/settings/backends/codex');
+  });
+
+  it('shows the own-login home with every backend switched off as off, not as a running gateway', async () => {
+    const offDirect = (backend: 'claude' | 'codex' | 'opencode'): AgentSupply => ({
+      ...takeoverAgent, backend, mode: 'direct', backend_enabled: false, sources: null, routes: null, supply_status: null, model_supply: null,
+    });
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([offDirect('claude'), offDirect('codex'), offDirect('opencode')]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const LocationProbe = () => <output data-testid="location">{useLocation().pathname}</output>;
+    const view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter initialEntries={['/settings/models']}>
+            <SettingsModelsRoute />
+            <LocationProbe />
+          </MemoryRouter>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => expect(view.container.querySelectorAll('[data-agent-backend-off]')).toHaveLength(3));
+    expect(screen.queryByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeNull();
+    expect(await screen.findByText(/^Local backends are all turned off$|^本机后端都已停用$/)).toBeTruthy();
+    expect(screen.queryByText(/^Model Hub running$|^模型网关运行中$/)).toBeNull();
+
+    const opencode = view.container.querySelector<HTMLElement>('[data-agent-backend-off="opencode"]') as HTMLElement;
+    await userEvent.click(within(opencode).getByRole('button', { name: /Turn on OpenCode|去启用 OpenCode/ }));
+    expect(screen.getByTestId('location').textContent).toBe('/settings/backends/opencode');
+  });
+
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
     const ids = Array.from({ length: 6 }, (_, index) => `catalog-model-${index + 1}`);
     const addedId = 'catalog-model-added';
@@ -726,6 +811,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeNull();
     expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
+    // Nothing is installed, so nothing was turned off.
+    expect(screen.queryByText(/^Local backends are all turned off$|^本机后端都已停用$/)).toBeNull();
   });
 
   it('publishes a newly discovered backend into the already-open page', async () => {

@@ -102,7 +102,7 @@ def test_current_startup_is_read_only_even_behind_migration_and_sqlite_writers(
     assert not any(sql.startswith(("BEGIN", "COMMIT")) for sql in statements)
     with closing(connect(ready_db)) as conn:
         plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + reads[0])]
-    assert sum("SEARCH state_meta USING INDEX" in step for step in plan) == 4
+    assert sum("SEARCH state_meta USING INDEX" in step for step in plan) == 5
 
 
 @pytest.mark.parametrize("change", [

@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import sqlite3
 import subprocess
 import sys
@@ -57,6 +58,11 @@ def _probe(action: str, home: Path) -> dict:
 
     if action.startswith("projection-"):
         return {**identity, **_projection_probe(action, home)}
+    if action.startswith("epoch3-"):
+        # Only harness code is loaded from this path; product imports still
+        # belong to the isolated interpreter (no checkout sys.path injection).
+        probe = runpy.run_path(str(Path(__file__).with_name("sqlite_epoch3_probe.py")))
+        return {**identity, **probe["run"](action, home)}
 
     from config.v2_settings import ChannelSettings, SettingsState
     from storage import agent_events_service, messages_service
@@ -237,9 +243,13 @@ def _projection_probe(action: str, home: Path) -> dict:
                                                                               is_error=bool(index)), details={})
                 return responses
             responses = asyncio.run(seed())
+            with engine.connect() as conn:
+                from storage.compatibility import read_compatibility_epoch
+
+                candidate_epoch = read_compatibility_epoch(conn.connection.driver_connection)
             with patch("core.message_mirror.get_cached_sqlite_engine", return_value=engine), \
                     patch("core.message_mirror._activity_streaming_enabled", return_value=False), \
-                    patch("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", 2):
+                    patch("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", candidate_epoch):
                 context = MessageContext(user_id="contract", channel_id="contract", platform="avibe",
                                          platform_specific={"agent_session_id": session, "suppress_delivery": True})
                 with engine.connect() as conn:
@@ -386,6 +396,13 @@ def verify_predecessor(python: Path, home: Path, *, expected_version: str) -> in
         assert _logical_db(db) == before and _artifacts(home) == artifacts
         print(json.dumps({"reader_contract": "not-applicable", "reason": "predecessor lacks this epoch", "epoch": epoch}), flush=True)
         return None
+    if epoch == 3:
+        print(json.dumps(run_probe(Path(sys.executable), "epoch3-seed", home, current=True)), flush=True)
+        before = _logical_db(db)
+        print(json.dumps(run_probe(python, "epoch3-read", home)), flush=True)
+        assert _logical_db(db) == before, "released reader mutated epoch-3 history"
+        print(json.dumps(run_probe(python, "epoch3-exercise", home)), flush=True)
+        print(json.dumps(run_probe(Path(sys.executable), "epoch3-return", home, current=True)), flush=True)
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("UPDATE alembic_version SET version_num=?", (FUTURE_REVISION,))
         for table in TABLES:
@@ -445,7 +462,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-tag", help="Target being published (excluded from predecessor selection)")
     parser.add_argument("--activate", action="store_true", help="Fill the release build's capability literal after verification")
     parser.add_argument("--require-refusal", action="store_true", help="Negative floor control: require unsupported-reader refusal, never activate")
-    parser.add_argument("--probe", choices=("identity", "seed", "open", "exercise", "verify", "projection-seed", "projection-read"), help=argparse.SUPPRESS)
+    parser.add_argument("--probe", choices=("identity", "seed", "open", "exercise", "verify", "projection-seed", "projection-read",
+                                           "epoch3-seed", "epoch3-read", "epoch3-exercise", "epoch3-return"), help=argparse.SUPPRESS)
     parser.add_argument("--home", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.require_refusal and args.activate:
