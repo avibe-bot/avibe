@@ -1117,7 +1117,11 @@ export const SettingsModelsPage: React.FC = () => {
   );
   // Before the first model provider (a search service supplies none), the Providers
   // card's add button is the page's one way forward.
-  const noModelProviders = sourcesRead.kind === 'ready' && sources.every((source) => source.protocol === 'search');
+  const sourcesReady = sourcesRead.kind === 'ready';
+  const noModelProviders = React.useMemo(
+    () => sourcesReady && sources.every((source) => source.protocol === 'search'),
+    [sources, sourcesReady],
+  );
   const canRetryRuntime = runtimeRead.kind === 'ready'
     && !runtimeRunning
     && runtimeHealth !== 'installing'
