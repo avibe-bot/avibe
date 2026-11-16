@@ -132,9 +132,16 @@ const firstRunPage = (props: Partial<Parameters<typeof InstancesPage>[0]> = {}) 
     onRefresh={noop}
     onAccount={noop}
     onAdd={noop}
+    onReopen={noop}
     {...props}
   />
 );
+
+/**
+ * The full page with an instance selected but none open (say it failed to load): the sheet's list
+ * in a page. The current instance opens again from here; there is nothing behind it to close to.
+ */
+const switchingPage = (props: Partial<Parameters<typeof InstancesPage>[0]> = {}) => firstRunPage({ session: bSession, ...props });
 
 const designFrames = frames([
   // A · the sheet the avatar opens over the live instance.
@@ -188,6 +195,9 @@ const designFrames = frames([
       />
     </div>
   )),
+  // The full page with a selection: the same list as the sheet, in a page.
+  ...both('page-switching', '整页 · 有选中实例（例如实例没能打开后）：和 sheet 同一个列表；点当前实例重新打开', () => switchingPage(), { status: 'shipped' }),
+  ...both('page-switching-stale', '整页 · 刷新失败：横幅 + 重试，列表照常可用', () => switchingPage({ errorKey: 'mobileApp.errors.network' }), { status: 'shipped' }),
   ...both('first-run-error', '首次使用 · 没能载入（没有缓存）', () => firstRunPage({ session: session([], null), errorKey: 'mobileApp.errors.network' }), { status: 'shipped' }),
   // Native: the instance failed to load.
   ...both('runtime-failed', '原生 · 实例打不开：重试 / 其他实例（打开同一张 sheet，不先关掉实例）', () => <RuntimeFailed instance={personal} />),

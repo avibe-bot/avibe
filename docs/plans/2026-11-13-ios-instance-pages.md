@@ -116,6 +116,7 @@ Rules:
 5. **Switching:** tap a row → it shows 「正在打开…」, the others wait, ✕ still works. When the new instance starts loading, the sheet closes over it.
 6. **Gestures:** sheet drag-down = back (native). Account page: swipe from the left edge = back. **Pull to refresh only on the full first-run page**: in a sheet, pulling down at the top dismisses; the sheet refreshes when it opens instead.
 7. **First run** (nothing selected yet) is a full page, not a sheet: same rows, 「想从哪里开始？」 kept from the approved A flow, the avatar for Account, pull to refresh. Signed out and no-instances keep their approved pages.
+   **Full page with a selection** (an instance selected but none open, say after it failed to load; Product, 2026-11-16): the sheet's list in a page. Title 「实例」 without a subtitle, the 正在使用 block and 其他实例 · 最近使用的在前, Add; the current block opens that instance again (「重新打开 {{name}}」) and reports opening, failure and offline as a row does. A failed refresh keeps the list under the sheet's banner. The avatar is the account's initial and opens Account without the current-instance block. One component (`InstanceListBody`) draws the list in both frames.
 8. **Native failure screen** uses the same words: 「暂时连不上 {name}」 · 重试 · 其他实例. 其他实例 opens the same sheet over the failed instance without stopping it first, so ✕ returns to the retry screen (fixes C13).
 9. **One vocabulary** across web, native and desktop: 实例 / 切换 / 账号 / 当前 / 离线 / 添加实例. 「更换实例」 goes. The sign-in account is 「账号」 (Product, 2026-11-15); 「账户」 stays only for Vault and billing.
 
@@ -142,6 +143,7 @@ Decision (owner, 2026-11-14 13:23): **A now, B with 3.2.7.** A removes every con
 | `sheet-long`, `sheet-long-end`, `account-long` (375×667) | Long instance names and shared-by line; scrolled to the end, the long email wraps in full in the account row; long email on Account |
 | `account` | Account pushed inside the sheet |
 | `first-run`, `first-run-pulling`, `first-run-error` | First use as a full page; pull to refresh; load failure without cache |
+| `page-switching`, `page-switching-stale` | The full page with a selection: the sheet's list; a failed refresh keeps it under the banner |
 | `runtime-failed` | Native failure screen in the same words, 其他实例 → sheet |
 | `b-home`, `b-sheet` | Variant B: the named header; its sheet without the account row |
 
