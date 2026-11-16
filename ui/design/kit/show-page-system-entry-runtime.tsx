@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
+import { MessageCirclePlus } from 'lucide-react';
 
 type RuntimeEntryMode = 'ios' | 'mac';
-type RuntimeEntryState = 'expanded' | 'collapsed';
+type RuntimeEntryState = 'expanded' | 'collapsed' | 'annotating';
 
 const content = {
   ios: {
@@ -43,7 +44,7 @@ export const ShowPageSystemEntryRuntimePreview = ({
 
   return (
     <div className="relative h-full overflow-hidden bg-background text-foreground">
-      <main className="mx-auto flex h-full max-w-4xl flex-col px-6 pb-56 pt-8 sm:px-10">
+      <main className={`mx-auto flex h-full max-w-4xl flex-col px-6 pt-8 sm:px-10 ${state === 'expanded' ? 'pb-72' : 'pb-24'}`}>
         <div className="flex items-center justify-between border-b border-border pb-4">
           <div>
             <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted">Show Page</div>
@@ -67,15 +68,15 @@ export const ShowPageSystemEntryRuntimePreview = ({
             <div className="h-24 rounded-lg bg-wash" />
           </div>
         </section>
-        <div className="mt-auto pt-8 text-xs text-muted">The entry is isolated in a Shadow DOM and does not restyle this page.</div>
+        <div className="mt-auto pt-8 text-xs text-muted">Next milestone: November launch review.</div>
       </main>
 
-      <div className="absolute bottom-4 right-4 z-10 max-w-[calc(100%-2rem)] sm:bottom-6 sm:right-6">
+      <div className={`absolute left-3 z-10 max-w-[calc(100%-1.5rem)] ${state === 'expanded' ? 'bottom-24' : 'bottom-3'}`}>
         {state === 'expanded' ? (
           <section
             role="dialog"
             aria-labelledby="runtime-entry-title"
-            className="mb-2 w-[min(300px,calc(100vw-2rem))] rounded-2xl border border-border bg-surface p-3.5 shadow-elevation-2"
+            className="w-80 max-w-[calc(100vw-1.5rem)] rounded-2xl border border-border bg-surface p-3.5 shadow-elevation-2"
           >
             <div className="flex items-start gap-2.5">
               <div className="min-w-0 flex-1">
@@ -93,6 +94,22 @@ export const ShowPageSystemEntryRuntimePreview = ({
           <RuntimeEntryButton ariaLabel={copy.title}>{copy.cta}</RuntimeEntryButton>
         ) : null}
       </div>
+      {state === 'annotating' ? (
+        <div className="absolute bottom-6 right-6 flex items-center gap-3 rounded-2xl border border-border bg-surface p-3 shadow-elevation-2">
+          <MessageCirclePlus className="size-5 text-cyan-ink" />
+          <span className="text-xs font-medium">Smart</span>
+          <span className="text-xs font-medium">Screenshot</span>
+          <span className="text-xs text-muted">Exit</span>
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-label="Annotation mode"
+          className="absolute bottom-6 right-6 grid size-13 place-items-center rounded-2xl border border-border bg-surface text-cyan-ink shadow-elevation-2"
+        >
+          <MessageCirclePlus className="size-5" />
+        </button>
+      )}
     </div>
   );
 };

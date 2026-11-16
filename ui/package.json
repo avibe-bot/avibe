@@ -25,6 +25,7 @@
     "typecheck:tests": "tsc -p tsconfig.tests.json --noEmit && tsc -p src/i18n/tsconfig.guard.json --noEmit",
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
     "test:safe-browser": "node --test scripts/safe-browser.check.mjs",
+    "test:show-system-entry": "node --test scripts/show-system-entry.check.mjs",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed",
     "test:chat-interactions": "node scripts/e2e-suite.mjs e2e/chat-interactions/tsconfig.json playwright.chat-interactions.config.ts",

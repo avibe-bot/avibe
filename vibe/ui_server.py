@@ -285,11 +285,13 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   const style = document.createElement('style');
   style.textContent = `
     :host { all: initial; }
-    .wrap { position: fixed; right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 2147483000; max-width: calc(100vw - 24px); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
+    .wrap { position: fixed; left: max(12px, env(safe-area-inset-left)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 2147483000; max-width: calc(100vw - 24px); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
+    .wrap[hidden] { display: none; }
+    .wrap[data-expanded="true"] { bottom: calc(96px + env(safe-area-inset-bottom)); }
     .button, .copy, .close { border: 1px solid rgba(23,32,42,.18); border-radius: 999px; background: rgba(255,255,255,.94); color: #17202a; box-shadow: 0 8px 26px rgba(23,32,42,.16); cursor: pointer; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .button { max-width: 100%; padding: 9px 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .button:hover, .copy:hover, .close:hover { background: #f4f7f8; }
-    .panel { width: min(300px, calc(100vw - 24px)); max-height: min(40vh, 300px); margin-bottom: 8px; overflow: auto; padding: 14px; border: 1px solid rgba(23,32,42,.14); border-radius: 16px; background: rgba(255,255,255,.98); box-shadow: 0 16px 42px rgba(23,32,42,.2); }
+    .panel { box-sizing: border-box; width: min(330px, calc(100vw - 24px)); max-height: min(40vh, 300px); overflow: auto; padding: 14px; border: 1px solid rgba(23,32,42,.14); border-radius: 16px; background: rgba(255,255,255,.98); box-shadow: 0 16px 42px rgba(23,32,42,.2); }
     .panel[hidden] { display: none; }
     .panel-head { display: flex; align-items: flex-start; gap: 10px; }
     .title { min-width: 0; flex: 1; margin: 0 0 6px; font: 700 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -391,18 +393,37 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   safeArea.style.cssText = 'width:1px;height:0;pointer-events:none;';
   document.body.append(safeArea);
   const updateSafeArea = () => {
-    safeArea.style.height = panel.hidden
+    safeArea.style.height = panel.hidden || wrap.hidden
       ? '0px'
-      : `${Math.ceil(panel.getBoundingClientRect().height + 24)}px`;
+      : `${Math.ceil(panel.getBoundingClientRect().height + parseFloat(getComputedStyle(wrap).bottom) + 12)}px`;
   };
   const setPanelOpen = (open) => {
     panel.hidden = !open;
     button.hidden = open;
+    wrap.setAttribute('data-expanded', String(open));
     button.setAttribute('aria-expanded', String(open));
     savePreference(open ? 'expanded' : 'collapsed');
     window.requestAnimationFrame(updateSafeArea);
   };
   setPanelOpen(readPreference() === 'expanded');
+
+  // Annotation owns the page while it is active, including its mobile bottom sheet.
+  // Subscribe to the existing Runtime API; its bootstrap may mount after this script.
+  let unsubscribeAnnotation;
+  const bindAnnotation = () => {
+    const api = window.__AVIBE_SHOW__?.annotation?.api;
+    if (!api || unsubscribeAnnotation) return;
+    const syncAnnotation = (state) => {
+      wrap.hidden = Boolean(state.enabled && state.available);
+      window.requestAnimationFrame(updateSafeArea);
+    };
+    unsubscribeAnnotation = api.subscribe(syncAnnotation);
+    syncAnnotation(api.getState());
+    annotationReady.disconnect();
+  };
+  const annotationReady = new MutationObserver(bindAnnotation);
+  annotationReady.observe(document.body, { childList: true });
+  bindAnnotation();
   button.addEventListener('click', () => {
     setPanelOpen(panel.hidden);
   });
@@ -411,6 +432,8 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   });
   closeButton.addEventListener('click', () => {
     savePreference('dismissed');
+    annotationReady.disconnect();
+    unsubscribeAnnotation?.();
     safeArea.remove();
     root.remove();
   });
