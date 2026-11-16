@@ -51,8 +51,9 @@ function FieldRow({ name, isDefault, single }: { name: string; isDefault: boolea
   );
 }
 
-/** The one line that says where a protected value appears. */
-function WindowNote() {
+/** The one line that says where a protected value appears: once, above the list, when the list has
+ *  a Protected secret (each button's tooltip says it too). */
+export function FieldRevealWindowNote() {
   const d = useDraft();
   return (
     <span className="flex items-center gap-1 text-[11px] text-muted">
@@ -82,7 +83,6 @@ function ProtectedRows({ secret }: { secret: FieldRevealSecret }) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
       {secret.fields.map((field) => <FieldRow key={field} name={field} isDefault={field === secret.defaultField} single={single} />)}
-      <WindowNote />
     </div>
   );
 }
@@ -130,7 +130,7 @@ export function FieldRevealCard({ secret, option, menuOpen = false, expanded = f
   const single = secret.fields.length === 1;
   let fieldArea = null;
   if (!isProtected) fieldArea = <StandardFields secret={secret} />;
-  else if (option === 'rows') fieldArea = <ProtectedRows secret={secret} />;
+  else if (option === 'rows') fieldArea = single ? null : <ProtectedRows secret={secret} />;
   else if (option === 'expand') {
     fieldArea = single ? null : (
       <div className="flex min-w-0 flex-col gap-1">
@@ -151,8 +151,9 @@ export function FieldRevealCard({ secret, option, menuOpen = false, expanded = f
       </div>
     );
   }
-  // Option B keeps a one-field protected secret one tap away: Show and Copy beside the menu.
-  const inlineActions = isProtected && single && option === 'expand';
+  // A and B keep a one-value protected secret one tap away, without a row that only says "Value":
+  // Show and Copy sit on the title row, beside the menu.
+  const inlineActions = isProtected && single && option !== 'menu';
   return (
     <li className="relative flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-xl border border-edge bg-surface px-4 py-3 shadow-elevation-0 md:flex-nowrap">
       <div className="flex size-9 shrink-0 items-center justify-center self-start rounded-lg bg-accent/10 text-accent-ink">
@@ -166,7 +167,7 @@ export function FieldRevealCard({ secret, option, menuOpen = false, expanded = f
         <span className="truncate text-xs text-muted">{secret.description} · {secret.used}</span>
         {fieldArea}
       </div>
-      <div className="order-last flex w-full min-w-0 flex-wrap items-center gap-1.5 md:order-none md:w-auto md:flex-col md:items-end">
+      <div className="order-last flex w-full min-w-0 flex-wrap items-center gap-1.5 md:order-none md:w-auto md:flex-col md:items-end md:self-start md:pt-1">
         {secret.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}
       </div>
       <div className="flex shrink-0 items-center self-start">

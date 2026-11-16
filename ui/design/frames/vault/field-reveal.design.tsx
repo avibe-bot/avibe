@@ -3,7 +3,7 @@
 // tiers (kit/vault-field-reveal). Protected: Show / Copy open the secure window from the click and the
 // value appears only there; the card never draws a value. Standard: field names only (no Web reveal).
 import { useDraft } from '../../kit/draft';
-import { FieldRevealCard, type FieldRevealOption, type FieldRevealSecret } from '../../kit/vault-field-reveal';
+import { FieldRevealCard, FieldRevealWindowNote, type FieldRevealOption, type FieldRevealSecret } from '../../kit/vault-field-reveal';
 import { frames } from '../../frame';
 import { vaultFixtures } from './fixtures';
 
@@ -23,7 +23,7 @@ const useSecrets = (): FieldRevealSecret[] => {
 function Heading({ option }: { option: FieldRevealOption }) {
   const d = useDraft();
   const text = {
-    rows: d('A · 字段直接列在卡片上：每个字段一行，显示 / 复制紧跟字段名（像 1Password）', 'A · Fields listed on the card: one row each, Show / Copy right after the name (like 1Password)'),
+    rows: d('A · 字段直接列在卡片上：每个字段一行，显示 / 复制紧跟字段名（像 1Password）；只有一个值时在标题行', 'A · Fields listed on the card: one row each, Show / Copy right after the name (like 1Password); a single value has them on the title row'),
     expand: d('B · 卡片上折叠「N 个字段」，展开后同 A；只有一个值时，显示 / 复制直接在卡片右侧', 'B · "N fields" folded on the card, expanding to A’s rows; a one-value secret has Show / Copy on the card'),
     menu: d('C · 仍在「…」菜单里，但去掉下拉框：每个字段一行，带显示 / 复制', 'C · Still in the "…" menu, without the select: one row per field with Show / Copy'),
   }[option];
@@ -35,6 +35,7 @@ const list = (option: FieldRevealOption, { expanded = false, menuOn = '' } = {})
   return (
     <div className="flex min-h-full flex-col gap-3 bg-background p-6">
       <Heading option={option} />
+      <FieldRevealWindowNote />
       <ul className="flex flex-col gap-2.5">
         {secrets.map((secret) => (
           <FieldRevealCard key={secret.name} secret={secret} option={option} expanded={expanded} menuOpen={secret.name === menuOn} />
