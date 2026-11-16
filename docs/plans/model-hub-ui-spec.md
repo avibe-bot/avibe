@@ -3227,10 +3227,10 @@ right column is ordered by how far the attempt got before it stopped, which is a
 order in which the product stops refusing: ③ and ④ cannot save at all, ⑤ can.
 
 **2026-11-17 amendment — ask only what cannot be worked out** (Product, first-time-user
-review). Field order is **服务商** → Base URL → API Key → API 格式 → 更多设置. A catalog
+review). Field order is **供应商** → Base URL → API Key → API 格式 → 更多设置. A catalog
 vendor fixes the format, so the form shows no format area at all. On 自定义 the format area
 is detection's one-line status; the three concrete formats appear only when detection is
-unrecognised, when the person presses 「更改」, or after they chose one. 名称(可选) moves
+unrecognised, when the person opens them (「手动选择 API 格式」, or 「更改格式」 once detected), or after they chose one. 名称(可选) moves
 under the collapsed 「更多设置」 (open when a name is already typed). Saving still sends the
 format the draft holds. Settings › Models: 「添加供应商」 no longer opens a menu; the
 footer offers 「添加订阅」 and 「添加 API Key」, and search services are added from the

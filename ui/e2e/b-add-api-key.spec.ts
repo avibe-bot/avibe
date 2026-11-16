@@ -118,7 +118,7 @@ test.describe('B · add an API-key source', () => {
     await fillApiKeyForm(hub.addKeyDialog, { vendor: preset.label, name, baseUrl: mockBaseUrl(), apiKey: 'e2e-add' });
     // A preset fixes the format, so the form neither asks for it nor shows it.
     await expect(hub.addKeyDialog.getByRole('group', { name: copy('addKey.field.protocol') })).toHaveCount(0);
-    await expect(hub.addKeyDialog).not.toContainText(copy('addKey.field.protocol'));
+    await expect(hub.addKeyDialog.locator('.model-hub-add-key-protocol-area')).toHaveCount(0);
     await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
     await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
     expect((await api.sources()).find((source) => source.display_name === name)).toMatchObject({

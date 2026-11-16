@@ -245,7 +245,11 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     await screen.findByText('Recognised as Anthropic Messages', undefined, DETECTION_WAIT);
     // A recognised format is stated, not offered as a choice; 「Change」 opens the choice.
     expect(screen.queryByRole('button', { name: 'Anthropic Messages' })).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Change' }));
+    const change = screen.getByRole('button', { name: 'Change format' });
+    await user.click(change);
+    // The toggle stays put, so keyboard focus does too.
+    expect(document.activeElement).toBe(change);
+    expect(change.getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByRole('button', { name: 'Anthropic Messages' }).getAttribute('aria-pressed')).toBe('true');
     // Only the address and key the person typed are probed.
     expect(observe).toHaveBeenCalledOnce();
@@ -284,7 +288,7 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     renderDialog();
     const user = await fillCredentials();
     await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
-    await user.click(screen.getByRole('button', { name: 'Change' }));
+    await user.click(screen.getByRole('button', { name: 'Choose the API format manually' }));
     await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
     answer.resolve(recognisedObservation('anthropic'));
     await waitFor(() => expect(screen.queryByText(/Detecting the API format/)).toBeNull());
@@ -320,13 +324,22 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     expect(observe).not.toHaveBeenCalled();
   });
 
+  it('asks no format for a preset vendor', async () => {
+    renderDialog();
+    const user = userEvent.setup();
+    await selectVendor(user, API_KEY_VENDOR_PRESETS[0].id);
+    expect(screen.queryByText('API format')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Choose the API format manually' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Anthropic Messages' })).toBeNull();
+  });
+
   it('lets the user choose a custom protocol and keeps validation failures editable', async () => {
     const create = vi.spyOn(modelsApi, 'createApiKeySource')
       .mockRejectedValueOnce(new ApiCallError('discovery_failed', undefined, true, [], [], [], 400))
       .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
     renderDialog();
     const user = await fillCredentials();
-    await user.click(screen.getByRole('button', { name: 'Change' }));
+    await user.click(screen.getByRole('button', { name: 'Choose the API format manually' }));
     await user.click(screen.getByRole('button', { name: 'Anthropic Messages' }));
     await clickConfirm(user);
     await screen.findByRole('button', { name: /^Retry$/ });
@@ -346,6 +359,9 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     await user.click(screen.getByRole('button', { name: /More settings|更多设置/ }));
     await user.type(screen.getByRole('textbox', { name: /Name|名称/i }), 'n'.repeat(65));
     expect(screen.getByRole('button', { name: CONFIRM }).hasAttribute('disabled')).toBe(true);
+    // The invalid name stays in view: it is why the save is disabled.
+    expect(screen.getByRole('button', { name: /More settings|更多设置/ }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('textbox', { name: /Name|名称/i })).toBeTruthy();
     expect(create).not.toHaveBeenCalled();
   });
 

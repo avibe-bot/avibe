@@ -417,7 +417,9 @@ export const fillApiKeyForm = async (
   if (values.protocol) {
     // The format is a choice only once asked for: 「Change」 opens it.
     const format = dialog.getByRole('button', { name: values.protocol, exact: true });
-    if (!(await format.isVisible())) await dialog.getByRole('button', { name: hub('addKey.protocol.change'), exact: true }).click();
+    if (!(await format.isVisible())) {
+      await dialog.getByRole('button', { name: new RegExp(`^(${hub('addKey.protocol.change')}|${hub('addKey.protocol.manual')})$`) }).click();
+    }
     await format.click();
   }
   await dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true }).fill(values.baseUrl);

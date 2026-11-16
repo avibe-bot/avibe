@@ -87,7 +87,7 @@ describe('search service activation and mixed order', () => {
     expect(screen.getByRole('heading', { name: locale.t('settings.models.searchServices.order') })).toBeTruthy();
     // Sources adds models only: search services are added from the Tools tab.
     expect(screen.getByRole('button', { name: locale.t('settings.models.upstream.addApiKey') })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: locale.t('settings.models.searchServices.addProvider') })).toBeNull();
+    expect(screen.queryByRole('button', { name: lng === 'zh' ? '添加供应商' : 'Add provider' })).toBeNull();
     expect(screen.getByRole('button', { name: locale.t('settings.models.searchServices.add') })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: new RegExp(`^${locale.t('settings.models.tools.advanced.label')}`) }));
     expect(screen.getAllByRole('list', { name: locale.t('settings.models.searchServices.order') })).toHaveLength(1);

@@ -214,9 +214,15 @@ export const ApiKeySourceForm: React.FC<{
   // person asked to change it; a preset fixes it, so it is not shown at all.
   // ui/design: models/first-provider/api-key-preset
   const [formatOpen, setFormatOpen] = React.useState(false);
-  const showFormats = formatOpen || draft.protocolChosen || detection.kind === 'unrecognised';
+  // Detection failing or a choice already made opens the formats by themselves;
+  // otherwise one toggle opens them, and stays where it is so focus does too.
+  const formatsForced = draft.protocolChosen || detection.kind === 'unrecognised';
+  const showFormats = formatOpen || formatsForced;
+  const formatsId = React.useId();
   // The name is optional and defaults to the address, so it waits behind 「更多设置」.
-  const [moreOpen, setMoreOpen] = React.useState(() => draft.displayName.trim() !== '' || !nameValid);
+  const [moreOpen, setMoreOpen] = React.useState(() => draft.displayName.trim() !== '');
+  // An invalid name keeps its field in view: it is why Save is disabled.
+  const moreShown = moreOpen || !nameValid;
   const moreId = React.useId();
 
   // A settled detection moves the format until the person picks one. It never
@@ -280,17 +286,26 @@ export const ApiKeySourceForm: React.FC<{
       {!vendorPreset && (
         <div className="model-hub-add-key-protocol-area">
           <span className="model-hub-add-key-label">{t('settings.models.addKey.field.protocol')}</span>
-          {showFormats && (
-            <ProtocolSegments
-              disabled={disabled}
-              selection={draft.protocol}
-              onSelect={(value) => onChange({ ...draft, protocol: value, protocolChosen: true }, 'protocol')}
-            />
-          )}
+          <div id={formatsId} hidden={!showFormats}>
+            {showFormats && (
+              <ProtocolSegments
+                disabled={disabled}
+                selection={draft.protocol}
+                onSelect={(value) => onChange({ ...draft, protocol: value, protocolChosen: true }, 'protocol')}
+              />
+            )}
+          </div>
           {draft.protocolChosen ? null : <DetectionNote detection={detection} />}
-          {!showFormats && (
-            <button type="button" className="model-hub-add-key-hint self-start underline underline-offset-2 hover:text-foreground" disabled={disabled} onClick={() => setFormatOpen(true)}>
-              {t('settings.models.addKey.protocol.change')}
+          {!formatsForced && (
+            <button
+              type="button"
+              className="model-hub-add-key-hint self-start underline underline-offset-2 hover:text-foreground"
+              disabled={disabled}
+              aria-expanded={formatOpen}
+              aria-controls={formatsId}
+              onClick={() => setFormatOpen((value) => !value)}
+            >
+              {t(detection.kind === 'detected' ? 'settings.models.addKey.protocol.change' : 'settings.models.addKey.protocol.manual')}
             </button>
           )}
         </div>
@@ -299,14 +314,15 @@ export const ApiKeySourceForm: React.FC<{
         <button
           type="button"
           className="model-hub-add-key-hint flex items-center gap-1 hover:text-foreground"
-          aria-expanded={moreOpen}
+          aria-expanded={moreShown}
           aria-controls={moreId}
+          disabled={!nameValid}
           onClick={() => setMoreOpen((value) => !value)}
         >
-          <ChevronDown className={cn('size-3 transition-transform', moreOpen && 'rotate-180')} aria-hidden="true" />
+          <ChevronDown className={cn('size-3 transition-transform', moreShown && 'rotate-180')} aria-hidden="true" />
           {t('settings.models.addKey.more')}
         </button>
-        <div id={moreId} hidden={!moreOpen}>
+        <div id={moreId} hidden={!moreShown}>
           <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
             {(id) => <Input id={id} value={draft.displayName} placeholder={draftDefaultName(draft) ?? undefined} disabled={disabled} aria-invalid={!nameValid} onChange={(event) => onChange({ ...draft, displayName: event.target.value }, 'displayName')} className="model-hub-add-key-input" />}
           </Field>
