@@ -6520,7 +6520,6 @@
       "ttlHours": "{{count}} h",
       "accessNote": "Unlocked in your browser — the secret's value is never shown to the AI or the chat.",
       "signNote": "The private key never leaves your browser — only the signature is returned.",
-      "protectedWarning": "Protected signing happens in the secure browser sandbox. Only the public signature returns to Avibe.",
       "browserNote": "This needs your passkey, which the desktop app can't use. Review and approve it in your browser.",
       "browserFallbackNote": "The passkey step didn't work in the app, so review and approve this in your browser.",
       "continueInBrowser": "Continue in browser",

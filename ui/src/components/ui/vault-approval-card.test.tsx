@@ -234,14 +234,37 @@ describe('VaultApprovalCard signing-address contract', () => {
     for (const address of Object.values(addresses)) {
       expect(screen.queryByText(address) !== null).toBe(visible.some((value) => value === address));
     }
-    // The secure window's own review states the network caveat; this card keeps the general note.
-    expect(screen.queryByText(en.vaults.approval.protectedWarning) !== null).toBe(protection === 'protected');
+    // The key's custody is said once, in the bottom note, and only on a protected card.
+    expect(screen.queryByText(en.vaults.approval.signNote) !== null).toBe(protection === 'protected');
   });
 });
 
 // The sandbox signs a protected request against the daemon-signed operation context, and the
 // daemon then settles it. An exact-message (Ed25519) completion is checked against the context the
 // request stored, so dropping it from the completion makes every protected Solana signature fail.
+// Each protected sign card says once where its key stays: the bottom note, in the browser and in the
+// desktop app, which adds that the approval is finished in the browser.
+describe('VaultApprovalCard protected custody note', () => {
+  const protectedSign = {
+    ...standardSignRequest,
+    card: { ...standardSignRequest.card, protection: 'protected', secret_unlock_material: { name: 'ETH_KEY', kind: 'keypair', envelope } },
+  } as unknown as VaultRequest;
+  afterEach(() => { delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__; });
+
+  it.each([
+    ['in the browser', false],
+    ['in the desktop app', true],
+  ])('says it once %s', async (_label, desktop) => {
+    if (desktop) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    api.listVaultSecrets.mockResolvedValue({ secrets: [] });
+    await act(async () => {
+      render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={protectedSign} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    });
+    expect(screen.getAllByText(en.vaults.approval.signNote)).toHaveLength(1);
+    expect(Boolean(screen.queryByText(en.vaults.approval.browserNote))).toBe(desktop);
+  });
+});
+
 describe('VaultApprovalCard protected signing completion', () => {
   const operationContext = { v: 2, purpose: 'sign', requestId: 'vrq_protected_sign' };
   const material = { name: 'SIGNING_KEY', kind: 'keypair', envelope };
@@ -443,7 +466,7 @@ describe('VaultApprovalCard protected wallet account signing', () => {
     ['an extra field', { ...derivation, path: "m/86'/0'/0'/0/1" }],
   ])('refuses a signed release naming %s, before the sandbox is asked', async (_label, released) => {
     const onResolved = await approve(walletSign(released));
-    await vi.waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByText(en.vaults.approval.errors.failed)).toBeTruthy());
     expect(vault.signProtectedRequest).not.toHaveBeenCalled();
     expect(api.signVaultDigest).not.toHaveBeenCalled();
     expect(onResolved).not.toHaveBeenCalled();

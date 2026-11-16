@@ -6520,7 +6520,6 @@
       "ttlHours": "{{count}} 小时",
       "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
-      "protectedWarning": "保护档签名在安全浏览器沙箱中完成，只有公开签名会返回 Avibe。",
       "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
       "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",

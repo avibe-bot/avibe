@@ -209,24 +209,18 @@ export const DetailRow: React.FC<{ label: string; children: React.ReactNode }> =
   </div>
 );
 
-/** Shared presentation for approval cards and inert design frames; never opens custody. */
-export function VaultSigningIdentity({ scheme, addresses, protectedKey }: {
+/** The addresses a sign request signs as; never opens custody. */
+function VaultSigningIdentity({ scheme, addresses, protectedKey }: {
   scheme?: string;
   addresses: SigningAddresses | null;
   protectedKey: boolean;
 }) {
   const { t } = useTranslation();
   const shown = addressesForScheme(scheme, addresses, protectedKey);
-  return <>
-    {protectedKey ? (
-      <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
-        {t('vaults.approval.protectedWarning')}
-      </div>
-    ) : null}
-    {Object.values(shown).some(Boolean) ? (
-      <DetailRow label={t('vaults.approval.signingAs')}><SigningAddressList addresses={shown} /></DetailRow>
-    ) : null}
-  </>;
+  // A protected card says where the key stays once, in its bottom note, not here as well.
+  return Object.values(shown).some(Boolean) ? (
+    <DetailRow label={t('vaults.approval.signingAs')}><SigningAddressList addresses={shown} /></DetailRow>
+  ) : null;
 }
 
 /**
@@ -915,9 +909,14 @@ export const VaultApprovalCard: React.FC<{
       {entryBlocked ? <VaultEntryNotice issue={entryIssue} /> : needsProtectedApproval ? (
         <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
           <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint-ink" />
-          {approveInBrowser
-            ? t(handoff === 'fallback' ? 'vaults.approval.browserFallbackNote' : 'vaults.approval.browserNote')
-            : isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
+          {approveInBrowser ? (
+            // Finished in the browser: say so, and for a signature also where its key stays, as the
+            // browser's card does.
+            <span className="flex flex-col gap-1">
+              <span>{t(handoff === 'fallback' ? 'vaults.approval.browserFallbackNote' : 'vaults.approval.browserNote')}</span>
+              {isSign ? <span>{t('vaults.approval.signNote')}</span> : null}
+            </span>
+          ) : isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
         </span>
       ) : null}
 
