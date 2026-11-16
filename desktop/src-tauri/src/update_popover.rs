@@ -4,7 +4,8 @@
 //! window over the main one, from the bundled account page. The remote page only
 //! asks for it, so it never reaches this computer's installer.
 use avibe_runtime_host::instance_client::protocol::ClientAction;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use url::Url;
 
@@ -40,8 +41,44 @@ pub(crate) fn navigation_allowed(url: &Url, bundle: &Url) -> bool {
     Some(url.clone()) == page_url(bundle)
 }
 
-/// Keeps a double click from building the window twice while one is being built.
-static OPENING: AtomicBool = AtomicBool::new(false);
+/// A popup being built or loading, so a second click waits for it instead of
+/// building another or replacing it. Cleared once its page loads or it is gone.
+struct Opening {
+    since: Option<Instant>,
+    /// The page state to rebuild with once a stuck window is actually destroyed.
+    rebuild: Option<String>,
+}
+static OPENING: Mutex<Opening> = Mutex::new(Opening {
+    since: None,
+    rebuild: None,
+});
+/// How long a popup may take to build and load (a cold WebView2 can be slow)
+/// before a click treats it as stuck and replaces it.
+const LOAD_DEADLINE: Duration = Duration::from_secs(15);
+
+fn opening() -> std::sync::MutexGuard<'static, Opening> {
+    OPENING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Debug, PartialEq)]
+enum Step {
+    Focus,
+    Wait,
+    Replace,
+    Build,
+}
+
+/// What a click on the version does, given the popup window (shown or not) and
+/// how long one has been building or loading.
+fn step(window: Option<bool>, loading_for: Option<Duration>) -> Step {
+    let loading = loading_for.is_some_and(|elapsed| elapsed < LOAD_DEADLINE);
+    match window {
+        Some(true) => Step::Focus,
+        _ if loading => Step::Wait,
+        Some(false) => Step::Replace,
+        None => Step::Build,
+    }
+}
 
 /// The popup's page is transparent from its first paint: the account page's own
 /// background would otherwise flash as a solid box over the remote sidebar.
@@ -54,37 +91,65 @@ const TRANSPARENT: &str = "(()=>{const s=document.createElement('style');s.textC
 /// navigation and menu handlers: the window is built off the handler's own thread,
 /// since building one inside them deadlocks on Windows.
 pub(crate) fn open(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
-    if let Some(window) = app.get_webview_window(UPDATE_POPOVER) {
-        if window.is_visible().unwrap_or(false) {
-            return window.set_focus().is_ok();
-        }
-        // Built but never shown: its page did not finish loading. Replace it.
-        let _ = window.destroy();
-    }
     if app.get_webview_window(crate::MAIN_WINDOW).is_none() || page_url(bundle).is_none() {
         return false;
     }
-    if OPENING.swap(true, Ordering::SeqCst) {
-        return true;
+    let window = app.get_webview_window(UPDATE_POPOVER);
+    // Decide and record under the lock, act after releasing it: destroying a
+    // window may run its Destroyed handler, which takes the lock too.
+    let (next, initialization) = {
+        let mut opening = opening();
+        let next = step(
+            window.as_ref().map(|window| window.is_visible().unwrap_or(false)),
+            opening.since.map(|since| since.elapsed()),
+        );
+        if matches!(next, Step::Replace | Step::Build) {
+            opening.since = Some(Instant::now());
+        }
+        if next == Step::Replace {
+            // Built for the new window once the stuck one is gone.
+            opening.rebuild = Some(initialization);
+            (next, None)
+        } else {
+            (next, Some(initialization))
+        }
+    };
+    match (next, window, initialization) {
+        (Step::Focus, Some(window), _) => window.set_focus().is_ok(),
+        // Never shown and past its deadline: its page is stuck. Destroying it
+        // completes on the event loop; its Destroyed event builds the new one.
+        (Step::Replace, Some(window), _) => {
+            let _ = window.destroy();
+            true
+        }
+        (Step::Build, _, Some(initialization)) => {
+            spawn_build(app, bundle, initialization);
+            true
+        }
+        _ => true,
     }
+}
+
+fn spawn_build(app: &AppHandle, bundle: &Url, initialization: String) {
     let app = app.clone();
     let bundle = bundle.clone();
     tauri::async_runtime::spawn(async move {
-        build(&app, &bundle, initialization);
-        OPENING.store(false, Ordering::SeqCst);
+        if !build(&app, &bundle, initialization) {
+            opening().since = None;
+        }
     });
-    true
 }
 
-fn build(app: &AppHandle, bundle: &Url, initialization: String) {
+/// Builds the popup, hidden until its page loads. False when nothing was built.
+fn build(app: &AppHandle, bundle: &Url, initialization: String) -> bool {
     if app.get_webview_window(UPDATE_POPOVER).is_some() {
-        return;
+        return false;
     }
     let (Some(main), Some(url)) = (app.get_webview_window(crate::MAIN_WINDOW), page_url(bundle)) else {
-        return;
+        return false;
     };
     let (Ok(origin), Ok(size), Ok(scale)) = (main.inner_position(), main.inner_size(), main.scale_factor()) else {
-        return;
+        return false;
     };
     // The main window's content area in its own logical points, and the popup's
     // top-left from its bottom-left corner.
@@ -110,12 +175,12 @@ fn build(app: &AppHandle, bundle: &Url, initialization: String) {
         .visible(false)
         .focused(true);
     let Ok(builder) = builder.parent(&main) else {
-        return;
+        return false;
     };
     #[cfg(target_os = "macos")]
     let builder = builder.accept_first_mouse(true);
     let Ok(window) = builder.build() else {
-        return;
+        return false;
     };
     // macOS places windows in one space of points, which the logical position
     // above already is. Windows places them on one physical desktop, where the
@@ -128,17 +193,32 @@ fn build(app: &AppHandle, bundle: &Url, initialization: String) {
         ));
     }
     let closing = window.clone();
-    window.on_window_event(move |event| {
+    let rebuilding = (app.clone(), bundle.clone());
+    window.on_window_event(move |event| match event {
         // A click anywhere outside the popup moves focus away: it closes, like a popover.
-        if let WindowEvent::Focused(false) = event {
+        WindowEvent::Focused(false) => {
             let _ = closing.close();
         }
+        // Gone, so its label is free: build the replacement a click asked for, if any.
+        WindowEvent::Destroyed => {
+            let mut opening = opening();
+            match opening.rebuild.take() {
+                Some(initialization) => {
+                    opening.since = Some(Instant::now());
+                    spawn_build(&rebuilding.0, &rebuilding.1, initialization);
+                }
+                None => opening.since = None,
+            }
+        }
+        _ => {}
     });
+    true
 }
 
 /// The popup's page has loaded: show it, focused, as a click on the version does.
 pub(crate) fn page_loaded(window: &WebviewWindow) {
     if window.label() == UPDATE_POPOVER {
+        opening().since = None;
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -177,6 +257,22 @@ mod tests {
         ] {
             assert!(!navigation_allowed(&Url::parse(other).unwrap(), &bundle), "{other}");
         }
+    }
+
+    /// A click while the popup is still building or loading waits for it rather
+    /// than replacing it; only one stuck past its deadline is replaced.
+    #[test]
+    fn a_click_waits_for_a_loading_popup_and_replaces_only_a_stuck_one() {
+        let early = Some(Duration::from_millis(300));
+        let late = Some(LOAD_DEADLINE + Duration::from_secs(1));
+        assert_eq!(step(None, None), Step::Build);
+        assert_eq!(step(None, early), Step::Wait);
+        assert_eq!(step(Some(false), early), Step::Wait);
+        assert_eq!(step(Some(false), late), Step::Replace);
+        assert_eq!(step(Some(false), None), Step::Replace);
+        assert_eq!(step(None, late), Step::Build);
+        assert_eq!(step(Some(true), None), Step::Focus);
+        assert_eq!(step(Some(true), early), Step::Focus);
     }
 
     #[test]
