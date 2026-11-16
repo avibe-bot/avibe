@@ -9,6 +9,14 @@ The scan covers every shipped string catalog: the Web/Desktop/Mini UI bundles,
 the service and IM reply bundles, and the iOS catalogs. A legitimate match must
 be listed in ``ALLOWED`` with the reason it is not roadmap or unfinished-state
 copy; keep that list short and specific.
+
+Scope: this guard blocks a fixed vocabulary of stage, roadmap and
+unfinished-state phrases (Phase N, coming soon, "(soon)", 即将上线, 未来的,
+暂不支持, "not supported yet", ...). It deliberately does not chase every
+natural-language paraphrase: "yet", 还没 and 尚未 are everywhere in legitimate
+empty-state and transient-state copy ("No projects yet", "Can't confirm yet"),
+so matching them would trade a short allowlist for a long one. Paraphrases are
+covered by the AGENTS.md copy rule and by review, not by growing this pattern.
 """
 
 from __future__ import annotations
