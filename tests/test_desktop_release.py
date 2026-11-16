@@ -1000,11 +1000,23 @@ def test_workflow_signs_every_macos_layer_before_recording():
     # The manual no-credential branch keeps the ad-hoc, inside-out seal, and
     # with it the profile-free entitlements Tauri sealed the bundle with.
     assert signing.count("--preserve-metadata=identifier,entitlements,flags,runtime") == 2
-    adhoc_branch = signing.split("release builds must be Developer ID signed", 1)[1].split("\n          fi\n", 1)[0]
-    assert "codesign --force --sign -" in adhoc_branch
+    remainder = signing.split("release builds must be Developer ID signed", 1)[1]
+    assert "\nfi\n" in remainder
+    adhoc_branch = remainder.split("\nfi\n", 1)[0]
+    assert "codesign --force --sign -" in adhoc_branch and "Signature=adhoc" in adhoc_branch
     assert "--entitlements" not in adhoc_branch and "provisionprofile" not in adhoc_branch
-    # The profile entitlements are reachable only through the Developer ID signer.
-    assert "app-developer-id" not in (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
+    assert "driver_packaged_cdhash" not in adhoc_branch
+    # The profile entitlements reach a signature only through the Developer ID
+    # signer; the workflow names them once, for the smoke test's control.
+    workflow_text = (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
+    smoke = step("Smoke-test macOS app launch")["run"]
+    assert workflow_text.count("app-developer-id") == smoke.count("app-developer-id") == 1
+    # On a signed build the smoke test first proves this runner kills a program
+    # claiming those entitlements without a profile, then launches the app.
+    control = smoke.split('if [ "${apple_signing:-absent}" = "enabled" ]; then', 1)[1].split("\nfi\n", 1)[0]
+    assert "--entitlements entitlements/app-developer-id.plist" in control
+    assert '[ "$control_status" -eq 137 ]' in control and "exit 1" in control
+    assert smoke.index("control_status") < smoke.index('"$binary" >"$launch_log"')
     assert "--deep --sign" not in signing
     assert "Contents/Helpers/cua-driver" in signing
     assert "Contents/MacOS/cua-driver" in signing

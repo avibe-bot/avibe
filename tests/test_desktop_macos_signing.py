@@ -6,6 +6,7 @@ import os
 import plistlib
 import stat
 import struct
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -562,3 +563,55 @@ def test_notarization_retries_only_lost_connections_and_never_resubmits_an_uploa
     assert waited == sleeps
     stapled = [command[1:3] for command in commands if command[0] == "stapler"]
     assert stapled == ([] if error else [["staple", str(dmg)], ["validate", str(dmg)]])
+
+
+def test_every_app_verification_checks_the_embedded_profile(tmp_path, monkeypatch):
+    checked, profiles = [], []
+    monkeypatch.setattr(signing, "verify_code", lambda path, **kwargs: checked.append((path, kwargs.get("entitlements"))))
+    monkeypatch.setattr(signing, "verify_embedded_profile", lambda *args: profiles.append(args))
+    app, profile_path = tmp_path / "Avibe.app", tmp_path / "embedded.provisionprofile"
+
+    signing.verify_app(app, profile_path)
+
+    assert checked == [
+        (app / "Contents/Helpers/cua-driver", signing.HELPER_ENTITLEMENTS),
+        (app, signing.APP_ENTITLEMENTS),
+    ]
+    assert profiles == [(app, profile_path)]
+
+
+def test_release_verification_checks_the_profile_of_the_app_and_of_the_app_inside_the_dmg(tmp_path, monkeypatch):
+    verified, mounted = [], []
+
+    def attach(command, **_kwargs):
+        if command[:2] == ["hdiutil", "attach"]:
+            mounted.append(Path(command[command.index("-mountpoint") + 1]))
+
+    monkeypatch.setattr(signing, "verify_dmg_signature", lambda _dmg: None)
+    monkeypatch.setattr(signing, "stapler", lambda *_args: None)
+    monkeypatch.setattr(signing, "assess", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(signing, "run", attach)
+    monkeypatch.setattr(signing.subprocess, "run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(signing, "verify_app", lambda *args: verified.append(args))
+    app, dmg, profile_path = tmp_path / "Avibe.app", tmp_path / "Avibe.dmg", tmp_path / "embedded.provisionprofile"
+
+    signing.verify_release(app, dmg, profile_path)
+
+    assert verified == [(app, profile_path), (mounted[0] / "Avibe.app", profile_path)]
+
+
+@pytest.mark.parametrize("command", [["sign-app", "Avibe.app"], ["verify-release", "--app", "Avibe.app", "--dmg", "Avibe.dmg"]])
+@pytest.mark.parametrize("profile_variable", [None, ""])
+def test_signing_commands_without_a_profile_stop_before_any_tool_runs(tmp_path, command, profile_variable):
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("AVIBE_")}
+    environment["AVIBE_CODESIGN_IDENTITY"] = COMPLETE["APPLE_SIGNING_IDENTITY"]
+    # No macOS tool is reachable: reaching one would fail differently.
+    environment["PATH"] = str(tmp_path)
+    if profile_variable is not None:
+        environment["AVIBE_PROVISIONING_PROFILE"] = profile_variable
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "desktop/scripts/macos_signing.py"), *command],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1
+    assert result.stderr.strip() == "::error::No provisioning profile: run import-identity first"

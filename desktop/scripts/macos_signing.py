@@ -782,13 +782,13 @@ def main() -> int:
         signer.add_argument("--identity", default=os.environ.get("AVIBE_CODESIGN_IDENTITY"))
         signer.add_argument("--keychain", default=os.environ.get("AVIBE_CODESIGN_KEYCHAIN"))
         if name == "sign-app":
-            signer.add_argument("--provisioning-profile", type=Path, default=os.environ.get("AVIBE_PROVISIONING_PROFILE"))
+            signer.add_argument("--provisioning-profile", type=Path, default=os.environ.get("AVIBE_PROVISIONING_PROFILE") or None)
     notarizer = sub.add_parser("notarize", help="submit, require Accepted, staple, and validate")
     notarizer.add_argument("path", type=Path)
     releaser = sub.add_parser("verify-release", help="Gatekeeper, staple, and code identity checks of the shipped app and DMG")
     releaser.add_argument("--app", type=Path, required=True)
     releaser.add_argument("--dmg", type=Path, required=True)
-    releaser.add_argument("--provisioning-profile", type=Path, default=os.environ.get("AVIBE_PROVISIONING_PROFILE"))
+    releaser.add_argument("--provisioning-profile", type=Path, default=os.environ.get("AVIBE_PROVISIONING_PROFILE") or None)
     args = parser.parse_args()
     try:
         if args.command == "import-identity":
