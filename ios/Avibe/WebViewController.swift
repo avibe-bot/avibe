@@ -1214,10 +1214,20 @@ final class WebViewController: UIViewController {
         UIApplication.shared.open(url)
     }
 
-    private func presentGoogleSignInMessage() {
+    private func presentThirdPartySignInMessage(_ provider: ThirdPartySignIn) {
+        let title: String
+        let message: String
+        switch provider {
+        case .google:
+            title = String(localized: "google.title")
+            message = String(localized: "google.body")
+        case .github:
+            title = String(localized: "github.title")
+            message = String(localized: "github.body")
+        }
         let alert = UIAlertController(
-            title: String(localized: "google.title"),
-            message: String(localized: "google.body"),
+            title: title,
+            message: message,
             preferredStyle: .alert
         )
         alert.addAction(
@@ -1299,15 +1309,15 @@ final class WebViewController: UIViewController {
         switch navigationPolicy.disposition(for: url, context: context) {
         case .allow:
             return .allow
-        case .googleAuthentication:
+        case .thirdPartySignIn(let provider):
             finishPrimaryLoadingIfNeeded(
                 webView,
                 event: RuntimeNavigationEvent(
                     stage: .finished,
-                    destination: .googleAuthentication
+                    destination: .thirdPartySignIn(provider)
                 )
             )
-            presentGoogleSignInMessage()
+            presentThirdPartySignInMessage(provider)
             return .cancel
         case .external:
             finishPrimaryLoadingIfNeeded(
@@ -2402,8 +2412,8 @@ extension WebViewController: WKUIDelegate {
             return presentChildWebView(using: configuration, from: webView)
         case .externalApplication:
             openExternalApplication(url)
-        case .googleAuthentication:
-            presentGoogleSignInMessage()
+        case .thirdPartySignIn(let provider):
+            presentThirdPartySignInMessage(provider)
         }
         return nil
     }

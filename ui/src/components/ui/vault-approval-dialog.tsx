@@ -2,7 +2,7 @@ import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { VaultRequest } from '@/context/ApiContext';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { useFullVaultRequest } from '@/lib/vaultFullRequest';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 
@@ -52,6 +52,7 @@ function FullRequestReview({ request, onResolved, onClose }: {
 }) {
   const { t } = useTranslation();
   const { state, retry } = useFullVaultRequest(request);
+  const handoff = useVaultPasskeyHandoff();
   if (!state || state.phase === 'loading') {
     return (
       <div role="status" className="flex items-center gap-2 py-6 text-sm text-muted">
@@ -78,14 +79,16 @@ function FullRequestReview({ request, onResolved, onClose }: {
     );
   }
   const full = state.request;
-  // Decided from the full request: an approval that needs a passkey this app can't use goes to the browser.
-  if (vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(full)) {
+  // Decided from the full request: an approval that needs a passkey this app can't run goes to the browser.
+  if (handoff && vaultApprovalNeedsPasskey(full)) {
     // The approval happens in the browser; the Session that asked opens here, in the app.
     const session = vaultRequestSessionDisplay(full);
     return (
       <div className="flex flex-col gap-3">
         {/* Clear of the dialog's close button. */}
-        <p className="mr-6 text-sm text-foreground">{t('vaults.approval.browserNote')}</p>
+        <p className="mr-6 text-sm text-foreground">
+          {t(handoff === 'fallback' ? 'vaults.approval.browserFallbackNote' : 'vaults.approval.browserNote')}
+        </p>
         {session ? (
           <DetailRow label={t('vaults.approval.session')}>
             <VaultRequestSessionLink session={session} textClassName="text-[13px]" />

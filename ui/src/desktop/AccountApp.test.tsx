@@ -8,8 +8,9 @@ import { AccountApp } from './AccountApp';
 
 const send = vi.hoisted(() => vi.fn(async () => null));
 const update = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
+const bridge = vi.hoisted(() => ({ failed: false }));
 vi.mock('./useAccountClient', () => ({
-  useAccountClient: () => ({
+  useAccountClient: () => bridge.failed ? { error: 'bridge_unavailable', send, state: null } : ({
     error: null,
     send,
     state: {
@@ -28,7 +29,7 @@ vi.mock('./useAccountClient', () => ({
     },
   }),
 }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); update.value = {}; window.history.replaceState(null, '', '/'); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); update.value = {}; bridge.failed = false; window.history.replaceState(null, '', '/'); });
 
 // ui/design: update/panel/trusted-view
 it('AUTH-SETUP-178 the trusted update view acts on this computer\'s desktop app with the same panel', async () => {
@@ -65,6 +66,37 @@ it('AUTH-SETUP-178 a rejected trusted install does not turn a later check error 
   await act(async () => { rendered.rerender(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>); });
   expect(await screen.findByText(en.update.status.checkFailed)).toBeTruthy();
   expect(screen.queryByText(en.update.failure.install.title)).toBeNull();
+});
+
+// ui/design: chrome/remote-update-popup. While the main window shows another computer, the
+// shell opens this page in its own popup window: the same panel, closed by Escape or a click
+// outside it, never sending an account action (the shell refuses those from this window).
+it('AUTH-SETUP-178 the update popup is the same panel, closed by Escape or a click outside', async () => {
+  window.history.replaceState(null, '', '/account/index.html?view=update-popover');
+  const invoke = vi.fn(async () => undefined);
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
+  const dialog = screen.getByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  expect(screen.queryByText(en.update.trustedView.title)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.update }));
+  expect(send).toHaveBeenCalledWith({ type: 'update_install', target_version: '3.2.7' });
+  fireEvent.click(dialog);
+  expect(invoke).not.toHaveBeenCalled();
+  fireEvent.keyDown(window, { key: 'Escape' });
+  expect(invoke).toHaveBeenCalledWith('plugin:window|close', { label: 'update-popover' });
+  invoke.mockClear();
+  fireEvent.click(document.querySelector('[data-update-popover]')!);
+  expect(invoke).toHaveBeenCalledWith('plugin:window|close', { label: 'update-popover' });
+  expect(send).not.toHaveBeenCalledWith({ type: 'cancel' });
+});
+
+it('AUTH-SETUP-178 the update popup still shows why it cannot reach the desktop app', () => {
+  window.history.replaceState(null, '', '/account/index.html?view=update-popover');
+  bridge.failed = true;
+  render(<AccountApp />);
+  expect(screen.getByRole('dialog', { name: 'dashboard.versionAndUpdate' })).toBeTruthy();
+  expect(screen.getByText('desktopClient.errors.bridge')).toBeTruthy();
 });
 
 // The remote note lives in the instance menu only, where switching happens; full pages do not repeat it.

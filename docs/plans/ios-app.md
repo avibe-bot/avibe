@@ -546,10 +546,11 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   1. **Instance origins** (configured by the user) load in the WebView and get
      the native bridge and the microphone grant.
   2. **Authentication origins** load in the WebView without bridge or
-     microphone access: avibe.bot, the Supabase Auth host avibe.bot uses, and
-     GitHub's OAuth pages. Phase 0 sign-in depends on this class (see Signing
-     in). Google's authorization endpoint is intercepted instead, because
-     Google rejects embedded webviews.
+     microphone access: avibe.bot and the Supabase Auth host avibe.bot uses.
+     Phase 0 sign-in depends on this class (see Signing in). Google's and
+     GitHub's authorization endpoints are intercepted instead: the App signs
+     in only with avibe.bot's own accounts (guideline 4.8), and Google also
+     rejects embedded webviews.
   3. **Other HTTP(S) origins** open in `SFSafariViewController` only when the
      primary main frame navigates to them.
 
@@ -574,8 +575,8 @@ later), so that a bridge change and its Web UI consumer land in one PR.
 - The shell's browser behavior has a closed deviation list:
   1. External primary-main-frame HTTP(S) navigation uses
      `SFSafariViewController`.
-  2. Google authorization is intercepted because Google rejects embedded
-     browsers.
+  2. Google and GitHub authorization are intercepted: the App signs in only
+     with avibe.bot's own accounts, and Google rejects embedded browsers.
   3. User-initiated external application schemes use `UIApplication`; subframe
      navigation to them is cancelled.
   4. Instance-origin main frames receive the microphone grant.
@@ -976,7 +977,7 @@ Push to APNs (section 8).
 | --- | --- | --- |
 | 4.2.7(e): "Thin clients for cloud-based apps are not appropriate" | Medium for managed Enterprise instances | Position the app as the companion to the user's own Avibe; personal instances run on the user's machine. |
 | 4.2.3(i): must work without installing another app | Medium | The app needs a running Avibe; provide the demo instance. |
-| 4.8 Login Services | High: avibe.bot offers Google and GitHub | Add Sign in with Apple to avibe.bot before App Store submission. |
+| 4.8 Login Services | High: avibe.bot offers Google and GitHub | The App intercepts Google and GitHub authorization and signs in only with avibe.bot's own accounts (email code, password, passkey), the guideline's own-account-system exception; Sign in with Apple is not needed. |
 | 5.1.1(v): account deletion in the app | High: email sign-in can create an account | Add account deletion to avibe.bot and an in-app entry that leads to it. |
 | 5.1.3 Health | Applies once HealthKit ships | Section 10. |
 | 2.5.14: recording indicator | Low | The system indicator plus the composer's recording state. |
@@ -1108,7 +1109,7 @@ Not built. Section 5 gives the reasons and the condition for reconsidering.
 | --- | --- | --- |
 | Native | Notification Service Extension with RFC 8291 decryption (CryptoKit P-256, HKDF, AES-GCM), `push` capability, tap routing, and badge | 2 weeks |
 | Instance | Payload byte budget, subscription label, and tests | 1 week |
-| Backend | Relay registration and delivery routes, APNs HTTP/2 client, rate limits; Sign in with Apple; account deletion | 1.5 weeks |
+| Backend | Relay registration and delivery routes, APNs HTTP/2 client, rate limits; account deletion | 1.5 weeks |
 | Reviews | Product and security review of the relay and the handoff | Before merge |
 
 ### Phase 2: deep native and App Store, about 3-4 weeks
@@ -1147,7 +1148,7 @@ Sogou), with the web composer in the shell.
 | 7 | Hold to talk on the composer and on the center button | Haptic on press and release; dictation reaches the real avibe.bot realtime socket and lands in the composer |
 | 8 | Recording indicator | Shown while capturing (App Review 2.5.14) |
 | 9 | `@` / `#` pickers and chips | Chips insert, delete atomically, and send the same markers as in Safari |
-| 10 | Sign-in | Email code, password, and GitHub complete inside the shell; the session survives a cold launch |
+| 10 | Sign-in | Email code and password complete inside the shell; Google and GitHub show the email-code alert; the session survives a cold launch |
 | 11 | Protected Vault passkey | Works, or the Safari fallback is confirmed |
 
 ## 16. Risks and open questions
@@ -1203,8 +1204,9 @@ Sogou), with the web composer in the shell.
 5. Approve the APNs relay on avibe.bot as a new backend path (product and
    security review), and provide the APNs `.p8` key.
 6. Approve the instance login handoff endpoints (security review).
-7. Add Sign in with Apple and account deletion to avibe.bot (needed for the App
-   Store, not for TestFlight).
+7. Add account deletion to avibe.bot (needed for the App Store, not for
+   TestFlight). Sign in with Apple is not needed: the App signs in only with
+   avibe.bot's own accounts.
 8. TestFlight only, or the App Store after Phase 2. For the App Store, a review
    demo instance and reviewer account are needed.
 9. **Settled 2026-11-04:** stay on the Individual membership. There is no

@@ -143,7 +143,7 @@
       "skip": "跳过此版本",
       "cancel": "稍后",
       "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
-      "disabledDetail": "此构建尚未配置桌面自动更新，请手动安装新的签名版本。",
+      "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
     }
   },
@@ -319,7 +319,10 @@
       "current": "当前实例",
       "none": "尚未选择实例",
       "switch": "切换实例",
-      "choose": "选择实例"
+      "choose": "选择实例",
+      "privacy": "隐私政策",
+      "delete": "删除账号",
+      "deleteHint": "前往 avibe.bot，查看影响并确认删除。"
     },
     "twoFactor": {
       "title": "确认是你本人。",
@@ -803,8 +806,7 @@
       "windows": {
         "subtitle": "让 Avibe Agent 查看并操作这台 Windows 电脑。",
         "title": "Windows 上的电脑操作",
-        "previewBadge": "预览",
-        "previewDetail": "Windows 上的电脑操作目前为预览版，显示缩放、多显示器和输入法仍在验证中。",
+        "limitations": "在显示缩放、多显示器和输入法下可能工作不稳定。",
         "apps": "Agent 可以操作以你的 Windows 账户运行的普通应用，无需设置辅助功能或屏幕录制。",
         "elevated": "以管理员身份运行的窗口会被拒绝。Avibe 不会自行提升权限，Agent 会告诉你它无法操作该窗口。如需让它协助，请不要使用“以管理员身份运行”，重新打开该应用。",
         "launch": "Agent 会启动它能在这台电脑上可靠找到的桌面应用。商店应用和无法可靠找到的应用，需要你先手动打开：Agent 会请你打开，然后在该窗口中继续操作。",
@@ -1215,10 +1217,6 @@
     },
     "logsTitle": "实时日志",
     "logsSubtitle": "按来源、级别和搜索条件查看运行日志流。",
-    "inProgressTitle": "这个设置页已经有新路由，但功能 UI 还在迁移中",
-    "inProgressBody": "新版路由和页面壳子已经就位，但这个分区的具体界面还在从旧 Dashboard 和向导流程迁移。",
-    "inProgressHint": "在该分区完成重构前，底层配置仍可先通过设置向导进行调整。",
-    "openSetup": "打开设置向导",
     "models": {
       "title": "模型网关",
       "subtitle": "按 Agent 查看每个模型使用哪个供应商，并按路由自动切换。",
@@ -1417,7 +1415,7 @@
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "searchAdd": "在供应商和模型目录里搜索「{{query}}」",
-          "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
+          "legacy": "当前模型引擎版本不能编辑模型列表，以下是它提供的模型。",
           "baselineUnavailable": "没能读取这个后端的模型列表。",
           "save": "保存",
           "saving": "正在保存…",
@@ -2101,7 +2099,6 @@
         "startNow": "立即启动",
         "starting": "正在启动"
       },
-      "experimental": "实验",
       "agents": {
         "title": "Agent",
         "subtitle": "各自选择供应商和优先级；失败时自动切换",
@@ -2435,7 +2432,7 @@
         "applyFailed": "迁移失败，请重试",
         "blocked": {
           "config": "配置文件格式有误。",
-          "environment": "环境变量里的密钥暂不支持迁移。",
+          "environment": "环境变量里的密钥无法迁移，请手动添加。",
           "credential": "不支持这种认证方式。",
           "dynamic_shell": "密钥由命令生成，无法读取。",
           "ambiguous_shell": "多个文件里的密钥不一致。",
@@ -2445,7 +2442,7 @@
           "token": "不支持这种登录令牌。",
           "headers": "不支持自定义请求头。",
           "transport": "模型网关无法按这种方式发送密钥。",
-          "fallback": "暂不支持迁移，请手动添加。"
+          "fallback": "无法迁移，请手动添加。"
         },
         "applying": "迁移中…",
         "interruptNotice": "迁移会中断所选助手在 Avibe 中正在运行的任务。",
@@ -3367,7 +3364,6 @@
   },
   "apps": {
     "title": "应用",
-    "soon": "即将上线",
     "editor": {
       "label": "编辑器",
       "desc": "本机文件的快速代码编辑器。",
@@ -3473,11 +3469,10 @@
     "fileBrowser": {
       "label": "文件",
       "desc": "浏览、查看、编辑这台机器上的文件。",
-      "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。",
       "tagline": "整机 · 查看与编辑",
       "selectHint": "选择一个文件来查看或编辑。",
       "empty": "这个文件夹是空的。",
-      "noPreview": "这种文件类型暂不支持应用内预览。",
+      "noPreview": "这种文件类型无法在应用内预览。",
       "download": "下载",
       "tooLarge": "文件太大,无法在浏览器里编辑。请下载后查看。",
       "refresh": "刷新",
@@ -3575,7 +3570,6 @@
     "terminal": {
       "label": "终端",
       "desc": "在浏览器里跑真实 shell。",
-      "placeholder": "终端将在第二阶段上线:真实 shell,配 tmux 持久化会话。",
       "tagline": "在浏览器里跑真实 shell。",
       "persistent": "持久会话",
       "tabTitle": "终端 {{n}}",
@@ -3650,8 +3644,6 @@
   },
   "workbench": {
     "eyebrow": "Agent OS",
-    "placeholderTitle": "你的 AI 工作台正在搭建",
-    "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
     "home": {
       "greeting": {
         "morning": "早上好，今天做什么？",
@@ -3686,7 +3678,7 @@
           "action": "去授权"
         },
         "computer_use_windows": {
-          "title": "开启电脑操作（预览）",
+          "title": "开启电脑操作",
           "why": "让 {{name}} 操作这台 Windows 电脑上的普通应用。",
           "action": "去开启"
         },
@@ -3801,7 +3793,7 @@
         "daemonUnreachableDetail": "Avibe 无法连接电脑操作。请关闭再开启电脑操作；再次出现就重新打开 Avibe。",
         "controllerUnavailableDetail": "Avibe 服务暂无响应，恢复后电脑操作即可继续使用。",
         "socketPathTooLongDetail": "macOS 无法启动电脑操作。请更新或重新安装 Avibe。",
-        "unsupportedArchitectureDetail": "Windows 上的电脑操作需要 x64 电脑，预览版暂不支持此设备。",
+        "unsupportedArchitectureDetail": "Windows 上的电脑操作需要 x64 电脑。",
         "elevatedRuntimeDetail": "Avibe 服务正以管理员身份运行，因此电脑操作不可用。请退出 Avibe，然后不要使用“以管理员身份运行”，正常重新打开。",
         "sessionUnavailableDetail": "电脑操作需要已登录的 Windows 桌面。请登录这台电脑的桌面，然后重新打开 Avibe。",
         "sessionLockedDetail": "这台电脑已锁定，或远程会话已断开。请解锁或重新连接后再检查。",
@@ -3962,12 +3954,10 @@
       "navQuiet": "收件箱：有未读，通知已关闭"
     },
     "modules": {
-      "comingSoonEyebrow": "即将就位",
-      "comingSoon": "这个能力还在路上,后续版本会接入完整界面。",
       "inbox": {
         "eyebrow": "收件箱",
         "title": "收件箱",
-        "description": "跨项目汇聚所有 Avibe 会话的通知。hover 浮层和完整列表视图后续 commit 接入。"
+        "description": "跨项目汇聚所有 Avibe 会话的通知。"
       },
       "agents": {
         "eyebrow": "Agents",
@@ -4024,13 +4014,6 @@
     "feature1": "数据与 Agent 都留在你自己的机器上。",
     "feature2": "Slack、Discord、Telegram、飞书、微信，一个入口全搞定。",
     "feature3": "Claude、OpenCode、Codex —— 按群/频道路由。"
-  },
-  "modeSelection": {
-    "title": "选择模式",
-    "saasMode": "SaaS 模式",
-    "saasDescription": "OAuth 安装 + 云端中继 + 本地执行（即将推出）",
-    "selfHostMode": "自托管模式",
-    "selfHostDescription": "使用您自己的聊天应用 + Socket Mode 令牌"
   },
   "platform": {
     "eyebrow": "03 — 平台",
@@ -5459,7 +5442,7 @@
     "createDialog": {
       "title": "和 Agent 对话来创建后台任务",
       "subtitle": "写 cron 是工具时代,描述意图是同事时代",
-      "body": "后台任务 / 等待器 / 未来的 Webhook 都通过和 Agent 对话创建。这样 Agent 能从你的真实意图里组装 vibe task add / vibe watch add 的参数,你不用记 cron 语法。",
+      "body": "后台任务和等待器都通过和 Agent 对话创建。Agent 会从你的真实意图里组装 vibe task add / vibe watch add 的参数，你不用记 cron 语法。",
       "example": "举例:「每天工作日早上 9:30 总结一下 ops 频道昨天的活动,发到 #ops。」Agent 会自动转换成 cron 表达式 + 注入 prompt 模板。",
       "projectLabel": "在哪个项目下创建",
       "noProject": "还没有项目 — 先到侧栏 + 按钮建一个吧。",
@@ -6255,6 +6238,7 @@
       "show": "查看值",
       "copy": "复制值",
       "showInBrowser": "在浏览器中查看",
+      "browserFallback": "没能在桌面端显示这个值，请在它的菜单中选择「在浏览器中查看」。",
       "errors": {
         "staleField": "此链接指向的字段已不存在。请打开密钥并选择当前字段。",
         "contextFailed": "无法准备查看，请重试。",
@@ -6346,6 +6330,7 @@
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
       "unlockUnavailableHere": "请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。",
       "browserNote": "桌面端无法使用 passkey。请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
+      "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
       "openInBrowser": "在浏览器中打开",
       "errors": {
         "prfUnavailable": "这个 Passkey 不支持保护档需要的加密，没有设置成功。在 Mac 上，浏览器问保存到哪里时请选 iCloud 钥匙串；在 Windows 上，可以用已登录 Google 账号的 Chrome，保存到 Google 密码管理工具。然后再试一次。",
@@ -6537,6 +6522,7 @@
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
       "protectedWarning": "保护档签名在安全浏览器沙箱中完成，只有公开签名会返回 Avibe。",
       "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
+      "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",
       "errors": {
         "failed": "批准未能完成，请重试。",

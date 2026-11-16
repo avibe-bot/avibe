@@ -46,6 +46,8 @@ import {
   openVaultsInBrowser,
   readDesktopVaultHandoff,
   readVaultBrowserStep,
+  isVaultPasskeyFallback,
+  useVaultPasskeyHandoff,
   withoutVaultBrowserStep,
 } from '../../lib/vaultBrowserHandoff';
 import { isReviewableVaultRequest } from '../../lib/vaultPendingRequests';
@@ -116,7 +118,7 @@ const SecretRow: React.FC<{
     ? vaultDefaultField(s)
     : fields.includes(revealField) ? revealField : null;
   const staleRevealField = canReveal && selectedField === null;
-  // The sandbox reveal needs its authorization window, which only a browser can pair with.
+  // The sandbox reveal needs its authorization window; a desktop app that cannot host it sends it to the browser.
   const entryIssue = canReveal ? vaultEntryIssue() : null;
   const revealInBrowser = entryIssue === 'desktop';
   const revealBlocked = !!entryIssue && !revealInBrowser;
@@ -477,6 +479,9 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const vault = useProtectedVault();
+  // Rows read the entry issue as they render; this re-renders them when an in-app passkey step
+  // fails and the desktop app moves to the browser hand-off.
+  const passkeyHandoff = useVaultPasskeyHandoff();
   const { capabilities } = useInstanceAuthorization();
   const canManageVaultSecrets = capabilities.can_manage_instance;
   const canUseVaultSecrets = capabilities.can_use_vault_secrets;
@@ -754,7 +759,7 @@ export const VaultsPage: React.FC = () => {
       field: menuField ?? vaultDefaultField(secret),
       version: vaultFieldFingerprint(secret),
     };
-  }, [canUseVaultSecrets, secrets, menuSecret, menuField]);
+  }, [canUseVaultSecrets, secrets, menuSecret, menuField, passkeyHandoff]);
   const revealContext = usePreparedRequest(menuRevealKey, requestRevealContext, revealContextIssued, PREPARED_REVEAL);
   const revealSandboxReady = useVaultSandboxWarm(menuRevealKey !== null);
   // Show and Copy wait for both, so their click never waits on either.
@@ -781,7 +786,10 @@ export const VaultsPage: React.FC = () => {
           authorizationWindow?.id,
         );
       } catch (err: unknown) {
-        showToast(vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
+        // This attempt moved the app to the browser hand-off: the row's menu now offers Show in browser.
+        showToast(isVaultPasskeyFallback(err)
+          ? t('vaults.reveal.browserFallback')
+          : vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
       } finally {
         authorizationWindow?.close();
       }

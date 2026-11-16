@@ -925,7 +925,7 @@ describe('BackendModelCatalogDialog', () => {
 
     expect(await screen.findByText('legacy-a')).toBeTruthy();
     expect(screen.getByText('legacy-b')).toBeTruthy();
-    expect(screen.getByText('This model engine build does not offer an editable model list yet. These are the models it currently exposes.')).toBeTruthy();
+    expect(screen.getByText('This model engine version can’t edit its model list. These are the models it provides.')).toBeTruthy();
     expect(screen.getByText('2 models')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Add models' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);

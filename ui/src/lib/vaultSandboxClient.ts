@@ -43,6 +43,7 @@ import {
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
 import { assertVaultEntryAvailable } from './vaultEntry';
+import { recordVaultPasskeyOutcome, vaultPasskeyHandoff } from './vaultBrowserHandoff';
 import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
@@ -78,6 +79,20 @@ export const PROTECTED_HD_OP = 'sealHdWallet' as const;
 const PROTECTED_HD_TIMEOUT_MS = 2_105_000;
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | OptionalSandboxOp | 'handshake';
 type ParentOnlySandboxOp = 'set-appearance';
+// The operations that may open a sandbox window or ask for the passkey; how each ends tells whether
+// a desktop shell that runs them itself still can (`recordVaultPasskeyOutcome`).
+const PASSKEY_OPS: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>([
+  'setup', 'unlock', 'seal', 'reveal', 'sign', 'approveRelease', POLICY_DOWNGRADE_OP, PROTECTED_HD_OP,
+]);
+// Cancels that an in-app failure produces too, so they count toward the same in-a-row rule as a
+// passkey cancel: the protected seed-phrase window turns every WebAuthn refusal into its own cancel,
+// and a window this page reserved that the sandbox never loads into ends, at the frame's pairing
+// timeout, as a closed window.
+function cancelMayBeFailure(op: VaultSandboxOp, authorizationWindow: string | undefined, error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return (op === PROTECTED_HD_OP && code === 'authorization_cancelled')
+    || (authorizationWindow !== undefined && code === 'authorization_window_closed');
+}
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -242,7 +257,11 @@ export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null 
   const generation = clientGeneration;
   const signal = generationController.signal;
   const popup = openLinkInNewContext('about:blank', authorizationWindowFeatures());
-  if (!popup) return null;
+  if (!popup) {
+    // A desktop shell that hosts these windows refused one: its passkey steps can't run here.
+    recordVaultPasskeyOutcome(new VaultSandboxError('authorization_popup_blocked', 'The app did not open the sandbox window'));
+    return null;
+  }
   let closed = false;
   const close = (): void => {
     closed = true;
@@ -721,6 +740,27 @@ export class VaultSandboxClient {
     op: VaultSandboxOp,
     payload?: unknown,
     options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string } = {},
+  ): Promise<T> {
+    if (!PASSKEY_OPS.has(op)) return this.send<T>(op, payload, options);
+    // The page already moved to the browser: never start a step that can only fail again.
+    if (vaultPasskeyHandoff() === 'fallback') {
+      throw new VaultSandboxError('sandbox_browser_required', 'Continue this protected Vault step in the browser');
+    }
+    let result: T;
+    try {
+      result = await this.send<T>(op, payload, options);
+    } catch (error) {
+      recordVaultPasskeyOutcome(error, cancelMayBeFailure(op, options.authorizationWindow, error));
+      throw error;
+    }
+    recordVaultPasskeyOutcome(null);
+    return result;
+  }
+
+  private async send<T>(
+    op: VaultSandboxOp,
+    payload: unknown,
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string },
   ): Promise<T> {
     await this.readyPromise;
     this.assertLive();

@@ -917,6 +917,7 @@ const NON_KEY_LITERALS = [
   'app.info',
   'app.dismiss',
   'app.openExternal',
+  'app.openPage',
   'app.returnToInstance',
   'app.setAccountActionAvailable',
   'app.showAccount',
