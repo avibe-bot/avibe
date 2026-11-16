@@ -37,6 +37,7 @@ JSON_CATALOGS = (
 XCSTRINGS_CATALOGS = (
     "ios/Avibe/Resources/Localizable.xcstrings",
     "ios/Avibe/Resources/InfoPlist.xcstrings",
+    "ios/Avibe/Resources/AppShortcuts.xcstrings",
 )
 STRINGS_CATALOGS = ("ios/NotificationService/Localizable.strings",)
 

@@ -17,6 +17,23 @@
         }
       }
     },
+    "Talk to Main Bot" : {
+      "comment" : "App Shortcut and its intent: opens Avibe in the main Bot's conversation. Listed under Settings > Action Button > Shortcut.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Talk to Main Bot"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "和主伙伴说话"
+          }
+        }
+      }
+    },
     "browser.account" : {
       "localizations" : {
         "en" : {

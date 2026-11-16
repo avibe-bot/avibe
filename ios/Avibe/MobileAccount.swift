@@ -583,6 +583,23 @@ final class MobileSessionCoordinator {
         snapshot?.instances ?? []
     }
 
+    /// The signed-in account's stored selection, as the last session read
+    /// lists it, available or not. `nil` when signed out, when nothing is
+    /// selected, or when the selection is another account's or names an
+    /// instance that is no longer listed at that address.
+    var selectedInstance: MobileInstance? {
+        guard
+            let snapshot,
+            let selection = storedSelection(),
+            selection.accountID == snapshot.account.id
+        else {
+            return nil
+        }
+        return snapshot.instances.first {
+            $0.id == selection.instanceID && $0.url == selection.url
+        }
+    }
+
     init(
         defaults: UserDefaults = .standard,
         controlPlane: MobileControlPlaneConfiguration = MobileControlPlaneConfiguration(),
