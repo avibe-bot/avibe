@@ -1054,8 +1054,10 @@ final class NavigationPolicyTests: XCTestCase {
             if currentStore != launchStore {
                 let cleanup = NamedDataStoreCleanup()
                 cleanup.identifier = currentStore
-                addTeardownBlock { @MainActor [appModel] in
-                    appModel.mobileSessionCoordinator.deactivateAccountSurface()
+                // Weak: the App holds its current store, so the store can
+                // go only once the App has.
+                addTeardownBlock { @MainActor [weak appModel] in
+                    appModel?.mobileSessionCoordinator.deactivateAccountSurface()
                     let error = await cleanup.remove()
                     XCTAssertNil(error, "Signed-out store cleanup failed")
                 }
@@ -3733,10 +3735,14 @@ final class NavigationPolicyTests: XCTestCase {
                 guard let heldSessionReads, read > 1 else {
                     return response
                 }
+                // The server sends the first 64 KiB at once and holds the
+                // rest: pad the JSON past that so the read really waits.
+                var body = response.body
+                body.append(Data(repeating: UInt8(ascii: " "), count: 70_000))
                 return LocalHTTPResponse(
                     status: response.status,
                     headers: response.headers,
-                    body: response.body,
+                    body: body,
                     bodyRelease: heldSessionReads.release
                 )
             default:
