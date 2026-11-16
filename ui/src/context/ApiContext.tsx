@@ -3119,6 +3119,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const announceStreamGap = () => {
     noteLocalStoreStreamGap();
     if (remoteReaderRef.current) void readAuthSession({ quiet: true }).catch(() => undefined);
+    // A voice answer changed while the stream was away (``voice.consent.updated``) is read again.
+    void refreshVoiceConsent();
     dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
   };
 

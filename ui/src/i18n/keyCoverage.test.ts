@@ -906,6 +906,7 @@ const NON_KEY_LITERALS = [
   'turn.start',
   'vaults.updated',
   'workbench.events.bridge.status',
+  'voice.consent.updated',
   // Event-channel names on the vault sandbox bridge and the permissions surface.
   'confirm.surface',
   'instance.permissions.mutate',
