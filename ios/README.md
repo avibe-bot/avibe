@@ -16,7 +16,7 @@ and Web resizing cannot both run.
 
 - Bundle identifier: `bot.avibe.ios`
 - Display name: `Avibe`
-- Deployment target: iOS 17
+- Deployment target: iOS 17.4 (App Shortcuts limited to a later iOS need `AppShortcutsBuilder.buildLimitedAvailability`, iOS 17.4)
 - The shell follows WebKit browser behavior except for the closed deviation
   list below. Origin-specific exceptions are not added for individual Web UI
   features.
