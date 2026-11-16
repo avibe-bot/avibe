@@ -721,7 +721,8 @@ export class VaultSandboxClient {
     try {
       result = await this.send<T>(op, payload, options);
     } catch (error) {
-      recordVaultPasskeyOutcome(error);
+      // The protected seed-phrase window turns every WebAuthn refusal into its own cancel.
+      recordVaultPasskeyOutcome(error, op === PROTECTED_HD_OP);
       throw error;
     }
     recordVaultPasskeyOutcome(null);

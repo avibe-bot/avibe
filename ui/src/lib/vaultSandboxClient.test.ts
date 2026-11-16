@@ -439,6 +439,23 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     expect(page.handoff()).toBe('fallback');
   });
 
+  // The protected seed-phrase window reports a refused passkey as its own cancel, so there that
+  // cancel follows the same rule; elsewhere closing the window is only ever the user's choice.
+  it('counts the seed-phrase window cancel like a passkey cancel', async () => {
+    const page = await freshPage('in-app');
+    await page.step('sealHdWallet', failure('authorization_cancelled'));
+    expect(page.handoff()).toBeNull();
+    await page.step('sealHdWallet', failure('authorization_cancelled'));
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  it('never counts closing an approval window as a refusal', async () => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure('authorization_cancelled'));
+    await page.step('approveRelease', failure('authorization_cancelled'));
+    expect(page.handoff()).toBeNull();
+  });
+
   it('starts counting cancels again after a passkey step succeeds', async () => {
     const page = await freshPage('in-app');
     await page.step('unlock', failure('passkey_cancelled'));

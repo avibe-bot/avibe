@@ -26,8 +26,9 @@ export type VaultPasskeyHandoff = 'desktop' | 'fallback';
 // the browser after the cause is gone, with nothing in the app to undo it.
 let failedInApp = false;
 // A system refusal before any passkey sheet reaches the sandbox as the same `NotAllowedError` a
-// user's cancel does, so it reports `passkey_cancelled`. One cancel is respected; a second in a row
-// with no passkey step succeeding in between offers the browser rather than loop on the same prompt.
+// user's cancel does, so it reports `passkey_cancelled` (the protected seed-phrase window reports
+// both as `authorization_cancelled`). One cancel is respected; a second in a row with no passkey
+// step succeeding in between offers the browser rather than loop on the same prompt.
 let cancelsInARow = 0;
 const CANCELS_BEFORE_BROWSER = 2;
 // The failure that moved the page, so only the attempt it ended says so (see `isVaultPasskeyFallback`).
@@ -81,16 +82,17 @@ const notWhereItRuns = (code: string): boolean =>
  * The vault sandbox client reports how each passkey-bearing step ended (`null` for success). In a
  * shell that runs these steps itself, any failure other than the user cancelling switches this
  * page to the browser hand-off: the window could not be opened, the passkey was not offered, or
- * the ceremony errored. Elsewhere it does nothing.
+ * the ceremony errored. Elsewhere it does nothing. `windowCancelMayBeRefusal`: the step's window
+ * reports a refused passkey as its own `authorization_cancelled`, so that counts as a passkey cancel.
  */
-export function recordVaultPasskeyOutcome(error: unknown): void {
+export function recordVaultPasskeyOutcome(error: unknown, windowCancelMayBeRefusal = false): void {
   if (!canRunDesktopVaultPasskey() || failedInApp) return;
   if (error == null) {
     cancelsInARow = 0;
     return;
   }
   const code = typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'sandbox_error';
-  if (code === 'passkey_cancelled') {
+  if (code === 'passkey_cancelled' || (windowCancelMayBeRefusal && code === 'authorization_cancelled')) {
     cancelsInARow += 1;
     if (cancelsInARow < CANCELS_BEFORE_BROWSER) return;
   } else if (CANCELLED.has(code) || notWhereItRuns(code)) {
