@@ -150,7 +150,7 @@ describe('inert parent preopen', () => {
   it('reserves activation synchronously, then navigates only after hashes pass with fragments only', async () => {
     const popup = stubBlankPopup();
     const handle = openVaultAuthorizationWindow()!;
-    expect(window.open).toHaveBeenCalledWith('about:blank', '_blank', 'popup,width=520,height=760');
+    expect(window.open).toHaveBeenCalledWith('about:blank', '_blank', expect.stringMatching(/^popup,width=520,height=760,left=\d+,top=\d+$/));
     expect(popup.location.replace).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(popup.location.replace).toHaveBeenCalledOnce());
     const url = new URL(popup.location.replace.mock.calls[0][0]);

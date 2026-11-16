@@ -130,7 +130,8 @@ def test_proof_free_collection_requires_the_exact_saved_id_full_read(kind):
     pending = request(signing)
     summary, = api.get_vault_requests()["requests"]
     assert summary["id"] == pending["id"]
-    for field in ("secret_name", "requester", "delivery", "message_id", "card", "session"):
+    assert summary["secret_name"] == signing["name"] and summary["protection"] == "protected"
+    for field in ("requester", "delivery", "message_id", "card", "session"):
         assert summary[field] is None
     assert len(json.dumps(summary, ensure_ascii=False).encode()) <= 1024
     full = api.get_vault_request(summary["id"])["request"]

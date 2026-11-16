@@ -547,11 +547,183 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.openExternal",
                 "app.dismiss",
                 "app.returnToInstance",
+                "app.openPage",
             ]
         )
         XCTAssertThrowsError(
             try MobileBridgeRequest.parse(["method": "auth.fetch"])
         )
+    }
+
+    // The bundled page names a page, never an address: each page has one
+    // fixed address on the control plane.
+    func testAvibePagesOpenOnlyTheirFixedControlPlaneAddresses() {
+        let production = MobileControlPlaneConfiguration.productionURL
+        XCTAssertEqual(Set(AvibePage.allCases.map(\.rawValue)), ["accountDeletion", "privacyPolicy"])
+        XCTAssertEqual(
+            AvibePage.accountDeletion.url(controlPlane: production).absoluteString,
+            "https://avibe.bot/account/delete"
+        )
+        XCTAssertEqual(
+            AvibePage.privacyPolicy.url(controlPlane: production).absoluteString,
+            "https://avibe.bot/privacy"
+        )
+        XCTAssertEqual(
+            AvibePage.accountDeletion.url(
+                controlPlane: URL(string: "http://127.0.0.1:43127")!
+            ).absoluteString,
+            "http://127.0.0.1:43127/account/delete"
+        )
+        XCTAssertTrue(AvibePage.accountDeletion.usesAccountSignIn)
+        XCTAssertFalse(AvibePage.privacyPolicy.usesAccountSignIn)
+    }
+
+    func testAvibePagesStayOnTheControlPlaneAndOnlyDeletionFinishesAtDone() {
+        let origin = WebOrigin.parseConfigured("https://avibe.bot")!
+        let deletion = AvibePagePolicy(page: .accountDeletion, origin: origin)
+        let privacy = AvibePagePolicy(page: .privacyPolicy, origin: origin)
+        let cases: [(String, AvibePageNavigation, AvibePageNavigation)] = [
+            ("https://avibe.bot/account/delete", .allow, .allow),
+            ("https://avibe.bot/login?next=/account/delete", .allow, .allow),
+            ("https://avibe.bot/app/organizations/org-1/settings", .allow, .allow),
+            ("https://avibe.bot/account/delete/done", .finished, .allow),
+            ("https://avibe.bot/account/delete/done?lang=zh#top", .finished, .allow),
+            ("https://avibe.bot/account/delete/done/more", .allow, .allow),
+            ("https://avibe.bot/account/delete/doneish", .allow, .allow),
+            ("http://avibe.bot/account/delete/done", .openOutside, .openOutside),
+            ("https://evil.avibe.bot/account/delete/done", .openOutside, .openOutside),
+            ("https://github.com/login/oauth/authorize", .openOutside, .openOutside),
+            ("mailto:support@avibe.bot", .openOutside, .openOutside),
+            ("about:blank", .allow, .allow),
+            ("javascript:alert(1)", .cancel, .cancel),
+            ("file:///etc/hosts", .cancel, .cancel),
+        ]
+        for (raw, deletionExpected, privacyExpected) in cases {
+            let url = URL(string: raw)!
+            XCTAssertEqual(deletion.mainFrameNavigation(to: url), deletionExpected, raw)
+            XCTAssertEqual(privacy.mainFrameNavigation(to: url), privacyExpected, raw)
+        }
+        XCTAssertEqual(deletion.subframeNavigation(to: URL(string: "https://challenges.example.com/")!), .allow)
+        XCTAssertEqual(deletion.subframeNavigation(to: URL(string: "mailto:a@example.com")!), .cancel)
+        XCTAssertEqual(deletion.newWindow(to: URL(string: "https://avibe.bot/privacy")!), .openOutside)
+        XCTAssertEqual(deletion.newWindow(to: URL(string: "javascript:void(0)")!), .cancel)
+    }
+
+    // The deletion page is signed in with the account's own store, and the
+    // sign-out its completion causes waits for it like for the runtime.
+    func testAccountDeletionPageSharesTheSignedInStoreAndHoldsItsCleanup() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let transport = FakeMobileAuthTransport()
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        XCTAssertThrowsError(try coordinator.accountWebPageDataStore()) { error in
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.signedOut.code)
+        }
+
+        transport.session = snapshot(accountID: "account-1")
+        _ = try await coordinator.bootstrap()
+        XCTAssertTrue(try coordinator.accountWebPageDataStore() === store.dataStore)
+        let oldIdentifier = store.identifier
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        var page: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+        coordinator.beginAccountWebPage(try XCTUnwrap(page))
+
+        // The account is gone: the session reads signed out.
+        transport.session = nil
+        let state = try await coordinator.refresh()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNotEqual(store.identifier, oldIdentifier)
+        XCTAssertTrue(registry.removalAttempts.isEmpty, "The page still uses the old store")
+        XCTAssertThrowsError(try coordinator.accountWebPageDataStore())
+
+        page = nil
+        await store.sweepOrphans()
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+    }
+
+    // A notification tap while the deletion page is open must not open an
+    // instance of an account the page may be deleting.
+    func testNoInstanceOpensWhileTheAccountPageIsOpen() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let page = WKWebView(frame: .zero, configuration: configuration)
+
+        coordinator.beginAccountWebPage(page)
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id)) { error in
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.busy.code)
+        }
+        XCTAssertEqual(opened, 0)
+
+        coordinator.endAccountWebPage(page)
+        XCTAssertEqual(try coordinator.selectInstance(id: instance.id).id, instance.id)
+        XCTAssertEqual(opened, 1)
+    }
+
+    // `app.openPage` answers exactly once however the page closes: the
+    // deletion page's done navigation, or Done.
+    func testOpenPagePresentsTheDeletionPageAndAnswersOnceForEachClose() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(defaults: makeDefaults(), transports: [transport]),
+            startScreen: .sheet
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+
+        for closesWithDone in [false, true] {
+            let call = Task { @MainActor in
+                try await webView.callAsyncJavaScript(
+                    "return await window.avibeMobile.call('app.openPage', {page: 'accountDeletion'});",
+                    arguments: [:],
+                    in: nil,
+                    contentWorld: .page
+                ) as? [String: Any]
+            }
+            var page: AvibePageViewController?
+            for _ in 0..<100 where page == nil {
+                page = (controller.presentedViewController as? UINavigationController)?
+                    .topViewController as? AvibePageViewController
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let shown = try XCTUnwrap(page)
+            XCTAssertEqual(
+                shown.webView.configuration.applicationNameForUserAgent,
+                NativeShellMetadata().userAgentSuffix
+            )
+            if closesWithDone {
+                let done = try XCTUnwrap(shown.navigationItem.leftBarButtonItem)
+                _ = done.target?.perform(done.action, with: done)
+            } else {
+                shown.webView.load(URLRequest(url: URL(string: "http://127.0.0.1:43127/account/delete/done")!))
+            }
+            let result = try await call.value
+            XCTAssertEqual(result?["completed"] as? Bool, !closesWithDone)
+            for _ in 0..<100 where controller.presentedViewController != nil {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertNil(controller.presentedViewController)
+        }
     }
 
     func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView() async throws {
@@ -672,6 +844,49 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? String
         XCTAssertEqual(invalid, MobileAccountError.invalidRequest.code)
         XCTAssertEqual(dismissCalls, 1)
+    }
+
+    func testOpenPageAcceptsOnlyANamedPage() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport]
+            ),
+            startScreen: .sheet
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 844)
+        )
+        defer { window.isHidden = true }
+
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+        for params in [
+            "{}",
+            "{page: 'https://avibe.bot/account/delete'}",
+            "{page: 'accountDeletion', url: 'https://example.com/'}",
+            "{page: 'settings'}",
+        ] {
+            let code = try await webView.callAsyncJavaScript(
+                """
+                try {
+                  await window.avibeMobile.call('app.openPage', \(params));
+                  return 'missing-error';
+                } catch (error) {
+                  return error.code;
+                }
+                """,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            ) as? String
+            XCTAssertEqual(code, "invalid_argument", params)
+        }
+        XCTAssertNil(controller.presentedViewController)
     }
 
     func testSheetRejectsAuthMethodsWithoutMutatingTheRuntime() async throws {
@@ -1411,6 +1626,267 @@ final class MobileOnboardingTests: XCTestCase {
             refused,
             ["refresh: \(MobileAccountError.busy.code)", "select: \(MobileAccountError.busy.code)"]
         )
+    }
+
+    /// The list's open (the current block after an open timed out, or any
+    /// row) made while a push request the App made on its own is running
+    /// waits for that request and then opens, instead of failing as busy.
+    func testTheListsOpenWaitsForAPushRequestAndOpensOnceItEnds() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened: [MobileRuntimeContext] = []
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { opened.append($0) }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        XCTAssertEqual(opened.count, 1)
+
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened.count, 1, "It opened while the request still ran.")
+
+        hold.release()
+        let reopened = try await reopen.value
+        try await request.value
+        XCTAssertEqual(reopened.id, instance.id)
+        XCTAssertEqual(opened.count, 2)
+        XCTAssertEqual(opened.last?.instance.id, instance.id)
+    }
+
+    /// Recovery can run push requests back to back, the next one starting
+    /// before the waiting open resumes: the open keeps waiting, within its
+    /// one bound, and opens once the last of them ends.
+    func testTheListsOpenWaitsThroughPushRequestsRunBackToBack() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let holds = [HeldCall(), HeldCall()]
+        let managements = holds.map { hold in
+            let management = FakeMobileAuthTransport()
+            management.pushManagementHandler = { _ in
+                await hold.wait()
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return management
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first] + managements + [FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let patch = PushManagementRequest(
+            method: "PATCH",
+            path: "/api/push/apns/installations/current",
+            headers: [:],
+            body: nil
+        )
+        let requests = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(patch)
+            _ = try await coordinator.pushManagementRequest(patch)
+        }
+        try await holds[0].waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+
+        holds[0].release()
+        try await holds[1].waitUntilHeld()
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened, 1, "It opened, or gave up, during the second request.")
+
+        holds[1].release()
+        let reopened = try await reopen.value
+        try await requests.value
+        XCTAssertEqual(reopened.id, instance.id)
+        XCTAssertEqual(opened, 2)
+    }
+
+    /// An open that waited is dropped when the page that asked for it closed
+    /// meanwhile (the sheet swiped away over a live runtime): it must not
+    /// replace the runtime the user went back to.
+    func testTheListsOpenIsDroppedWhenItsPageClosesDuringTheWait() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        // The sheet over the runtime; the push request uses its transport.
+        coordinator.activateAccountSurface()
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        coordinator.leaveAccountSurface()
+
+        hold.release()
+        do {
+            _ = try await reopen.value
+            XCTFail("The open went ahead after its page closed.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        try await request.value
+        XCTAssertEqual(opened, 1)
+    }
+
+    /// Only an operation that keeps the selection is waited for: any other
+    /// one (here the first session read, before a list exists) still
+    /// answers busy at once.
+    func testTheListsOpenAnswersBusyAtOnceForAnOperationThatDoesNotKeepTheSelection()
+        async throws
+    {
+        let first = FakeMobileAuthTransport()
+        let session = snapshot(accountID: "account-1")
+        let hold = HeldCall()
+        first.fetchSessionHandler = {
+            await hold.wait()
+            return .signedIn(session)
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        let bootstrap = Task { @MainActor in
+            _ = try await coordinator.bootstrap()
+        }
+        try await hold.waitUntilHeld()
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: instance.id
+            )
+            XCTFail("The open did not answer busy.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        XCTAssertLessThan(started.duration(to: clock.now), .seconds(2))
+
+        hold.release()
+        try await bootstrap.value
+    }
+
+    /// The wait is bounded: a push request that does not finish in time
+    /// leaves the open answering busy, not hanging.
+    func testTheListsOpenAnswersBusyWhenThePushRequestOutlastsTheWait()
+        async throws
+    {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: instance.id,
+                waitingAtMost: .milliseconds(300)
+            )
+            XCTFail("The open did not answer busy.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        let waited = started.duration(to: clock.now)
+        XCTAssertGreaterThanOrEqual(waited, .milliseconds(300))
+        XCTAssertLessThan(waited, .seconds(5))
+        XCTAssertEqual(opened, 1)
+
+        hold.release()
+        try await request.value
+        XCTAssertEqual(opened, 1)
     }
 
     /// The instance list: the current instance first, then the ones opened on
@@ -3878,6 +4354,39 @@ private final class WeakObjectReference<Value: AnyObject> {
 
     init(_ value: Value?) {
         self.value = value
+    }
+}
+
+/// A fake transport call that stays in flight until `release()`.
+@MainActor
+private final class HeldCall {
+    private var held = false
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        held = true
+        guard !released else {
+            return
+        }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilHeld() async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !held {
+            guard clock.now < deadline else {
+                throw MobileAccountError.network
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
     }
 }
 

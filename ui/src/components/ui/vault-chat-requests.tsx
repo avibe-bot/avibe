@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import type { VaultRequest } from '@/context/ApiContext';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { isVaultApprovalRequest, vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { buttonVariants } from './button-variants';
 import { VaultApprovalDialog } from './vault-approval-dialog';
@@ -103,7 +103,8 @@ export const VaultApprovalFloat: React.FC<{ offscreen: VaultRequest[]; pending: 
   }, [pending, reviewing]);
 
   const oldestOffscreen = offscreen.length > 0 ? offscreen[offscreen.length - 1] : null;
-  const reviewInBrowser = oldestOffscreen != null && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(oldestOffscreen);
+  const handoff = useVaultPasskeyHandoff();
+  const reviewInBrowser = oldestOffscreen != null && handoff !== null && vaultApprovalNeedsPasskey(oldestOffscreen);
   return (
     <>
       {oldestOffscreen ? (

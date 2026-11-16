@@ -1,9 +1,18 @@
 import Foundation
 
+/// A sign-in with another company's account. The App signs in only with
+/// avibe.bot's own account system (email code, password, passkey), so these
+/// are intercepted with an explanation that points at the email code.
+enum ThirdPartySignIn: Equatable {
+    /// Google also rejects sign-in inside embedded browsers.
+    case google
+    case github
+}
+
 enum NavigationDestination: Equatable {
     case instance
     case authentication
-    case googleAuthentication
+    case thirdPartySignIn(ThirdPartySignIn)
     case external
     case browserInternal
 }
@@ -15,7 +24,7 @@ enum NavigationContext: Equatable {
 
 enum NavigationDisposition: Equatable {
     case allow
-    case googleAuthentication
+    case thirdPartySignIn(ThirdPartySignIn)
     case external
     case externalApplication
 }
@@ -28,7 +37,7 @@ enum SubframeNavigationDisposition: Equatable {
 enum NewWindowDisposition: Equatable {
     case childWebView
     case externalApplication
-    case googleAuthentication
+    case thirdPartySignIn(ThirdPartySignIn)
 }
 
 enum DownloadDisposition: Equatable {
@@ -45,7 +54,6 @@ struct NavigationPolicy {
         // hostname for networks that reset `*.supabase.co`; the default
         // domain stays valid during and after the switch.
         WebOrigin.parseConfigured("https://auth.avibe.bot"),
-        WebOrigin.parseConfigured("https://github.com"),
     ].compactMap { $0 }.reduce(into: []) { result, origin in
         result.insert(origin)
     }
@@ -56,6 +64,13 @@ struct NavigationPolicy {
     ].compactMap { $0 }.reduce(into: []) { result, origin in
         result.insert(origin)
     }
+
+    /// GitHub's OAuth authorization endpoints, intercepted only for
+    /// avibe.bot's own sign-in. The rest of github.com is an ordinary
+    /// external site, including the device-code page (`/login/device`) that
+    /// an instance's Copilot sign-in opens.
+    private static let githubOrigin = WebOrigin.parseConfigured("https://github.com")
+    private static let githubAuthorizationPathPrefix = "/login/oauth/"
 
     let instanceOrigins: Set<WebOrigin>
     let authenticationOrigins: Set<WebOrigin>
@@ -82,7 +97,10 @@ struct NavigationPolicy {
             return .authentication
         }
         if googleOrigins.contains(origin) {
-            return .googleAuthentication
+            return .thirdPartySignIn(.google)
+        }
+        if origin == Self.githubOrigin, isAvibeGitHubAuthorization(url) {
+            return .thirdPartySignIn(.github)
         }
         return origin.scheme == "http" || origin.scheme == "https"
             ? .external
@@ -94,8 +112,8 @@ struct NavigationPolicy {
             return .externalApplication
         }
         switch destination(for: url) {
-        case .googleAuthentication:
-            return .googleAuthentication
+        case .thirdPartySignIn(let provider):
+            return .thirdPartySignIn(provider)
         case .external:
             return context == .primaryMainFrame ? .external : .allow
         case .instance, .authentication, .browserInternal:
@@ -119,8 +137,8 @@ struct NavigationPolicy {
             return .externalApplication
         }
         switch destination(for: url) {
-        case .googleAuthentication:
-            return .googleAuthentication
+        case .thirdPartySignIn(let provider):
+            return .thirdPartySignIn(provider)
         case .instance, .authentication, .external, .browserInternal:
             return .childWebView
         }
@@ -156,6 +174,31 @@ struct NavigationPolicy {
         default:
             return .blocked
         }
+    }
+
+    /// GitHub authorization for avibe.bot's own sign-in: it returns to an
+    /// authentication origin (Supabase's `/auth/v1/callback`). GitHub sign-in
+    /// for anything else, such as an MCP server an instance connects to, is
+    /// an ordinary external page.
+    private func isAvibeGitHubAuthorization(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        let path = components.percentEncodedPath.lowercased()
+        guard path == "/login/oauth" || path.hasPrefix(Self.githubAuthorizationPathPrefix) else {
+            return false
+        }
+        return components.queryItems?.contains { item in
+            guard
+                item.name == "redirect_uri",
+                let value = item.value,
+                let redirect = URL(string: value),
+                let redirectOrigin = WebOrigin(url: redirect, requiresHTTPS: false)
+            else {
+                return false
+            }
+            return authenticationOrigins.contains(redirectOrigin)
+        } == true
     }
 
     private func isExternalApplicationURL(_ url: URL) -> Bool {

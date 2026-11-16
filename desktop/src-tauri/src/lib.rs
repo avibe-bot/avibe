@@ -32,7 +32,9 @@ mod notifications;
 mod pet;
 mod pet_native;
 mod update_install;
+mod update_popover;
 pub mod updater;
+mod window_return;
 
 #[cfg(target_os = "macos")]
 mod computer_use;
@@ -1913,6 +1915,7 @@ fn build_main_window(
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+        .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
@@ -2031,7 +2034,7 @@ fn new_window_decision(url: &Url) -> NewWindowDecision {
 /// scripts and IPC handler on that shared content controller: every such window
 /// would add a copy of the scripts to this one and, when dropped, remove this
 /// window's IPC handler, leaving the bootstrap page unable to reach the shell.
-fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+pub(crate) fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
     if new_window_decision(&url) == NewWindowDecision::OpenInSystemBrowser {
         // Off the main thread: this runs inside the webview's own delegate callback.
         tauri::async_runtime::spawn_blocking(move || {
@@ -2611,10 +2614,21 @@ pub fn run() {
                     if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
                         main_document_finished(webview);
                     }
+                    if webview.label() == update_popover::UPDATE_POPOVER
+                        && payload.event() == tauri::webview::PageLoadEvent::Finished
+                    {
+                        if let Some(window) = webview.app_handle().get_webview_window(update_popover::UPDATE_POPOVER) {
+                            update_popover::page_loaded(&window);
+                        }
+                    }
                 })
                 .on_navigation(|webview, url| {
                     if webview.label() == pet::PET_WINDOW {
                         return pet::navigation_allowed(webview.app_handle(), url);
+                    }
+                    if webview.label() == update_popover::UPDATE_POPOVER {
+                        return instance_client::bundle(webview.app_handle())
+                            .is_some_and(|bundle| update_popover::navigation_allowed(url, &bundle));
                     }
                     if instance_client::enabled(webview.app_handle()) && webview.label() == MAIN_WINDOW {
                         if instance_client::presentation_request(
@@ -2740,7 +2754,8 @@ pub fn run() {
             pet::pet_reset_voice_shortcut,
             pet::pet_bind,
             pet::pet_unbind,
-            pet::pet_open
+            pet::pet_open,
+            window_return::focus_main_window
         ])
         .setup(|app| {
             #[cfg(feature = "bundled-runtime")]

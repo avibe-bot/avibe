@@ -236,6 +236,9 @@ export type VaultRequest = {
   expires_at: string | null;
   card?: Record<string, unknown> | null;
   session?: VaultRequestSession | null;
+  /** On a proof-free summary row only (`card: null`): the key's tier, `protected` or null. Its
+   *  `secret_name` may be null too when the whole name would not fit the summary. */
+  protection?: 'protected' | null;
 };
 
 export type VaultRequestSession = {

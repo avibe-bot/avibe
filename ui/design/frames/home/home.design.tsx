@@ -14,6 +14,7 @@ import { frames, type FrameSpec } from '../../frame';
 import { SoftKeyboard } from '../../shell/HeldComposer';
 import { IOS_APP_CAPABILITIES, IPHONE_17_PRO, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentsApi, aloneFixtures, mainRunningFixtures, teamFixtures } from '../../shell/teamFixtures';
+import { settingsConfig } from '../settings/fixtures';
 import { homeFactsApi, phoneShell, workbenchFixtures, type HomeFacts } from '../workbench/fixtures';
 
 type State = {
@@ -129,8 +130,27 @@ const stateFrames: FrameSpec[] = STATES.flatMap((state) => [
   })),
 ]);
 
+/** A Windows host reports Computer Use off; Getting started asks to turn it on rather than grant permissions. */
+const windowsFixtures = workbenchFixtures({
+  ...agentsApi,
+  ...homeFactsApi({ model: true, push: false, computerUse: false, chatApps: true, paired: true }),
+  '/api/desktop/computer-use/status': { supported: true, host_platform: 'windows', enabled: false, status: 'off', reason: 'never_enabled' },
+  // The frame follows the shot's language instead of the fixture config's `zh`.
+  '/api/config': { ...settingsConfig, platforms: { ...settingsConfig.platforms, enabled: ['slack'] }, language: undefined },
+}, { ...teamFixtures, desktopShell: true });
+
 const designFrames = frames([
   ...stateFrames,
+  {
+    name: 'f-windows-desktop',
+    title: '首页 · 桌面 1440×900 · Windows 主机：开始使用里只剩「开启电脑操作」',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: '/',
+    fixtures: windowsFixtures,
+    render: home,
+  },
   {
     name: 'e-native-phone',
     title: '首页 · iOS App（iPhone 17 Pro，安全区 62/34）· 账户头像进入账号与实例，底栏贴近底部',

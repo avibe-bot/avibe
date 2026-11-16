@@ -298,6 +298,59 @@ describe('VaultApprovalCard protected signing completion', () => {
 
 // A protected seed-phrase wallet account (contract rev0.7 §5): the sandbox signs with the account
 // the signed release names, which must be the persisted one; the completion repeats it exactly.
+// A protected Bitcoin request names its input from the persisted, daemon-validated context: the type
+// it spends and the requester's network label, and that the amounts are reviewed in the secure window.
+// Nothing decoded from the transaction itself is shown here.
+describe('VaultApprovalCard protected Bitcoin input row', () => {
+  const a = en.vaults.approval;
+  const fill = (template: string, values: Record<string, string>) => template.replace(/\{\{(\w+)\}\}/g, (_m, key: string) => values[key]);
+  const btcSign = (context: unknown, protection: 'protected' | 'standard' = 'protected'): VaultRequest => ({
+    ...protectedAccess,
+    id: 'vrq_btc_input',
+    request_type: 'sign',
+    secret_name: 'BTC_KEY',
+    delivery: { digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-der', ...(context === undefined ? {} : { signing_context: context }) },
+    card: { request_type: 'sign', secret_name: 'BTC_KEY', kind: 'keypair', protection },
+  } as unknown as VaultRequest);
+  const show = (request: VaultRequest) => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+  };
+  const legacy = { kind: 'bitcoin-p2pkh-v1', addressType: 'p2pkh', network: 'testnet', unsignedTransaction: '02', prevout: {}, sighashType: 1, digestAlgorithm: 'bitcoin-legacy-sighash-all', digest: '11'.repeat(32) };
+  const segwit = { ...legacy, kind: 'bitcoin-p2wpkh-v1', addressType: 'p2wpkh', network: 'bitcoin', digestAlgorithm: 'bitcoin-bip143-sighash-all' };
+  const taproot = { kind: 'bitcoin-taproot-keypath-v1', network: 'signet', unsignedTransaction: '02', prevout: {}, digestAlgorithm: 'bip341-sighash-default-keypath', digest: '11'.repeat(32) };
+
+  it.each([
+    ['Legacy', legacy, `${en.vaults.addresses.typeLegacy} P2PKH`, 'testnet'],
+    ['SegWit', segwit, `${en.vaults.addresses.typeSegwit} P2WPKH`, 'bitcoin'],
+    ['Taproot', taproot, en.vaults.addresses.typeTaproot, 'signet'],
+  ])('names a %s input, the requester\'s network label, and where the amounts are checked', (_label, context, type, network) => {
+    show(btcSign(context));
+    expect(screen.getByText(a.btcInput)).toBeTruthy();
+    expect(screen.getByText(type)).toBeTruthy();
+    expect(screen.getByText(fill(a.btcInputNetwork, { network }))).toBeTruthy();
+    expect(screen.getByText(a.btcInputReview)).toBeTruthy();
+  });
+
+  it.each([
+    ['no context', undefined],
+    ['a type that disagrees with its kind', { ...legacy, addressType: 'p2wpkh' }],
+    ['an unknown network', { ...segwit, network: 'mainnet' }],
+    ['an unknown kind', { ...segwit, kind: 'bitcoin-p2sh-v1' }],
+    ['a Taproot context that names a type', { ...taproot, addressType: 'p2tr' }],
+    ['a context that is not an object', 'bitcoin-p2pkh-v1'],
+  ])('shows nothing for %s', (_label, context) => {
+    show(btcSign(context));
+    expect(screen.queryByText(a.btcInput)).toBeNull();
+    expect(screen.queryByText(a.btcInputReview)).toBeNull();
+  });
+
+  it('says nothing more for a standard request, whose context is never decoded', () => {
+    show(btcSign(segwit, 'standard'));
+    expect(screen.queryByText(a.btcInput)).toBeNull();
+  });
+});
+
 describe('VaultApprovalCard protected wallet account signing', () => {
   const material = { name: 'COLD_WALLET', kind: 'keypair', envelope };
   const derivation = { chain: 'bitcoin', account: 1, address_type: 'p2tr' };

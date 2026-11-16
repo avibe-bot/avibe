@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { VaultSandboxClient, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
+import { VaultSandboxClient, authorizationWindowFeatures, openVaultAuthorizationWindow, resetVaultSandboxClient } from './vaultSandboxClient';
 import { stubBlankPopup, stubReleaseFetch } from './__fixtures__/vaultSandboxTransport';
 import type { VaultConfirmSurface } from './vaultConfirmSurface';
 import type { PolicyDowngradeContext } from './vaultSigningPolicy';
@@ -353,5 +353,201 @@ describe('VaultSandboxClient protected seed-phrase wallet (contract rev0.7 §4)'
   ])('refuses %s', async (_label, result) => {
     const { instance } = client(withHd, result);
     await expect(instance.sealHdWallet({ name: 'COLD', mode: 'create', wrapMeta: '{}' }, 'win1')).rejects.toMatchObject({ code: 'protected_hd_result_invalid' });
+  });
+});
+
+// A desktop shell that runs passkey steps itself must not trap the user there: when a step fails
+// in the app for any reason other than the user cancelling, the page moves to the browser
+// hand-off. The client is where every passkey-bearing step ends, so it is where that is decided;
+// a new code the sandbox adds counts as a failure unless it is known to mean otherwise.
+describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => {
+  type Shell = 'browser' | 'desktop' | 'in-app';
+  const failure = (code: string) => ({ code });
+
+  async function freshPage(shell: Shell) {
+    // The hand-off is page-lifetime state; each case starts from a new page.
+    vi.resetModules();
+    const client = await import('./vaultSandboxClient');
+    const handoff = await import('./vaultBrowserHandoff');
+    if (shell !== 'browser') Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    if (shell === 'in-app') Object.defineProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__', { configurable: true, value: true });
+    const iframe = document.createElement('iframe');
+    document.body.appendChild(iframe);
+    const instance = Object.create(client.VaultSandboxClient.prototype) as TestVaultSandboxClient & {
+      pending: Map<string, TestPendingRequest & { reject: (error: Error) => void }>;
+    };
+    Object.assign(instance, {
+      iframe, backdrop: null, pending: new Map(), readyPromise: Promise.resolve({}), handshaken: true,
+      modalVisible: false, interactiveRequests: new Set(), surfaceRefreshTimer: null,
+    });
+    const postMessage = vi.spyOn(iframe.contentWindow!, 'postMessage').mockImplementation(() => undefined);
+    // One sandbox step, answered as the sandbox would: `null` succeeds, a code fails.
+    const step = async (op: string, outcome: { code: string } | null, options: { authorizationWindow?: string } = {}) => {
+      const calls = postMessage.mock.calls.length;
+      const result = instance.request(op, {}, options);
+      await vi.waitFor(() => expect(postMessage.mock.calls.length).toBe(calls + 1));
+      const pending = instance.pending.get((postMessage.mock.calls[calls][0] as { id: string }).id)!;
+      window.clearTimeout(pending.timer);
+      const error = outcome ? new client.VaultSandboxError(outcome.code, 'sandbox failure') : null;
+      if (error) pending.reject(error);
+      else pending.resolve({});
+      await result.catch(() => undefined);
+      return error;
+    };
+    // A sandbox window this page opened from the click, as approvals, signatures and reveals do.
+    const reserveWindow = () => {
+      stubReleaseFetch();
+      stubBlankPopup();
+      return client.openVaultAuthorizationWindow()!.id;
+    };
+    return { step, instance, postMessage, client, reserveWindow, handoff: handoff.vaultPasskeyHandoff, isFallback: handoff.isVaultPasskeyFallback };
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__');
+  });
+
+  it.each([
+    ['the window could not be opened', 'approveRelease', 'authorization_popup_blocked'],
+    ['the setup window could not be opened', 'setup', 'setup_popup_blocked'],
+    ['the passkey gave no PRF', 'unlock', 'passkey_prf_unavailable'],
+    ['the ceremony errored', 'sign', 'sign_failed'],
+    ['the window never answered', 'reveal', 'authorization_window_timeout'],
+    ['a code this Avibe does not know', 'seal', 'some_future_failure'],
+  ])('moves to the browser when %s', async (_label, op, code) => {
+    const page = await freshPage('in-app');
+    expect(page.handoff()).toBeNull();
+    await page.step(op, failure(code));
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  it.each([
+    ['the user closed the sandbox window', 'authorization_cancelled'],
+    ['the user closed the window before confirming', 'authorization_window_closed'],
+    ['the attempt was superseded', 'sandbox_reset'],
+    ['the request expired, as it would in a browser', 'context_expired'],
+    ['the request was invalid, as it would be in a browser', 'invalid_context'],
+    ['this Avibe and the sandbox disagree, as they would in a browser', 'sandbox_integrity_failed'],
+    ['the vault has no passkey, as in a browser', 'passkey_not_configured'],
+  ])('stays in the app when %s', async (_label, code) => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure(code));
+    expect(page.handoff()).toBeNull();
+  });
+
+  // A system refusal before any passkey sheet reaches the sandbox as a cancel.
+  it('respects one passkey cancel and offers the browser after a second in a row', async () => {
+    const page = await freshPage('in-app');
+    await page.step('unlock', failure('passkey_cancelled'));
+    expect(page.handoff()).toBeNull();
+    await page.step('unlock', failure('passkey_cancelled'));
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  // The protected seed-phrase window reports a refused passkey as its own cancel, so there that
+  // cancel follows the same rule; elsewhere closing the window is only ever the user's choice.
+  it('counts the seed-phrase window cancel like a passkey cancel', async () => {
+    const page = await freshPage('in-app');
+    await page.step('sealHdWallet', failure('authorization_cancelled'));
+    expect(page.handoff()).toBeNull();
+    await page.step('sealHdWallet', failure('authorization_cancelled'));
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  // A window this page reserved that the sandbox never loads into ends as a closed window.
+  it('counts a reserved window that closed like a passkey cancel', async () => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow() });
+    expect(page.handoff()).toBeNull();
+    await page.step('reveal', failure('authorization_window_closed'), { authorizationWindow: page.reserveWindow() });
+    expect(page.handoff()).toBe('fallback');
+  });
+
+  it('never counts cancelling in an approval window as a refusal', async () => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow() });
+    await page.step('approveRelease', failure('authorization_cancelled'), { authorizationWindow: page.reserveWindow() });
+    expect(page.handoff()).toBeNull();
+  });
+
+  // Without a window this page reserved, a closed window is the sandbox's own: only the user closes it.
+  it('never counts closing a window the sandbox opened itself', async () => {
+    const page = await freshPage('in-app');
+    await page.step('approveRelease', failure('authorization_window_closed'));
+    await page.step('approveRelease', failure('authorization_window_closed'));
+    expect(page.handoff()).toBeNull();
+  });
+
+  it('starts counting cancels again after a passkey step succeeds', async () => {
+    const page = await freshPage('in-app');
+    await page.step('unlock', failure('passkey_cancelled'));
+    await page.step('unlock', null);
+    await page.step('reveal', failure('passkey_cancelled'));
+    expect(page.handoff()).toBeNull();
+  });
+
+  it('ignores steps that never ask for the passkey', async () => {
+    const page = await freshPage('in-app');
+    await page.step('status', failure('sandbox_error'));
+    expect(page.handoff()).toBeNull();
+  });
+
+  it.each([
+    ['a desktop shell without the capability', 'desktop' as const, 'desktop'],
+    ['a browser', 'browser' as const, null],
+  ])('changes nothing in %s', async (_label, shell, expected) => {
+    const page = await freshPage(shell);
+    expect(page.handoff()).toBe(expected);
+    await page.step('approveRelease', failure('authorization_popup_blocked'));
+    expect(page.handoff()).toBe(expected);
+  });
+
+  // Only the attempt that moved the page reports it; its surface then shows the hand-off note.
+  it('names the failure that moved the page, and refuses later steps without asking the sandbox', async () => {
+    const page = await freshPage('in-app');
+    const moved = await page.step('approveRelease', failure('authorization_popup_blocked'));
+    expect(page.isFallback(moved)).toBe(true);
+    expect(page.isFallback(new Error('grant refused'))).toBe(false);
+    const posted = page.postMessage.mock.calls.length;
+    const refused = page.instance.request('unlock', {}, {});
+    await expect(refused).rejects.toMatchObject({ code: 'sandbox_browser_required' });
+    expect(page.isFallback(await refused.catch((error: unknown) => error))).toBe(true);
+    expect(page.postMessage.mock.calls.length).toBe(posted);
+  });
+
+  it('moves to the browser when the app does not open the sandbox window', async () => {
+    const page = await freshPage('in-app');
+    stubReleaseFetch();
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    expect(page.client.openVaultAuthorizationWindow()).toBeNull();
+    expect(page.handoff()).toBe('fallback');
+  });
+});
+
+describe('the secure window opens at a fixed size, centered over the Avibe window', () => {
+  it('computes the same size every time and centers it on the opener', () => {
+    vi.stubGlobal('screenX', 100);
+    vi.stubGlobal('screenY', 50);
+    vi.stubGlobal('outerWidth', 1440);
+    vi.stubGlobal('outerHeight', 900);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=560,top=120');
+    // Never off the left or top edge, even from a small window.
+    vi.stubGlobal('screenX', 0);
+    vi.stubGlobal('screenY', 0);
+    vi.stubGlobal('outerWidth', 400);
+    vi.stubGlobal('outerHeight', 500);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=0,top=0');
+    // A display left of the primary one has negative coordinates: the window stays on it.
+    vi.stubGlobal('screen', { availLeft: -1440, availTop: 0, availWidth: 1440, availHeight: 900 });
+    vi.stubGlobal('screenX', -1440);
+    vi.stubGlobal('screenY', 0);
+    vi.stubGlobal('outerWidth', 1440);
+    vi.stubGlobal('outerHeight', 900);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=-980,top=70');
+    // Kept within that screen, not pushed off its right edge.
+    vi.stubGlobal('screenX', -400);
+    expect(authorizationWindowFeatures()).toBe('popup,width=520,height=760,left=-520,top=70');
+    vi.unstubAllGlobals();
   });
 });

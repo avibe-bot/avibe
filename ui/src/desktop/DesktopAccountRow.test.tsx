@@ -98,7 +98,7 @@ it('AUTH-SETUP-178 current version offers no install; the account menu has no up
 it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local or remote update IPC', async () => {
   mock.remote = true;
   mount();
-  fireEvent.click(screen.getByRole('button', { name: 'Local Desktop version 3.2.6rc12' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Local Desktop version v3.2.6rc12' }));
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
   expect(mock.invoke).not.toHaveBeenCalled();
   expect(mock.getVersion).not.toHaveBeenCalled();
@@ -108,6 +108,27 @@ it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local
   fireEvent(window, event);
   expect(event.defaultPrevented).toBe(true);
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
+});
+
+// ui/design: chrome/bottom-row. The owner found the remote version read as plain text, though it
+// opens the update panel: on every surface the row is status-left, version-right, and the version
+// is the same chip, so a plain-text version or a reversed row fails here.
+it('the bottom row reads the same locally and on another computer: status, then the version chip', async () => {
+  for (const remote of [false, true]) {
+    mock.remote = remote;
+    const view = mount();
+    const row = document.querySelector('[data-sidebar-status-row]')!;
+    const version = remote
+      ? screen.getByRole('button', { name: 'Local Desktop version v3.2.6rc12' })
+      : await screen.findByTitle('v3.2.6rc12');
+    expect(version.hasAttribute('data-version-chip')).toBe(true);
+    expect(row.lastElementChild!.contains(version)).toBe(true);
+    const status = row.querySelector('[data-account-trigger]')!;
+    expect(row.firstElementChild!.contains(status)).toBe(true);
+    // The status dot leads the computer's name.
+    expect(status.firstElementChild!.querySelector('[data-status-indicator]')).toBeTruthy();
+    view.unmount();
+  }
 });
 
 // The previous updater-only test never exercised the account trigger: signed-out

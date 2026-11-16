@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, ArrowRight, Check, ChevronRight, Laptop, RefreshCw, Server, ShieldCheck, TriangleAlert, WifiOff } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -9,7 +9,7 @@ import { Label } from '../components/ui/label';
 import { Skeleton } from '../components/ui/skeleton';
 import { cn } from '../lib/utils';
 import { AccountLoginView } from './AccountLoginView';
-import { isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type Instance } from './bridge';
+import { isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type Instance } from './bridge';
 import { useAccountClient } from './useAccountClient';
 import { UpdatePanel } from '../components/update/UpdatePanel';
 import { modelFromDesktopState } from '../components/update/updatePanelModel';
@@ -24,9 +24,84 @@ function Notice({ children, warning = false }: { children: ReactNode; warning?: 
   return <div role={warning ? 'alert' : 'status'} className={cn('rounded-xl border p-4 text-sm leading-6', warning ? 'border-gold/40 bg-gold/10 text-foreground' : 'border-edge bg-field text-muted')}>{children}</div>;
 }
 
+/** The update popup's window closes itself (Escape, its backdrop); the shell also closes it on blur. */
+function closeUpdatePopover() {
+  const internals = (window as unknown as {
+    __TAURI_INTERNALS__?: { invoke: (command: string, args: { label: string }) => Promise<unknown> };
+  }).__TAURI_INTERNALS__;
+  void internals?.invoke('plugin:window|close', { label: UPDATE_POPOVER }).catch(() => undefined);
+}
+
+/** This computer's update panel as a popup over another computer's page (ui/design:
+ *  chrome/remote-update-popup): the panel at the window's bottom-left, the rest a
+ *  transparent backdrop, so a click outside the panel closes it like a popover. The
+ *  shell makes the page transparent before its first paint and shows it once loaded. */
+export function UpdatePopoverView({ label, onClose, panelRef, children }: {
+  label: string;
+  onClose: () => void;
+  panelRef?: Ref<HTMLDivElement>;
+  /** The panel; absent until the desktop client's state arrives, so no empty frame is drawn. */
+  children?: ReactNode;
+}) {
+  return <div data-update-popover className="fixed inset-0" onClick={onClose}>
+    {children && <div ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} onClick={(event) => event.stopPropagation()}
+      className="absolute bottom-2 left-2 w-80 overflow-hidden rounded-xl border border-edge bg-popover text-popover-foreground shadow-elevation-2 outline-none">
+      {children}
+    </div>}
+  </div>;
+}
+
+function UpdatePopover({ label, children }: { label: string; children?: ReactNode }) {
+  const panel = useRef<HTMLDivElement>(null);
+  const ready = Boolean(children);
+  // The shell's injected style makes the page transparent before first paint; this
+  // keeps it transparent should that script not have run.
+  useEffect(() => {
+    const root = document.documentElement;
+    const rootBackground = root.style.background;
+    const bodyBackground = document.body.style.background;
+    root.style.background = 'transparent';
+    document.body.style.background = 'transparent';
+    return () => { root.style.background = rootBackground; document.body.style.background = bodyBackground; };
+  }, []);
+  useEffect(() => { if (ready) panel.current?.focus(); }, [ready]);
+  return <UpdatePopoverView label={label} onClose={closeUpdatePopover} panelRef={panel}>{children}</UpdatePopoverView>;
+}
+
+const UPDATE_POPOVER = 'update-popover';
+
+/** The same panel as everywhere else, acting on this computer's desktop app. */
+export function DesktopUpdatePanel({ state, act, busy, install, close }: {
+  state: DesktopClientState;
+  act: (action: DesktopClientAction) => Promise<boolean>;
+  busy: boolean;
+  install: ReturnType<typeof useAcceptedInstall>;
+  close: () => void;
+}) {
+  const update = state.desktop.update;
+  const model = modelFromDesktopState(update, { current: state.desktop.version, installFailed: install.failed });
+  const target = update.latest;
+  const accepts = (action: string) => update.hostActions?.includes(action) ?? false;
+  return <UpdatePanel
+    model={model}
+    actions={{
+      check: { run: () => void act({ type: 'update_check' }), disabled: busy || ['checking', 'downloading', 'installing'].includes(update.phase) },
+      ...(update.phase === 'available' && target ? {
+        // Only an accepted request can fail as an install; a rejected one installed nothing.
+        update: { run: () => void act({ type: 'update_install', target_version: target }).then((ok) => { if (ok) install.accept(); }), disabled: busy },
+      } : {}),
+      ...(accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void act({ type: 'update_set_prereleases', enabled }) } : {}),
+      ...(accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'update_set_auto_update', enabled }) } : {}),
+      settingsBusy: busy,
+      close,
+    }}
+  />;
+}
+
 export function AccountApp() {
   const { t } = useTranslation();
   const { state, error, send } = useAccountClient();
+  const [popover] = useState(() => new URLSearchParams(window.location.search).get('view') === UPDATE_POPOVER);
   const install = useAcceptedInstall(state?.desktop.update.phase);
   const [view, setView] = useState(() => {
     const initial = new URLSearchParams(window.location.search).get('view');
@@ -81,6 +156,8 @@ export function AccountApp() {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing) return;
       event.preventDefault();
+      // The popup has no account flow to cancel: Escape closes it, as it closes a popover.
+      if (popover) { closeUpdatePopover(); return; }
       epoch.current += 1;
       setMaterial(null);
       setCode('');
@@ -88,35 +165,27 @@ export function AccountApp() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [send]);
+  }, [send, popover]);
   const localButton = <Button variant="ghost" onClick={() => leave('return_local')}>{t('desktopClient.continueLocal')}</Button>;
   const instances = () => { setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' }); };
   const errorMessage = error && t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
   const failure = errorMessage && <Notice warning>{errorMessage}</Notice>;
+  if (popover) {
+    // Nothing is drawn until the state arrives; a failure to get it is still shown.
+    return <UpdatePopover label={t('dashboard.versionAndUpdate')}>
+      {(state || failure) && <>
+        {state && <DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />}
+        {failure && <div className={state ? 'p-4 pt-0' : 'p-4'}>{failure}</div>}
+      </>}
+    </UpdatePopover>;
+  }
   let content: ReactNode;
   let centerLogin = false;
   if (!state) {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
   } else if (view === 'updates') {
-    // The same panel as everywhere else, acting on this computer's desktop app (ui/design: update/panel/trusted-view).
-    const update = state.desktop.update;
-    const model = modelFromDesktopState(update, { current: state.desktop.version, installFailed: install.failed });
-    const target = update.latest;
-    const accepts = (action: string) => update.hostActions?.includes(action) ?? false;
-    content = <div className="mx-auto w-full max-w-md pt-12"><Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading><div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><UpdatePanel
-      model={model}
-      actions={{
-        check: { run: () => void act({ type: 'update_check' }), disabled: busy || ['checking', 'downloading', 'installing'].includes(update.phase) },
-        ...(update.phase === 'available' && target ? {
-          // Only an accepted request can fail as an install; a rejected one installed nothing.
-          update: { run: () => void act({ type: 'update_install', target_version: target }).then((ok) => { if (ok) install.accept(); }), disabled: busy },
-        } : {}),
-        ...(accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void act({ type: 'update_set_prereleases', enabled }) } : {}),
-        ...(accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'update_set_auto_update', enabled }) } : {}),
-        settingsBusy: busy,
-        close: () => leave('cancel'),
-      }}
-    /></div>{failure}</div>;
+    // ui/design: update/panel/trusted-view
+    content = <div className="mx-auto w-full max-w-md pt-12"><Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading><div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
   } else if (view === 'sign-out') {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.signOut')}>{t('desktopClient.signOutBody')}</Heading>{failure}<div className="mt-7 flex gap-3"><Button variant="brand" onClick={() => leave('sign_out')}>{t('desktopClient.signOut')}</Button><Button variant="outline" onClick={() => leave('cancel')}>{t('common.cancel')}</Button></div></div>;
   } else if (view === 'setup-complete') {
@@ -171,7 +240,6 @@ export function AccountApp() {
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
     <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
-    {state?.remote_auxiliary === 'disabled_incomplete' && <footer className="shrink-0 border-t border-edge bg-surface px-4 py-2 text-xs text-muted">{t('desktopClient.auxiliaryIncomplete')}</footer>}
   </div>;
 }
 

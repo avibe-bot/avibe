@@ -164,6 +164,11 @@ fn failure(_: impl std::fmt::Display) -> ClientError {
     ClientError::new("window_unavailable")
 }
 
+/// The bundled origin the account pages (and the update popup) are served from.
+pub(crate) fn bundle(app: &AppHandle) -> Option<Url> {
+    app.try_state::<Client>().map(|client| client.view.bundle.clone())
+}
+
 pub(crate) fn enabled(app: &AppHandle) -> bool {
     app.try_state::<Client>().is_some()
 }
@@ -472,6 +477,21 @@ fn trusted_page(client: &Client, window: &WebviewWindow) -> bool {
             .url()
             .is_ok_and(|url| account_view(&url, &client.view.bundle).is_some())
 }
+/// Who may drive this computer's updater through the desktop client: the account
+/// page in the main window, or the update popup on its own page while it is open.
+/// `desktop_client_request` has already checked the caller; this is the updater's
+/// own second check.
+fn updater_caller<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    bundle: &Url,
+    main_account_page: impl FnOnce(&WebviewWindow<R>) -> bool,
+) -> bool {
+    app.get_webview_window(MAIN_WINDOW)
+        .is_some_and(|window| main_account_page(&window))
+        || app
+            .get_webview_window(crate::update_popover::UPDATE_POPOVER)
+            .is_some_and(|window| crate::update_popover::is_page(&window, bundle))
+}
 #[tauri::command]
 pub async fn desktop_client_request(
     window: WebviewWindow,
@@ -479,7 +499,13 @@ pub async fn desktop_client_request(
     request: ClientRequest,
 ) -> Result<ClientReply, String> {
     let client = app.try_state::<Client>().ok_or("desktop_client_unavailable")?;
-    if !trusted_page(&client, &window) {
+    // The update popup is its own window, limited to its page and to this computer's updater.
+    let trusted = if window.label() == crate::update_popover::UPDATE_POPOVER {
+        crate::update_popover::is_page(&window, &client.view.bundle) && crate::update_popover::allows(&request.action)
+    } else {
+        trusted_page(&client, &window)
+    };
+    if !trusted {
         return Err("untrusted_desktop_caller".into());
     }
     let coordinator = client.coordinator.clone();
@@ -638,6 +664,12 @@ fn present_owned(
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
+    // While the main window shows another computer, this computer's update panel
+    // opens as a popup over it instead of replacing the page (ui/design:
+    // chrome/remote-update-popup). Nothing navigates, so no guard is needed.
+    if view == "updates" && !local_selected(app) {
+        return crate::update_popover::open(app, &client.view.bundle, client.view.script(true, None));
+    }
     let Ok(mut url) = client.view.bundle.join("/account/index.html") else {
         return false;
     };
@@ -871,6 +903,15 @@ pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<boo
 }
 
 impl NativeView {
+    /// The update popup's state: the bundled page in its own window, guarded to that document.
+    fn popover_script(&self, receiver: &Url) -> String {
+        let state = self.presentation.lock().expect("presentation");
+        let value = serde_json::to_value(&state.state).expect("client state");
+        format!(
+            "if (window.self === window.top && window.location.href === {}) {{window.dispatchEvent(new CustomEvent('{EVENT}', {{detail:{value}}}));}}",
+            serde_json::to_string(receiver.as_str()).expect("receiver URL")
+        )
+    }
     fn script(&self, initial: bool, receiver: Option<&Url>) -> String {
         let state = self.presentation.lock().expect("presentation");
         // Initialization survives navigation for the lifetime of a WebView.
@@ -1192,11 +1233,7 @@ impl ClientView for NativeView {
             .app
             .try_state::<Client>()
             .ok_or_else(|| ClientError::new("desktop_client_unavailable"))?;
-        let window = self
-            .app
-            .get_webview_window(MAIN_WINDOW)
-            .ok_or_else(|| ClientError::new("untrusted_desktop_caller"))?;
-        if !trusted_page(&client, &window) {
+        if !updater_caller(&self.app, &client.view.bundle, |window| trusted_page(&client, window)) {
             return Err(ClientError::new("untrusted_desktop_caller"));
         }
         epoch.check()?;
@@ -1281,6 +1318,7 @@ impl ClientView for NativeView {
                 }
             }
         }
+        crate::update_popover::publish(&self.app, &self.bundle, |url| self.popover_script(url));
         self.auxiliaries();
         // Finished may arrive while this owner still holds the window lock.
         // The owner's terminal publication is the deferred delivery handoff.
@@ -1445,6 +1483,40 @@ impl ClientView for NativeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The popup only opens while main shows another computer, so the updater's
+    /// own check must admit it there; otherwise Update, Check and both switches
+    /// would all be refused from the popup. Drives the same window lookup
+    /// `NativeView::desktop_update` uses; main's account-page test is passed in.
+    #[test]
+    fn the_update_popup_may_drive_the_updater_while_main_shows_another_computer() {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+        let app = tauri::test::mock_app();
+        let bundle = Url::parse("tauri://localhost/").unwrap();
+        let window = |label: &str, raw: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::External(Url::parse(raw).unwrap()))
+                .build()
+                .unwrap()
+        };
+        let account_page = |window: &WebviewWindow<tauri::test::MockRuntime>| {
+            window.url().is_ok_and(|url| account_view(&url, &bundle).is_some())
+        };
+        // Main shows another computer's page and no popup is open: refused.
+        window(MAIN_WINDOW, "https://studio.avibe.bot/");
+        assert!(!updater_caller(app.handle(), &bundle, account_page));
+        // The popup on its own page: admitted.
+        let popover = window(
+            crate::update_popover::UPDATE_POPOVER,
+            "tauri://localhost/account/index.html?view=update-popover",
+        );
+        assert!(updater_caller(app.handle(), &bundle, account_page));
+        // Not once the popup shows anything else.
+        popover
+            .navigate(Url::parse("tauri://localhost/account/index.html?view=account").unwrap())
+            .unwrap();
+        assert!(!updater_caller(app.handle(), &bundle, account_page));
+    }
 
     // A footer/menu intent used to disappear when its deferred callback met a
     // busy window or a lifecycle rebind. Only actual admission may settle it.

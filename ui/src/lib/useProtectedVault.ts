@@ -10,6 +10,7 @@ import {
   type VaultWebAuthnSerializedCredential,
 } from '@/context/ApiContext';
 import {
+  getActiveVaultSandboxClient,
   getVaultSandboxClient,
   PROTECTED_HD_OP,
   resetVaultSandboxClient,
@@ -218,7 +219,11 @@ async function lockVault(broadcast = false): Promise<void> {
   notifyVaultLockChange();
   if (broadcast) getVaultLockChannel()?.postMessage('lock');
   try {
-    await (await getVaultSandboxClient()).lock();
+    // The client that holds the key, even where this page no longer starts sandbox steps (a desktop
+    // app that moved them to the browser after an in-app unlock): the page never says locked while
+    // the sandbox still holds the key. Without one, nothing is unlocked here; asking for one checks
+    // the entry as before.
+    await (getActiveVaultSandboxClient() ?? await getVaultSandboxClient()).lock();
   } catch {
     // Local parent state is already locked; a best-effort sandbox lock failure remains fail-closed.
   }

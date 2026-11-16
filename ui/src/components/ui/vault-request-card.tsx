@@ -4,7 +4,7 @@ import { ArrowRight, ExternalLink, KeyRound, LockKeyhole, PenTool, Trash2, Walle
 import { useTranslation } from 'react-i18next';
 
 import type { VaultRequest } from '@/context/ApiContext';
-import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { vaultRequestNeedsFullRead } from '@/lib/vaultFullRequest';
 import { partitionTags } from '@/lib/vaultTags';
@@ -115,10 +115,12 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
     protected_secret_names?: string[];
     source_selector?: { env?: string[]; tags?: string[] };
   };
-  const isProtected = card.protection === 'protected' || (card.protected_secret_names?.length ?? 0) > 0;
+  // A summary row has no card; it names the tier itself.
+  const isProtected = card.protection === 'protected' || (card.protected_secret_names?.length ?? 0) > 0 || request.protection === 'protected';
   // An approval that needs a passkey this app can't use is reviewed once, in the browser, instead
   // of in a dialog that could only send it there.
-  const reviewInBrowser = type !== 'provision' && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(request);
+  const handoff = useVaultPasskeyHandoff();
+  const reviewInBrowser = type !== 'provision' && handoff !== null && vaultApprovalNeedsPasskey(request);
   // A selector-based access request matches multiple secrets, so `secret_name` is null and the
   // members/selector live on the card. Fall back to those so the card is never nameless.
   const { name, extra } = useMemo(() => {
@@ -154,7 +156,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
             <span className="truncate font-mono text-[13px] font-semibold text-foreground">{name}</span>
             {extra > 0 ? <Badge variant="secondary">+{extra}</Badge> : null}
             {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
-            {card.kind === 'keypair' ? (
+            {card.kind === 'keypair' || (type === 'sign' && vaultRequestNeedsFullRead(request)) ? (
               <Badge variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet-ink">
                 <Wallet className="size-3" />
                 {t('vaults.signing')}

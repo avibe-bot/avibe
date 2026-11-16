@@ -540,6 +540,11 @@ final class MobileSessionCoordinator {
     /// Operation that is allowed to preserve the selected runtime while the
     /// account page refreshes or performs a push-management request.
     private var selectionKeepingOperation: UUID?
+    /// Opens waiting, each up to its bound, for `selectionKeepingOperation`
+    /// to finish.
+    private var selectionKeepingOperationWaiters: [
+        UUID: CheckedContinuation<Void, Never>
+    ] = [:]
     /// The operation that currently retains the transport after its surface
     /// closes. This token is separate from `selectionKeepingOperation`:
     /// selection and transport ownership have different invariants.
@@ -552,6 +557,8 @@ final class MobileSessionCoordinator {
     private var pendingStoreReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
+    /// The avibe.bot page shown with this account's sign-in, while open.
+    private weak var openAccountWebPage: WKWebView?
 
     private enum Phase: Equatable {
         case ready
@@ -566,6 +573,10 @@ final class MobileSessionCoordinator {
 
     var currentAccount: MobileAccount? {
         snapshot?.account
+    }
+
+    var controlPlaneURL: URL {
+        controlPlane.baseURL
     }
 
     var currentInstances: [MobileInstance] {
@@ -619,6 +630,37 @@ final class MobileSessionCoordinator {
         guard transportOperationToken != nil else {
             deactivateAccountSurface()
             return
+        }
+    }
+
+    /// The store an avibe.bot page shown with the account's sign-in uses
+    /// (`AvibePage.accountDeletion`): the account's own, so the page is
+    /// already signed in. Only a signed-in account gets it, and not while a
+    /// sign-out or account change is under way.
+    func accountWebPageDataStore() throws -> WKWebsiteDataStore {
+        guard snapshot != nil else {
+            throw MobileAccountError.signedOut
+        }
+        guard keepsSelection else {
+            throw MobileAccountError.busy
+        }
+        return websiteDataStore.dataStore
+    }
+
+    /// A WebView on `accountWebPageDataStore()` is open. An account
+    /// transition waits for it, as for the runtime's, before it rotates the
+    /// store, and leaves the old store for a later sweep if it is still
+    /// alive. Until `endAccountWebPage(_:)`, no instance can be selected
+    /// (a notification tap included): the page's result decides first
+    /// whether there is still an account to open it for.
+    func beginAccountWebPage(_ webView: WKWebView) {
+        openAccountWebPage = webView
+        recordReleaseBarrier(WebsiteDataStoreReleaseBarrier(webViews: [webView]))
+    }
+
+    func endAccountWebPage(_ webView: WKWebView) {
+        if openAccountWebPage === webView {
+            openAccountWebPage = nil
         }
     }
 
@@ -899,8 +941,73 @@ final class MobileSessionCoordinator {
         }
     }
 
+    /// The instance list's open (`session.selectInstance`). When the account
+    /// is held only by operations that keep the selection (push-management
+    /// requests the App makes on its own, as on a return to the foreground,
+    /// or a refresh of the signed-in account), it first waits for them, up
+    /// to `bound` in all, then selects once. Any other operation, a reset or
+    /// a sign-out still answers `busy` at once. An open that waited is
+    /// dropped as `busy` if its page closed, another page opened, or the
+    /// account or selection changed meanwhile. `selectInstance` itself and
+    /// transport ownership are unchanged.
+    func selectInstanceAfterSelectionKeepingOperation(
+        id: String,
+        waitingAtMost bound: Duration = .seconds(10)
+    ) async throws -> MobileInstance {
+        guard isHeldBySelectionKeepingOperation else {
+            return try selectInstance(id: id)
+        }
+        let lease = accountSurfaceLeaseID
+        let requestGeneration = generation
+        let selection = storedSelection()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: bound)
+        // Recovery can run such operations back to back, the next one
+        // starting before this wait resumes.
+        while isHeldBySelectionKeepingOperation, clock.now < deadline {
+            await selectionKeepingOperationFinished(
+                atMost: clock.now.duration(to: deadline)
+            )
+        }
+        guard
+            accountSurfaceLeaseID == lease,
+            generation == requestGeneration,
+            storedSelection() == selection
+        else {
+            throw MobileAccountError.busy
+        }
+        return try selectInstance(id: id)
+    }
+
+    private var isHeldBySelectionKeepingOperation: Bool {
+        if case .operation(let token) = phase {
+            return token == selectionKeepingOperation
+        }
+        return false
+    }
+
+    private func selectionKeepingOperationFinished(
+        atMost bound: Duration
+    ) async {
+        let waiter = UUID()
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: bound)
+            self?.selectionKeepingOperationWaiters
+                .removeValue(forKey: waiter)?
+                .resume()
+        }
+        await withCheckedContinuation { continuation in
+            if isHeldBySelectionKeepingOperation {
+                selectionKeepingOperationWaiters[waiter] = continuation
+            } else {
+                continuation.resume()
+            }
+        }
+        timeout.cancel()
+    }
+
     func selectInstance(id: String) throws -> MobileInstance {
-        guard phase == .ready else {
+        guard phase == .ready, openAccountWebPage == nil else {
             throw MobileAccountError.busy
         }
         guard
@@ -1288,7 +1395,8 @@ final class MobileSessionCoordinator {
         // Keep its ownership token even if there was no transport on entry.
         transportOperationToken = token
         defer {
-            if selectionKeepingOperation == token {
+            let keptSelection = selectionKeepingOperation == token
+            if keptSelection {
                 selectionKeepingOperation = nil
             }
             if transportOperationToken == token {
@@ -1296,6 +1404,13 @@ final class MobileSessionCoordinator {
             }
             if phase == .operation(token) {
                 phase = .ready
+            }
+            if keptSelection {
+                let waiters = selectionKeepingOperationWaiters.values
+                selectionKeepingOperationWaiters = [:]
+                for waiter in waiters {
+                    waiter.resume()
+                }
             }
         }
         return try await operation()

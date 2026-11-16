@@ -36,6 +36,7 @@ import {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { KeyAddressList } from '../ui/btc-address-row';
+import { VaultHandoffDone } from '../ui/vault-handoff-done';
 import { VaultPendingRequests } from '../ui/vault-pending-requests';
 import { VaultGeneratedOriginBadge } from '../ui/vault-generated-origin';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
@@ -43,7 +44,10 @@ import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault, useVaultSandboxWarm } from '../../lib/useProtectedVault';
 import {
   openVaultsInBrowser,
+  readDesktopVaultHandoff,
   readVaultBrowserStep,
+  isVaultPasskeyFallback,
+  useVaultPasskeyHandoff,
   withoutVaultBrowserStep,
 } from '../../lib/vaultBrowserHandoff';
 import { isReviewableVaultRequest } from '../../lib/vaultPendingRequests';
@@ -112,7 +116,7 @@ const SecretRow: React.FC<{
   // shown in-sandbox. Standard values aren't sandbox-sealed, and a keypair has no plaintext value.
   const canReveal = canUse && isProtected && !isKeypair;
   const fields = vaultFieldNames(s);
-  // The sandbox reveal needs its authorization window, which only a browser can pair with.
+  // The sandbox reveal needs its authorization window; a desktop app that cannot host it sends it to the browser.
   const entryIssue = canReveal ? vaultEntryIssue() : null;
   const revealInBrowser = entryIssue === 'desktop';
   const revealBlocked = !!entryIssue && !revealInBrowser;
@@ -370,7 +374,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
  * blank the rest of the hub.
  */
 const PendingRequestsSection: React.FC<{
-  onResolved: () => void;
+  onResolved: (requestId: string) => void;
   focusRequestId?: string | null;
   /** Open a focused provision request on the Protected tier (the desktop app's handoff). */
   focusStartProtected?: boolean;
@@ -411,7 +415,7 @@ const PendingRequestsSection: React.FC<{
   const onSettled = useCallback((requestId: string) => {
     setRequests((prev) => prev.filter((r) => r.id !== requestId));
     void load();
-    onResolved();
+    onResolved(requestId);
   }, [load, onResolved]);
 
   return (
@@ -436,6 +440,9 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const vault = useProtectedVault();
+  // Rows read the entry issue as they render; this re-renders them when an in-app passkey step
+  // fails and the desktop app moves to the browser hand-off.
+  const passkeyHandoff = useVaultPasskeyHandoff();
   const { capabilities } = useInstanceAuthorization();
   const canManageVaultSecrets = capabilities.can_manage_instance;
   const canUseVaultSecrets = capabilities.can_use_vault_secrets;
@@ -450,7 +457,7 @@ export const VaultsPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The Add dialog while open: a new secret, or one resumed from the desktop app's handoff.
-  const [adding, setAdding] = useState<{ name?: string; startProtected: boolean } | null>(null);
+  const [adding, setAdding] = useState<{ name?: string; startProtected: boolean; desktopHandoff?: boolean } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
@@ -482,6 +489,10 @@ export const VaultsPage: React.FC = () => {
   // A request linked from IM, or a step the desktop app handed to this browser (`openVaultsInBrowser`),
   // resumed below; each drops the step from the URL once resumed so a reload doesn't resume it again.
   const step = useMemo(() => readVaultBrowserStep(searchParams), [searchParams]);
+  // The step the desktop app handed to this tab, read once on arrival: the URL drops it once resumed.
+  const [desktopHandoff] = useState(() => readDesktopVaultHandoff(searchParams));
+  const [desktopHandoffDone, setDesktopHandoffDone] = useState(false);
+  const handoffRequestId = desktopHandoff?.step.kind === 'request' ? desktopHandoff.step.requestId : null;
   // The secret whose row menu is open; a reveal handed off from the desktop app reopens it.
   const [menuSecret, setMenuSecret] = useState<string | null>(null);
 
@@ -491,7 +502,7 @@ export const VaultsPage: React.FC = () => {
 
   useEffect(() => {
     if (!canUseVaultSecrets || step?.kind !== 'add') return;
-    setAdding({ name: step.name, startProtected: true });
+    setAdding({ name: step.name, startProtected: true, desktopHandoff: true });
     clearStep();
   }, [canUseVaultSecrets, step, clearStep]);
 
@@ -527,6 +538,11 @@ export const VaultsPage: React.FC = () => {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const onRequestResolved = useCallback((requestId: string) => {
+    if (requestId === handoffRequestId) setDesktopHandoffDone(true);
+    refresh();
+  }, [handoffRequestId, refresh]);
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
@@ -703,7 +719,7 @@ export const VaultsPage: React.FC = () => {
     const secret = secrets.find((entry) => entry.name === menuSecret);
     if (secret?.protection !== 'protected' || secret.kind === 'keypair') return null;
     return { name: secret.name, fields: vaultFieldNames(secret), version: vaultFieldFingerprint(secret) };
-  }, [canUseVaultSecrets, secrets, menuSecret]);
+  }, [canUseVaultSecrets, secrets, menuSecret, passkeyHandoff]);
   const revealContext = usePreparedRequest(menuRevealKey, requestRevealContext, revealContextsIssued, PREPARED_REVEAL);
   const revealSandboxReady = useVaultSandboxWarm(menuRevealKey !== null);
   // Show and Copy wait for both, so their click never waits on either.
@@ -734,7 +750,10 @@ export const VaultsPage: React.FC = () => {
         });
         await vault.revealProtectedSecret(items, defaultField, authorizationWindow?.id);
       } catch (err: unknown) {
-        showToast(vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
+        // This attempt moved the app to the browser hand-off: the row's menu now offers Show in browser.
+        showToast(isVaultPasskeyFallback(err)
+          ? t('vaults.reveal.browserFallback')
+          : vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
       } finally {
         authorizationWindow?.close();
       }
@@ -831,10 +850,11 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
+      {desktopHandoffDone ? <VaultHandoffDone session={desktopHandoff?.session ?? null} /> : null}
       {canReadVaultState ? <AvaultAuthorizationNotice /> : null}
       {canUseVaultSecrets ? (
         <PendingRequestsSection
-          onResolved={refresh}
+          onResolved={onRequestResolved}
           focusRequestId={step?.kind === 'request' ? step.requestId : null}
           focusStartProtected={step?.kind === 'request' && step.startProtected}
           onFocusRequestOpened={clearStep}
@@ -961,6 +981,7 @@ export const VaultsPage: React.FC = () => {
           if (!o) setAdding(null);
         }}
         onCreated={(name, reason) => {
+          if (adding?.desktopHandoff) setDesktopHandoffDone(true);
           setAdding(null);
           // Only an Add for a name an agent asked for treats an existing secret as provided.
           if (reason !== 'already_exists') showToast(t('vaults.created', { name }), 'success');
@@ -976,6 +997,7 @@ export const VaultsPage: React.FC = () => {
         onCancel={() => setEditTarget(null)}
         onCreated={() => setEditTarget(null)}
         onSaved={(name) => {
+          if (desktopHandoff?.step.kind === 'edit' && desktopHandoff.step.secretName === name) setDesktopHandoffDone(true);
           setEditTarget(null);
           showToast(t('vaults.saved', { name }), 'success');
           refresh();

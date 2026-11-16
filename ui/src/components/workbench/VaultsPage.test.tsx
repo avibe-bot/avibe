@@ -695,7 +695,7 @@ describe('VaultsPage protected reveal', () => {
     await vi.waitFor(() => expect(showValue().disabled).toBe(false));
     fireEvent.click(showValue());
     // Asserted synchronously after the click dispatch, before any awaited work can run.
-    expect(open).toHaveBeenCalledExactlyOnceWith('about:blank', '_blank', expect.stringMatching(/^popup,width=520,height=760/));
+    expect(open).toHaveBeenCalledExactlyOnceWith('about:blank', '_blank', expect.stringMatching(/^popup,width=520,height=760,left=\d+,top=\d+$/));
     expect(popup.location.replace).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(popup.location.replace).toHaveBeenCalledOnce());
     const opened = new URL(String(popup.location.replace.mock.calls[0][0]));

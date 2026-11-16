@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label';
 import { MoreAccountSection } from '@/components/workbench/MorePage';
 import { MobileAppHeader } from '@/components/apps/MobileAppHeader';
 import type { AppLicenses } from '@/mobile/appLicenses';
-import { LicensesContent, LicensesEntry } from '@/mobile/LicensesPage';
+import { AboutSection, DeleteAccount, LicensesContent } from '@/mobile/LicensesPage';
 import logo from '@/assets/logo.png';
 import mailMascot from '@/assets/pet/vibey-message.png';
 import heroMascot from '../../../assets/mascot/cloud-tuanzi-v2.png';
@@ -100,6 +100,8 @@ export function WelcomePage() {
   </div><div className="flex flex-col gap-4 pb-3"><Primary>{t('登录 / 注册', 'Sign in / Create account')}</Primary><p className="text-center text-xs leading-relaxed text-muted">{t('Vibey，你的内置 AI 伙伴。', 'Vibey, your built-in AI partner.')}<br />{t('连接自己的实例，也可以加入别人共享的实例。', 'Connect to your instances or those shared with you.')}</p></div></CloudScreen>;
 }
 
+const noop = () => {};
+
 /** One accessible input; six equally spaced cells are a decorative fixture display. */
 function CodeInput({ code, invalid, busy, label }: { code: string; invalid: boolean; busy: boolean; label?: string }) {
   const t = useCopy();
@@ -145,7 +147,7 @@ export function EmptyInstancesPage({ cli = false }: { cli?: boolean }) {
 }
 export function AccountPage({ instance, licenses = false }: { instance?: MobileInstance; licenses?: boolean }) {
   const t = useCopy();
-  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section>{licenses && <LicensesEntry />}<div className="mt-auto pt-9 pb-3"><Button variant="link" className="px-0 text-destructive-ink">{t('删除账号', 'Delete account')}<ExternalLink className="size-4" /></Button><p className="mt-2 text-xs leading-6 text-muted">{t('前往 avibe.bot，查看影响并确认删除。', 'Continue to avibe.bot to review the impact and confirm deletion.')}</p></div></CloudScreen>;
+  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section><AboutSection licenses={licenses} onPrivacy={noop} /><DeleteAccount onDelete={noop} /></CloudScreen>;
 }
 /** The shipped Open-source licenses page (`LicensesContent`) in the A screen. */
 export function LicensesScreen({ licenses, openGroup }: { licenses: AppLicenses; openGroup?: number }) {

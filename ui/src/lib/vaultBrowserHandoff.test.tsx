@@ -17,10 +17,12 @@ import { VaultRequestCard } from '@/components/ui/vault-request-card';
 import { VaultSecretForm } from '@/components/ui/vault-secret-form';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 import en from '@/i18n/en.json';
+import { vaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(),
   createVaultAgentBindingsBatch: vi.fn(),
+  createVaultGrant: vi.fn(),
   createVaultRevealContext: vi.fn(),
   denyVaultRequest: vi.fn(),
   fulfillVaultAccessRequest: vi.fn(),
@@ -52,7 +54,8 @@ const vault = vi.hoisted(() => ({
 }));
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
-vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+const toast = vi.hoisted(() => vi.fn());
+vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: toast }) }));
 vi.mock('@/lib/useProtectedVault', () => ({
   useProtectedVault: () => vault,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
@@ -142,10 +145,19 @@ const protectedSecret: VaultSecret = {
   updated_at: '2026-09-30T00:00:00Z',
 };
 
-type Click = { role: 'button' | 'menuitem'; name: RegExp };
+type Click = { role: 'button' | 'menuitem' | 'checkbox'; name: RegExp };
 const approve: Click = { role: 'button', name: /^(approve|sign|continue in browser)$/i };
 const protectedTier: Click = { role: 'button', name: /^protected/i };
 const openInBrowser: Click = { role: 'button', name: /add a passkey|unlock with passkey|open in browser/i };
+const acknowledgeLoss: Click = { role: 'checkbox', name: /if i lose this passkey/i };
+const addPasskey: Click = { role: 'button', name: /^add a passkey$/i };
+const unlockWithPasskey: Click = { role: 'button', name: /^unlock with passkey$/i };
+const review: Click = { role: 'button', name: /^review$/i };
+const moreActions: Click = { role: 'button', name: /^more actions$/i };
+// What a shell without the capability says, and a shell with it must never say.
+const cannotUsePasskeys = /desktop app can't use|don't work in the desktop app/i;
+const approvalFallbackNote = en.vaults.approval.browserFallbackNote;
+const unlockFallbackNote = en.vaults.protectedUnlock.browserFallbackNote;
 
 const resumedDialog = () => screen.findByRole('dialog');
 const expectApprovalButton = async (name: RegExp) => {
@@ -189,9 +201,20 @@ const signSummary = {
   secret_name: null, requester: null, delivery: null, message_id: null, card: null, session: null,
 } as unknown as VaultRequest;
 
+// The surfaces under test. A page that must start from its own state renders a fresh copy of them.
+type Ui = {
+  VaultApprovalCard: typeof VaultApprovalCard;
+  VaultRequestCard: typeof VaultRequestCard;
+  VaultSecretForm: typeof VaultSecretForm;
+  VaultsPage: typeof VaultsPage;
+};
+const staticUi: Ui = { VaultApprovalCard, VaultRequestCard, VaultSecretForm, VaultsPage };
+
+const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedSecret];
+
 const cases: Array<{
   surface: string;
-  desktop: () => ReactElement;
+  desktop: (ui: Ui) => ReactElement;
   clicks: Click[];
   requests?: VaultRequest[];
   /** What the full read by id returns, when it differs from the listed request. */
@@ -200,47 +223,68 @@ const cases: Array<{
   vaultStatus?: string;
   role?: 'editor' | 'member';
   resumed: () => Promise<void>;
+  /** In a shell that runs passkey steps itself: the clicks to the step, and the ceremony they start. */
+  inApp: { clicks: Click[]; ceremony: (typeof ceremonies)[number] };
+  /** After that step failed in the app: the sentence the surface shows (a reveal says it in a toast)
+   *  and the clicks to the surface's browser action for the same step. */
+  fallbackNote?: string;
+  afterFailure: Click[];
 }> = [
   {
     surface: 'protected access approval',
-    desktop: () => <VaultApprovalCard request={protectedAccess} onResolved={vi.fn()} onCancel={vi.fn()} />,
+    desktop: ({ VaultApprovalCard }) => <VaultApprovalCard request={protectedAccess} onResolved={vi.fn()} onCancel={vi.fn()} />,
     clicks: [approve],
     requests: [protectedAccess],
     resumed: () => expectApprovalButton(/^approve$/i),
+    inApp: { clicks: [approve], ceremony: vault.approveProtectedRelease },
+    afterFailure: [{ role: 'button', name: /^continue in browser$/i }],
+    fallbackNote: approvalFallbackNote,
   },
   {
     surface: 'protected sign approval',
-    desktop: () => <VaultApprovalCard request={protectedSign} onResolved={vi.fn()} onCancel={vi.fn()} />,
+    desktop: ({ VaultApprovalCard }) => <VaultApprovalCard request={protectedSign} onResolved={vi.fn()} onCancel={vi.fn()} />,
     clicks: [approve],
     requests: [protectedSign],
     resumed: () => expectApprovalButton(/^sign$/i),
+    inApp: { clicks: [approve], ceremony: vault.signProtectedRequest },
+    afterFailure: [{ role: 'button', name: /^continue in browser$/i }],
+    fallbackNote: approvalFallbackNote,
   },
   {
     // The summary itself says nothing about protection: Review reads it in full, and only then
     // does the dialog hand the protected request to the browser.
     surface: 'chat card for a proof-free signing summary',
-    desktop: () => <VaultRequestCard request={signSummary} onResolved={vi.fn()} />,
+    desktop: ({ VaultRequestCard }) => <VaultRequestCard request={signSummary} onResolved={vi.fn()} />,
     clicks: [{ role: 'button', name: /^review$/i }, { role: 'button', name: /^review in browser/i }],
     requests: [signSummary],
     full: [protectedSign as unknown as VaultRequest],
     resumed: () => expectApprovalButton(/^sign$/i),
+    inApp: { clicks: [review, approve], ceremony: vault.signProtectedRequest },
+    afterFailure: [{ role: 'button', name: /^review in browser/i }],
+    fallbackNote: approvalFallbackNote,
   },
   {
     surface: 'chat request card review',
-    desktop: () => <VaultRequestCard request={protectedAccess} onResolved={vi.fn()} />,
+    desktop: ({ VaultRequestCard }) => <VaultRequestCard request={protectedAccess} onResolved={vi.fn()} />,
     clicks: [{ role: 'button', name: /^review/i }],
     requests: [protectedAccess],
     resumed: () => expectApprovalButton(/^approve$/i),
+    inApp: { clicks: [review, approve], ceremony: vault.approveProtectedRelease },
+    afterFailure: [{ role: 'button', name: /^review in browser/i }],
+    fallbackNote: approvalFallbackNote,
   },
   {
     surface: 'Add switched to Protected',
-    desktop: () => <VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} />,
+    desktop: ({ VaultSecretForm }) => <VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} />,
     clicks: [protectedTier, openInBrowser],
     resumed: () => expectProtectedForm(),
+    inApp: { clicks: [protectedTier, acknowledgeLoss, addPasskey], ceremony: vault.setupPasskey },
+    afterFailure: [{ role: 'button', name: /^open in browser$/i }],
+    fallbackNote: unlockFallbackNote,
   },
   {
     surface: 'provision request answered on Protected over its Standard default',
-    desktop: () => (
+    desktop: ({ VaultSecretForm }) => (
       <VaultSecretForm
         fixedName="WALLET_PASSWORD"
         provisionRequestId="vrq_provision"
@@ -254,28 +298,36 @@ const cases: Array<{
     requests: [standardProvision],
     vaultStatus: 'locked',
     resumed: () => expectProtectedForm('WALLET_PASSWORD'),
+    inApp: { clicks: [protectedTier, unlockWithPasskey], ceremony: vault.unlockPasskey },
+    afterFailure: [{ role: 'button', name: /^open in browser$/i }],
+    fallbackNote: unlockFallbackNote,
   },
   {
     // An agent's `$WALLET_PASSWORD` ask whose request lookup found nothing: only the name identifies it.
     surface: 'secret an agent asked for by name, with no pending request',
-    desktop: () => <VaultSecretForm fixedName="WALLET_PASSWORD" onCancel={vi.fn()} onCreated={vi.fn()} />,
+    desktop: ({ VaultSecretForm }) => <VaultSecretForm fixedName="WALLET_PASSWORD" onCancel={vi.fn()} onCreated={vi.fn()} />,
     clicks: [protectedTier, openInBrowser],
     resumed: () => expectProtectedForm('WALLET_PASSWORD'),
+    inApp: { clicks: [protectedTier, acknowledgeLoss, addPasskey], ceremony: vault.setupPasskey },
+    afterFailure: [{ role: 'button', name: /^open in browser$/i }],
+    fallbackNote: unlockFallbackNote,
   },
   {
     surface: 'protected secret reveal',
-    desktop: () => <VaultsPage />,
+    desktop: ({ VaultsPage }) => <VaultsPage />,
     clicks: [
       { role: 'button', name: /^more actions$/i },
       { role: 'menuitem', name: /^view in browser$/i },
     ],
     secrets: [protectedSecret],
     resumed: () => expectRevealReady(),
+    inApp: { clicks: [moreActions, { role: 'menuitem', name: /^view secret$/i }], ceremony: vault.revealProtectedSecret },
+    afterFailure: [moreActions, { role: 'menuitem', name: /^view in browser$/i }],
   },
   {
     surface: 'protected field edit',
     role: 'member', // Editing is management-only; other handoffs remain Editor use.
-    desktop: () => <VaultSecretForm editSecret={protectedSecret} onCancel={vi.fn()} onCreated={vi.fn()} />,
+    desktop: ({ VaultSecretForm }) => <VaultSecretForm editSecret={protectedSecret} onCancel={vi.fn()} onCreated={vi.fn()} />,
     clicks: [openInBrowser],
     secrets: [protectedSecret],
     vaultStatus: 'locked',
@@ -283,10 +335,12 @@ const cases: Array<{
       expect(within(await resumedDialog()).getByLabelText('Value for value')).toBeTruthy();
       await expectPasskeyReady();
     },
+    inApp: { clicks: [unlockWithPasskey], ceremony: vault.unlockPasskey },
+    afterFailure: [{ role: 'button', name: /^open in browser$/i }],
+    fallbackNote: unlockFallbackNote,
   },
 ];
 
-const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.sealValue, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedSecret];
 const expectNoProtectedOperations = () => {
   for (const ceremony of ceremonies) expect(ceremony).not.toHaveBeenCalled();
   expect(api.fulfillVaultAccessRequest).not.toHaveBeenCalled();
@@ -303,15 +357,15 @@ const fixtureContext = (purpose: 'agent-deliver' | 'reveal', name: string): Vaul
   signature: { alg: 'ed25519', keyId: 'inert-fixture', value: 'not-a-signature' },
 });
 
-function renderAt(path: string, ui: ReactElement, role: 'editor' | 'member' = 'editor') {
+function renderAt(path: string, ui: ReactElement, role: 'editor' | 'member' = 'editor', Authorization = InstanceAuthorizationContext) {
   return render(
-    <InstanceAuthorizationContext.Provider value={{
+    <Authorization.Provider value={{
       remote: true, instanceKind: 'organization', instanceRole: role, capabilities: capabilitiesFor(role),
     }}>
       <I18nextProvider i18n={i18n}>
         <MemoryRouter initialEntries={[path]}>{ui}</MemoryRouter>
       </I18nextProvider>
-    </InstanceAuthorizationContext.Provider>,
+    </Authorization.Provider>,
   );
 }
 
@@ -345,7 +399,64 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
+  delete (window as { __AVIBE_DESKTOP_VAULT_PASSKEY__?: true }).__AVIBE_DESKTOP_VAULT_PASSKEY__;
 });
+
+type Case = (typeof cases)[number];
+
+function serve(c: Case) {
+  vault.status = c.vaultStatus ?? 'needs-setup';
+  api.getVaultRequests.mockResolvedValue({ requests: c.requests ?? [] });
+  // A handed-off request is read in full by its id (rev0.4 §4.3).
+  api.getVaultRequest.mockImplementation(async (id: string) => {
+    const request = (c.full ?? c.requests ?? []).find((r: { id: string }) => r.id === id);
+    return request ? { ok: true, request } : { ok: false, code: 'request_not_found' };
+  });
+  api.listVaultSecrets.mockResolvedValue({ secrets: c.secrets ?? [] });
+}
+
+function enterDesktopShell(inApp: boolean) {
+  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+  if (inApp) Object.defineProperty(window, '__AVIBE_DESKTOP_VAULT_PASSKEY__', { configurable: true, value: true });
+}
+
+function leaveDesktopShell() {
+  delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
+  delete (window as { __AVIBE_DESKTOP_VAULT_PASSKEY__?: true }).__AVIBE_DESKTOP_VAULT_PASSKEY__;
+}
+
+/** A desktop app without the passkey capability hands the step to the browser, where it resumes. */
+async function handOffToBrowser(c: Case) {
+  const user = userEvent.setup();
+  serve(c);
+  const open = vi.spyOn(window, 'open').mockReturnValue(null);
+
+  enterDesktopShell(false);
+  expect(vaultPasskeyHandoff()).toBe('desktop');
+  renderAt('/vaults', c.desktop(staticUi), c.role);
+  for (const click of c.clicks) await user.click(await screen.findByRole(click.role, { name: click.name }));
+
+  expect(open).toHaveBeenCalledTimes(1);
+  const target = new URL(String(open.mock.calls[0][0]));
+  expect(target.origin).toBe(window.location.origin);
+  expect(target.pathname).toBe('/vaults');
+  expect(target.searchParams.get('from')).toBe('desktop');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
+  expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+  expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
+  // The desktop shell must not even warm or refresh the protected sandbox before handing the
+  // flow to the browser; WKWebView cannot pair with the sandbox authorization surface.
+  expect(vault.refresh).not.toHaveBeenCalled();
+
+  cleanup();
+  leaveDesktopShell();
+  renderAt(`${target.pathname}${target.search}`, <VaultsPage />, c.role);
+  await c.resumed();
+
+  expect(open).toHaveBeenCalledTimes(1);
+  expectNoProtectedOperations();
+}
 
 // Contract: in the desktop shell, whose WKWebView can't run WebAuthn and whose new windows never
 // pair with the sandbox, every surface that would start a protected passkey step instead opens the
@@ -386,40 +497,189 @@ describe('desktop shell protected-vault browser handoff', () => {
     expectNoProtectedOperations();
   });
 
-  it.each(cases)('$surface resumes in the browser without starting a passkey step', async (c) => {
+  it.each(cases)('$surface resumes in the browser without starting a passkey step', (c) => handOffToBrowser(c));
+
+  // The browser tab is where the user lands after the step: once it is done there, the tab says so
+  // and links back to the conversation the app handed it off from. An IM link is not a hand-off.
+  it.each([
+    { from: 'the desktop app', handoff: true },
+    { from: 'an IM link', handoff: false },
+  ])('a request answered in a tab opened from $from says the tab can be closed: $handoff', async ({ handoff }) => {
     const user = userEvent.setup();
-    vault.status = c.vaultStatus ?? 'needs-setup';
-    api.getVaultRequests.mockResolvedValue({ requests: c.requests ?? [] });
-    // A handed-off request is read in full by its id (rev0.4 §4.3).
-    api.getVaultRequest.mockImplementation(async (id: string) => {
-      const request = (c.full ?? c.requests ?? []).find((r: { id: string }) => r.id === id);
-      return request ? { ok: true, request } : { ok: false, code: 'request_not_found' };
-    });
-    api.listVaultSecrets.mockResolvedValue({ secrets: c.secrets ?? [] });
+    vault.status = 'locked';
+    api.getVaultRequests.mockResolvedValue({ requests: [protectedAccess] });
+    api.getVaultRequest.mockResolvedValue({ ok: true, request: protectedAccess });
+    api.listVaultSecrets.mockResolvedValue({ secrets: [] });
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
-
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123/chat/ses_A-1'));
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
-    renderAt('/vaults', c.desktop(), c.role);
-    for (const click of c.clicks) await user.click(await screen.findByRole(click.role, { name: click.name }));
-
-    expect(open).toHaveBeenCalledTimes(1);
+    renderAt('/chat/ses_A-1', <VaultApprovalCard request={protectedAccess} onResolved={vi.fn()} onCancel={vi.fn()} />);
+    await user.click(await screen.findByRole(approve.role, { name: approve.name }));
     const target = new URL(String(open.mock.calls[0][0]));
-    expect(target.origin).toBe(window.location.origin);
-    expect(target.pathname).toBe('/vaults');
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
-    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
-    expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
-    // The desktop shell must not even warm or refresh the protected sandbox before handing the
-    // flow to the browser; WKWebView cannot pair with the sandbox authorization surface.
-    expect(vault.refresh).not.toHaveBeenCalled();
-
+    expect(target.searchParams.get('session')).toBe('ses_A-1');
     cleanup();
     delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
+    vi.stubGlobal('location', new URL('http://127.0.0.1:5123'));
+
+    const path = handoff ? `${target.pathname}${target.search}` : `/vaults?request_id=${protectedAccess.id}`;
+    renderAt(path, <VaultsPage />);
+    await user.click(within(await resumedDialog()).getByRole('button', { name: /^deny$/i }));
+    await waitFor(() => expect(api.denyVaultRequest).toHaveBeenCalledWith(protectedAccess.id));
+    if (handoff) {
+      const done = (await screen.findByText(en.vaults.handoff.done)).closest('[role="status"]') as HTMLElement;
+      expect(done).toBeTruthy();
+      expect(within(done).getByRole('link', { name: en.vaults.handoff.openApp }).getAttribute('href')).toBe('avibe://session/ses_A-1');
+    } else {
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(screen.queryByText(en.vaults.handoff.done)).toBeNull();
+    }
+    expectNoProtectedOperations();
+  });
+});
+
+// Contract: a shell that says it runs the sandbox's passkey steps itself gets the ordinary Web flow.
+// Each surface starts its ceremony here, on the click that begins it, and opens nothing but the
+// sandbox's own blank window (approvals, signatures and reveals; setup and unlock open none).
+describe('desktop shell that runs protected-vault passkey steps in the app', () => {
+  // The shell's contract: a blank window the sandbox may load, as in a browser.
+  const openSandboxWindows = () => {
+    const popup = { closed: false, location: { replace: vi.fn() }, close: vi.fn(() => { popup.closed = true; }) };
+    return vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+  };
+  const press = async (user: ReturnType<typeof userEvent.setup>, click: Click) => {
+    const element = await screen.findByRole(click.role, { name: click.name }) as HTMLButtonElement | HTMLInputElement;
+    await waitFor(() => expect(element.disabled).toBe(false));
+    await user.click(element);
+  };
+
+  beforeEach(() => {
+    vault.approveProtectedRelease.mockResolvedValue([{}]);
+    vault.signProtectedRequest.mockResolvedValue({ signature: 'inert-signature' });
+    vault.revealProtectedSecret.mockResolvedValue({ completed: true });
+    vault.setupPasskey.mockResolvedValue(undefined);
+    vault.unlockPasskey.mockResolvedValue(undefined);
+  });
+
+  it.each(cases)('$surface starts its passkey step in the app, opening no browser', async (c) => {
+    const user = userEvent.setup();
+    serve(c);
+    const open = openSandboxWindows();
+    enterDesktopShell(true);
+    expect(vaultPasskeyHandoff()).toBeNull();
+    renderAt('/vaults', c.desktop(staticUi), c.role);
+    for (const click of c.inApp.clicks) await press(user, click);
+
+    await waitFor(() => expect(c.inApp.ceremony).toHaveBeenCalledTimes(1));
+    expect(open.mock.calls.every(([url]) => url === 'about:blank')).toBe(true);
+    expect(screen.queryByText(cannotUsePasskeys)).toBeNull();
+  });
+
+  // The hand-off after a failure lives for the page, so each case below is a new page: a fresh copy
+  // of the surfaces and of the hand-off state they read.
+  async function freshPage() {
+    vi.resetModules();
+    const [card, request, form, vaults, authorization, handoff, client] = await Promise.all([
+      import('@/components/ui/vault-approval-card'),
+      import('@/components/ui/vault-request-card'),
+      import('@/components/ui/vault-secret-form'),
+      import('@/components/workbench/VaultsPage'),
+      import('@/context/InstanceAuthorizationContext'),
+      import('@/lib/vaultBrowserHandoff'),
+      import('@/lib/vaultSandboxClient'),
+    ]);
+    return {
+      ui: { VaultApprovalCard: card.VaultApprovalCard, VaultRequestCard: request.VaultRequestCard, VaultSecretForm: form.VaultSecretForm, VaultsPage: vaults.VaultsPage },
+      Authorization: authorization.InstanceAuthorizationContext,
+      handoff: handoff.vaultPasskeyHandoff,
+      // What the sandbox client does with how a step ended, before its caller sees the error.
+      record: handoff.recordVaultPasskeyOutcome,
+      VaultSandboxError: client.VaultSandboxError,
+    };
+  }
+  type Page = Awaited<ReturnType<typeof freshPage>>;
+  // The surface's ceremony ends as the client ends it: recorded, then thrown to the surface.
+  const endsWith = (page: Page, ceremony: Case['inApp']['ceremony'], code: string) => {
+    const error = new page.VaultSandboxError(code, 'sandbox failure');
+    ceremony.mockImplementation(async () => {
+      page.record(error);
+      throw error;
+    });
+  };
+
+  // Any failure other than a cancel: the surface says so in one sentence, offers its browser action
+  // for the same step, and the browser resumes that step as it does for a shell without the capability.
+  it.each(cases)('$surface continues in the browser on the same step after its passkey step fails in the app', async (c) => {
+    const page = await freshPage();
+    const user = userEvent.setup();
+    serve(c);
+    const open = openSandboxWindows();
+    enterDesktopShell(true);
+    endsWith(page, c.inApp.ceremony, 'authorization_popup_blocked');
+    renderAt('/vaults', c.desktop(page.ui), c.role, page.Authorization);
+    for (const click of c.inApp.clicks) await press(user, click);
+    await waitFor(() => expect(c.inApp.ceremony).toHaveBeenCalledTimes(1));
+    expect(page.handoff()).toBe('fallback');
+
+    if (c.fallbackNote) expect(await screen.findByText(c.fallbackNote)).toBeTruthy();
+    else await waitFor(() => expect(toast).toHaveBeenCalledWith(en.vaults.reveal.browserFallback, 'warning'));
+    // The sentence is the message: the sandbox error is not shown beside it, here or in the vault's own error line.
+    expect(screen.queryByText('sandbox failure')).toBeNull();
+    expect(vault.setError.mock.calls.filter(([message]) => message != null)).toEqual([]);
+    expect(screen.queryByText(cannotUsePasskeys)).toBeNull();
+
+    // From here on nothing more may start in the app.
+    for (const ceremony of ceremonies) ceremony.mockClear();
+    vi.mocked(fetch).mockClear();
+    for (const click of c.afterFailure) await press(user, click);
+    const handedOff = open.mock.calls.map(([url]) => String(url)).filter((url) => url !== 'about:blank');
+    expect(handedOff).toHaveLength(1);
+    const target = new URL(handedOff[0]);
+    expect(target.origin).toBe(window.location.origin);
+    expect(target.pathname).toBe('/vaults');
+    expect(target.searchParams.get('from')).toBe('desktop');
+    expectNoProtectedOperations();
+
+    cleanup();
+    leaveDesktopShell();
     renderAt(`${target.pathname}${target.search}`, <VaultsPage />, c.role);
     await c.resumed();
-
-    expect(open).toHaveBeenCalledTimes(1);
     expectNoProtectedOperations();
+  });
+
+  it('keeps a cancelled step in the app, with nothing sent to the browser', async () => {
+    const page = await freshPage();
+    const user = userEvent.setup();
+    const access = cases[0];
+    serve(access);
+    const open = openSandboxWindows();
+    enterDesktopShell(true);
+    endsWith(page, vault.approveProtectedRelease, 'authorization_cancelled');
+    renderAt('/vaults', access.desktop(page.ui), access.role, page.Authorization);
+    await press(user, approve);
+    await waitFor(() => expect(vault.approveProtectedRelease).toHaveBeenCalledTimes(1));
+
+    expect(page.handoff()).toBeNull();
+    expect(await screen.findByRole('button', { name: /^approve$/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /continue in browser/i })).toBeNull();
+    expect(screen.queryByText(approvalFallbackNote)).toBeNull();
+    expect(open.mock.calls.every(([url]) => url === 'about:blank')).toBe(true);
+  });
+
+  // Approvals that never ask for the passkey still run here, and their own errors still show.
+  it('keeps showing errors of approvals that need no passkey', async () => {
+    const page = await freshPage();
+    const user = userEvent.setup();
+    const standardAccess = {
+      ...protectedAccess,
+      id: 'vrq_standard',
+      card: { request_type: 'access', protection: 'standard', secret_names: ['GITHUB_TOKEN'], grant_options: [{ grant_id: 'grant_std' }] },
+    } as unknown as VaultRequest;
+    api.createVaultGrant.mockResolvedValue({ ok: false, code: 'grant_refused', message: 'grant refused' });
+    enterDesktopShell(true);
+    page.record(new page.VaultSandboxError('authorization_popup_blocked', 'sandbox failure'));
+    expect(page.handoff()).toBe('fallback');
+    renderAt('/vaults', <page.ui.VaultApprovalCard request={standardAccess} onResolved={vi.fn()} onCancel={vi.fn()} />, 'editor', page.Authorization);
+    await press(user, { role: 'button', name: /^approve$/i });
+    expect(await screen.findByText('grant refused')).toBeTruthy();
   });
 });

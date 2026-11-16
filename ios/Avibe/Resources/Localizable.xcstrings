@@ -177,6 +177,236 @@
         }
       }
     },
+    "runtime.open.awaiting_user.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finish signing in on this page."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在此页面完成登录。"
+          }
+        }
+      }
+    },
+    "runtime.open.awaiting_user.title.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finish signing in to %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "完成 %@ 的登录"
+          }
+        }
+      }
+    },
+    "runtime.open.long_wait" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This is taking longer than usual. You can cancel at any time."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待时间比平时更长，你可以随时取消。"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.authenticating.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verifying sign-in for %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在验证 %@ 的登录…"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.connecting.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connecting to %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在连接 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.document_loaded.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ is open"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已打开"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.failed.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't open %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法打开 %@"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.loading_page.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected. Loading %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已连接，正在加载 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.preparing_route.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preparing to connect to %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在准备连接 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.stage.authenticating" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "verifying sign-in" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证登录" } }
+      }
+    },
+    "runtime.open.stage.awaiting_user" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "waiting for sign-in" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待完成登录" } }
+      }
+    },
+    "runtime.open.stage.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "connecting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接实例" } }
+      }
+    },
+    "runtime.open.stage.document_loaded" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "page loaded" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "页面已加载" } }
+      }
+    },
+    "runtime.open.stage.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "load failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加载失败" } }
+      }
+    },
+    "runtime.open.stage.loading_page" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "loading the page" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加载页面" } }
+      }
+    },
+    "runtime.open.stage.preparing_route" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "preparing to connect" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "准备连接" } }
+      }
+    },
+    "runtime.open.timeout.dismiss" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Dismiss" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭" } }
+      }
+    },
+    "runtime.open.timeout.last_stage" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stopped while %@. Your account and data are unaffected."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停在“%@”这一步。账号和数据不受影响。"
+          }
+        }
+      }
+    },
+    "runtime.open.timeout.reopen_hint.named" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tap %@ above to open it again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "点上面的 %@ 重新打开。" } }
+      }
+    },
+    "runtime.open.timeout.title.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ took too long to open"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 打开超时"
+          }
+        }
+      }
+    },
     "browser.loading" : {
       "localizations" : {
         "en" : {
@@ -317,6 +547,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "下载失败"
+          }
+        }
+      }
+    },
+    "github.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in with an email code sent to your GitHub account's primary email address. It opens the same account."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请用 GitHub 账号的主邮箱接收验证码登录，进入的是同一个账号。"
+          }
+        }
+      }
+    },
+    "github.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub sign-in is unavailable here"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此处无法使用 GitHub 登录"
           }
         }
       }
