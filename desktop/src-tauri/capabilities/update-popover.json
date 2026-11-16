@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "update-popover",
+  "description": "This computer's update panel, drawn by the shell as a popup while the main window shows another computer. Bundled page only; Rust additionally verifies the exact page and allows only state and updater actions. The popup may close itself (Escape or its backdrop).",
+  "local": true,
+  "windows": ["update-popover"],
+  "permissions": ["allow-desktop-client-request", "core:window:allow-close"]
+}

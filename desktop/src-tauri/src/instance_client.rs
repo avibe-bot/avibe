@@ -164,6 +164,11 @@ fn failure(_: impl std::fmt::Display) -> ClientError {
     ClientError::new("window_unavailable")
 }
 
+/// The bundled origin the account pages (and the update popup) are served from.
+pub(crate) fn bundle(app: &AppHandle) -> Option<Url> {
+    app.try_state::<Client>().map(|client| client.view.bundle.clone())
+}
+
 pub(crate) fn enabled(app: &AppHandle) -> bool {
     app.try_state::<Client>().is_some()
 }
@@ -479,7 +484,13 @@ pub async fn desktop_client_request(
     request: ClientRequest,
 ) -> Result<ClientReply, String> {
     let client = app.try_state::<Client>().ok_or("desktop_client_unavailable")?;
-    if !trusted_page(&client, &window) {
+    // The update popup is its own window, limited to its page and to this computer's updater.
+    let trusted = if window.label() == crate::update_popover::UPDATE_POPOVER {
+        crate::update_popover::is_page(&window, &client.view.bundle) && crate::update_popover::allows(&request.action)
+    } else {
+        trusted_page(&client, &window)
+    };
+    if !trusted {
         return Err("untrusted_desktop_caller".into());
     }
     let coordinator = client.coordinator.clone();
@@ -638,6 +649,12 @@ fn present_owned(
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
+    // While the main window shows another computer, this computer's update panel
+    // opens as a popup over it instead of replacing the page (ui/design:
+    // chrome/bottom-row/remote-popup). Nothing navigates, so no guard is needed.
+    if view == "updates" && !local_selected(app) {
+        return crate::update_popover::open(app, &client.view.bundle, client.view.script(true, None));
+    }
     let Ok(mut url) = client.view.bundle.join("/account/index.html") else {
         return false;
     };
@@ -871,6 +888,15 @@ pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<boo
 }
 
 impl NativeView {
+    /// The update popup's state: the bundled page in its own window, guarded to that document.
+    fn popover_script(&self, receiver: &Url) -> String {
+        let state = self.presentation.lock().expect("presentation");
+        let value = serde_json::to_value(&state.state).expect("client state");
+        format!(
+            "if (window.self === window.top && window.location.href === {}) {{window.dispatchEvent(new CustomEvent('{EVENT}', {{detail:{value}}}));}}",
+            serde_json::to_string(receiver.as_str()).expect("receiver URL")
+        )
+    }
     fn script(&self, initial: bool, receiver: Option<&Url>) -> String {
         let state = self.presentation.lock().expect("presentation");
         // Initialization survives navigation for the lifetime of a WebView.
@@ -1281,6 +1307,7 @@ impl ClientView for NativeView {
                 }
             }
         }
+        crate::update_popover::publish(&self.app, &self.bundle, |url| self.popover_script(url));
         self.auxiliaries();
         // Finished may arrive while this owner still holds the window lock.
         // The owner's terminal publication is the deferred delivery handoff.

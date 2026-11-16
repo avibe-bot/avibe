@@ -32,6 +32,7 @@ mod notifications;
 mod pet;
 mod pet_native;
 mod update_install;
+mod update_popover;
 pub mod updater;
 
 #[cfg(target_os = "macos")]
@@ -2615,6 +2616,10 @@ pub fn run() {
                 .on_navigation(|webview, url| {
                     if webview.label() == pet::PET_WINDOW {
                         return pet::navigation_allowed(webview.app_handle(), url);
+                    }
+                    if webview.label() == update_popover::UPDATE_POPOVER {
+                        return instance_client::bundle(webview.app_handle())
+                            .is_some_and(|bundle| update_popover::navigation_allowed(url, &bundle));
                     }
                     if instance_client::enabled(webview.app_handle()) && webview.label() == MAIN_WINDOW {
                         if instance_client::presentation_request(

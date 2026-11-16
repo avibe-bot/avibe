@@ -167,8 +167,19 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-desktop-update",
             "main-app-windows",
             "main-desktop-notifications",
-            "main-instance-client"
+            "main-instance-client",
+            "update-popover"
         ])
+    );
+    // The update popup (ui/design: chrome/bottom-row/remote-popup): its own bundled window only,
+    // asking the desktop client for state and updater actions (Rust filters the actions).
+    let popover = read_json(crate_dir().join("capabilities/update-popover.json"));
+    assert_eq!(popover["windows"], serde_json::json!(["update-popover"]));
+    assert_eq!(popover["local"], true);
+    assert!(popover.get("remote").is_none());
+    assert_eq!(
+        popover["permissions"],
+        serde_json::json!(["allow-desktop-client-request", "core:window:allow-close"])
     );
     let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
     assert_eq!(account["windows"], serde_json::json!([MAIN_WINDOW]));

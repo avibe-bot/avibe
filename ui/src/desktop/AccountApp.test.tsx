@@ -66,3 +66,27 @@ it('AUTH-SETUP-178 a rejected trusted install does not turn a later check error 
   expect(await screen.findByText(en.update.status.checkFailed)).toBeTruthy();
   expect(screen.queryByText(en.update.failure.install.title)).toBeNull();
 });
+
+// ui/design: chrome/bottom-row/remote-popup. While the main window shows another computer, the
+// shell opens this page in its own popup window: the same panel, closed by Escape or a click
+// outside it, never sending an account action (the shell refuses those from this window).
+it('AUTH-SETUP-178 the update popup is the same panel, closed by Escape or a click outside', async () => {
+  window.history.replaceState(null, '', '/account/index.html?view=update-popover');
+  const invoke = vi.fn(async () => undefined);
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
+  const dialog = screen.getByRole('dialog', { name: en.dashboard.versionAndUpdate });
+  expect(screen.queryByText(en.update.trustedView.title)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.update }));
+  expect(send).toHaveBeenCalledWith({ type: 'update_install', target_version: '3.2.7' });
+  fireEvent.click(dialog);
+  expect(invoke).not.toHaveBeenCalled();
+  fireEvent.keyDown(window, { key: 'Escape' });
+  expect(invoke).toHaveBeenCalledWith('plugin:window|close', { label: 'update-popover' });
+  invoke.mockClear();
+  fireEvent.click(document.querySelector('[data-update-popover]')!);
+  expect(invoke).toHaveBeenCalledWith('plugin:window|close', { label: 'update-popover' });
+  expect(send).not.toHaveBeenCalledWith({ type: 'cancel' });
+  vi.unstubAllGlobals();
+});
