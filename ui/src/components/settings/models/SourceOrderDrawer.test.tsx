@@ -267,7 +267,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     renderDrawer();
     const handles = await screen.findAllByRole('button', { name: 'Reorder provider' });
     expect(screen.getByRole('heading', { name: 'Claude Code · Default routing' })).toBeTruthy();
-    expect(screen.getByText('Applies to automatic and passthrough routes. Saved manual routes stay unchanged.')).toBeTruthy();
+    expect(screen.getByText('Applies to automatic and forwarded-as-is routes. Saved manual routes stay unchanged.')).toBeTruthy();
     expect(screen.getByText('Available for manual routes.')).toBeTruthy();
     expect(handles[0].className).toContain('cursor-grab');
 
