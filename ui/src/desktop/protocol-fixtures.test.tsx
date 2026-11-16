@@ -617,11 +617,11 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
     fireEvent.click(screen.getByRole('button', { name: 'Verify and enable' }));
     expect(await screen.findByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
     expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'cancel')).toBe(false);
-    if (exit === 'back') fireEvent.click(screen.getByRole('button', { name: 'Back to Workbench' }));
+    if (exit === 'back') expect(screen.queryByRole('button', { name: 'Back to Workbench' })).toBeNull();
     else fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.getByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeTruthy();
     expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'cancel')).toBe(false);
-    expect(screen.getByRole('button', { name: 'Back to Workbench' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Back to Workbench' })).toBeNull();
     if (status === 'new_owner') {
       fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: {
         ...completed, generation: completed.generation + 1, revision: completed.revision + 1,
@@ -638,5 +638,11 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
     expect(cancels).toHaveLength(status === 'paired_this_account' ? 1 : 0);
     if (status === 'failed') expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     if (status === 'paired_error') expect(screen.getByRole('alert')).toBeTruthy();
+    const back = screen.getByRole('button', { name: 'Back to Workbench' });
+    expect(back.hasAttribute('disabled')).toBe(false);
+    if (status !== 'paired_this_account') {
+      fireEvent.click(back);
+      await waitFor(() => expect(invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel')).toHaveLength(1));
+    }
   },
 );

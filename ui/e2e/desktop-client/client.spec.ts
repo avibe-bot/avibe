@@ -2,6 +2,8 @@ import { expect, test } from '../support/browserTest';
 import { serveProduct } from '../workbench-general/support';
 import { clientState, installBridge, signIn } from './bridge-fixture';
 import type { Page } from '@playwright/test';
+import en from '../../src/i18n/en.json' with { type: 'json' };
+import zh from '../../src/i18n/zh.json' with { type: 'json' };
 
 const ACCOUNT = 'http://127.0.0.1:5214/account/index.html';
 async function isolateAccount(page: Page) {
@@ -99,35 +101,42 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
   }
 }
 
-for (const persistenceError of [false, true]) test(`AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transient (persistenceError=${persistenceError})`, async ({ page }, info) => {
+for (const lang of ['en', 'zh'] as const) for (const persistenceError of [false, true]) test(`AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transient (${lang}, persistenceError=${persistenceError})`, async ({ page }, info) => {
   await page.setViewportSize({ width: 880, height: 600 });
-  await isolateAccount(page); await language(page, 'en');
+  await isolateAccount(page); await language(page, lang);
+  const copy = (lang === 'en' ? en : zh).desktopClient;
   const state = clientState();
   state.account = { ...state.account, status: 'second_factor_required', gate: 'enroll' };
   state.connection = { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'Retained remote', instance_id: 'remote-retained', canonical_origin: 'https://retained.example.test' } };
   const requests = await installBridge(page, state);
-  await page.goto(ACCOUNT);
-  await page.getByRole('button', { name: 'Add authenticator' }).click();
+  await page.goto(`${ACCOUNT}?theme=${lang === 'en' ? 'light' : 'dark'}`);
+  await page.getByRole('button', { name: copy.addAuthenticator }).click();
   await expect(page.getByText('JBSWY3DPEHPK3PXP', { exact: true })).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: info.outputPath('totp-enrollment.png') });
-  await page.getByLabel('Authenticator code', { exact: true }).fill('654321');
-  await page.getByRole('button', { name: 'Verify and enable' }).click();
-  await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible();
+  await page.getByLabel(copy.authenticatorCode, { exact: true }).fill('654321');
+  await page.getByRole('button', { name: copy.finishFactor }).click();
+  await expect(page.getByRole('heading', { name: copy.recoveryTitle })).toBeVisible();
   if (persistenceError) {
     state.enrollment.error_code = 'persistence_failed'; state.revision += 1;
     await page.evaluate((snapshot) => window.dispatchEvent(new CustomEvent('avibe:desktop-client-state', { detail: snapshot })), state);
     await expect(page.getByRole('alert')).toBeVisible();
   }
-  await expect(page.getByRole('button', { name: 'Back to Workbench' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: copy.backWorkbench })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(page.getByText('fixture-recovery-one')).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: info.outputPath('recovery-codes.png') });
   expect(requests.some((request) => request.action.type === 'cancel')).toBe(false);
-  await page.getByRole('button', { name: 'I have saved these codes' }).click();
+  await page.getByRole('button', { name: copy.savedCodes }).click();
   if (persistenceError) {
     await expect(page.locator('[data-account-details]')).toBeVisible();
     await expect(page.getByRole('alert')).toBeVisible();
     expect(requests.filter((request) => request.action.type === 'cancel')).toHaveLength(0);
+    await expect(page.getByText('fixture-recovery-one')).toHaveCount(0);
+    const back = page.getByRole('button', { name: copy.backWorkbench });
+    await expect(back).toBeVisible(); await expect(back).toBeEnabled();
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('acknowledged-error.png') });
+    await back.click();
+    await expect.poll(() => requests.filter((request) => request.action.type === 'cancel').length).toBe(1);
   } else await expect.poll(() => requests.filter((request) => request.action.type === 'cancel').length).toBe(1);
   expect(state.connection.committed.kind).toBe('remote');
   await expect(page.getByText('fixture-recovery-one')).toHaveCount(0);

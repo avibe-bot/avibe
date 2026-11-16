@@ -301,7 +301,7 @@ export function AccountApp() {
   }
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
-    <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" disabled={awaitingRecoveryAcknowledgement} onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>
+    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>}
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
   </div>;
 }
