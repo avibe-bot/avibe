@@ -2,7 +2,8 @@
 
 This is a conservative free-space policy, not a reservation or a measured
 minimum. Other disk users, quotas and later I/O failures can still exhaust space.
-Never credit clone success, pruning, sparse allocation or an older backup.
+This plan never anticipates a clone or credits pruning/older backups. The proven
+epoch-3 migration separately tries an actual clone before requesting a copy plan.
 """
 from __future__ import annotations
 

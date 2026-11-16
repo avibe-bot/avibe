@@ -15577,6 +15577,8 @@ def cmd_start(
 ):
     from vibe import runtime
 
+    # A service failure recorded from here on belongs to this start.
+    invoked_at = time.time()
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
@@ -15726,7 +15728,7 @@ def cmd_start(
             detail = (
                 "service process is still starting"
                 if alive
-                else "service process exited before startup completed"
+                else runtime.service_exited_detail(service_pid)
             )
             runtime.write_status(
                 "starting" if alive else "error",
@@ -15738,8 +15740,13 @@ def cmd_start(
         elif runtime.pid_alive(service_pid):
             runtime.write_status("starting", "service process is still starting", service_pid, ui_pid)
         else:
-            runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
-            raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
+            detail = runtime.service_exited_detail(service_pid)
+            runtime.write_status("error", detail, service_pid, ui_pid)
+            failure = runtime.service_start_failure(service_pid)
+            raise RuntimeError(
+                failure["detail"] if failure
+                else f"Vibe service process pid={service_pid} exited before acquiring the service lock"
+            )
 
         ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
 
@@ -15812,8 +15819,11 @@ def cmd_start(
         if not startup_committed:
             runtime.roll_back_start(service_start, ui_start)
         if desktop_receipt and not startup_committed:
+            failure = runtime.service_start_failure(since=invoked_at)
             reason = (
                 "runtime_claim_refused" if isinstance(exc, runtime.DesktopRuntimeClaimRefused)
+                # The Desktop window shows the same sentence the CLI prints.
+                else failure["receipt_reason"] if failure is not None
                 else "runtime_not_ready" if isinstance(exc, RuntimeError)
                 else "startup_failed"
             )

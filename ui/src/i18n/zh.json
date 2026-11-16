@@ -21,7 +21,9 @@
       "runtime_stop_failed": "Avibe 无法确认运行时已停止，其部分或全部组件可能仍在运行。点击“重试”重新连接，如有需要可再次停止它。",
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
-      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
+      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。",
+      "database_disk_full": "磁盘已满，Avibe 无法更新数据库。数据没有任何改动。请在存放 Avibe 数据的磁盘上腾出一些空间，然后点击“重试”。",
+      "database_disk_full_unconfirmed": "磁盘已满，Avibe 无法更新数据库。请在存放 Avibe 数据的磁盘上腾出一些空间，然后点击“重试”。"
     },
     "tray": {
       "open": "打开应用",

@@ -64,8 +64,9 @@ clone. Current-schema, compatible-open and proven no-copy paths do not acquire a
 upgrade-sized normal-use free-space requirement.
 
 `storage/migration_space.py` reports a **conservative reserve**, not a measured
-minimum or a reservation. It never assumes a successful clone, sparse-file
-savings, reusable backups, pruning or purgeable space. For the exact clean
+minimum or a reservation. It never assumes sparse-file savings, reusable backups,
+pruning or purgeable space, and outside the exact epoch-3 conversion below it
+never assumes a successful clone. For the exact clean
 `0088 → 0089` transition, with page size `P`, main+WAL+journal logical bytes `B`,
 and `N` rows matching the migration's guarded Skill-reference predicate:
 
@@ -103,6 +104,55 @@ callers never recover. The recovered attempt keeps the generic policy rather
 than switching to a potentially larger coordinated policy; any later low-space
 refusal explicitly says recovery already completed. Thus crash recovery itself
 may require capacity even when the recovered schema is current.
+
+### Epoch-3 conversion on a nearly full disk
+
+Product decision S2 (November 16) applies only to the exact `0088 → 0089`
+conversion; every other path keeps the reserve above.
+
+- **Clone first.** Where the filesystem clones (APFS, Btrfs), the backup is a
+  clone and is not charged against the full-copy reserve, whatever state the
+  importer receipts are in. The conversion is not refused for the reserve there.
+- **No clone and the copy does not fit.** The conversion proceeds without a
+  backup copy for every database at this boundary. Pending import or repair
+  work runs as before, and unrelated migration batches keep the reserve above.
+  The conversion is additive, runs in one transaction and rewrites no history.
+  Inside that transaction it records `storage.epoch3_backup_skipped`
+  (`converted_at`, `database_bytes`). That record is permanent backup
+  provenance and is never deleted, so a restart between the conversion and later
+  repair work cannot adopt an older failed-attempt backup. Once the service is
+  up, it posts one notice to the workspace notifications; the service log
+  carries the same English text from the conversion. Its wording is Product's.
+  Going back to 3.2.6 still works; 3.2.5 and older cannot open the database. Once the notice exists, the
+  record gains `notified_at`. Notices are posted only while `notified_at` is
+  absent, and a stable message id prevents a duplicate after a crash between
+  posting and acknowledging.
+- **The conversion transaction itself runs out of disk.** SQLite rolls it back
+  and the service stops with `DatabaseDiskFullError`. Only after a post-error
+  check that the old revision, epoch stamp, schema and 0089 marker are unchanged
+  does it carry `rollback_confirmed=True`, and only then do the user-facing
+  surfaces say "Nothing was changed". The check does not cover DB/WAL bytes:
+  clone preparation may have checkpointed committed WAL. Other failures stay
+  distinct.
+
+The service records the disk-full outcome in `runtime/service-start-failure.json`
+before exiting. A start that gets past migration clears that record. `vibe status`
+reports it as `state: error` with a `code`. Whoever started the service (`vibe
+start`, the restart job, the Desktop startup receipt) reports the same sentence
+instead of "the process exited". If the disk is so full that even this small
+record cannot be written, the reason is lost and all of these fall back to the
+generic "process exited" message.
+
+**Desktop and a long update.** While the service reports that it is updating
+the database, the `vibe start` that Desktop launched pauses its own startup
+budget, within the existing 30-minute bound, so an update inside that bound is
+not rolled back for taking long. **Known limitation:** the Desktop startup screen still waits a
+fixed 120 seconds. On a disk that cannot clone, copying a large database can
+take longer than that. The screen then shows its "not ready" page while the
+update continues. Try again waits on the same update for another 120 seconds,
+without starting a second one. Once the update has finished, Try again connects,
+or shows the recorded reason if the update failed. While the update runs,
+`vibe status` says so.
 
 See [the measurement procedure](epoch3-measurements.md) for the populated
 published-binary upgrade, refusal and per-writer growth acceptance.

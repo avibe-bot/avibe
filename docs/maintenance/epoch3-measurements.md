@@ -60,7 +60,14 @@ interruption. The script never silently resumes partially written workloads.
    rows clone a real API-written message shape until the main database exceeds
    4.5 GB. This tests upgrade of populated history, not message ingestion speed.
    A streamed history digest and row counts provide preservation evidence.
-2. **Refusal:** an exclusively created test-owned filler brings guest filesystem
+2. **Refusal (historical, before S2):** this phase was written for the earlier
+   policy, which refused the conversion whenever the full-copy reserve did not
+   fit. Since S2 (November 16) the exact `0088 → 0089` conversion on such a disk
+   converts without the copy. The three S2
+   outcomes (backup made; converted without the copy; transaction out of disk
+   and rolled back) are to be measured on a real disk that cannot clone. No S2
+   results are recorded here yet. The original phase follows for the record: an
+   exclusively created test-owned filler brings guest filesystem
    usage to approximately 91%. Record actual available bytes, not just percent.
    Candidate admission must refuse with required reserve and actionable deficit;
    DB/WAL/backup/lifecycle hashes must remain unchanged. The filler is removed in
@@ -107,8 +114,9 @@ not authorize any deployment, live database access or service restart.
 Normal cache behavior, Skill use and Vault access/audit history remain unchanged.
 Future repeated state consumes less database space; existing history is retained
 and the database is not vacuumed. The first upgrade needs a rollback copy and
-migration workspace; insufficient space is rejected with the additional GB to
-free. Publish the measured 4.5 GB upgrade/backup duration and conservative free-
+migration workspace. Where the disk can clone, the copy costs no space. Where
+it cannot and the copy does not fit, the conversion proceeds without it and Avibe
+says so once. Publish the measured 4.5 GB upgrade/backup duration and conservative free-
 space reserve from the approved run here—do not invent a universal downtime
 promise. Returning to the verified 3.2.6 reader preserves current data. Unsupported
 older readers refuse the new epoch; recovery to them requires an explicitly

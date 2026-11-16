@@ -543,19 +543,30 @@ def _clone_file(source: Path, destination: Path) -> None:
         # SQLite record locks, including those of other local connections. Run
         # FICLONE in a child so opening/closing its source cannot drop our lock.
         # Linux UAPI <linux/fs.h>: FICLONE = _IOW(0x94, 9, int).
-        subprocess.run(
+        result = subprocess.run(
             [sys.executable, "-I", "-c",
              "import fcntl, sys\n"
-             "with open(sys.argv[1], 'rb') as src, open(sys.argv[2], 'xb') as dst:\n"
-             "    fcntl.ioctl(dst.fileno(), 0x40049409, src.fileno())\n",
+             "try:\n"
+             "    with open(sys.argv[1], 'rb') as src, open(sys.argv[2], 'xb') as dst:\n"
+             "        fcntl.ioctl(dst.fileno(), 0x40049409, src.fileno())\n"
+             "except OSError as exc:\n"
+             "    print(exc.errno)\n"
+             "    sys.exit(1)\n",
              str(source), str(destination)],
-            check=True, capture_output=True, timeout=30,
+            capture_output=True, timeout=30,
         )
+        if result.returncode:
+            # Preserve the native errno: the optional epoch-boundary copy must
+            # distinguish unsupported cloning from real I/O/permission errors.
+            if result.returncode == 1 and result.stdout.strip().isdigit():
+                error = int(result.stdout.strip())
+                raise OSError(error, os.strerror(error))
+            result.check_returncode()
     else:
         raise OSError(errno.ENOTSUP, "Filesystem cloning is unavailable")
 
 
-def _try_clone_sqlite_snapshot(source_path: Path, destination_path: Path) -> bool:
+def _try_clone_sqlite_snapshot(source_path: Path, destination_path: Path, *, strict: bool = False) -> bool:
     """Checkpoint and clone while SQLite itself excludes every other writer.
 
     The caller holds MigrationFileLock, but ordinary SQL writers do not. Keep
@@ -577,9 +588,32 @@ def _try_clone_sqlite_snapshot(source_path: Path, destination_path: Path) -> boo
             _clone_file(source_path, destination_path)
         return True
     except (OSError, sqlite3.Error, AttributeError, subprocess.SubprocessError) as exc:
-        logger.debug("SQLite snapshot clone unavailable; using online backup: %s", exc)
         destination_path.unlink(missing_ok=True)
+        if strict:
+            unsupported = isinstance(exc, AttributeError) or (
+                isinstance(exc, OSError) and exc.errno in {errno.EXDEV, errno.ENOTSUP, errno.ENOSYS, errno.ENOTTY}
+            )
+            busy = isinstance(exc, sqlite3.Error) and (
+                getattr(exc, "sqlite_errorcode", 0) & 0xff in {5, 6}  # SQLITE_BUSY / SQLITE_LOCKED
+                or str(exc) in {"database is locked", "database table is locked"}  # Python 3.10
+            )
+            if not unsupported and not busy:
+                raise
+        logger.debug("SQLite snapshot clone unavailable; using online backup: %s", exc)
         return False
+
+
+class BackupCopySpaceUnavailableError(RuntimeError):
+    """Clone was unavailable and a full copy failed capacity admission.
+
+    This is not a pre-mutation refusal: clone preparation may have checkpointed
+    committed WAL. Only the migration owner can authorize a no-copy transition.
+    Actual I/O/permission/corruption failures never become this result.
+    """
+
+    def __init__(self, plan):
+        self.plan = plan
+        super().__init__("SQLite backup clone unavailable and full-copy reserve does not fit")
 
 
 def create_sqlite_migration_backup(
@@ -588,10 +622,11 @@ def create_sqlite_migration_backup(
     backups_dir: Path | None = None,
     to_revisions: Iterable[str] = (),
     now: datetime | None = None,
+    clone_first: bool = False,
 ) -> Path:
     with MigrationFileLock(migration_lock_path_for(db_path), timeout_seconds=None):
         return _create_sqlite_migration_backup_locked(
-            db_path, backups_dir=backups_dir, to_revisions=to_revisions, now=now
+            db_path, backups_dir=backups_dir, to_revisions=to_revisions, now=now, clone_first=clone_first
         )
 
 
@@ -601,6 +636,7 @@ def _create_sqlite_migration_backup_locked(
     backups_dir: Path | None = None,
     to_revisions: Iterable[str] = (),
     now: datetime | None = None,
+    clone_first: bool = False,
 ) -> Path:
     """Hold a rollback point for the database as it stands, in a bounded window.
 
@@ -645,9 +681,10 @@ def _create_sqlite_migration_backup_locked(
     source_path = db_path.expanduser().resolve()
     created_at = now or datetime.now(timezone.utc)
     target_root = (backups_dir or source_path.parent / "backups").expanduser().resolve()
-    from storage.migration_space import plan_space
+    from storage.migration_space import InsufficientMigrationSpaceError, plan_space
 
-    plan_space(source_path, backups_dir=target_root).require()
+    if not clone_first:
+        plan_space(source_path, backups_dir=target_root).require()
     target_root.mkdir(parents=True, exist_ok=True)
     # The entry for the window itself has to be on the disk before anything in
     # it counts as durable; a crash that keeps the upgrade but loses this
@@ -665,7 +702,15 @@ def _create_sqlite_migration_backup_locked(
 
     try:
         copy_started = time.monotonic()
-        cloned = _try_clone_sqlite_snapshot(source_path, temp_db)
+        cloned = (
+            _try_clone_sqlite_snapshot(source_path, temp_db, strict=True)
+            if clone_first else _try_clone_sqlite_snapshot(source_path, temp_db)
+        )
+        if clone_first and not cloned:
+            try:
+                plan_space(source_path, backups_dir=target_root).require()
+            except InsufficientMigrationSpaceError as exc:
+                raise BackupCopySpaceUnavailableError(exc.plan) from exc
         with closing(sqlite3.connect(temp_db)) as destination:
             if not cloned:
                 with closing(sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True)) as source:

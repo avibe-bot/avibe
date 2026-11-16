@@ -2,7 +2,9 @@
 
 Existing row bytes are untouched. The partial ownership index is a one-time
 migration scan, not a JSON backfill; old bridge deletes also execute the GC
-triggers. This breaking boundary always retains the conservative backup path.
+triggers. The migration owner may omit the backup only for its proven 3.2.6
+predecessor when a clone is unavailable and the copy does not fit. Pending
+importer repair remains independent and must still run after this transaction.
 """
 from alembic import op
 
@@ -66,6 +68,16 @@ def upgrade() -> None:
         BEGIN DELETE FROM session_cache_state WHERE session_id = OLD.id; END
     """)
     advance_compatibility_epoch(conn, 3)
+    backup_bytes = op.get_context().config.attributes.get("epoch3_backup_omitted")
+    if backup_bytes is not None:
+        # Commit the notice receipt with the schema, epoch and Alembic stamp.
+        # A failed conversion must never claim it successfully omitted a copy.
+        conn.exec_driver_sql("""
+            INSERT INTO state_meta(key, value_json, updated_at)
+            VALUES ('storage.epoch3_backup_skipped',
+                json_object('converted_at', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'database_bytes', ?),
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        """, (backup_bytes,))
 
 
 def downgrade() -> None:

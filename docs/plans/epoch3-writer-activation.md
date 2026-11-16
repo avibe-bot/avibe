@@ -75,7 +75,10 @@ No owner live database is required or authorized for that exercise.
    importer, factory and standalone backup boundaries. Read-only admission and
    a separately budgeted crash-recovery path preserve cold WAL and committed
    revision semantics. Budgets are conservative policy, never measured minima;
-   clone success, pruning and backup reuse are not credited.
+   pruning and backup reuse are not credited. Product decision S2 (November 16)
+   changes one boundary, the exact `0088 → 0089` conversion: a clone backup is
+   not charged against the reserve, and when no clone is possible and the copy
+   does not fit, the conversion proceeds without the copy and says so once. See [the compatibility guide](../maintenance/sqlite-compatibility.md#epoch-3-conversion-on-a-nearly-full-disk).
 2. Complete focused consumer/lifecycle coverage and verify historical fixture
    reconstruction refuses real compact data. Production downgrade guards remain
    unchanged; 3.2.6 rollback is compatible-open, never restamping.
@@ -121,7 +124,9 @@ Product added three delivery gates on November 14:
   capacity (91% alone is not a capacity). Measure backup plus upgrade elapsed
   time, peak additional space and the conservative free-space admission budget.
   Insufficient space must refuse before DB/checkpoint/backup/prune changes and
-  say how much to free. The preflight implementation is still pending.
+  say how much to free. Superseded for the `0088 → 0089` conversion by S2
+  (November 16): measure the three S2 outcomes instead (backup made; converted
+  without the copy; transaction ran out of disk and rolled back).
 - Measure each writer's before/after growth with the same deterministic workload
   and report per 1,000 turns/requests and clearly justified daily extrapolation.
   Include index/snapshot/state cost, not just shortened JSON; do not promise

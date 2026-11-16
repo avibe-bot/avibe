@@ -39,7 +39,7 @@ from storage.compatibility import (
 )
 from storage.db import create_sqlite_engine
 from storage.lock import MigrationFileLock, migration_lock_path_for
-from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
+from storage.migrations import _epoch3_omission_recorded, guard_source_checkout_default_state_migration, run_migrations
 from storage.models import (
     agents,
     agent_sessions,
@@ -162,10 +162,11 @@ def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
+                "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?) "
                 "FROM alembic_version LIMIT 2",
                 (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
-                 COMPATIBILITY_EPOCH_KEY),
+                 COMPATIBILITY_EPOCH_KEY, "storage.epoch3_backup_skipped"),
             ).fetchall()
         expected_revision = _installed_schema_revision()
         if expected_revision is None or len(rows) != 1 or rows[0][0] != expected_revision:
@@ -174,6 +175,8 @@ def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
         require_supported_compatibility_epoch(epoch)
         if epoch != _installed_schema_epoch():
             return False
+        if expected_revision == "20261114_0089":
+            _epoch3_omission_recorded(rows[0][5])
         return _valid_import_receipts(rows[0][1:4])
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return False
@@ -243,19 +246,21 @@ def repair_sqlite_state(
             target_db=target_db,
             use_default_dirs=db_path is None and state_dir is None,
         )
-        if decision.compatible_open or decision.skip_snapshot:
+        if decision.compatible_open or decision.skip_snapshot or (decision.backup_omitted and decision.imports_complete):
             # Compatible-open belongs to the newer runtime. A no-copy batch has
-            # already proved its importer receipts complete. Neither path may
-            # adopt an old backup attempt, replay imports or run a full-file check.
+            # already proved its importer receipts complete. An omitted epoch-3
+            # copy may short-circuit ONLY with that independent completion proof.
+            # Pending importer work below must still run exactly as before.
             report = MigrationImportReport(db_path=target_db, imported=False)
             with _ensured_lock:
                 _ensured_targets[ensured_key] = report
             return report
-        try:
-            backup_attempt = begin_sqlite_backup_validation(target_db)
-        except OSError:
-            logger.warning("Could not track SQLite backup validation; retaining backups", exc_info=True)
-            backup_attempt = None
+        backup_attempt = None
+        if not decision.backup_omitted:
+            try:
+                backup_attempt = begin_sqlite_backup_validation(target_db)
+            except OSError:
+                logger.warning("Could not track SQLite backup validation; retaining backups", exc_info=True)
         engine = create_sqlite_engine(target_db)
         report: MigrationImportReport | None = None
         try:
@@ -322,13 +327,14 @@ def repair_sqlite_state(
             engine.dispose()
         if report is None:
             raise RuntimeError("SQLite state initialization completed without a report")
-        try:
-            complete_sqlite_backup_validation(target_db, backup_attempt)
-        except OSError:
-            logger.warning("SQLite state validated without expiry evidence; retaining backups", exc_info=True)
-        else:
-            report = replace(report, backup_attempt_id=backup_attempt)
-        prune_state_backups(target_state_dir / "backups")
+        if not decision.backup_omitted:
+            try:
+                complete_sqlite_backup_validation(target_db, backup_attempt)
+            except OSError:
+                logger.warning("SQLite state validated without expiry evidence; retaining backups", exc_info=True)
+            else:
+                report = replace(report, backup_attempt_id=backup_attempt)
+            prune_state_backups(target_state_dir / "backups")
         with _ensured_lock:
             _ensured_targets[ensured_key] = report
         return report

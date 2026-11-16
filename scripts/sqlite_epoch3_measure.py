@@ -154,18 +154,25 @@ def main(argv=None) -> int:
     parser.add_argument("--phase", choices=("prepare", "refusal", "upgrade", "growth"))
     parser.add_argument("--count", type=int, default=1000)
     parser.add_argument("--target-bytes", type=int, default=4_500_000_000)
-    parser.add_argument("--worker", choices=("seed", "workload", "populate", "history", "refuse", "upgrade"), help=argparse.SUPPRESS)
+    parser.add_argument("--worker", choices=("seed", "workload", "populate", "history", "refuse", "upgrade",
+                                              "repair", "transaction-full", "notice"), help=argparse.SUPPRESS)
     parser.add_argument("--group", choices=("cache", "vault", "skill"), default="cache", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
     if args.worker:
-        if (fixture_bytes(root) > 16 * MIB or (args.worker == "populate" and args.target_bytes > 16 * MIB)
+        if (args.worker == "transaction-full" or fixture_bytes(root) > 16 * MIB
+                or (args.worker == "populate" and args.target_bytes > 16 * MIB)
                 or (args.worker == "workload" and args.count > 32)):
             require_guest(root, args.quota_bytes)
         if os.environ.get("HOME") != str(root / "home") or os.environ.get("AVIBE_HOME") != str(root / "avibe"):
             raise RuntimeError("Worker requires the harness's isolated HOME/AVIBE_HOME environment")
-        helpers = runpy.run_path(str(Path(__file__).with_name("sqlite_epoch3_workload.py")))
-        print(json.dumps(helpers["run"](args.worker, root, group=args.group, count=args.count, target_bytes=args.target_bytes)))
+        if args.worker in {"repair", "transaction-full", "notice"}:
+            helpers = runpy.run_path(str(Path(__file__).with_name("sqlite_epoch3_s2_measure.py")))
+            result = helpers["worker"](args.worker, root, quota_bytes=args.quota_bytes)
+        else:
+            helpers = runpy.run_path(str(Path(__file__).with_name("sqlite_epoch3_workload.py")))
+            result = helpers["run"](args.worker, root, group=args.group, count=args.count, target_bytes=args.target_bytes)
+        print(json.dumps(result))
         return 0
     if not args.phase or not args.previous_python:
         parser.error("--phase and --previous-python are required")

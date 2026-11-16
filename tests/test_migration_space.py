@@ -19,9 +19,12 @@ pytestmark = pytest.mark.no_sqlite_template
 
 
 @pytest.fixture
-def old_db(tmp_path):
+def old_db(tmp_path, monkeypatch):
     path = tmp_path / "state" / "vibe.sqlite"
     migrations.run_migrations(path, revision="20261112_0088")
+    # These tests own conservative/unproven admission. The proven epoch-3
+    # clone-first exception is covered separately in test_epoch3_low_space.
+    monkeypatch.setattr(migrations, "VERIFIED_PREDECESSOR_EPOCH", None)
     # Keep a writer open to leave committed pages in WAL. Admission may update
     # SHM/lock bookkeeping but must not change main/WAL or backup evidence.
     keeper = sqlite3.connect(path)
@@ -224,6 +227,7 @@ os._exit(0)
 @pytest.mark.parametrize("wal", [True, False])
 def test_crash_left_wal_or_hot_journal_refuses_without_recovery(tmp_path, monkeypatch, wal):
     path = _crashed_database(tmp_path, wal=wal)
+    monkeypatch.setattr(migrations, "VERIFIED_PREDECESSOR_EPOCH", None)
     before = protected_bytes(path)
     free(monkeypatch, 1)
     with pytest.raises(space.InsufficientMigrationSpaceError):
