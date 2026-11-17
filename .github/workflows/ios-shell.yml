@@ -141,6 +141,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build-for-testing
 
+      - name: Start the voice capture probe's stand-in instance (draft only)
+        run: |
+          set -euo pipefail
+          nohup python3 ios/scripts/voice_capture_probe_server.py 8765 "$RUNNER_TEMP/probe-server.log" >/dev/null 2>&1 &
+          sleep 1
+          curl -sf http://127.0.0.1:8765/api/csrf-token
+          xcrun simctl privacy "$SIMULATOR_ID" grant microphone bot.avibe.ios || echo "microphone grant failed"
+
       - name: Run XCTest on iPhone Simulator
         run: |
           set -euo pipefail
@@ -151,7 +159,7 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
-            -only-testing:AvibeTests/NativeBadgeTests \
+            -only-testing:AvibeTests/VoiceCaptureProbeTests \
             ENABLE_DEBUG_DYLIB=NO IROH_DEBUG_DYLIB_PATH= IROH_DEBUG_DYLIB_INPUT= \
             CODE_SIGNING_ALLOWED=NO \
             test
@@ -165,18 +173,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Start the voice capture probe's stand-in instance (draft only)
-        run: |
-          set -euo pipefail
-          nohup python3 ios/scripts/voice_capture_probe_server.py 8765 "$RUNNER_TEMP/probe-server.log" >/dev/null 2>&1 &
-          sleep 1
-          curl -sf http://127.0.0.1:8765/api/csrf-token
-          xcrun simctl privacy "$SIMULATOR_ID" grant microphone bot.avibe.ios || echo "microphone grant failed"
-
       - name: Run sheet gesture XCUITest fixture
         if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
         run: |
           set -euo pipefail
+          xcrun simctl privacy "$SIMULATOR_ID" grant microphone bot.avibe.ios || echo "microphone grant failed"
           xcodebuild \
             -project ios/Avibe.xcodeproj \
             -scheme AvibeSheetFixture \

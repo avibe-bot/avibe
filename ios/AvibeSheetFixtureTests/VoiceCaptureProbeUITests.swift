@@ -166,20 +166,26 @@ final class VoiceCaptureProbeUITests: XCTestCase {
         shot("ab-3-chooser")
         let avibeEntry = settings.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "Avibe")).firstMatch
-        if avibeEntry.waitForExistence(timeout: 3), avibeEntry.isHittable {
+        if avibeEntry.waitForExistence(timeout: 15), avibeEntry.isHittable {
             avibeEntry.tap()
             sleep(2)
         }
         shot("ab-4-avibe")
         let shortcut = settings.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS[c] %@", "Speak to Main Bot")).firstMatch
-        guard shortcut.waitForExistence(timeout: 3), shortcut.isHittable else {
+        _ = shortcut.waitForExistence(timeout: 20)
+        shot("ab-4b-waited")
+        guard shortcut.exists, shortcut.isHittable else {
+            XCUIDevice.shared.press(.home)
+            XCUIDevice.shared.press(.home)
+            settings.terminate()
             note("action button: no Speak to Main Bot; tree:\n\(settings.debugDescription.prefix(6000))")
             return false
         }
         shortcut.tap()
         sleep(2)
         shot("ab-5-chosen")
+        settings.terminate()
         XCUIDevice.shared.press(.home)
         sleep(1)
         return true

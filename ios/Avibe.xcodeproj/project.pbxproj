@@ -114,6 +114,7 @@
 		16000000000000000000000020 /* AvibeLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000020 /* AvibeLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		17000000000000000000000001 /* VoiceCaptureProbeSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000001 /* VoiceCaptureProbeSetup.swift */; };
 		17000000000000000000000002 /* VoiceCaptureProbeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000002 /* VoiceCaptureProbeUITests.swift */; };
+		17000000000000000000000003 /* VoiceCaptureProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000003 /* VoiceCaptureProbeTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -260,6 +261,7 @@
 		26000000000000000000000020 /* AvibeLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AvibeLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		27000000000000000000000001 /* VoiceCaptureProbeSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeSetup.swift; sourceTree = "<group>"; };
 		27000000000000000000000002 /* VoiceCaptureProbeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeUITests.swift; sourceTree = "<group>"; };
+		27000000000000000000000003 /* VoiceCaptureProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -408,6 +410,7 @@
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
+				27000000000000000000000003 /* VoiceCaptureProbeTests.swift */,
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
 				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
@@ -936,6 +939,7 @@
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
+				17000000000000000000000003 /* VoiceCaptureProbeTests.swift in Sources */,
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
 				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,

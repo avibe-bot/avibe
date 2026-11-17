@@ -45,6 +45,29 @@ enum VoiceCaptureProbeSetup {
 
     private static var kept: (WKWebView, Delegate)?
 
+    /// Signs a fresh store in at the stand-in and points the target at it.
+    /// Returns the cookie names the store holds afterwards.
+    static func setUp(origin originURL: URL) async -> [String] {
+        let identifier = UUID()
+        let config = Config(origin: originURL.absoluteString, storeIdentifier: identifier.uuidString)
+        if let url = configURL, let data = try? JSONEncoder().encode(config) {
+            try? data.write(to: url)
+        }
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: identifier)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let delegate = Delegate()
+        webView.navigationDelegate = delegate
+        kept = (webView, delegate)
+        webView.load(URLRequest(url: originURL.appending(path: "probe/login")))
+        for _ in 0..<40 {
+            try? await Task.sleep(for: .milliseconds(250))
+            let cookies = await configuration.websiteDataStore.httpCookieStore.allCookies()
+            if !cookies.isEmpty { return cookies.map(\.name).sorted() }
+        }
+        return []
+    }
+
     static func runIfRequested() {
         let arguments = ProcessInfo.processInfo.arguments
         guard
