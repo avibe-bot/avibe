@@ -252,8 +252,12 @@ hidden Workbench. Three things follow.
   whichever web view made it, every opener is read again, and the sandbox
   windows of one that is no longer in place (in its window, not hidden, not
   covered) are closed, reserved and empty ones included, and their pages
-  destroyed before the announcement returns. **An announcement only ever
-  closes.** It is what makes closing prompt; nothing in the input rule waits
+  destroyed before the announcement returns. (The handler reads nothing only
+  if the module's registry is in use at that instant. No path that reaches
+  that is known, because the registry is never held across a call that
+  touches a view; and the reads at admission, at the commit, at the reveal
+  and for every event do not depend on announcements.) **An announcement only
+  ever closes.** It is what makes closing prompt; nothing in the input rule waits
   for one, and whether an opener is in view is still read afresh at the
   commit and for every click and key. Nothing is observed and no web view is
   held, so nothing here depends on when a web view is freed. (The first
@@ -265,7 +269,9 @@ hidden Workbench. Three things follow.
   hiding it, and creating another web view in front of it, as it does with a
   candidate Workbench during a switch. A retirement hides the web view,
   erases its data store and then closes it; the hide closes the cards and
-  destroys their pages, so that is done before the erase starts. What is
+  destroys their pages, so that is done before the erase starts. That is
+  true of every sandbox window's page; the Workbench's own page and the
+  sandbox frame inside it live through the erase, as #3850 designed it. What is
   asked of WebKit there is `_close` on the card's web view, in the same turn
   as the hide; the erase is asked for in a later turn.
 - **A sandbox window exists only for an opener in place: one that is not in
@@ -480,3 +486,10 @@ Only a signed build with a real passkey can show these:
   it closes.
 - A release build. Tests run debug builds.
 - The association being fetched after the app's first launch.
+- For replacement web views: the marker and the support on one in the real
+  shell (the two calls in `build_main_child` have no automated check); a real
+  instance switch, and back on the local instance afterwards; a remote
+  instance (a card from a remote HTTPS Workbench, the passkey sheet, passkey
+  PRF from the sandbox frame there); the shell's own `instance_store::retire`
+  with a card up; signing out with a card up; the account screen opened while
+  a card is up.

@@ -593,7 +593,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             self.a_card_takes_no_input_until_it_has_been_seen();
 
             self.other_requests_keep_their_handler();
-            self.another_window_going_away_closes_nothing();
+            self.another_window_going_away_closes_nothing(10);
             self.reservations_are_bounded();
 
             // No child outlives the main window: not when the user closes it,
@@ -653,7 +653,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
 
             self.a_redirect_never_shows();
             self.other_requests_keep_their_handler();
-            self.another_window_going_away_closes_nothing();
+            self.another_window_going_away_closes_nothing(10);
             self.reservations_are_bounded();
 
             self.eval("window.open('about:blank'); window.open('about:blank')");
@@ -1456,9 +1456,14 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// in place. (On its first CI run the probe lost one reserved window
         /// right after such a window was destroyed, once, and nothing was
         /// recording by what.)
-        fn another_window_going_away_closes_nothing(&mut self) {
-            const ROUNDS: usize = 10;
-            for round in 0..ROUNDS {
+        ///
+        /// Three windows are asked for 20, 35 and 50 ms after the script
+        /// starts, and the other window is destroyed between 0 and 54 ms after
+        /// it, later each round, so that its leaving falls before, between
+        /// and after them. Where it fell is counted from the record and said.
+        fn another_window_going_away_closes_nothing(&mut self, rounds: usize) {
+            let (mut before, mut between, mut after, mut unseen) = (0usize, 0usize, 0usize, 0usize);
+            for round in 0..rounds {
                 let other = self.another_window_of_the_app(&format!("other-{round}"));
                 if self.focus {
                     // As in the case that failed: shown, and key for a moment.
@@ -1470,8 +1475,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 } else {
                     self.on_main(|_| ());
                 }
-                trace::closely(true);
-                other.destroy().unwrap();
+                trace::round_begins();
                 self.eval(
                     r#"(() => {
                         const kept = probe.windows.kept = [];
@@ -1482,38 +1486,54 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                                 case: 'kept',
                                 opened: kept.map((child) => !!child),
                                 closed: kept.map((child) => !child || child.closed),
-                            }), 300);
+                            }), 150);
                         };
-                        open();
+                        setTimeout(open, 20);
                     })()"#,
                 );
+                std::thread::sleep(Duration::from_millis(6 * (round % 10) as u64));
+                other.destroy().unwrap();
                 let kept = self.report("kept");
                 let held = self.child_windows();
-                trace::closely(false);
+                let seen = trace::round_ends();
                 assert!(
                     kept["opened"] == json!([true, true, true])
                         && kept["closed"] == json!([false, false, false])
-                        && held == 3,
+                        && held == 3
+                        && seen.most_held == 3
+                        && seen.closed == 0,
                     "round {round}: a reserved window was lost while another window of the app went away: \
-                     {kept}, {held} windows held\n{}",
+                     {kept}, {held} windows held, {seen:?}\n{}",
                     trace::seen()
                 );
+                // Where the other window's web view announced its leaving,
+                // counted in windows asked for by then.
+                match seen.announced_after.as_slice() {
+                    [] => unseen += 1,
+                    asked if asked.iter().any(|asked| (1..3).contains(asked)) => between += 1,
+                    asked if asked.iter().all(|asked| *asked == 0) => before += 1,
+                    _ => after += 1,
+                }
                 self.eval("probe.windows.kept.forEach((child) => child.close())");
                 self.wait_children("the kept windows to close", |children| children.is_empty());
             }
             println!(
-                "vault window probe: windows reserved while another window of the app was destroyed were kept, \
-                 {ROUNDS} times"
+                "vault window probe: three windows were reserved while another window of the app was destroyed, \
+                 {rounds} times, and none was lost; its web view announced its leaving before the first was \
+                 asked for {before} times, between the first and the last {between} times, after the last \
+                 {after} times, and not during the round {unseen} times"
             );
         }
 
         /// The main webview's pages cannot hold more than a few hidden windows,
         /// and those do not outlive the deadline.
         fn reservations_are_bounded(&mut self) {
-            // Nothing may close a reserved window while these are asked for.
-            // What the web views announced and which sandbox windows closed,
-            // shortly before and during, is printed either way.
-            trace::closely(true);
+            // Nothing may close a reserved window while these are asked for,
+            // and never more than four may exist. What the web views
+            // announced, which sandbox windows closed and how many were held
+            // after each request, shortly before and during, is printed
+            // either way.
+            trace::round_begins();
             self.eval(
                 r#"(() => {
                     const at = [];
@@ -1526,16 +1546,17 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 })()"#,
             );
             let many = self.report("many");
-            trace::closely(false);
+            let round = trace::round_ends();
             let seen = trace::seen();
             println!(
-                "vault window probe: six windows asked for at {}; announcements and closes up to then:\n{seen}",
+                "vault window probe: six windows asked for at {}; {round:?}; the record up to then:\n{seen}",
                 many["at"]
             );
-            assert_eq!(
-                many["opened"],
-                json!([true, true, true, true, false, false]),
-                "{many}\n{seen}"
+            assert!(
+                many["opened"] == json!([true, true, true, true, false, false])
+                    && round.most_held == 4
+                    && round.closed == 0,
+                "{many}, {round:?}\n{seen}"
             );
             let held = self.children();
             assert_eq!(held.len(), 4, "{held:?}");
@@ -1788,6 +1809,53 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             static WORKBENCH_VIEW: RefCell<Option<Weak<WKWebView>>> = const { RefCell::new(None) };
         }
         static LINES: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+        static ROUND: Mutex<Round> = Mutex::new(Round::new());
+        static WRY_CREATE: OnceLock<Imp> = OnceLock::new();
+
+        type Create = unsafe extern "C-unwind" fn(
+            &AnyObject,
+            Sel,
+            &AnyObject,
+            &AnyObject,
+            &AnyObject,
+            &AnyObject,
+        ) -> *mut AnyObject;
+
+        /// What was seen while one case asked for windows.
+        #[derive(Clone, Debug)]
+        pub struct Round {
+            /// Requests for a new window that reached the app.
+            pub asked: usize,
+            /// The most sandbox windows that existed right after a request.
+            pub most_held: usize,
+            /// Sandbox windows that closed.
+            pub closed: usize,
+            /// For each announcement by a web view other than the Workbench's:
+            /// how many windows had been asked for by then.
+            pub announced_after: Vec<usize>,
+        }
+
+        impl Round {
+            const fn new() -> Self {
+                Self {
+                    asked: 0,
+                    most_held: 0,
+                    closed: 0,
+                    announced_after: Vec::new(),
+                }
+            }
+        }
+
+        /// Starts counting, with call stacks for every close.
+        pub fn round_begins() {
+            *ROUND.lock().expect("the round") = Round::new();
+            closely(true);
+        }
+
+        pub fn round_ends() -> Round {
+            closely(false);
+            ROUND.lock().expect("the round").clone()
+        }
 
         fn note(line: String) {
             let mut lines = LINES.lock().expect("the trace");
@@ -1909,6 +1977,11 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             // SAFETY: As above.
             unsafe { original(this, selector) };
             let after = windows(mtm);
+            if std::ptr::from_ref(this) as usize != WORKBENCH.load(Ordering::SeqCst) {
+                let mut round = ROUND.lock().expect("the round");
+                let asked = round.asked;
+                round.announced_after.push(asked);
+            }
             note(format!(
                 "{} on {subject}; the Workbench was {read}; sandbox windows {before:?} -> {after:?}",
                 NAMES[which]
@@ -1916,6 +1989,40 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             if before != after && CLOSELY.load(Ordering::SeqCst) {
                 note(format!("    the announcement came from:\n{}", stack()));
             }
+        }
+
+        /// A page asked for a new window: the module's answer is passed on
+        /// untouched, and the sandbox windows that exist right after it are
+        /// counted.
+        unsafe extern "C-unwind" fn asked_for_a_window(
+            delegate: &AnyObject,
+            selector: Sel,
+            opener: &AnyObject,
+            configuration: &AnyObject,
+            action: &AnyObject,
+            features: &AnyObject,
+        ) -> *mut AnyObject {
+            // SAFETY: The implementation this one replaced, for this selector,
+            // called with the arguments WebKit passed.
+            let given = unsafe {
+                let original = std::mem::transmute::<Imp, Create>(*WRY_CREATE.get().expect("armed"));
+                original(delegate, selector, opener, configuration, action, features)
+            };
+            if let Some(mtm) = MainThreadMarker::new() {
+                let held = windows(mtm);
+                {
+                    let mut round = ROUND.lock().expect("the round");
+                    round.asked += 1;
+                    round.most_held = round.most_held.max(held.len());
+                }
+                if CLOSELY.load(Ordering::SeqCst) {
+                    note(format!(
+                        "a window was asked for and {}; sandbox windows now {held:?}",
+                        if given.is_null() { "refused" } else { "given" }
+                    ));
+                }
+            }
+            given
         }
 
         unsafe extern "C-unwind" fn did_hide(this: &AnyObject, selector: Sel) {
@@ -1971,6 +2078,25 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     )),
                 }
             }
+            // The answer to a page's request for a window: the module put its
+            // own in front of wry's on the UI delegate's class.
+            // SAFETY: Main thread; the delegate is a live object.
+            if let Some(delegate) = unsafe { workbench.UIDelegate() } {
+                let delegate: &AnyObject = delegate.as_ref();
+                let selector = sel!(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:);
+                let own = delegate.class().instance_methods();
+                match own.iter().find(|method| method.name() == selector) {
+                    Some(method) => {
+                        // SAFETY: The wrapper has the method's own signature
+                        // and calls what it replaces.
+                        let original = unsafe {
+                            method.set_implementation(std::mem::transmute::<Create, Imp>(asked_for_a_window))
+                        };
+                        let _ = WRY_CREATE.set(original);
+                    }
+                    None => note("the UI delegate's class does not answer requests for a window itself".to_owned()),
+                }
+            }
             let closing = block2::RcBlock::new(|notification: NonNull<NSNotification>| {
                 // SAFETY: AppKit posts this on the main thread with a live
                 // notification whose object is the window.
@@ -1983,6 +2109,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 if super::child_view(window).is_none() {
                     return;
                 }
+                ROUND.lock().expect("the round").closed += 1;
                 note(format!("sandbox window {} is closing", window.windowNumber()));
                 if CLOSELY.load(Ordering::SeqCst) {
                     note(format!("    closed from:\n{}", stack()));

@@ -280,9 +280,14 @@ rules are stated at the top of that file. In short:
   the shell builds tells the module when it is hidden, shown, or moved into or
   out of a window; the module then reads every Workbench again and, for one
   that is no longer in place, closes its sandbox windows and destroys their
-  pages before it returns. The shell erases a retired Workbench's data store
-  after hiding its web view, so by then the store's sandbox pages have been
-  destroyed, and a hidden Workbench is refused any new one. A web view moved or
+  pages before it returns. (It reads nothing only if its own registry is in
+  use at that instant, which no known path reaches; the reads at
+  `window.open`, at the commit, at the reveal and for every click and key do
+  not depend on it.) The shell erases a retired Workbench's data store after
+  hiding its web view, so by then the pages of that Workbench's sandbox
+  windows have been destroyed, and a hidden Workbench is refused any new
+  window. The Workbench's own page, and the sandbox frame inside it, live
+  through the erase, as the retirement was designed. A web view moved or
   resized over a Workbench without being created or shown there is not
   announced; the reads above still keep a window from appearing or taking
   input. A sandbox window becomes the key window when its content is
@@ -368,6 +373,12 @@ admission; the real origin and how long its first paint takes; the passkey
 sheet from this window and passkey PRF from the sandbox iframe; focus with a
 real system sheet on screen, including the two-second wait after the sheet
 closes; a release build; and the association being fetched after first launch.
+For replacement web views, also: the marker and the window on a Workbench after
+a real instance switch, and back on the local instance afterwards; a remote
+instance (a card from a remote HTTPS Workbench, the passkey sheet, and passkey
+PRF from the sandbox frame there); the shell's own `instance_store::retire`
+with a card up; signing out with a card up; and the account screen opened
+while a card is up.
 
 ## Product packages
 

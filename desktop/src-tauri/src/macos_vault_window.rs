@@ -92,9 +92,13 @@
 //!   opener is read again, and the children of one that is no longer in place
 //!   are closed and their pages destroyed before the announcement returns.
 //!   That covers a web view the shell hides, one it closes without hiding,
-//!   and one that another web view was created in front of. The shell erases
-//!   a retired Workbench's data store after hiding its web view, so a child's
-//!   page is gone before the erase starts. A web view that is not in place
+//!   and one that another web view was created in front of. (The one case in
+//!   which an announcement reads nothing is the registry being in use at that
+//!   instant; no path that reaches it is known, since nothing touches a view
+//!   while the registry is held, and the reads at admission, at the commit,
+//!   at the reveal and for every event do not depend on announcements.) The
+//!   shell erases a retired Workbench's data store after hiding its web
+//!   view, so a child's page is gone before the erase starts. A web view that is not in place
 //!   is refused a window when it asks (`window.open` returns `null`), so a
 //!   sandbox window exists only for an opener in place: one that is not in
 //!   place cannot get one, and one that leaves its place loses those it has
@@ -868,6 +872,10 @@ unsafe extern "C-unwind" fn view_did_move_to_window(this: &AnyObject, _selector:
 /// An announcement only ever closes. It is what makes closing prompt; whether
 /// an opener is in view is still read afresh wherever it matters, and nothing
 /// in the input rule waits for one.
+///
+/// Nothing is read if the registry is gone or in use at this instant. No path
+/// that reaches the second is known: the registry is never held across a call
+/// that touches a view.
 fn web_view_changed() {
     // AppKit can call this while the process is ending and the registry is
     // already gone; then there is nothing left to close.
