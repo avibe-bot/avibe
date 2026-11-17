@@ -23,7 +23,8 @@ import { RunningStatus, SidebarStatusRow } from './SidebarStatusRow';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { lazyPage } from '../lib/lazyPage';
 import { useBots } from '../context/BotsContext';
-import { useVoiceConsentAsking } from '../lib/voiceConsent';
+import { closeVoiceConsent, useVoiceConsentAsking } from '../lib/voiceConsent';
+import { LazyDialog } from './ui/lazy-dialog';
 import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
@@ -182,12 +183,15 @@ export type AppShellProps = {
 const BotProfileDialogHost = lazyPage(() => import('./workbench/bots/BotProfileDialog').then((module) => module.BotProfileDialogHost));
 
 function BotProfileDialogSlot() {
-  const { profileRequest } = useBots();
+  const { profileRequest, closeProfile } = useBots();
   const [requested, setRequested] = useState(false);
   if (profileRequest && !requested) setRequested(true);
   if (!requested) return null;
-  // A chunk that cannot load loses only the dialog, not the shell around it.
-  return <ErrorBoundary variant="inline"><React.Suspense fallback={null}><BotProfileDialogHost /></React.Suspense></ErrorBoundary>;
+  return (
+    <LazyDialog onFailed={() => { setRequested(false); closeProfile(); }}>
+      <BotProfileDialogHost />
+    </LazyDialog>
+  );
 }
 
 // The question's code loads when it is first put up; nothing on the first screen draws it.
@@ -196,7 +200,7 @@ const VoiceConsentHost = lazyPage(() => import('./voice/VoiceConsent').then((mod
 function VoiceConsentSlot() {
   const asking = useVoiceConsentAsking();
   if (!asking) return null;
-  return <ErrorBoundary variant="inline"><React.Suspense fallback={null}><VoiceConsentHost /></React.Suspense></ErrorBoundary>;
+  return <LazyDialog onFailed={closeVoiceConsent}><VoiceConsentHost /></LazyDialog>;
 }
 
 export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
