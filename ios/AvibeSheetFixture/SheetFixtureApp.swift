@@ -21,7 +21,9 @@ final class SheetFixtureAppDelegate: UIResponder, UIApplicationDelegate {
 }
 
 @MainActor
-private final class SheetFixtureRootViewController: UIViewController {
+private final class SheetFixtureRootViewController: UIViewController,
+    UIAdaptivePresentationControllerDelegate
+{
     private var sheetController: MobileOnboardingViewController?
     private var hasStarted = false
     private var documentReady = false
@@ -31,6 +33,11 @@ private final class SheetFixtureRootViewController: UIViewController {
     private var documentReadinessTask: Task<Void, Never>?
     private var selectionReceiptObserver: FixtureSelectionReceiptObserver?
     private var selectionEvidence: [String: Any] = ["bridgeStage": "selection-none"]
+    /// What a dismissing gesture did: whether its touch reached the window,
+    /// and what UIKit's sheet did with it. Passive; published on the sheet's
+    /// surface while it is up and on the root view once it is gone.
+    private var dismissalEvidence: [String: Any] = ["stages": [String]()]
+    private var dismissalTouchObserver: FixtureTouchObserver?
     private var selectionDisplayLink: CADisplayLink?
     private var geometryDisplayLink: CADisplayLink?
     private var lastGeometrySignature: String?
@@ -206,8 +213,12 @@ private final class SheetFixtureRootViewController: UIViewController {
             controller.didMove(toParent: self)
         } else {
             presentationStartedUptime = ProcessInfo.processInfo.systemUptime
-            present(controller, animated: false) { [weak self] in
+            // Notification-only delegate methods: the fixture never answers
+            // whether the sheet may dismiss.
+            controller.presentationController?.delegate = self
+            present(controller, animated: false) { [weak self, weak controller] in
                 self?.presentationCompletedUptime = ProcessInfo.processInfo.systemUptime
+                self?.observeDismissalTouches(of: controller)
             }
         }
     }
@@ -324,6 +335,46 @@ private final class SheetFixtureRootViewController: UIViewController {
             while ProcessInfo.processInfo.systemUptime < end {}
             self.recordSelectionEvidence(["kind": "stall-end"], in: controller, webView: webView)
         }
+    }
+
+    private func observeDismissalTouches(of controller: MobileOnboardingViewController?) {
+        guard let window = controller?.view.window, dismissalTouchObserver == nil else { return }
+        let observer = FixtureTouchObserver { [weak self] event in
+            self?.recordDismissal(event)
+        }
+        window.addGestureRecognizer(observer)
+        dismissalTouchObserver = observer
+    }
+
+    func presentationControllerWillDismiss(_ presentationController: UIPresentationController) {
+        recordDismissal(["kind": "sheet-will-dismiss"])
+    }
+
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        recordDismissal(["kind": "sheet-did-dismiss"])
+    }
+
+    func presentationControllerDidAttemptToDismiss(_ presentationController: UIPresentationController) {
+        recordDismissal(["kind": "sheet-dismiss-refused"])
+    }
+
+    private func recordDismissal(_ event: [String: Any]) {
+        guard let kind = event["kind"] as? String else { return }
+        var stages = dismissalEvidence["stages"] as? [String] ?? []
+        stages.append(kind)
+        dismissalEvidence["stages"] = Array(stages.suffix(16))
+        var detail = event
+        detail["uptime"] = ProcessInfo.processInfo.systemUptime
+        if kind == "native-touch-began",
+           let webView = sheetController?.view.subviews.compactMap({ $0 as? WKWebView }).first {
+            detail["scrollOffsetY"] = Double(webView.scrollView.contentOffset.y)
+        }
+        dismissalEvidence[kind] = detail
+        selectionEvidence["dismissal"] = dismissalEvidence
+        guard let data = try? JSONSerialization.data(withJSONObject: selectionEvidence, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return }
+        sheetController?.view.accessibilityLabel = text
+        view.accessibilityLabel = text
     }
 
     @objc private func recordGeometryTick() {
@@ -545,8 +596,21 @@ private final class FixtureTouchObserver: UIGestureRecognizer {
                  "windowX": Double(point.x), "windowY": Double(point.y)])
     }
 
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        if let touch = touches.first {
+            let point = touch.location(in: nil)
+            publish(["kind": "native-touch-ended", "timestamp": touch.timestamp,
+                     "windowX": Double(point.x), "windowY": Double(point.y)])
+        }
+        state = .failed
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        if let touch = touches.first {
+            publish(["kind": "native-touch-cancelled", "timestamp": touch.timestamp])
+        }
+        state = .failed
+    }
 }
 
 // Data-only transport shapes keep the fixture independent of the production
