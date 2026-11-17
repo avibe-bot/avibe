@@ -2335,6 +2335,19 @@ describe('mobile instance sheet', () => {
       await screen.findByText('mobileApp.account.signedInAs');
     };
 
+    it('pushes Account and data inside the sheet, whose Back names Account for the edge swipe', async () => {
+      await openAccountRoot();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.accountData.title' }));
+      await screen.findByRole('heading', { name: 'mobileApp.accountData.title', level: 1 });
+      const back = document.querySelector('[data-mobile-back]') as HTMLButtonElement;
+      expect(back.textContent).toBe('mobileApp.account.title');
+      expect(screen.getByRole('button', { name: 'mobileApp.account.delete' })).toBeTruthy();
+
+      fireEvent.click(back);
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+      expect(document.querySelector('[data-mobile-back]')).toBeNull();
+    });
+
     it('is the sheet\'s root: Account with Close, and no Back for the edge swipe to press', async () => {
       await openAccountRoot();
       expect(screen.getByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeTruthy();

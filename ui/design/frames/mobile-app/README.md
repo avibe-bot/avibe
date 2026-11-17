@@ -375,7 +375,7 @@ but none open) draws the same list: with a selection it shows the current
 block and the others by recent use under the sheet's title, and the current
 block opens that instance again (`switcher/page-switching`, `page-switching-stale`). Plan,
 variants A/B, desktop consistency and build notes:
-`docs/plans/2026-11-13-ios-instance-pages.md`. The frames `switcher/*` (22
+`docs/plans/2026-11-13-ios-instance-pages.md`. The frames `switcher/*` (23
 states × zh/en, light and dark) draw the shipped pages; the kit
 `ui/design/kit/mobile-instance-sheet.tsx` keeps only what the web cannot render:
 the native sheet, the gestures, and the native failure screen.

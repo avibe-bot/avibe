@@ -1967,7 +1967,7 @@ export function AccountSheetPage(props: Omit<Parameters<typeof Account>[0], 'inS
 
 /**
  * Account and data, pushed from Account in the sheet and on the full page alike, with Back to
- * Account (ui/design: mobile-app/account-data/*).
+ * Account (ui/design: mobile-app/switcher/account-data, mobile-app/account/data).
  */
 function AccountData({
   locked,
@@ -2012,6 +2012,11 @@ function AccountData({
       <AccountDataContent disabled={locked} onPrivacy={onPrivacy} onDelete={onDelete} />
     </CloudScreen>
   );
+}
+
+/** Account and data as a full page (`#account`, `#runtime-account`), as a view; design frames draw it. */
+export function AccountDataPage(props: Omit<Parameters<typeof AccountData>[0], 'inSheet'>) {
+  return <AccountData {...props} />;
 }
 
 /** Account and data inside the sheet, as a view; design frames draw it. */

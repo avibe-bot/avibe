@@ -60,7 +60,7 @@ export function AboutSection({
 /**
  * Account and data, one page below Account: the privacy policy, and at the very bottom deleting
  * the account as one plain line, so it is not tapped by mistake (owner, 2026-11-17). Deletion
- * opens avibe.bot's page over this page with the App's sign-in. Design: mobile-app/account-data/*.
+ * opens avibe.bot's page over this page with the App's sign-in. Design: mobile-app/switcher/account-data, mobile-app/account/data.
  */
 export function AccountDataContent({
   disabled,
