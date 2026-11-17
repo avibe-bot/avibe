@@ -34,10 +34,10 @@
       "purpose": "user"
     },
     {
-      "requestId": "cancel-compensation",
+      "requestId": "cancel-user-unicode",
       "operationId": "operation-unicode",
       "kind": "reminder",
-      "purpose": "compensation"
+      "purpose": "user"
     }
   ],
   "receipts": [

@@ -4118,8 +4118,9 @@ final class MobileOnboardingTests: XCTestCase {
                 transitionEvents.append("runtime_revoked")
                 return []
             },
-            onDetachAccount: { accountID in
-                transitionEvents.append("detached:\(accountID)")
+            onDetachActiveOwner: {
+                transitionEvents.append("detached")
+                return true
             },
             onPreparePushLogout: {
                 transitionEvents.append("push_cleanup_started")
@@ -4138,7 +4139,7 @@ final class MobileOnboardingTests: XCTestCase {
             transitionEvents,
             [
                 "runtime_revoked",
-                "detached:account-1",
+                "detached",
                 "push_cleanup_started",
             ]
         )
@@ -4148,7 +4149,59 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(transitionPreparations, 1)
     }
 
-    func testColdStartSignedOutDetachesThePersistedDepartingAccount() async throws {
+    // I3 review E1/E5: failed durable detach stops logout before any awaited cleanup.
+    func testDetachFailureStopsLogoutBeforePushCleanup() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var transitionPreparations = 0
+        var pushCleanupCalls = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport],
+            onPrepareAccountTransition: {
+                transitionPreparations += 1
+                return []
+            },
+            onDetachActiveOwner: { false },
+            onPreparePushLogout: { pushCleanupCalls += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+
+        do {
+            _ = try await coordinator.logout()
+            XCTFail("Logout should stop when the ledger cannot durably detach.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error.code, "local_state_unavailable")
+        }
+        XCTAssertEqual(transitionPreparations, 1)
+        XCTAssertEqual(pushCleanupCalls, 0)
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
+    }
+
+    // I3 review E1: a new authenticated account is not exposed until owner sync commits.
+    func testAuthenticatedAccountWaitsWhenScheduleOwnerCommitFails() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-2")
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport],
+            onAuthenticatedAccount: { _ in false }
+        )
+        coordinator.activateAccountSurface()
+
+        do {
+            _ = try await coordinator.bootstrap()
+            XCTFail("Bootstrap should stop when the schedule owner cannot be committed.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error.code, "local_state_unavailable")
+        }
+        XCTAssertNil(coordinator.currentAccount)
+    }
+
+    // I3 review D2: server-signed-out bootstrap is not an explicit owner detach.
+    func testColdStartSignedOutPreservesThePersistedScheduleOwner() async throws {
         let defaults = makeDefaults()
         let signedIn = FakeMobileAuthTransport()
         signedIn.session = snapshot(accountID: "account-1")
@@ -4166,15 +4219,59 @@ final class MobileOnboardingTests: XCTestCase {
         let relaunched = makeCoordinator(
             defaults: defaults,
             transports: [signedOut, FakeMobileAuthTransport()],
-            onDetachAccount: { detachedAccounts.append($0) }
+            onDetachActiveOwner: {
+                detachedAccounts.append("detached")
+                return true
+            }
         )
         relaunched.activateAccountSurface()
 
         let relaunchedRoute = try await relaunched.bootstrap()
         XCTAssertEqual(relaunchedRoute, .signedOut)
-        XCTAssertEqual(detachedAccounts, ["account-1"])
+        XCTAssertEqual(detachedAccounts, [])
     }
 
+    // I3 simplification 2: stale selection cannot prove the persisted schedule owner changed.
+    func testColdStartStaleSelectionUsesAuthenticatedAccountOwnerFence() async throws {
+        let defaults = makeDefaults()
+        let staleTransport = FakeMobileAuthTransport()
+        staleTransport.session = snapshot(accountID: "account-2")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [staleTransport]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let matchingOwnerTransport = FakeMobileAuthTransport()
+        matchingOwnerTransport.session = snapshot(accountID: "account-1")
+        let matchingOwnerBootstrapTransport = FakeMobileAuthTransport()
+        matchingOwnerBootstrapTransport.session = snapshot(accountID: "account-1")
+        var explicitDetachCount = 0
+        var authenticatedAccounts: [String] = []
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [matchingOwnerTransport, matchingOwnerBootstrapTransport],
+            onDetachActiveOwner: {
+                explicitDetachCount += 1
+                return true
+            },
+            onDetachActiveOwnerForAuthenticatedAccount: { accountID in
+                authenticatedAccounts.append(accountID)
+                return true
+            }
+        )
+        relaunched.activateAccountSurface()
+
+        let relaunchedRoute = try await relaunched.bootstrap()
+        XCTAssertEqual(relaunchedRoute, .signedOut)
+        XCTAssertNil(relaunched.currentAccount)
+        XCTAssertEqual(explicitDetachCount, 0)
+        XCTAssertEqual(authenticatedAccounts, ["account-1"])
+    }
+
+    // I3 simplification 2: a proven different account detaches the persisted owner.
     func testColdStartDifferentAccountDetachesThePersistedDepartingAccount() async throws {
         let defaults = makeDefaults()
         let firstTransport = FakeMobileAuthTransport()
@@ -4191,18 +4288,88 @@ final class MobileOnboardingTests: XCTestCase {
         replacementTransport.session = snapshot(accountID: "account-2")
         let replacementBootstrapTransport = FakeMobileAuthTransport()
         replacementBootstrapTransport.session = snapshot(accountID: "account-2")
-        var detachedAccounts: [String] = []
+        var explicitDetachCount = 0
+        var authenticatedAccounts: [String] = []
         let relaunched = makeCoordinator(
             defaults: defaults,
             transports: [replacementTransport, replacementBootstrapTransport],
-            onDetachAccount: { detachedAccounts.append($0) }
+            onDetachActiveOwner: {
+                explicitDetachCount += 1
+                return true
+            },
+            onDetachActiveOwnerForAuthenticatedAccount: { accountID in
+                authenticatedAccounts.append(accountID)
+                return true
+            }
         )
         relaunched.activateAccountSurface()
 
         let relaunchedRoute = try await relaunched.bootstrap()
         XCTAssertEqual(relaunchedRoute, .signedOut)
         XCTAssertNil(relaunched.currentAccount)
-        XCTAssertEqual(detachedAccounts, ["account-1"])
+        XCTAssertEqual(explicitDetachCount, 0)
+        XCTAssertEqual(authenticatedAccounts, ["account-2"])
+    }
+
+    // I3 review E4: 2FA is not an inferred logout and preserves the owner.
+    func testColdStartSecondFactorPreservesThePersistedScheduleOwner() async throws {
+        let defaults = makeDefaults()
+        let signedIn = FakeMobileAuthTransport()
+        signedIn.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(defaults: defaults, transports: [signedIn])
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let owed = FakeMobileAuthTransport()
+        owed.secondFactor = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .challenge,
+            methods: [.totp]
+        )
+        var detachCount = 0
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [owed],
+            onDetachActiveOwner: {
+                detachCount += 1
+                return true
+            }
+        )
+        relaunched.activateAccountSurface()
+
+        let state = try await relaunched.bootstrap()
+        guard case .twoFactorRequired = state else {
+            return XCTFail("Expected two-factor state")
+        }
+        XCTAssertEqual(detachCount, 0)
+    }
+
+    // I3 review E5: explicit logout detaches the ledger owner without snapshot or selection.
+    func testExplicitLogoutDetachesEvenWithoutSnapshotOrSelection() async throws {
+        let cleanupStarted = expectation(description: "push cleanup started")
+        let releaseCleanup = expectation(description: "release push cleanup")
+        var detachCount = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            onDetachActiveOwner: {
+                detachCount += 1
+                return true
+            },
+            onPreparePushLogout: {
+                cleanupStarted.fulfill()
+                await self.fulfillment(of: [releaseCleanup], timeout: 30)
+            }
+        )
+        coordinator.activateAccountSurface()
+
+        let logout = Task { try await coordinator.logout() }
+        await fulfillment(of: [cleanupStarted], timeout: 30)
+        XCTAssertEqual(detachCount, 1)
+        releaseCleanup.fulfill()
+        let state = try await logout.value
+        XCTAssertEqual(state, .signedOut)
     }
 
     private func makeDefaults() -> UserDefaults {
@@ -4225,7 +4392,9 @@ final class MobileOnboardingTests: XCTestCase {
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
         ] = { [] },
-        onDetachAccount: @escaping @MainActor (String) -> Void = { _ in },
+        onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
+        onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) -> MobileSessionCoordinator {
         var queue = transports
@@ -4244,7 +4413,9 @@ final class MobileOnboardingTests: XCTestCase {
             passkeyAuthenticator: passkeyAuthenticator ?? FakePasskeyAuthenticator(),
             onOpenRuntime: onOpen,
             onPrepareAccountTransition: onPrepareAccountTransition,
-            onDetachAccount: onDetachAccount,
+            onDetachActiveOwner: onDetachActiveOwner,
+            onDetachActiveOwnerForAuthenticatedAccount: onDetachActiveOwnerForAuthenticatedAccount,
+            onAuthenticatedAccount: onAuthenticatedAccount,
             onPreparePushLogout: onPreparePushLogout
         )
     }

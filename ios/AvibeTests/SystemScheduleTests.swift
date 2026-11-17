@@ -45,7 +45,7 @@ final class SystemScheduleTests: XCTestCase {
             "requestId": "cancel-1",
             "operationId": "operation-1",
             "kind": "reminder",
-            "purpose": "compensation",
+            "purpose": "user",
         ]
         XCTAssertEqual(
             SystemScheduleCancelRequest.parse(params),
@@ -53,9 +53,13 @@ final class SystemScheduleTests: XCTestCase {
                 requestID: "cancel-1",
                 operationID: "operation-1",
                 kind: .reminder,
-                purpose: .compensation
+                purpose: .user
             )
         )
+
+        var compensation = params
+        compensation["purpose"] = "compensation"
+        XCTAssertNil(SystemScheduleCancelRequest.parse(compensation))
 
         var missingPurpose = params
         missingPurpose.removeValue(forKey: "purpose")
@@ -86,7 +90,7 @@ final class SystemScheduleTests: XCTestCase {
             cancelRequests.compactMap {
                 SystemScheduleCancelRequest.parse($0)?.purpose
             },
-            [.user, .compensation]
+            [.user, .user]
         )
 
         let receiptVectors = try XCTUnwrap(
@@ -182,14 +186,21 @@ final class SystemScheduleTests: XCTestCase {
                 withJSONObject: ["version": 2, "activeOwner": NSNull(), "records": []]
             ),
         ] {
-            let suiteName = "SystemScheduleTests.\(UUID().uuidString)"
-            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-            defer { defaults.removePersistentDomain(forName: suiteName) }
-            defaults.set(data, forKey: "avibe.systemSchedule.records")
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "SystemScheduleCorruptTests.\(UUID().uuidString)",
+                isDirectory: true
+            )
+            defer { try? FileManager.default.removeItem(at: directory) }
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            let fileURL = directory.appendingPathComponent("ledger.json")
+            try data.write(to: fileURL)
             let platform = SystemSchedulePlatformSpy()
             let coordinator = SystemScheduleCoordinator(
                 platform: platform,
-                store: UserDefaultsSystemScheduleStore(defaults: defaults)
+                store: FileSystemSystemScheduleStore(fileURL: fileURL)
             )
 
             let receipt = await coordinator.schedule(
@@ -202,17 +213,14 @@ final class SystemScheduleTests: XCTestCase {
             XCTAssertEqual(receipt.state, .failed)
             XCTAssertEqual(receipt.error?.code, "local_state_unavailable")
             XCTAssertEqual(platform.scheduleCalls, 0)
-            XCTAssertEqual(
-                defaults.data(forKey: "avibe.systemSchedule.records"),
-                data
-            )
+            XCTAssertEqual(try Data(contentsOf: fileURL), data)
         }
     }
 
     @MainActor
     func testSameOperationIDIsScopedByInstance() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let platform = SystemSchedulePlatformSpy()
         let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
@@ -258,9 +266,9 @@ final class SystemScheduleTests: XCTestCase {
     }
 
     @MainActor
-    func testCompensationTargetsTheExactInstanceRecord() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    func testUserCancelTargetsTheExactInstanceRecord() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let firstRequest = makeRequest(instanceID: "instance-1")
         let secondRequest = makeRequest(
@@ -299,7 +307,7 @@ final class SystemScheduleTests: XCTestCase {
         let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
 
         let receipt = await coordinator.cancel(
-            makeCancelRequest(purpose: .compensation),
+            makeCancelRequest(),
             context: makeContext(owner: owner, instanceID: "instance-1"),
             stillCurrent: { true }
         )
@@ -324,16 +332,20 @@ final class SystemScheduleTests: XCTestCase {
         )
     }
 
+    // I3 review E1: the reservation crosses a real file durability barrier before OS work.
     @MainActor
     func testReservationIsDurableBeforeThePlatformWrite() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
         let platform = SystemSchedulePlatformSpy()
         platform.onScheduleWrite = {
-            let record = store.record(
+            let reopened = FileSystemSystemScheduleStore(
+                fileURL: directory.appendingPathComponent("ledger.json")
+            )
+            let record = reopened.record(
                 operationID: request.operationID,
                 instanceID: request.instanceID,
                 owner: owner
@@ -366,10 +378,208 @@ final class SystemScheduleTests: XCTestCase {
         )
     }
 
+    // I3 review E1: a crash before rename leaves the previous committed ledger intact.
+    @MainActor
+    func testInterruptedPreRenameWritePreservesThePreviousLedger() throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let request = makeRequest()
+        let original = StoredSystemSchedule(
+            operationID: request.operationID,
+            owner: owner,
+            intent: StoredSystemScheduleIntent(request: request),
+            systemIdentifier: "system-1",
+            authorization: .authorized,
+            lifecycle: .reserved,
+            effectMayExist: false,
+            generation: 1,
+            createState: nil,
+            lastError: nil,
+            updatedAt: now
+        )
+        XCTAssertTrue(store.save(original))
+
+        let interrupted = FileSystemSystemScheduleStore(
+            fileURL: directory.appendingPathComponent("ledger.json"),
+            beforeRename: {
+                throw NSError(domain: "intentional-pre-rename", code: 1)
+            }
+        )
+        var changed = original
+        changed.lifecycle = .managedScheduled
+        changed.effectMayExist = true
+        changed.generation += 1
+        XCTAssertFalse(interrupted.save(changed))
+
+        let reopened = FileSystemSystemScheduleStore(
+            fileURL: directory.appendingPathComponent("ledger.json")
+        )
+        XCTAssertEqual(
+            reopened.record(
+                operationID: request.operationID,
+                instanceID: request.instanceID,
+                owner: owner
+            ),
+            original
+        )
+    }
+
+    // I3 review E1/E5: explicit logout cannot advance past an uncommitted detach.
+    @MainActor
+    func testInterruptedDetachPreservesActiveOwnerAndManagedRecord() throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let request = makeRequest()
+        let original = StoredSystemSchedule(
+            operationID: request.operationID,
+            owner: owner,
+            intent: StoredSystemScheduleIntent(request: request),
+            systemIdentifier: "system-1",
+            authorization: .authorized,
+            lifecycle: .managedScheduled,
+            effectMayExist: true,
+            generation: 1,
+            createState: .scheduled,
+            lastError: nil,
+            updatedAt: now
+        )
+        XCTAssertTrue(store.save(original))
+
+        let interrupted = FileSystemSystemScheduleStore(
+            fileURL: directory.appendingPathComponent("ledger.json"),
+            beforeRename: {
+                throw NSError(domain: "intentional-pre-rename", code: 1)
+            }
+        )
+        XCTAssertFalse(interrupted.detachActiveOwner())
+
+        let reopened = FileSystemSystemScheduleStore(
+            fileURL: directory.appendingPathComponent("ledger.json")
+        )
+        XCTAssertTrue(reopened.isActive(owner: owner))
+        XCTAssertEqual(
+            reopened.record(
+                operationID: request.operationID,
+                instanceID: request.instanceID,
+                owner: owner
+            ),
+            original
+        )
+    }
+
+    @MainActor
+    func testConfirmedAccountMatchDoesNotDetachThePersistedOwner() throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let request = makeRequest()
+        let record = StoredSystemSchedule(
+            operationID: request.operationID,
+            owner: owner,
+            intent: StoredSystemScheduleIntent(request: request),
+            systemIdentifier: "system-1",
+            authorization: .authorized,
+            lifecycle: .managedScheduled,
+            effectMayExist: true,
+            generation: 1,
+            createState: .scheduled,
+            lastError: nil,
+            updatedAt: now
+        )
+        XCTAssertTrue(store.save(record))
+        let ledgerURL = directory.appendingPathComponent("ledger.json")
+        let committed = try Data(contentsOf: ledgerURL)
+
+        XCTAssertTrue(
+            store.detachActiveOwner(unlessAccountID: "account-1")
+        )
+        XCTAssertTrue(store.isActive(owner: owner))
+        XCTAssertEqual(try Data(contentsOf: ledgerURL), committed)
+        XCTAssertEqual(
+            store.record(
+                operationID: request.operationID,
+                instanceID: request.instanceID,
+                owner: owner
+            ),
+            record
+        )
+    }
+
+    @MainActor
+    func testDetachingTheActiveOwnerDoesNotRewritePriorSameAccountEpochs() throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstOwner = try XCTUnwrap(
+            store.managementOwner(accountID: "account-1")
+        )
+        let firstRequest = makeRequest(operationID: "operation-first")
+        let firstRecord = StoredSystemSchedule(
+            operationID: firstRequest.operationID,
+            owner: firstOwner,
+            intent: StoredSystemScheduleIntent(request: firstRequest),
+            systemIdentifier: "system-first",
+            authorization: .authorized,
+            lifecycle: .managedScheduled,
+            effectMayExist: true,
+            generation: 1,
+            createState: .scheduled,
+            lastError: nil,
+            updatedAt: now
+        )
+        XCTAssertTrue(store.save(firstRecord))
+        XCTAssertTrue(store.detachActiveOwner())
+        let detachedFirst = try XCTUnwrap(
+            store.record(
+                operationID: firstRequest.operationID,
+                instanceID: firstRequest.instanceID,
+                owner: firstOwner
+            )
+        )
+
+        let secondOwner = try XCTUnwrap(
+            store.managementOwner(accountID: "account-1")
+        )
+        let secondRequest = makeRequest(operationID: "operation-second")
+        let secondRecord = StoredSystemSchedule(
+            operationID: secondRequest.operationID,
+            owner: secondOwner,
+            intent: StoredSystemScheduleIntent(request: secondRequest),
+            systemIdentifier: "system-second",
+            authorization: .authorized,
+            lifecycle: .managedScheduled,
+            effectMayExist: true,
+            generation: 1,
+            createState: .scheduled,
+            lastError: nil,
+            updatedAt: now
+        )
+        XCTAssertTrue(store.save(secondRecord))
+        XCTAssertTrue(store.detachActiveOwner())
+
+        XCTAssertEqual(
+            store.record(
+                operationID: firstRequest.operationID,
+                instanceID: firstRequest.instanceID,
+                owner: firstOwner
+            ),
+            detachedFirst
+        )
+        XCTAssertEqual(
+            store.record(
+                operationID: secondRequest.operationID,
+                instanceID: secondRequest.instanceID,
+                owner: secondOwner
+            )?.lifecycle,
+            .detachedRetained
+        )
+    }
+
     @MainActor
     func testScheduleAndUserCancellationAreIdempotent() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
@@ -424,10 +634,11 @@ final class SystemScheduleTests: XCTestCase {
         XCTAssertEqual(platform.cancelWriteCalls, 1)
     }
 
+    // I3 review C2: detached cross-owner history blocks duplicate creation after relogin.
     @MainActor
     func testDetachIsPermanentAndReloginGetsANewOwnerEpoch() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let firstOwner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let firstContext = makeContext(owner: firstOwner)
         let request = makeRequest()
@@ -442,7 +653,7 @@ final class SystemScheduleTests: XCTestCase {
         )
         XCTAssertEqual(scheduled.state, .scheduled)
 
-        coordinator.detach(accountID: firstOwner.accountID)
+        coordinator.detachActiveOwner()
         let detached = try XCTUnwrap(
             store.record(
                 operationID: request.operationID,
@@ -492,8 +703,8 @@ final class SystemScheduleTests: XCTestCase {
 
     @MainActor
     func testLogoutCreateCleanupFailureStaysDetachedAcrossReloginAndRetries() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
@@ -511,7 +722,7 @@ final class SystemScheduleTests: XCTestCase {
             )
         )
         platform.onScheduleWrite = {
-            coordinator.detach(accountID: owner.accountID)
+            coordinator.detachActiveOwner()
         }
 
         let receipt = await coordinator.schedule(
@@ -574,15 +785,7 @@ final class SystemScheduleTests: XCTestCase {
         )
 
         platform.cancelResult = .success(.authorized)
-        let compensation = await coordinator.cancel(
-            makeCancelRequest(
-                requestID: "compensation-after-relogin",
-                purpose: .compensation
-            ),
-            context: newContext,
-            stillCurrent: { true }
-        )
-        XCTAssertEqual(compensation.state, .cancelled)
+        await coordinator.retryPendingCleanup()
         XCTAssertEqual(
             store.record(
                 operationID: request.operationID,
@@ -593,10 +796,11 @@ final class SystemScheduleTests: XCTestCase {
         )
     }
 
+    // I3 review D1: pending create and user-cancel continuations derive from cleanup truth.
     @MainActor
     func testUserCancelWhilePlatformCreateIsInFlightRemovesTheCreatedItem() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
@@ -748,6 +952,7 @@ final class SystemScheduleTests: XCTestCase {
         XCTAssertTrue(record?.effectMayExist == true)
     }
 
+    // I3 review C3: recovery runs before request-expiry guards for every existence result.
     @MainActor
     func testExpiredCreatingUnknownRecoveryHandlesEveryExistenceResult() async {
         let cases: [(
@@ -767,7 +972,7 @@ final class SystemScheduleTests: XCTestCase {
             (
                 "absent",
                 .absentConclusive(.authorized),
-                .expired,
+                .failed,
                 .closedNoItem,
                 0
             ),
@@ -840,10 +1045,61 @@ final class SystemScheduleTests: XCTestCase {
         }
     }
 
+    // I3 review E6: conclusive absence is a terminal no-item tombstone, never a recreate.
+    @MainActor
+    func testConclusiveAbsenceClosesRecoveryWithoutAnotherCreate() async {
+        let owner = SystemScheduleManagementOwner(
+            accountID: "account-1",
+            ownerEpoch: "owner-epoch-absence"
+        )
+        let store = SystemScheduleStoreSpy(activeOwner: owner)
+        let request = makeRequest()
+        let platform = SystemSchedulePlatformSpy()
+        XCTAssertTrue(
+            store.save(
+                StoredSystemSchedule(
+                    operationID: request.operationID,
+                    owner: owner,
+                    intent: StoredSystemScheduleIntent(request: request),
+                    systemIdentifier: platform.systemIdentifier(for: request, owner: owner),
+                    authorization: .authorized,
+                    lifecycle: .creatingUnknown,
+                    effectMayExist: true,
+                    generation: 2,
+                    createState: nil,
+                    lastError: nil,
+                    updatedAt: now
+                )
+            )
+        )
+        platform.existenceResults = [.absentConclusive(.authorized)]
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+
+        let receipt = await coordinator.schedule(
+            makeRequest(requestID: "request-recovery-absent"),
+            context: makeContext(owner: owner),
+            creationFence: { nil },
+            postWriteFence: { nil }
+        )
+
+        XCTAssertEqual(receipt.state, .failed)
+        XCTAssertEqual(receipt.error?.code, "recovery_item_absent")
+        XCTAssertEqual(platform.existenceCalls, 1)
+        XCTAssertEqual(platform.scheduleWriteCalls, 0)
+        XCTAssertEqual(
+            store.record(
+                operationID: request.operationID,
+                instanceID: request.instanceID,
+                owner: owner
+            )?.lifecycle,
+            .closedNoItem
+        )
+    }
+
     @MainActor
     func testContextChangeAfterCancelLookupPreventsSystemRemoval() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
@@ -878,9 +1134,9 @@ final class SystemScheduleTests: XCTestCase {
     }
 
     @MainActor
-    func testCleanupFailureRetainsIdentityAndCanBeRetriedByCompensation() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    func testCleanupFailureRetainsIdentityAndLifecycleRetryRemovesIt() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
@@ -920,13 +1176,8 @@ final class SystemScheduleTests: XCTestCase {
                 effectMayExist: true
             )
         )
-        let firstCleanup = await coordinator.cancel(
-            makeCancelRequest(purpose: .compensation),
-            context: context,
-            stillCurrent: { true }
-        )
-        XCTAssertEqual(firstCleanup.state, .failed)
-        XCTAssertEqual(firstCleanup.systemIdentifier, failed.systemIdentifier)
+        await coordinator.retryPendingCleanup()
+        XCTAssertEqual(platform.cancelSystemIdentifiers.last, failed.systemIdentifier)
         XCTAssertEqual(
             store.record(
                 operationID: request.operationID,
@@ -937,15 +1188,7 @@ final class SystemScheduleTests: XCTestCase {
         )
 
         platform.cancelResult = .success(.authorized)
-        let cleaned = await coordinator.cancel(
-            makeCancelRequest(
-                requestID: "compensation-2",
-                purpose: .compensation
-            ),
-            context: context,
-            stillCurrent: { true }
-        )
-        XCTAssertEqual(cleaned.state, .cancelled)
+        await coordinator.retryPendingCleanup()
         XCTAssertEqual(
             store.record(
                 operationID: request.operationID,
@@ -956,10 +1199,11 @@ final class SystemScheduleTests: XCTestCase {
         )
     }
 
+    // I3 review D5: a completed cleanup tombstone replays without another OS write.
     @MainActor
-    func testCompletedCleanupTombstoneReplaysCompensationWithoutAnotherOSWrite() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    func testCompletedCleanupTombstoneReplaysUserCancelWithoutAnotherOSWrite() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
@@ -990,10 +1234,7 @@ final class SystemScheduleTests: XCTestCase {
         )
 
         let replay = await coordinator.cancel(
-            makeCancelRequest(
-                requestID: "compensation-replay",
-                purpose: .compensation
-            ),
+            makeCancelRequest(requestID: "user-cancel-replay"),
             context: context,
             stillCurrent: { true }
         )
@@ -1003,9 +1244,9 @@ final class SystemScheduleTests: XCTestCase {
     }
 
     @MainActor
-    func testPendingCompensationWinsOverANewerCompletedTombstone() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    func testLifecycleCleanupPrefersPendingRecordOverNewerTombstone() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let request = makeRequest()
         let firstOwner = try XCTUnwrap(
             store.managementOwner(accountID: "account-1")
@@ -1042,13 +1283,8 @@ final class SystemScheduleTests: XCTestCase {
         XCTAssertTrue(store.save(tombstone))
         let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
 
-        let receipt = await coordinator.cancel(
-            makeCancelRequest(purpose: .compensation),
-            context: makeContext(owner: currentOwner),
-            stillCurrent: { true }
-        )
+        await coordinator.retryPendingCleanup()
 
-        XCTAssertEqual(receipt.state, .cancelled)
         XCTAssertEqual(platform.cancelSystemIdentifiers, [pendingIdentifier])
         XCTAssertEqual(
             store.record(
@@ -1068,6 +1304,7 @@ final class SystemScheduleTests: XCTestCase {
         )
     }
 
+    // I3 review D6: terminal platform evidence persists the observed authorization atomically.
     @MainActor
     func testTerminalPlatformFailurePersistsObservedAuthorization() async throws {
         let cases: [(
@@ -1079,8 +1316,8 @@ final class SystemScheduleTests: XCTestCase {
             (.unsupported, .unsupported, .unsupported),
         ]
         for testCase in cases {
-            let (defaults, store) = try makeStore()
-            defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+            let (directory, store) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: directory) }
             let owner = try XCTUnwrap(
                 store.managementOwner(accountID: "account-1")
             )
@@ -1115,10 +1352,11 @@ final class SystemScheduleTests: XCTestCase {
         }
     }
 
+    // I3 review D3: a lookup returning after logout keeps exact detached cleanup identity.
     @MainActor
-    func testLogoutDuringRecoveryLookupPreservesIdentityForCompensation() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    func testLogoutDuringRecoveryLookupPreservesIdentityForLocalCleanup() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest()
@@ -1166,7 +1404,7 @@ final class SystemScheduleTests: XCTestCase {
             )
         }
         await eventually { platform.hasSuspendedExistence }
-        coordinator.detach(accountID: owner.accountID)
+        coordinator.detachActiveOwner()
         XCTAssertEqual(
             store.record(
                 operationID: request.operationID,
@@ -1197,8 +1435,8 @@ final class SystemScheduleTests: XCTestCase {
 
     @MainActor
     func testDeadlineCrossedBeforePlatformWriteCreatesNoSystemItem() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest(expiresAt: now.addingTimeInterval(10))
@@ -1236,9 +1474,9 @@ final class SystemScheduleTests: XCTestCase {
     }
 
     @MainActor
-    func testDeadlineCrossedAfterPlatformWriteKeepsScheduledResultWithoutCompensation() async throws {
-        let (defaults, store) = try makeStore()
-        defer { defaults.removePersistentDomain(forName: defaultsSuite(defaults)) }
+    func testDeadlineCrossedAfterPlatformWriteKeepsScheduledResultWithoutCleanup() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
         let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
         let context = makeContext(owner: owner)
         let request = makeRequest(expiresAt: now.addingTimeInterval(10))
@@ -1398,12 +1636,13 @@ final class SystemScheduleTests: XCTestCase {
 
     private func makeRequest(
         requestID: String = "request-1",
+        operationID: String = "operation-1",
         instanceID: String = "instance-1",
         expiresAt: Date? = nil
     ) -> SystemScheduleRequest {
         SystemScheduleRequest(
             requestID: requestID,
-            operationID: "operation-1",
+            operationID: operationID,
             kind: .alarm,
             title: "Take medicine",
             fireAt: now.addingTimeInterval(3_600),
@@ -1467,17 +1706,23 @@ final class SystemScheduleTests: XCTestCase {
 
     @MainActor
     private func makeStore() throws -> (
-        defaults: UserDefaults,
-        store: UserDefaultsSystemScheduleStore
+        directory: URL,
+        store: FileSystemSystemScheduleStore
     ) {
-        let suiteName = "SystemScheduleTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.set(suiteName, forKey: "test.suiteName")
-        return (defaults, UserDefaultsSystemScheduleStore(defaults: defaults))
-    }
-
-    private func defaultsSuite(_ defaults: UserDefaults) -> String {
-        defaults.string(forKey: "test.suiteName")!
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "SystemScheduleTests.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return (
+            directory,
+            FileSystemSystemScheduleStore(
+                fileURL: directory.appendingPathComponent("ledger.json")
+            )
+        )
     }
 
     @MainActor
@@ -1662,8 +1907,8 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
         if activeOwner?.accountID == accountID {
             return activeOwner
         }
-        if let activeOwner {
-            detach(accountID: activeOwner.accountID)
+        if activeOwner != nil {
+            _ = detachActiveOwner()
         }
         ownerGeneration += 1
         let owner = SystemScheduleManagementOwner(
@@ -1702,30 +1947,13 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
             .max(by: { $0.updatedAt < $1.updatedAt })
     }
 
-    func compensationRecord(
-        operationID: String,
-        instanceID: String,
-        kind: SystemScheduleKind
-    ) -> StoredSystemSchedule? {
-        let candidates = records.filter {
-            $0.operationID == operationID
-                && $0.intent.instanceID == instanceID
-                && $0.intent.kind == kind
-                && [
-                    .managedCleanupPending,
-                    .detachedCleanupPending,
-                    .closedNoItem,
-                    .closedRemoved,
-                    .detachedCleaned,
-                    .detachedAbsent,
-                ].contains($0.lifecycle)
-        }
-        let pending = candidates.filter {
-            [.managedCleanupPending, .detachedCleanupPending]
-                .contains($0.lifecycle)
-        }
-        return (pending.isEmpty ? candidates : pending)
-            .max(by: { $0.updatedAt < $1.updatedAt })
+    func cleanupRecords() -> [StoredSystemSchedule] {
+        records
+            .filter {
+                [.managedCleanupPending, .detachedCleanupPending]
+                    .contains($0.lifecycle)
+            }
+            .sorted(by: { $0.updatedAt < $1.updatedAt })
     }
 
     func save(_ record: StoredSystemSchedule) -> Bool {
@@ -1749,11 +1977,24 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
         return true
     }
 
-    func detach(accountID: String) {
-        if activeOwner?.accountID == accountID {
-            activeOwner = nil
-        }
-        for index in records.indices where records[index].owner.accountID == accountID {
+    @discardableResult
+    func detachActiveOwner() -> Bool {
+        guard let activeOwner else { return true }
+        return detach(activeOwner)
+    }
+
+    @discardableResult
+    func detachActiveOwner(unlessAccountID accountID: String) -> Bool {
+        guard let activeOwner else { return true }
+        guard activeOwner.accountID != accountID else { return true }
+        return detach(activeOwner)
+    }
+
+    private func detach(_ owner: SystemScheduleManagementOwner) -> Bool {
+        activeOwner = nil
+        for index in records.indices
+            where records[index].owner == owner
+        {
             switch records[index].lifecycle {
             case .managedScheduled:
                 records[index].lifecycle = .detachedRetained
@@ -1771,10 +2012,6 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
             records[index].generation += 1
             records[index].updatedAt = Date()
         }
-    }
-
-    func detachActiveOwner() {
-        guard let activeOwner else { return }
-        detach(accountID: activeOwner.accountID)
+        return true
     }
 }

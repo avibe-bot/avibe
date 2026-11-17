@@ -525,7 +525,9 @@ final class MobileSessionCoordinator {
     private let onPrepareAccountTransition: () -> [
         WebsiteDataStoreReleaseBarrier
     ]
-    private let onDetachAccount: @MainActor (String) -> Void
+    private let onDetachActiveOwner: @MainActor () -> Bool
+    private let onDetachActiveOwnerForAuthenticatedAccount: @MainActor (String) -> Bool
+    private let onAuthenticatedAccount: @MainActor (String) -> Bool
     private let onPreparePushLogout: @MainActor () async -> Void
 
     private var transport: MobileAuthTransporting?
@@ -613,7 +615,9 @@ final class MobileSessionCoordinator {
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
         ],
-        onDetachAccount: @escaping @MainActor (String) -> Void = { _ in },
+        onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
+        onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) {
         self.defaults = defaults
@@ -624,7 +628,9 @@ final class MobileSessionCoordinator {
             ?? MobilePasskeyAuthenticator()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
-        self.onDetachAccount = onDetachAccount
+        self.onDetachActiveOwner = onDetachActiveOwner
+        self.onDetachActiveOwnerForAuthenticatedAccount = onDetachActiveOwnerForAuthenticatedAccount
+        self.onAuthenticatedAccount = onAuthenticatedAccount
         self.onPreparePushLogout = onPreparePushLogout
         transport = nil
     }
@@ -729,16 +735,26 @@ final class MobileSessionCoordinator {
                 try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
                 return .signedOut
             }
-            if self.belongsToAnotherAccount(discovery) {
-                try await self.preparePushLogout(
-                    publishing: .signedOut, generation: requestGeneration
+            if let authenticatedAccountID = self.differentAuthenticatedAccountID(
+                discovery
+            ) {
+                let transitionGeneration = self.beginAccountTransition(
+                    clearSelection: true
                 )
-                let transitionGeneration = self.beginAccountTransition(clearSelection: true)
-                try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
+                try self.detachScheduleOwner(
+                    unlessAuthenticatedAccount: authenticatedAccountID
+                )
+                try await self.preparePushLogout(
+                    publishing: .signedOut,
+                    generation: transitionGeneration
+                )
+                try await self.replaceWithFreshSignedOutStore(
+                    generation: transitionGeneration
+                )
                 return .signedOut
             }
             self.signedOutStoreIsFresh = false
-            return self.state(for: discovery)
+            return try self.state(for: discovery)
         }
     }
 
@@ -782,7 +798,7 @@ final class MobileSessionCoordinator {
                 self.clearStoredSelection()
                 self.signedOutStoreIsFresh = false
                 self.secondFactorEmail = normalizedEmail
-                return self.state(for: discovery)
+                return try self.state(for: discovery)
             } catch {
                 if self.generation == loginGeneration {
                     try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
@@ -818,7 +834,7 @@ final class MobileSessionCoordinator {
                 self.signedOutStoreIsFresh = false
                 self.secondFactorEmail = normalizedEmail
                 return MobilePasswordSignInResult(
-                    state: self.state(for: result.discovery),
+                    state: try self.state(for: result.discovery),
                     weakPasswordReasons: result.weakPasswordReasons
                 )
             } catch {
@@ -864,11 +880,19 @@ final class MobileSessionCoordinator {
                     let previousAccountID,
                     previousAccountID != fresh.account.id
                 {
-                    try await self.preparePushLogout(
-                        publishing: .signedOut, generation: requestGeneration
+                    let transitionGeneration = self.beginAccountTransition(
+                        clearSelection: true
                     )
-                    let transitionGeneration = self.beginAccountTransition(clearSelection: true)
-                    try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
+                    try self.detachScheduleOwner(
+                        unlessAuthenticatedAccount: fresh.account.id
+                    )
+                    try await self.preparePushLogout(
+                        publishing: .signedOut,
+                        generation: transitionGeneration
+                    )
+                    try await self.replaceWithFreshSignedOutStore(
+                        generation: transitionGeneration
+                    )
                     return .signedOut
                 }
                 if self.selectedRuntimeOriginIsMissing(in: fresh) {
@@ -898,7 +922,7 @@ final class MobileSessionCoordinator {
                     self.beginAccountTransition(clearSelection: true)
                 }
                 self.signedOutStoreIsFresh = false
-                return self.state(for: discovery)
+                return try self.state(for: discovery)
             }
         }
     }
@@ -1093,8 +1117,9 @@ final class MobileSessionCoordinator {
             borrowsCleanup = false
         }
         let resetToken = try beginReset()
-        let resetGeneration = generation
         defer { finishReset(resetToken) }
+        try detachScheduleOwner()
+        let resetGeneration = generation
         try await preparePushLogout(
             publishing: .signedOut, generation: resetGeneration,
             borrowingCleanup: borrowsCleanup
@@ -1157,7 +1182,7 @@ final class MobileSessionCoordinator {
             let discovery = try await operation()
             try requireCurrentGeneration(requestGeneration)
             signedOutStoreIsFresh = false
-            return state(for: discovery)
+            return try state(for: discovery)
         } catch let error as MobileAccountError
             where error.code == MobileAccountError.signedOut.code
         {
@@ -1168,6 +1193,22 @@ final class MobileSessionCoordinator {
             let transitionGeneration = beginAccountTransition(clearSelection: true)
             try await replaceWithFreshSignedOutStore(generation: transitionGeneration)
             return .signedOut
+        }
+    }
+
+    private func detachScheduleOwner(
+        unlessAuthenticatedAccount accountID: String? = nil
+    ) throws {
+        let detached = if let accountID {
+            onDetachActiveOwnerForAuthenticatedAccount(accountID)
+        } else {
+            onDetachActiveOwner()
+        }
+        guard detached else {
+            throw MobileAccountError(
+                code: "local_state_unavailable",
+                message: "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
+            )
         }
     }
 
@@ -1184,27 +1225,12 @@ final class MobileSessionCoordinator {
                 authoritativeTransition = nil
             }
         }
-        if let accountID = snapshot?.account.id ?? storedSelection()?.accountID,
-           !stateKeepsAccount(state, accountID: accountID)
-        {
-            onDetachAccount(accountID)
-        }
         if !borrowingCleanup {
             await preparePushLogout()
         }
         // Push cleanup can be superseded by logout and even a new login.
         // Transport ownership alone does not authorize the old state write.
         try requireCurrentGeneration(requestGeneration)
-    }
-
-    private func stateKeepsAccount(
-        _ state: MobileSessionState,
-        accountID: String
-    ) -> Bool {
-        guard case .signedIn(let snapshot, _) = state else {
-            return false
-        }
-        return snapshot.account.id == accountID
     }
 
     private func preparePushLogout() async {
@@ -1229,16 +1255,17 @@ final class MobileSessionCoordinator {
         await onPreparePushLogout()
     }
 
-    private func belongsToAnotherAccount(
+    private func differentAuthenticatedAccountID(
         _ discovery: MobileSessionDiscovery
-    ) -> Bool {
+    ) -> String? {
         guard
             case .signedIn(let fresh) = discovery,
-            let selection = storedSelection()
+            let selection = storedSelection(),
+            selection.accountID != fresh.account.id
         else {
-            return false
+            return nil
         }
-        return selection.accountID != fresh.account.id
+        return fresh.account.id
     }
 
     private func beginRuntimeInvalidation(
@@ -1270,9 +1297,17 @@ final class MobileSessionCoordinator {
         }
     }
 
-    private func state(for discovery: MobileSessionDiscovery) -> MobileSessionState {
+    private func state(
+        for discovery: MobileSessionDiscovery
+    ) throws -> MobileSessionState {
         switch discovery {
         case .signedIn(let fresh):
+            guard onAuthenticatedAccount(fresh.account.id) else {
+                throw MobileAccountError(
+                    code: "local_state_unavailable",
+                    message: "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
+                )
+            }
             secondFactorEmail = nil
             snapshot = fresh
             return state(for: fresh)

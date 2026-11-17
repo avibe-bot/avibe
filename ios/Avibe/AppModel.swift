@@ -331,8 +331,18 @@ final class AppModel: ObservableObject {
         onPrepareAccountTransition: { [weak self] in
             self?.prepareForAccountTransition() ?? []
         },
-        onDetachAccount: { [weak self] accountID in
-            self?.systemScheduleCoordinator.detach(accountID: accountID)
+        onDetachActiveOwner: { [weak self] in
+            self?.systemScheduleCoordinator.detachActiveOwner() ?? false
+        },
+        onDetachActiveOwnerForAuthenticatedAccount: { [weak self] accountID in
+            self?.systemScheduleCoordinator.detachActiveOwner(
+                unlessAccountID: accountID
+            ) ?? false
+        },
+        onAuthenticatedAccount: { [weak self] accountID in
+            self?.systemScheduleCoordinator.synchronizeAccount(
+                accountID: accountID
+            ) ?? false
         },
         onPreparePushLogout: { [weak self] in
             // Signing out or another account: the badge counted this
@@ -428,6 +438,7 @@ final class AppModel: ObservableObject {
         pushOpenedNow: @escaping () -> Date = Date.init,
         pushOpenedLifetime: TimeInterval = 120,
         systemSchedulePlatform: SystemSchedulePlatforming? = nil,
+        systemScheduleStore: SystemScheduleStoring? = nil,
         systemScheduleNow: @escaping () -> Date = Date.init,
         runtimeOpenTiming: (any RuntimeOpenTiming)? = nil,
         runtimeOpenBudget: Duration = AppModel.runtimeOpenAutomaticBudget,
@@ -457,12 +468,17 @@ final class AppModel: ObservableObject {
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
         self.systemScheduleNow = systemScheduleNow
-        self.systemScheduleDeviceID = SystemScheduleDeviceIdentity.resolve(
+        let systemScheduleDeviceID = SystemScheduleDeviceIdentity.resolve(
             defaults: defaults
         )
+        self.systemScheduleDeviceID = systemScheduleDeviceID
         self.systemScheduleCoordinator = SystemScheduleCoordinator(
             platform: systemSchedulePlatform ?? LiveSystemSchedulePlatform(),
-            store: UserDefaultsSystemScheduleStore(defaults: defaults),
+            store: systemScheduleStore ?? FileSystemSystemScheduleStore(
+                fileURL: FileSystemSystemScheduleStore.defaultFileURL(
+                    deviceID: systemScheduleDeviceID
+                )
+            ),
             now: systemScheduleNow
         )
         self.runtimeOpenTiming = runtimeOpenTiming ?? ContinuousRuntimeOpenTiming()
@@ -498,6 +514,7 @@ final class AppModel: ObservableObject {
         ]
 
         Task { [weak self] in
+            await self?.systemScheduleCoordinator.retryPendingCleanup()
             await self?.bootstrap()
         }
     }
@@ -591,6 +608,7 @@ final class AppModel: ObservableObject {
         _ request: SystemScheduleRequest,
         origin: WebOrigin
     ) async -> [String: Any] {
+        await systemScheduleCoordinator.retryPendingCleanup()
         let context: SystemScheduleContext
         switch resolveCurrentSystemScheduleContext(
             origin: origin,
@@ -748,6 +766,7 @@ final class AppModel: ObservableObject {
         _ request: SystemScheduleCancelRequest,
         origin: WebOrigin
     ) async -> [String: Any]? {
+        await systemScheduleCoordinator.retryPendingCleanup()
         let context: SystemScheduleContext
         switch resolveCurrentSystemScheduleContext(origin: origin) {
         case .available(let current):
@@ -1096,13 +1115,6 @@ final class AppModel: ObservableObject {
         sessionCoordinator.activateAccountSurface()
         do {
             let state = try await sessionCoordinator.bootstrap()
-            if case .signedIn(let snapshot, _) = state {
-                systemScheduleCoordinator.synchronizeAccount(
-                    accountID: snapshot.account.id
-                )
-            } else {
-                systemScheduleCoordinator.synchronizeAccount(accountID: nil)
-            }
             if let runtime = sessionCoordinator.restorableRuntime(from: state) {
                 sessionCoordinator.deactivateAccountSurface()
                 openRuntime(runtime)
@@ -1567,6 +1579,9 @@ final class AppModel: ObservableObject {
     /// remainder. A timer that could not fire on time (no background
     /// interval was reported) ends its attempt here.
     private func runtimeOpenWillEnterForeground() {
+        Task { [weak self] in
+            await self?.systemScheduleCoordinator.retryPendingCleanup()
+        }
         if let backgroundedAt = runtimeOpenBackgroundedAt {
             runtimeOpenBackgroundTime += runtimeOpenTiming.now - backgroundedAt
             runtimeOpenBackgroundedAt = nil

@@ -77,7 +77,7 @@ export type NativeSystemScheduleCancel = Pick<
   NativeSystemScheduleRequest,
   'requestId' | 'operationId' | 'kind'
 > & {
-  purpose: 'user' | 'compensation';
+  purpose: 'user';
 };
 
 export type NativeSystemScheduleReceipt = {

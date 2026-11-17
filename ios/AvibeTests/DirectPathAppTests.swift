@@ -527,9 +527,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(platform.scheduleCalls, 1)
         XCTAssertEqual(platform.systemCreationCalls, 1)
 
-        let store = UserDefaultsSystemScheduleStore(
-            defaults: try XCTUnwrap(appDefaults)
-        )
+        let store = try XCTUnwrap(appScheduleStore)
         let owner = try XCTUnwrap(
             store.managementOwner(accountID: "account-1")
         )
@@ -567,18 +565,17 @@ final class DirectPathAppTests: XCTestCase {
             )
         )
         var owner: SystemScheduleManagementOwner?
-        var store: UserDefaultsSystemScheduleStore?
+        var store: FileSystemSystemScheduleStore?
         let app = try await makeApp(
             directTransport: nil,
             sessionResponse: { .status(500) },
             systemScheduleNow: { now },
             launchesWithInstanceOneSelected: true,
             whenTheAppExists: { _ in
-                guard let defaults = self.appDefaults else {
-                    XCTFail("App defaults were not created before bootstrap.")
+                guard let seeded = self.appScheduleStore else {
+                    XCTFail("App schedule store was not created before bootstrap.")
                     return
                 }
-                let seeded = UserDefaultsSystemScheduleStore(defaults: defaults)
                 guard let seededOwner = seeded.managementOwner(
                     accountID: "account-1"
                 ) else {
@@ -623,6 +620,173 @@ final class DirectPathAppTests: XCTestCase {
                 owner: persistedOwner
             )?.lifecycle,
             .managedScheduled
+        )
+    }
+
+    @MainActor
+    func testNativeCleanupRetriesOnLaunchForegroundAndBridgeClaims() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let launchRequest = try XCTUnwrap(
+            SystemScheduleRequest.parse(
+                scheduleParams(
+                    requestID: "request-launch-cleanup",
+                    operationID: "operation-launch-cleanup",
+                    now: now
+                )
+            )
+        )
+        let retainedRequest = try XCTUnwrap(
+            SystemScheduleRequest.parse(
+                scheduleParams(
+                    requestID: "request-retained",
+                    operationID: "operation-retained",
+                    now: now
+                )
+            )
+        )
+        var seededOwner: SystemScheduleManagementOwner?
+        let app = try await makeApp(
+            directTransport: nil,
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now },
+            beforeTheAppExists: { [self] in
+                let store = try XCTUnwrap(appScheduleStore)
+                let owner = try XCTUnwrap(
+                    store.managementOwner(accountID: "account-1")
+                )
+                seededOwner = owner
+                XCTAssertTrue(
+                    store.save(
+                        cleanupPendingRecord(
+                            request: launchRequest,
+                            owner: owner,
+                            systemIdentifier: "system-launch",
+                            updatedAt: now
+                        )
+                    )
+                )
+                XCTAssertTrue(
+                    store.save(
+                        StoredSystemSchedule(
+                            operationID: retainedRequest.operationID,
+                            owner: owner,
+                            intent: StoredSystemScheduleIntent(
+                                request: retainedRequest
+                            ),
+                            systemIdentifier: "system-retained",
+                            authorization: .authorized,
+                            lifecycle: .detachedRetained,
+                            effectMayExist: true,
+                            generation: 1,
+                            createState: .scheduled,
+                            lastError: nil,
+                            updatedAt: now
+                        )
+                    )
+                )
+            }
+        )
+        let store = try XCTUnwrap(appScheduleStore)
+        let owner = try XCTUnwrap(seededOwner)
+
+        // E2: local cleanup, not a Runtime compensation generation, owns
+        // crash recovery on launch and must never touch retained items.
+        try await eventually { platform.cancelCalls == 1 }
+        XCTAssertEqual(
+            store.record(
+                operationID: launchRequest.operationID,
+                instanceID: launchRequest.instanceID,
+                owner: owner
+            )?.lifecycle,
+            .closedRemoved
+        )
+        XCTAssertEqual(
+            store.record(
+                operationID: retainedRequest.operationID,
+                instanceID: retainedRequest.instanceID,
+                owner: owner
+            )?.lifecycle,
+            .detachedRetained
+        )
+
+        let foregroundRequest = try XCTUnwrap(
+            SystemScheduleRequest.parse(
+                scheduleParams(
+                    requestID: "request-foreground-cleanup",
+                    operationID: "operation-foreground-cleanup",
+                    now: now
+                )
+            )
+        )
+        XCTAssertTrue(
+            store.save(
+                cleanupPendingRecord(
+                    request: foregroundRequest,
+                    owner: owner,
+                    systemIdentifier: "system-foreground",
+                    updatedAt: now.addingTimeInterval(1)
+                )
+            )
+        )
+        enterBackground()
+        enterForeground()
+        try await eventually { platform.cancelCalls == 2 }
+        XCTAssertEqual(
+            store.record(
+                operationID: foregroundRequest.operationID,
+                instanceID: foregroundRequest.instanceID,
+                owner: owner
+            )?.lifecycle,
+            .closedRemoved
+        )
+
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { page.close() }
+        let bridgeRequest = try XCTUnwrap(
+            SystemScheduleRequest.parse(
+                scheduleParams(
+                    requestID: "request-bridge-cleanup",
+                    operationID: "operation-bridge-cleanup",
+                    now: now
+                )
+            )
+        )
+        XCTAssertTrue(
+            store.save(
+                cleanupPendingRecord(
+                    request: bridgeRequest,
+                    owner: owner,
+                    systemIdentifier: "system-bridge",
+                    updatedAt: now.addingTimeInterval(2)
+                )
+            )
+        )
+        let unknownCancel = try jsonObject(
+            try await page.systemScheduleCancel(
+                requestID: "cancel-unknown-after-cleanup",
+                operationID: "operation-unknown",
+                kind: "alarm"
+            )
+        )
+        XCTAssertEqual(unknownCancel["state"] as? String, "failed")
+        try await eventually { platform.cancelCalls == 3 }
+        XCTAssertEqual(
+            store.record(
+                operationID: bridgeRequest.operationID,
+                instanceID: bridgeRequest.instanceID,
+                owner: owner
+            )?.lifecycle,
+            .closedRemoved
+        )
+        XCTAssertEqual(
+            store.record(
+                operationID: retainedRequest.operationID,
+                instanceID: retainedRequest.instanceID,
+                owner: owner
+            )?.lifecycle,
+            .detachedRetained
         )
     }
 
@@ -869,17 +1033,12 @@ final class DirectPathAppTests: XCTestCase {
         let app = try await makeApp(
             directTransport: nil,
             systemSchedulePlatform: platform,
-            systemScheduleNow: { now },
-            beforeTheAppExists: { [self] in
-                try XCTUnwrap(appDefaults).set(
-                    corrupt,
-                    forKey: "avibe.systemSchedule.records"
-                )
-            }
+            systemScheduleNow: { now }
         )
         let runtime = try await select("instance-1", in: app)
         let page = try await showRuntimePage(app, runtime)
         defer { page.close() }
+        try corrupt.write(to: XCTUnwrap(appScheduleLedgerURL))
 
         let create = try jsonObject(
             try await page.systemScheduleRequest(
@@ -917,9 +1076,7 @@ final class DirectPathAppTests: XCTestCase {
             "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
         )
         XCTAssertEqual(
-            try XCTUnwrap(appDefaults).data(
-                forKey: "avibe.systemSchedule.records"
-            ),
+            try Data(contentsOf: XCTUnwrap(appScheduleLedgerURL)),
             corrupt
         )
         XCTAssertEqual(platform.scheduleCalls, 0)
@@ -946,9 +1103,7 @@ final class DirectPathAppTests: XCTestCase {
             now: requestTime
         )
         let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
-        let store = UserDefaultsSystemScheduleStore(
-            defaults: try XCTUnwrap(appDefaults)
-        )
+        let store = try XCTUnwrap(appScheduleStore)
         let owner = try XCTUnwrap(
             store.managementOwner(accountID: "account-1")
         )
@@ -1032,7 +1187,7 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
-    func testLogoutDuringClaimedCreateDetachesThenCompensatesLateOSSuccess() async throws {
+    func testLogoutDuringClaimedCreateDetachesThenCleansUpLateOSSuccessLocally() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let platform = RuntimeSystemSchedulePlatform()
         platform.holdAfterSystemCreation = true
@@ -1062,9 +1217,7 @@ final class DirectPathAppTests: XCTestCase {
         app.confirmSystemSchedule(id: confirmation.id)
         try await eventually { platform.isWaitingAfterSystemCreation }
 
-        let store = UserDefaultsSystemScheduleStore(
-            defaults: try XCTUnwrap(appDefaults)
-        )
+        let store = try XCTUnwrap(appScheduleStore)
         let owner = try XCTUnwrap(
             store.managementOwner(accountID: "account-1")
         )
@@ -1254,9 +1407,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(platform.scheduleCalls, 1)
         XCTAssertEqual(platform.systemCreationCalls, 0)
 
-        let store = UserDefaultsSystemScheduleStore(
-            defaults: try XCTUnwrap(appDefaults)
-        )
+        let store = try XCTUnwrap(appScheduleStore)
         let owner = try XCTUnwrap(
             store.managementOwner(accountID: "account-1")
         )
@@ -4275,6 +4426,8 @@ final class DirectPathAppTests: XCTestCase {
 
     /// The isolated preferences of the last App `makeApp` built.
     private var appDefaults: UserDefaults?
+    private var appScheduleStore: FileSystemSystemScheduleStore?
+    private var appScheduleLedgerURL: URL?
 
     /// Where the account coordinator keeps the selected instance.
     private static let selectionKey = "avibe.mobile.selection"
@@ -4366,6 +4519,22 @@ final class DirectPathAppTests: XCTestCase {
         }
         let suiteName = "DirectPathAppTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let scheduleDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "DirectPathScheduleTests.\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: scheduleDirectory,
+            withIntermediateDirectories: true
+        )
+        let scheduleLedgerURL = scheduleDirectory.appendingPathComponent("ledger.json")
+        let scheduleStore = FileSystemSystemScheduleStore(fileURL: scheduleLedgerURL)
+        appScheduleStore = scheduleStore
+        appScheduleLedgerURL = scheduleLedgerURL
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: scheduleDirectory)
+        }
         appDefaults = defaults
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
@@ -4406,6 +4575,7 @@ final class DirectPathAppTests: XCTestCase {
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 systemSchedulePlatform: systemSchedulePlatform,
+                systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming,
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
@@ -4424,6 +4594,7 @@ final class DirectPathAppTests: XCTestCase {
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 systemSchedulePlatform: systemSchedulePlatform,
+                systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming,
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
@@ -4441,6 +4612,7 @@ final class DirectPathAppTests: XCTestCase {
                     ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
                 pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
                 systemSchedulePlatform: systemSchedulePlatform,
+                systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming,
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
@@ -4467,6 +4639,28 @@ final class DirectPathAppTests: XCTestCase {
             requests: server.requests
         )
         return app
+    }
+
+    @MainActor
+    private func cleanupPendingRecord(
+        request: SystemScheduleRequest,
+        owner: SystemScheduleManagementOwner,
+        systemIdentifier: String,
+        updatedAt: Date
+    ) -> StoredSystemSchedule {
+        StoredSystemSchedule(
+            operationID: request.operationID,
+            owner: owner,
+            intent: StoredSystemScheduleIntent(request: request),
+            systemIdentifier: systemIdentifier,
+            authorization: .authorized,
+            lifecycle: .managedCleanupPending,
+            effectMayExist: true,
+            generation: 1,
+            createState: .cancelled,
+            lastError: nil,
+            updatedAt: updatedAt
+        )
     }
 
     /// Starts a push-management request and returns once the control plane

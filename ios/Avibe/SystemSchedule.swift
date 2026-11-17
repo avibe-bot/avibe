@@ -1,5 +1,6 @@
 import AlarmKit
 import CryptoKit
+import Darwin
 import EventKit
 import Foundation
 import OSLog
@@ -490,38 +491,78 @@ protocol SystemScheduleStoring: AnyObject {
         operationID: String,
         instanceID: String
     ) -> StoredSystemSchedule?
-    func compensationRecord(
-        operationID: String,
-        instanceID: String,
-        kind: SystemScheduleKind
-    ) -> StoredSystemSchedule?
+    func cleanupRecords() -> [StoredSystemSchedule]
     @discardableResult
     func save(_ record: StoredSystemSchedule) -> Bool
-    func detach(accountID: String)
-    func detachActiveOwner()
+    @discardableResult
+    func detachActiveOwner() -> Bool
+    @discardableResult
+    func detachActiveOwner(unlessAccountID accountID: String) -> Bool
 }
 
 @MainActor
-final class UserDefaultsSystemScheduleStore: SystemScheduleStoring {
+final class FileSystemSystemScheduleStore: SystemScheduleStoring {
     private struct Envelope: Codable, Equatable {
         let version: Int
         var activeOwner: SystemScheduleManagementOwner?
         var records: [StoredSystemSchedule]
     }
 
-    private static let key = "avibe.systemSchedule.records"
+    private enum LoadFailure: Error {
+        case unsupportedVersion(Int)
+        case invalidData(String)
+    }
+
+    private enum StoreIOError: Error {
+        case posix(String, Int32)
+    }
+
     private static let version = 1
     private static let logger = Logger(
         subsystem: "bot.avibe.ios",
         category: "system-schedule-store"
     )
 
-    private let defaults: UserDefaults
+    private let fileURL: URL
+    private let fileManager: FileManager
+    private let beforeRename: (() throws -> Void)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    static func defaultFileURL(
+        deviceID: String,
+        fileManager: FileManager = .default
+    ) -> URL {
+        let directory = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(
+            fileURLWithPath: NSHomeDirectory(),
+            isDirectory: true
+        ).appendingPathComponent(
+            "Library/Application Support",
+            isDirectory: true
+        )
+        return directory.appendingPathComponent(
+            "system-schedule-ledger-\(deviceID)-v1.json"
+        )
+    }
+
+    init(
+        fileURL: URL? = nil,
+        fileManager: FileManager = .default,
+        beforeRename: (() throws -> Void)? = nil
+    ) {
+        self.fileManager = fileManager
+        self.beforeRename = beforeRename
+        if let fileURL {
+            self.fileURL = fileURL
+        } else {
+            self.fileURL = Self.defaultFileURL(
+                deviceID: "default",
+                fileManager: fileManager
+            )
+        }
     }
 
     var isAvailable: Bool {
@@ -535,7 +576,7 @@ final class UserDefaultsSystemScheduleStore: SystemScheduleStoring {
             return envelope.activeOwner
         }
         if let active = envelope.activeOwner {
-            detach(active.accountID, in: &envelope)
+            detach(active, in: &envelope)
         }
         let owner = SystemScheduleManagementOwner(
             accountID: accountID,
@@ -576,31 +617,14 @@ final class UserDefaultsSystemScheduleStore: SystemScheduleStoring {
             .max(by: { $0.updatedAt < $1.updatedAt })
     }
 
-    func compensationRecord(
-        operationID: String,
-        instanceID: String,
-        kind: SystemScheduleKind
-    ) -> StoredSystemSchedule? {
-        guard case .success(let envelope) = loadEnvelope() else { return nil }
-        let candidates = envelope.records.filter {
-            $0.operationID == operationID
-                && $0.intent.instanceID == instanceID
-                && $0.intent.kind == kind
-                && [
-                    .managedCleanupPending,
-                    .detachedCleanupPending,
-                    .closedNoItem,
-                    .closedRemoved,
-                    .detachedCleaned,
-                    .detachedAbsent,
-                ].contains($0.lifecycle)
-        }
-        let pending = candidates.filter {
-            [.managedCleanupPending, .detachedCleanupPending]
-                .contains($0.lifecycle)
-        }
-        return (pending.isEmpty ? candidates : pending)
-            .max(by: { $0.updatedAt < $1.updatedAt })
+    func cleanupRecords() -> [StoredSystemSchedule] {
+        guard case .success(let envelope) = loadEnvelope() else { return [] }
+        return envelope.records
+            .filter {
+                [.managedCleanupPending, .detachedCleanupPending]
+                    .contains($0.lifecycle)
+            }
+            .sorted(by: { $0.updatedAt < $1.updatedAt })
     }
 
     @discardableResult
@@ -622,28 +646,41 @@ final class UserDefaultsSystemScheduleStore: SystemScheduleStoring {
         return persist(envelope)
     }
 
-    func detach(accountID: String) {
-        guard case .success(var envelope) = loadEnvelope() else { return }
-        let original = envelope
-        detach(accountID, in: &envelope)
-        guard envelope != original else { return }
-        _ = persist(envelope)
+    @discardableResult
+    func detachActiveOwner() -> Bool {
+        switch loadEnvelope() {
+        case .failure:
+            return false
+        case .success(var envelope):
+            guard let activeOwner = envelope.activeOwner else { return true }
+            detach(activeOwner, in: &envelope)
+            return persist(envelope)
+        }
     }
 
-    func detachActiveOwner() {
-        guard case .success(let envelope) = loadEnvelope(),
-              let activeOwner = envelope.activeOwner
-        else { return }
-        detach(accountID: activeOwner.accountID)
+    @discardableResult
+    func detachActiveOwner(unlessAccountID accountID: String) -> Bool {
+        switch loadEnvelope() {
+        case .failure:
+            return false
+        case .success(var envelope):
+            guard let activeOwner = envelope.activeOwner else { return true }
+            guard activeOwner.accountID != accountID else { return true }
+            detach(activeOwner, in: &envelope)
+            return persist(envelope)
+        }
     }
 
-    private func detach(_ accountID: String, in envelope: inout Envelope) {
-        if envelope.activeOwner?.accountID == accountID {
+    private func detach(
+        _ owner: SystemScheduleManagementOwner,
+        in envelope: inout Envelope
+    ) {
+        if envelope.activeOwner == owner {
             envelope.activeOwner = nil
         }
         let now = Date()
         for index in envelope.records.indices
-            where envelope.records[index].owner.accountID == accountID
+            where envelope.records[index].owner == owner
         {
             switch envelope.records[index].lifecycle {
             case .managedScheduled:
@@ -664,19 +701,17 @@ final class UserDefaultsSystemScheduleStore: SystemScheduleStoring {
         }
     }
 
-    private enum LoadFailure: Error {
-        case unsupportedVersion(Int)
-        case invalidData(String)
-    }
-
     private func loadEnvelope() -> Result<Envelope, LoadFailure> {
-        guard let data = defaults.data(forKey: Self.key) else {
+        guard fileManager.fileExists(atPath: fileURL.path) else {
             return .success(
                 Envelope(version: Self.version, activeOwner: nil, records: [])
             )
         }
         do {
-            let envelope = try decoder.decode(Envelope.self, from: data)
+            let envelope = try decoder.decode(
+                Envelope.self,
+                from: Data(contentsOf: fileURL)
+            )
             guard envelope.version == Self.version else {
                 Self.logger.error(
                     "Unsupported system schedule store version: \(envelope.version, privacy: .public)"
@@ -694,17 +729,87 @@ final class UserDefaultsSystemScheduleStore: SystemScheduleStoring {
     }
 
     private func persist(_ envelope: Envelope) -> Bool {
+        let directory = fileURL.deletingLastPathComponent()
+        let temporaryURL = directory.appendingPathComponent(
+            ".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp"
+        )
         do {
-            defaults.set(try encoder.encode(envelope), forKey: Self.key)
-            guard case .success(let persisted) = loadEnvelope() else {
-                return false
-            }
-            return persisted == envelope
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            try writeAndSync(try encoder.encode(envelope), to: temporaryURL)
+            try beforeRename?()
+            try replaceAtomically(temporaryURL: temporaryURL)
+            try syncDirectory(directory)
+            return true
         } catch {
+            try? fileManager.removeItem(at: temporaryURL)
             Self.logger.error(
-                "System schedule store could not be encoded: \(String(describing: error), privacy: .public)"
+                "System schedule store could not be committed: \(String(describing: error), privacy: .public)"
             )
             return false
+        }
+    }
+
+    private func writeAndSync(_ data: Data, to url: URL) throws {
+        let descriptor = url.path.withCString {
+            open($0, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
+        }
+        guard descriptor >= 0 else {
+            throw StoreIOError.posix("open", errno)
+        }
+        var needsClose = true
+        defer {
+            if needsClose { _ = close(descriptor) }
+        }
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var offset = 0
+            while offset < rawBuffer.count {
+                let count = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    rawBuffer.count - offset
+                )
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else {
+                    throw StoreIOError.posix("write", errno)
+                }
+                offset += count
+            }
+        }
+        guard fsync(descriptor) == 0 else {
+            throw StoreIOError.posix("fsync-file", errno)
+        }
+        guard close(descriptor) == 0 else {
+            needsClose = false
+            throw StoreIOError.posix("close", errno)
+        }
+        needsClose = false
+    }
+
+    private func replaceAtomically(temporaryURL: URL) throws {
+        let result = temporaryURL.path.withCString { temporaryPath in
+            fileURL.path.withCString { destinationPath in
+                rename(temporaryPath, destinationPath)
+            }
+        }
+        guard result == 0 else {
+            throw StoreIOError.posix("rename", errno)
+        }
+    }
+
+    private func syncDirectory(_ directory: URL) throws {
+        let descriptor = directory.path.withCString {
+            open($0, O_RDONLY)
+        }
+        guard descriptor >= 0 else {
+            throw StoreIOError.posix("open-directory", errno)
+        }
+        defer { _ = close(descriptor) }
+        guard fsync(descriptor) == 0 else {
+            throw StoreIOError.posix("fsync-directory", errno)
         }
     }
 }
@@ -718,7 +823,6 @@ enum SystemScheduleFenceFailure: Equatable {
 
 enum SystemScheduleCancelPurpose: String, Equatable {
     case user
-    case compensation
 }
 
 @MainActor
@@ -922,12 +1026,19 @@ final class SystemScheduleCoordinator {
                     return writeFailure(request, identifier: record.systemIdentifier)
                 }
                 return record.createReceipt(requestID: request.requestID)!
-            case .absentConclusive:
-                record.lifecycle = .reserved
+            case .absentConclusive(let authorization):
+                record.authorization = authorization
+                record.lifecycle = .closedNoItem
                 record.effectMayExist = false
+                record.createState = .failed
+                record.lastError = StoredSystemScheduleError(
+                    code: "recovery_item_absent",
+                    message: "The previously confirmed system item is absent. Create a new operation to schedule it again."
+                )
                 record.generation += 1
                 record.updatedAt = now()
                 guard store.save(record) else { return localStateUnavailable(request) }
+                return record.createReceipt(requestID: request.requestID)!
             case .unknown(let failure):
                 record.authorization = observedAuthorization(
                     for: failure,
@@ -935,7 +1046,12 @@ final class SystemScheduleCoordinator {
                 )
                 record.lastError = storedError(failure)
                 record.updatedAt = now()
-                _ = store.save(record)
+                guard store.save(record) else {
+                    return writeFailure(
+                        request,
+                        identifier: record.systemIdentifier
+                    )
+                }
                 return receipt(for: failure, request: request, fallback: record.systemIdentifier)
             }
         }
@@ -984,7 +1100,12 @@ final class SystemScheduleCoordinator {
                         message: "The system returned an unexpected item identity."
                     )
                     latest.updatedAt = now()
-                    _ = store.save(latest)
+                    guard store.save(latest) else {
+                        return writeFailure(
+                            request,
+                            identifier: latest.systemIdentifier
+                        )
+                    }
                     return latest.createReceipt(requestID: request.requestID)!
                 }
                 return await settleStaleCreatedItem(
@@ -1040,7 +1161,12 @@ final class SystemScheduleCoordinator {
                 )
                 latest.generation += 1
                 latest.updatedAt = now()
-                _ = store.save(latest)
+                guard store.save(latest) else {
+                    return writeFailure(
+                        request,
+                        identifier: latest.systemIdentifier
+                    )
+                }
                 return latest.createReceipt(requestID: request.requestID)!
             }
             if let failure = postWriteFence() {
@@ -1087,7 +1213,12 @@ final class SystemScheduleCoordinator {
             } ?? storedError(failure)
             latest.generation += 1
             latest.updatedAt = now()
-            _ = store.save(latest)
+            guard store.save(latest) else {
+                return writeFailure(
+                    request,
+                    identifier: latest.systemIdentifier
+                )
+            }
             return latest.createReceipt(requestID: request.requestID)
                 ?? receipt(for: failure, request: request, fallback: latest.systemIdentifier)
         }
@@ -1101,25 +1232,14 @@ final class SystemScheduleCoordinator {
         guard store.isAvailable else {
             return cancelFailure(request, code: "local_state_unavailable")
         }
-        var record: StoredSystemSchedule?
-        switch request.purpose {
-        case .user:
-            guard store.isActive(owner: context.owner) else {
-                return cancelFailure(request, code: "item_not_found")
-            }
-            record = store.record(
-                operationID: request.operationID,
-                instanceID: context.instanceID,
-                owner: context.owner
-            )
-        case .compensation:
-            record = store.compensationRecord(
-                operationID: request.operationID,
-                instanceID: context.instanceID,
-                kind: request.kind
-            )
+        guard store.isActive(owner: context.owner) else {
+            return cancelFailure(request, code: "item_not_found")
         }
-        guard var record, record.intent.kind == request.kind else {
+        guard var record = store.record(
+            operationID: request.operationID,
+            instanceID: context.instanceID,
+            owner: context.owner
+        ), record.intent.kind == request.kind else {
             return cancelFailure(request, code: "item_not_found")
         }
         if [.closedNoItem, .closedRemoved, .detachedCleaned, .detachedAbsent]
@@ -1145,7 +1265,7 @@ final class SystemScheduleCoordinator {
             }
             return record.cancelReceipt(requestID: request.requestID)
         }
-        if request.purpose == .user { record.createState = record.createState ?? .cancelled }
+        record.createState = record.createState ?? .cancelled
         record.lifecycle = record.lifecycle.isDetached
             ? .detachedCleanupPending
             : .managedCleanupPending
@@ -1155,12 +1275,30 @@ final class SystemScheduleCoordinator {
         guard store.save(record) else {
             return cancelFailure(request, code: "local_state_write_failed")
         }
+        return await cleanup(
+            record,
+            requestID: request.requestID,
+            stillAuthorized: stillCurrent
+        )
+    }
+
+    private func cleanup(
+        _ record: StoredSystemSchedule,
+        requestID: String,
+        stillAuthorized: @escaping @MainActor () -> Bool
+    ) async -> SystemScheduleReceipt {
         let expectedGeneration = record.generation
+        let request = SystemScheduleCancelRequest(
+            requestID: requestID,
+            operationID: record.operationID,
+            kind: record.intent.kind,
+            purpose: .user
+        )
         let result = await platform.cancel(
             kind: record.intent.kind,
             systemIdentifier: record.systemIdentifier,
             stillAuthorized: {
-                guard stillCurrent(),
+                guard stillAuthorized(),
                       let current = self.store.record(
                           operationID: record.operationID,
                           instanceID: record.intent.instanceID,
@@ -1197,7 +1335,7 @@ final class SystemScheduleCoordinator {
                     record: current
                 )
             }
-            return current.cancelReceipt(requestID: request.requestID)
+            return current.cancelReceipt(requestID: requestID)
         case .failure(let failure):
             current.authorization = observedAuthorization(
                 for: failure,
@@ -1205,10 +1343,16 @@ final class SystemScheduleCoordinator {
             )
             current.lastError = storedError(failure)
             current.updatedAt = now()
-            _ = store.save(current)
+            guard store.save(current) else {
+                return cancelFailure(
+                    request,
+                    code: "local_state_write_failed",
+                    record: current
+                )
+            }
             return receipt(
                 for: failure,
-                request: current.request(requestID: request.requestID),
+                request: current.request(requestID: requestID),
                 fallback: current.systemIdentifier
             )
         }
@@ -1232,15 +1376,30 @@ final class SystemScheduleCoordinator {
         return record.cancelReceipt(requestID: request.requestID)
     }
 
-    func detach(accountID: String) {
-        store.detach(accountID: accountID)
+    @discardableResult
+    func detachActiveOwner() -> Bool {
+        store.detachActiveOwner()
     }
 
-    func synchronizeAccount(accountID: String?) {
-        if let accountID {
-            _ = store.managementOwner(accountID: accountID)
-        } else {
-            store.detachActiveOwner()
+    @discardableResult
+    func detachActiveOwner(unlessAccountID accountID: String) -> Bool {
+        store.detachActiveOwner(unlessAccountID: accountID)
+    }
+
+    @discardableResult
+    func synchronizeAccount(accountID: String?) -> Bool {
+        guard let accountID else { return true }
+        return store.managementOwner(accountID: accountID) != nil
+    }
+
+    func retryPendingCleanup() async {
+        guard store.isAvailable else { return }
+        for record in store.cleanupRecords() {
+            _ = await cleanup(
+                record,
+                requestID: "native-cleanup-\(UUID().uuidString.lowercased())",
+                stillAuthorized: { true }
+            )
         }
     }
 
@@ -1327,22 +1486,15 @@ final class SystemScheduleCoordinator {
         guard store.save(record) else {
             return writeFailure(request, identifier: record.systemIdentifier)
         }
-        let cleanupOwner = record.owner
-        let cleanupOperationID = record.operationID
-        _ = await cancel(
-            SystemScheduleCancelRequest(
-                requestID: request.requestID,
-                operationID: request.operationID,
-                kind: request.kind,
-                purpose: .compensation
-            ),
-            context: context,
-            stillCurrent: { true }
+        _ = await cleanup(
+            record,
+            requestID: request.requestID,
+            stillAuthorized: { true }
         )
         return store.record(
-            operationID: cleanupOperationID,
+            operationID: record.operationID,
             instanceID: record.intent.instanceID,
-            owner: cleanupOwner
+            owner: record.owner
         )?
             .createReceipt(requestID: request.requestID)
             ?? terminal(

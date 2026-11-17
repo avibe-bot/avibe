@@ -15,11 +15,15 @@ import { onPageReactivated } from '@/lib/pageActivity';
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_CLAIMS_PER_RECONCILE = 16;
+const RECEIPT_TIMEOUT_MS = 15_000;
 const PERMANENT_RECEIPT_ERRORS = new Set([
   'invalid_receipt',
   'receipt_conflict',
   'receipt_mismatch',
   'stale_receipt',
+]);
+const RETRY_NATIVE_RECEIPT_ERRORS = new Set([
+  'local_state_write_failed',
 ]);
 
 type NativeIdentity = {
@@ -30,7 +34,7 @@ type NativeIdentity = {
 type ScheduleClaim = {
   action: 'create' | 'cancel';
   generation: number;
-  purpose: 'user' | 'compensation';
+  purpose: 'user';
   leaseToken: string;
   leaseExpiresAt: string;
   request: NativeSystemScheduleRequest | NativeSystemScheduleCancel;
@@ -70,6 +74,8 @@ async function claimNext(
 }
 
 async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'discard' | 'retry'> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), RECEIPT_TIMEOUT_MS);
   try {
     const response = await apiFetch('/api/system-schedule/receipt', {
       method: 'POST',
@@ -80,6 +86,7 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
         lease_token: pending.leaseToken,
         receipt: pending.receipt,
       }),
+      signal: controller.signal,
     });
     if (response.ok) return 'accepted';
     if (response.status === 400 || response.status === 409) {
@@ -88,6 +95,8 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
     }
   } catch {
     // The lease and receipt remain in memory for the next poll/reactivation.
+  } finally {
+    window.clearTimeout(timeout);
   }
   return 'retry';
 }
@@ -103,6 +112,7 @@ export const SystemScheduleForwarder: FC = () => {
     { leaseToken: string; action: ScheduleClaim['action'] }
   >());
   const pendingReceiptsRef = useRef(new Map<string, PendingReceipt>());
+  const receiptDeliveryByLeaseRef = useRef(new Map<string, Promise<void>>());
   const reconcileRef = useRef<() => Promise<void>>(async () => undefined);
 
   const leaseKey = useCallback((
@@ -126,10 +136,18 @@ export const SystemScheduleForwarder: FC = () => {
       action: claim.action,
     });
     void (async () => {
+      let reconcileImmediately = true;
       try {
         const receipt = claim.action === 'create'
           ? await nativeSystemScheduleRequest(claim.request as NativeSystemScheduleRequest)
           : await nativeSystemScheduleCancel(claim.request as NativeSystemScheduleCancel);
+        if (receipt?.error && RETRY_NATIVE_RECEIPT_ERRORS.has(receipt.error.code)) {
+          // Native has a durable pre-effect record but could not commit the
+          // post-effect transition. Keep the Runtime lease sticky so the next
+          // poll re-enters Native recovery instead of terminalizing the attempt.
+          reconcileImmediately = false;
+          return;
+        }
         if (receipt) {
           pendingReceiptsRef.current.set(key, {
             ...identity,
@@ -142,10 +160,26 @@ export const SystemScheduleForwarder: FC = () => {
         // Runtime reissues this sticky lease; Native owns durable idempotency.
       } finally {
         inFlightLeasesRef.current.delete(key);
-        window.setTimeout(() => void reconcileRef.current(), 0);
+        if (reconcileImmediately) {
+          window.setTimeout(() => void reconcileRef.current(), 0);
+        }
       }
     })();
   }, [leaseKey]);
+
+  const startReceiptDelivery = useCallback((key: string, pending: PendingReceipt) => {
+    if (receiptDeliveryByLeaseRef.current.has(key)) return;
+    const delivery = (async () => {
+      const outcome = await deliverReceipt(pending);
+      if (outcome !== 'retry' && pendingReceiptsRef.current.get(key) === pending) {
+        pendingReceiptsRef.current.delete(key);
+        window.setTimeout(() => void reconcileRef.current(), 0);
+      }
+    })().finally(() => {
+      receiptDeliveryByLeaseRef.current.delete(key);
+    });
+    receiptDeliveryByLeaseRef.current.set(key, delivery);
+  }, []);
 
   const reconcile = useCallback(async () => {
     if (
@@ -168,8 +202,7 @@ export const SystemScheduleForwarder: FC = () => {
           pendingReceiptsRef.current.delete(key);
           continue;
         }
-        const outcome = await deliverReceipt(pending);
-        if (outcome !== 'retry') pendingReceiptsRef.current.delete(key);
+        startReceiptDelivery(key, pending);
       }
 
       for (let index = 0; index < MAX_CLAIMS_PER_RECONCILE; index += 1) {
@@ -195,7 +228,7 @@ export const SystemScheduleForwarder: FC = () => {
     } finally {
       claimMutexRef.current = false;
     }
-  }, [startClaim]);
+  }, [startClaim, startReceiptDelivery]);
   reconcileRef.current = reconcile;
 
   useEffect(() => {

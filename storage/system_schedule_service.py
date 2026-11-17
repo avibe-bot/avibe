@@ -293,7 +293,6 @@ def _operation_public(conn, row: Mapping[str, Any], now: datetime) -> dict[str, 
     create = next(item for item in attempts if item["action"] == "create")
     cancels = [item for item in attempts if item["action"] == "cancel"]
     user_cancels = [item for item in cancels if item["purpose"] == "user"]
-    cleanup = [item for item in cancels if item["purpose"] == "compensation"]
     active_cancels = [
         item
         for item in cancels
@@ -333,7 +332,7 @@ def _operation_public(conn, row: Mapping[str, Any], now: datetime) -> dict[str, 
         "status_message": status_message,
         "create": _attempt_public(create),
         "cancel": _attempt_public(user_cancels[-1]) if user_cancels else None,
-        "cleanup": _attempt_public(cleanup[-1]) if cleanup else None,
+        "cleanup": None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -372,7 +371,6 @@ def _insert_cancel_attempt(
     conn,
     operation: Mapping[str, Any],
     *,
-    purpose: str,
     expires_in: int,
     now: datetime,
 ) -> Mapping[str, Any]:
@@ -393,7 +391,7 @@ def _insert_cancel_attempt(
             attempt_key=_attempt_key(
                 operation["operation_id"], "cancel", generation
             ),
-            purpose=purpose,
+            purpose="user",
             request_id=request_id,
             instance_id=operation["instance_id"],
             device_id=device_id,
@@ -433,25 +431,6 @@ def _successful_cancel_exists(conn, operation_id: str) -> bool:
     )
 
 
-def _ensure_compensation(
-    conn,
-    operation: Mapping[str, Any],
-    *,
-    now: datetime,
-) -> None:
-    if _active_cancel(conn, operation["operation_id"]) is not None:
-        return
-    if _successful_cancel_exists(conn, operation["operation_id"]):
-        return
-    _insert_cancel_attempt(
-        conn,
-        operation,
-        purpose="compensation",
-        expires_in=DEFAULT_REQUEST_TTL_SECONDS,
-        now=now,
-    )
-
-
 def create_operation(
     *,
     session_id: str,
@@ -473,11 +452,6 @@ def create_operation(
     time_zone = _time_zone(time_zone)
     expires_in = _ttl(expires_in)
     now = (now or _utc_now()).astimezone(timezone.utc)
-    if fire <= now:
-        raise SystemScheduleServiceError(
-            "fire_time_in_past",
-            "The requested time has already passed.",
-        )
     immutable = {
         "session_id": session_id,
         "instance_id": instance_id,
@@ -503,6 +477,11 @@ def create_operation(
                         details={"operation_id": operation_id},
                     )
                 return _operation_public(conn, existing, now)
+            if fire <= now:
+                raise SystemScheduleServiceError(
+                    "fire_time_in_past",
+                    "The requested time has already passed.",
+                )
             session = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
             ).scalar_one_or_none()
@@ -642,7 +621,6 @@ def cancel_operation(
                     _insert_cancel_attempt(
                         conn,
                         operation,
-                        purpose="user",
                         expires_in=expires_in,
                         now=now,
                     )
@@ -702,6 +680,8 @@ def _sticky_attempt(
         .where(system_schedule_attempts.c.terminal_state.is_(None))
         .where(system_schedule_attempts.c.receipt_json.is_(None))
     )
+    if action == "cancel":
+        query = query.where(system_schedule_attempts.c.purpose == "user")
     if excluded:
         query = query.where(system_schedule_attempts.c.lease_token.not_in(excluded))
     return conn.execute(
@@ -726,6 +706,8 @@ def _pending_attempt(
         .where(system_schedule_attempts.c.terminal_state.is_(None))
         .where(system_schedule_attempts.c.instance_id == instance_id)
     )
+    if action == "cancel":
+        query = query.where(system_schedule_attempts.c.purpose == "user")
     if device_id is None:
         query = query.where(system_schedule_attempts.c.device_id.is_(None))
     else:
@@ -1016,12 +998,6 @@ def record_receipt(
                     updated_at=_iso(now),
                 )
             )
-            if (
-                attempt["action"] == "create"
-                and terminal in {"cancelled", "expired", "stale_context"}
-                and parsed.payload["systemIdentifier"]
-            ):
-                _ensure_compensation(conn, operation, now=now)
             updated = _load_operation(conn, operation["operation_id"])
             return {
                 "action": attempt["action"],

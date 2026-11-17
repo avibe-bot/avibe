@@ -36,6 +36,7 @@ NOTICE_LOG = (
 )
 
 
+# I3 review D7: pin both the historical ancestor graph and its historical schema validator.
 @pytest.fixture(autouse=True)
 def exact_epoch3_graph(tmp_path, monkeypatch):
     """Keep these historical boundary tests on the exact 0089 graph.

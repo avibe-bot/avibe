@@ -1,8 +1,10 @@
 # iOS system schedule implementation
 
-Date: 2026-11-16
-Base: `origin/master@db0fa462bcf28d885c780d6f7435cc6aa128a0af`
+Date: 2026-11-17
+Base: `origin/master@2a7ab2841aafd594e26e569ad5452dcbe28c9614`
 Branch: `feat/ios-system-schedule`
+
+Revision note: the 06:24 simplification after the third circuit breaker supersedes earlier compensation/UserDefaults/inferred-detach design in this plan.
 
 ## Goal
 
@@ -14,7 +16,7 @@ The shell advertises `systemSchedule: 1` and accepts only:
 
 - `systemSchedule.capabilities` with no parameters.
 - `systemSchedule.request` with exactly `requestId`, `operationId`, `kind`, `title`, `fireAt`, `timeZone`, `recurrence`, `instanceId`, `sessionId`, and `expiresAt`. `recurrence` is `null` in this slice.
-- `systemSchedule.cancel` with exactly `requestId`, `operationId`, `kind`, and `purpose`. `purpose` is the closed internal control value `user` or `compensation`; it does not expose a raw platform API or widen the Agent product surface.
+- `systemSchedule.cancel` with exactly `requestId`, `operationId`, `kind`, and `purpose`. `purpose` is fixed to the closed value `user`; Runtime does not create compensation attempts and no raw platform API is exposed.
 
 `kind` is `alarm` or `reminder`. The first slice exposes exactly one creation path per OS: iOS 26+ supports fixed-time AlarmKit alarms; iOS 17–25 supports EventKit reminders. The capability response names only the product path supported on that OS and maps framework authorization to `not_determined`, `authorized`, `denied`, `restricted`, or `unsupported`. A reminder created before an OS upgrade can still be cancelled through its retained record, but iOS 26 does not advertise or create new reminders.
 
@@ -31,6 +33,20 @@ A receipt has contract version 1, request/operation/kind identity, `state`, the 
 
 `scheduled` is emitted only after the OS API accepts the item. `awaiting_device` is not a Native receipt state: it is the Agent/CLI operation state shown when a create was already claimed by its bound iPhone, its claim deadline has passed, and the matching terminal receipt has not arrived yet. The operation includes `status_message: "Waiting for your iPhone to return the result."`.
 
+## 06:24 simplification
+
+The implementation now follows seven reductions from the authoritative state machine:
+
+1. replace the schedule ledger's `UserDefaults` cache with one App-container file committed by temp-file write, file `fsync`, same-directory atomic `rename`, and directory `fsync`;
+2. detach only on explicit user logout or authenticated different-account activation, using the ledger's persisted `activeOwner`; bootstrap failure, server-signed-out, 2FA, missing snapshot, and cleared selection preserve ownership while exposing no Runtime authority;
+3. remove Runtime compensation generation; Native retries exact cleanup-pending records on launch, foreground, and every schedule bridge claim;
+4. user cancel means “ensure the deterministic item is absent” for managed, uncertain-create, and cleanup-pending states; detached-retained stays unmanaged;
+5. conclusive absence during recovery commits a terminal no-item tombstone and never re-enters create;
+6. deliver receipts per lease outside the claim mutex with a request timeout;
+7. compare and return an existing Runtime operation before applying first-create time validation.
+
+The cross-layer regression suite names the committed-head finding ID (`C*`, `D*`, or `E*`) beside every added race test.
+
 ## Review-fix invariants
 
 These invariants close the defect classes found by the first read-only review. Tests assert the properties rather than only the reported examples.
@@ -43,28 +59,30 @@ These invariants close the defect classes found by the first read-only review. T
 
 ### OS creation, persistence, and recovery
 
+- The Native ledger is one crash-durable App-container file, not `UserDefaults`. Every reservation and tombstone completes temp write + file `fsync` + atomic `rename` + directory `fsync` before dependent OS work or bridge receipt.
 - An OS item has a deterministic identity scoped by the selected Avibe instance and operation before the system call. Two instances using the same Agent-chosen operation ID cannot collide in the iPhone's system namespace. Recovery can find the corresponding AlarmKit/EventKit item after a crash between OS acceptance and local persistence, so retry never blindly creates a duplicate.
-- A locally persisted `scheduled` state is written only after the system accepted the item. If persistence fails, Native either removes the accepted item or retains enough durable cleanup ownership to retry later; it never reports a clean failure while forgetting a live item.
-- Every cleanup failure retains the real opaque system identifier and a managed recovery record. Subsequent retry/cancel can address the same item; no path discards the only handle to a live system item.
-- A waiting user-cancel/compensation request is settled from the exact persisted cleanup record, independently of the immutable create outcome. Cleanup failure reports a failed cancel with the identifier; only proven absence/removal reports `cancelled`.
-- Completed no-item/removed cleanup tombstones are replayable idempotently after Web/receipt loss, while deliberately retained detached items never become compensation targets.
+- A locally persisted `scheduled` state is written only after the system accepted the item. If the final commit fails, the earlier crash-durable `creatingUnknown` record remains sufficient for deterministic recovery; Web does not submit that `local_state_write_failed` result as a terminal Runtime receipt, so the same sticky lease re-enters Native recovery on a later poll.
+- Every cleanup failure retains the real opaque system identifier and a cleanup-pending recovery record. Native retries these records on launch, foreground, and every bridge create/cancel claim.
+- A waiting user-cancel request is settled from the exact persisted cleanup record, independently of the immutable create outcome. Cleanup failure reports a failed cancel with the identifier; only proven absence/removal reports `cancelled`.
+- Completed no-item/removed cleanup tombstones replay idempotently after Web/receipt loss, while deliberately retained detached items never become cleanup targets.
 - Runtime keeps `(operationId, action, generation)` unique through a canonical `attempt_key` stored in a literal unique column on the new table, so the repository's existing additive analyzer proves the constraint without an analyzer exception.
 - Permission-denied and unsupported platform results atomically persist and return the authorization observed by that result; an earlier `not_determined` capability snapshot cannot leak into the terminal receipt.
 - EventKit cancellation never treats an unstable `calendarItemIdentifier` miss as proof of absence. It recovers by stable operation metadata/identity and reports `cancelled` only after the matching item is absent or removal succeeds.
-- A persisted `creatingUnknown` record enters stable-identity recovery before request-entry expiry/fire-time guards. Exists plus expired/cancelled authority is compensated, conclusive absence closes without another OS write, and unknown retains the original identity; the App never shows a second confirmation for that recovery.
+- A persisted `creatingUnknown` record enters stable-identity recovery before request-entry expiry/fire-time guards. Exists converges to managed or local-cleanup state, conclusive absence commits a terminal no-item tombstone with zero create writes, and unknown retains the original identity. Recreating requires a new operation and user confirmation.
 
 ### Account-transition timing
 
 - Account transition revokes schedule authority and dismisses/settles pending confirmation synchronously before any awaited push/logout cleanup.
-- Cold-start detachment requires a confirmed signed-out or different-account bootstrap result. Network/server/decoding failure preserves the persisted owner epoch and ledger unchanged while exposing no Runtime authority.
-- If a `creatingUnknown` existence lookup returns after logout detached its record, Native reloads the exact record and reconciles exists/absent/unknown through compensation states; it never returns an identifier-less stale result while cleanup may remain.
-- Logout detaches ownership using the persisted departing account identity when the in-memory snapshot is absent. Once detached, records do not become managed again merely because the same account signs in later.
+- Only explicit user logout or authenticated different-account activation detaches. Bootstrap failure, server-signed-out, 2FA, missing snapshot, and cleared instance selection preserve the persisted owner and records while exposing no Runtime authority.
+- Explicit logout detaches using the ledger's persisted `activeOwner`, even when the in-memory snapshot and stored selection are absent.
+- If a `creatingUnknown` existence lookup returns after explicit logout detached its record, Native reloads the exact record and reconciles exists/absent/unknown through local cleanup states; it never returns an identifier-less stale result while cleanup may remain.
 - Before a new owner epoch reserves a create, Native checks the exact instance+operation history across owners. A detached or closed operation returns its immutable prior outcome (or stale cleanup identity) and cannot create a second AlarmKit/EventKit item after re-login.
 
 ### Runtime producer state machine
 
 - Runtime terminal states are monotonic. Expiry, cancellation, denial, failure, unsupported, and stale-context states cannot be revived by a late receipt.
-- Runtime expires only an unclaimed create. A claimed create that crosses its deadline remains nonterminal as `awaiting_device`; the matching device receipt later writes the single terminal outcome normally. Receipt transport delay alone never creates compensation.
+- Runtime expires only an unclaimed create. A claimed create that crosses its deadline remains nonterminal as `awaiting_device`; the matching device receipt later writes the single terminal outcome normally. Receipt ordering never generates Native cleanup work in Runtime.
+- Runtime compares an existing operation's canonical immutable intent and returns its current result before applying `fire_time_in_past`; time validation is only for first insertion.
 - A claimed create must be cancelled by its existing `operationId`; the Agent must not create a replacement operation while the status is `awaiting_device`.
 - A receipt advances state only when operation, request, action, instance, device, lease token, current lease state, and immutable intent all match. Exact duplicate receipts are idempotent; conflicting or stale receipts fail closed.
 - The first device claim is sticky for the operation lifetime. A second device never takes over an expired/in-flight request, and cancellation of a created item routes only to the creating device. A cancellation claim deadline expires only an unclaimed request; once the device has claimed it, the lease remains current until its terminal receipt so a successful late OS removal is not discarded as `expired`.
@@ -78,15 +96,15 @@ These invariants close the defect classes found by the first read-only review. T
 - NativeBridge keeps its existing main-frame + exact-origin policy. WebViewController additionally grants schedule handlers only to the retained primary WebView.
 - AppModel binds a pending request to the current account ID, instance ID, exact origin, Runtime context, and `runtimeIdentity`. The request-provided session ID is retained and shown in confirmation.
 - Instance replacement, account transition/logout, Runtime cancellation/timeout, or any retired opening generation invalidates the request context. A request not yet submitted resolves as `stale_context`. An in-flight system call loses creation authority, hides the confirmation, and waits for the platform adapter's stale-context cleanup result before releasing its native continuation.
-- A late OS success after cancellation or exact context/owner loss is cancelled before Native returns. If cleanup cannot be proven, Native retains the deterministic identity and a cleanup-pending ledger record instead of claiming the item was removed. Merely crossing a claimed request deadline after an OS write is not context loss: that device result remains `scheduled`, and no compensation runs.
-- One native confirmation is active at a time. While a create is awaiting confirmation, Web continues claiming cancellation work but tells Runtime not to lease another create. A retry of the same pending operation joins the existing confirmation and receives its eventual terminal result; a conflicting direct bridge operation receives `failed/confirmation_in_progress`.
+- A late OS success after cancellation or exact context/owner loss is handled through Native local cleanup before success is claimed. If cleanup cannot be proven, Native retains the deterministic identity and a cleanup-pending ledger record. Later wall-clock deadline crossing after an accepted OS write does not trigger a new Runtime attempt.
+- One native confirmation is active at a time. While a create is awaiting confirmation, Web continues claiming user-cancel work but tells Runtime not to lease another create. Receipt HTTP calls run independently per lease outside the claim mutex and have explicit timeouts. A Native `local_state_write_failed` result is not queued as terminal evidence: the lease remains sticky and is retried through Native recovery on the next poll/reactivation.
 - Native rechecks both `now < expiresAt` and `now < fireAt` before presentation, after confirmation, after permission/lookup awaits, and immediately before the OS create write. Once that write has happened, later wall-clock deadline crossing cannot rewrite the device result or trigger cleanup.
 
 ## Idempotency and retained items
 
-A versioned UserDefaults-backed installation-local store records Avibe-created system identities and permanent lifecycle tombstones. A management owner is the exact `(accountId, ownerEpoch)` generation, and each item identity also includes the selected instance and operation. The ledger key and every compensation lookup use the exact `(accountId, ownerEpoch, instanceId, operationId)` tuple, so two instances may safely use the same Agent operation ID without overwriting or cleaning up each other's records. Repeating an accepted operation under that exact owner returns its existing terminal receipt instead of creating another item. Cancellation is idempotent for known records. An unreadable or future-version store disables creation and cancellation with `local_state_unavailable`; it is not overwritten, and the trusted bridge returns that same actionable error instead of misclassifying the request as stale or forbidden.
+A versioned crash-durable App-container file records Avibe-created system identities and permanent lifecycle tombstones. A management owner is the exact `(accountId, ownerEpoch)` generation, and each item identity also includes the selected instance and operation. The ledger key and every local cleanup record use the exact `(accountId, ownerEpoch, instanceId, operationId)` tuple, so two instances may safely use the same Agent operation ID without overwriting or cleaning up each other's records. Repeating an accepted operation under that exact owner returns its existing terminal receipt instead of creating another item. User cancellation is idempotent “ensure absent” for known managed/uncertain/cleanup-pending records. An unreadable or future-version ledger disables creation and cancellation with `local_state_unavailable`; it is not overwritten.
 
-On logout, completed records for the departing owner become permanently detached without deleting the AlarmKit alarm or EventKit reminder. The system item remains, and Avibe can no longer read, cancel, or otherwise manage it. A create that is still in flight when logout detaches its owner retains only exact compensation authority, so a later OS success is removed rather than becoming managed. Signing in again — even to the same account — creates a new `ownerEpoch` and cannot reclaim detached records. Instance switching without logout only removes current document authority; returning to the same signed-in owner and selected instance can manage its recorded item.
+On explicit logout, completed records for the persisted active owner become permanently detached without deleting the AlarmKit alarm or EventKit reminder. A create still in flight becomes exact local cleanup work. Server-signed-out bootstrap and 2FA do not detach. Signing in to a different account detaches before new Runtime authority; signing back into the same preserved lifecycle reuses the owner unless an explicit logout already detached it.
 
 ## Platform implementation
 
@@ -110,7 +128,7 @@ The user can cancel or create the item. Submission remains visibly in progress w
 
 ## Validation
 
-1. Shared contract vectors in `tests/fixtures/system_schedule_contract_vectors.json` are consumed by Python, TypeScript, and Swift and cover ASCII/non-ASCII titles, millisecond timestamps, both cancel purposes, and every terminal receipt state.
+1. Shared contract vectors in `tests/fixtures/system_schedule_contract_vectors.json` are consumed by Python, TypeScript, and Swift and cover ASCII/non-ASCII titles, millisecond timestamps, the user-cancel shape, and every terminal receipt state.
 2. The Runtime migration uses only repository-mechanically-proven additive Alembic operations, and the historical epoch-3 tests run against a fixture graph pinned through `20261114_0089` instead of the moving repository head.
 3. Parser, authorization mapping, OS adapter, store, idempotency, cancellation, detach/logout, and stale-callback unit tests.
 4. NativeBridge method allowlist, metadata, exact-origin/main-frame/primary-WebView tests.

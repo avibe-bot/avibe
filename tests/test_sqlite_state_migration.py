@@ -7248,6 +7248,7 @@ def test_legacy_sessions_import_still_requires_platform_for_an_unresolvable_lega
         ensure_sqlite_state(db_path=db_path, state_dir=state_dir)
 
 
+# I3 review D4: the existing additive analyzer proves the canonical attempt-key uniqueness.
 def test_system_schedule_operations_migration_is_additive_and_reversible(
     tmp_path: Path,
 ) -> None:

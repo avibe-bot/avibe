@@ -117,7 +117,7 @@ describe('SystemScheduleForwarder', () => {
     ))).toBe(true);
     expect(contractVectors.cancelRequests.map((item: { purpose: string }) => item.purpose)).toEqual([
       'user',
-      'compensation',
+      'user',
     ]);
     expect(new Set(
       contractVectors.receipts.map((item: { state: string }) => item.state),
@@ -209,6 +209,48 @@ describe('SystemScheduleForwarder', () => {
     });
   });
 
+  it('retries Native recovery instead of terminalizing a local ledger write failure', async () => {
+    let reactivate: (() => void) | undefined;
+    activity.onPageReactivated.mockImplementation((callback: () => void) => {
+      reactivate = callback;
+      return () => undefined;
+    });
+    const localWriteFailure = {
+      ...receipt,
+      state: 'failed' as const,
+      error: {
+        code: 'local_state_write_failed',
+        message: 'The system item changed, but Avibe could not finish saving its management record.',
+      },
+    };
+    native.nativeSystemScheduleRequest
+      .mockResolvedValueOnce(localWriteFailure)
+      .mockResolvedValueOnce(receipt);
+    let accepted = false;
+    apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
+      if (path === '/api/system-schedule/claim') {
+        const body = JSON.parse(init.body as string);
+        return Response.json({
+          ok: true,
+          claim: accepted || body.exclude_lease_tokens.includes(createClaim.leaseToken)
+            ? null
+            : createClaim,
+        });
+      }
+      accepted = true;
+      return Response.json({ ok: true });
+    });
+
+    render(<SystemScheduleForwarder />);
+    await waitFor(() => expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce());
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(0);
+
+    reactivate?.();
+    await waitFor(() => expect(native.nativeSystemScheduleRequest).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1));
+    expect(JSON.parse(callsFor('/api/system-schedule/receipt')[0][1].body).receipt).toEqual(receipt);
+  });
+
   it('retries an undelivered receipt without invoking the same native lease again', async () => {
     let reactivate: (() => void) | undefined;
     activity.onPageReactivated.mockImplementation((callback: () => void) => {
@@ -238,6 +280,76 @@ describe('SystemScheduleForwarder', () => {
     reactivate?.();
     await waitFor(() => expect(receiptAttempts).toBe(2));
     expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce();
+  });
+
+  // I3 review E7: a hung receipt cannot hold the claim mutex or suppress another lease.
+  it('does not let one hung receipt block a cancel claim or another receipt', async () => {
+    let reactivate: (() => void) | undefined;
+    activity.onPageReactivated.mockImplementation((callback: () => void) => {
+      reactivate = callback;
+      return () => undefined;
+    });
+    const cancelRequest = {
+      requestId: 'cancel-after-hung-receipt',
+      operationId: request.operationId,
+      kind: request.kind,
+      purpose: 'user' as const,
+    };
+    const cancelReceipt = {
+      ...receipt,
+      requestId: cancelRequest.requestId,
+      state: 'cancelled' as const,
+    };
+    native.nativeSystemScheduleCancel.mockResolvedValue(cancelReceipt);
+
+    let firstClaimed = false;
+    let allowCancel = false;
+    let cancelClaimed = false;
+    let resolveHungReceipt: ((response: Response) => void) | undefined;
+    apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      if (path === '/api/system-schedule/receipt') {
+        if (body.lease_token === createClaim.leaseToken) {
+          return new Promise<Response>((resolve) => { resolveHungReceipt = resolve; });
+        }
+        return Response.json({ ok: true });
+      }
+      if (!firstClaimed) {
+        firstClaimed = true;
+        return Response.json({ ok: true, claim: createClaim });
+      }
+      if (allowCancel && !cancelClaimed) {
+        cancelClaimed = true;
+        return Response.json({
+          ok: true,
+          claim: {
+            action: 'cancel',
+            generation: 1,
+            purpose: 'user',
+            leaseToken: 'lease-cancel-after-hung',
+            leaseExpiresAt: request.expiresAt,
+            request: cancelRequest,
+          },
+        });
+      }
+      return Response.json({ ok: true, claim: null });
+    });
+
+    render(<SystemScheduleForwarder />);
+    await waitFor(() => expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1));
+    expect(callsFor('/api/system-schedule/receipt')[0][1].signal).toBeInstanceOf(AbortSignal);
+
+    allowCancel = true;
+    reactivate?.();
+
+    await waitFor(() => expect(native.nativeSystemScheduleCancel).toHaveBeenCalledWith(cancelRequest));
+    await waitFor(() => expect(
+      callsFor('/api/system-schedule/receipt').some(([, init]) => (
+        JSON.parse(init.body).lease_token === 'lease-cancel-after-hung'
+      )),
+    ).toBe(true));
+
+    resolveHungReceipt?.(Response.json({ ok: true }));
   });
 
   it('claims cancellation while creation awaits confirmation and keeps both receipts by lease', async () => {

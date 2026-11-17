@@ -57,7 +57,6 @@ def test_shared_contract_vectors_cover_closed_shapes_and_terminal_receipts():
     )
     assert {request["purpose"] for request in vectors["cancelRequests"]} == {
         "user",
-        "compensation",
     }
     parsed = [_canonical_receipt(receipt).payload for receipt in vectors["receipts"]]
     assert parsed == vectors["receipts"]
@@ -240,6 +239,26 @@ def test_create_is_canonical_session_bound_idempotent_and_conflict_safe(isolated
         assert exc_info.value.code == "invalid_request"
 
 
+# I3 review E8: an idempotent retry is resolved before first-create time guards.
+def test_existing_operation_retry_precedes_first_create_time_validation(isolated_state):
+    created = _create(operation_id="past-retry")
+
+    retried = _create(
+        operation_id="past-retry",
+        now=NOW + timedelta(hours=2),
+    )
+    assert retried["operation_id"] == created["operation_id"]
+    assert retried["state"] == "expired"
+    assert retried["create"]["request_id"] == created["create"]["request_id"]
+
+    with pytest.raises(SystemScheduleServiceError) as exc_info:
+        _create(
+            operation_id="new-past-operation",
+            now=NOW + timedelta(hours=2),
+        )
+    assert exc_info.value.code == "fire_time_in_past"
+
+
 def test_created_operation_survives_originating_session_deletion(isolated_state):
     _create(operation_id="survives-session")
     engine = create_sqlite_engine()
@@ -329,6 +348,7 @@ def test_device_binding_is_sticky_and_exclusions_allow_cancel_to_pass_create(
     ) is None
 
 
+# I3 review C1: a terminal create attempt is never sticky claim work again.
 def test_cancelled_claimed_create_is_never_redispatched(isolated_state):
     for suffix, cancel_state in (
         ("inflight", None),
@@ -425,7 +445,59 @@ def test_cancel_and_create_receipts_can_arrive_in_either_order(isolated_state):
         assert operation["cleanup"] is None
 
 
-def test_late_side_effect_after_cancel_failure_creates_compensation_generation(
+# I3 review D1/E3: receipt order is evidence only and cannot synthesize cleanup.
+def test_late_side_effect_and_cancel_receipt_order_never_generates_cleanup_attempt(
+    isolated_state,
+):
+    for suffix, create_first in (("create-first", True), ("cancel-first", False)):
+        operation_id = f"no-cleanup-{suffix}"
+        _create(operation_id=operation_id)
+        create_claim = claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            now=NOW,
+        )
+        cancel_operation(
+            session_id="ses-schedule",
+            instance_id="instance-a",
+            operation_id=operation_id,
+            now=NOW + timedelta(seconds=1),
+        )
+        cancel_claim = claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            exclude_lease_tokens=[create_claim["leaseToken"]],
+            now=NOW + timedelta(seconds=1),
+        )
+        create_receipt = _receipt(
+            create_claim,
+            state="scheduled",
+            system_identifier=f"opaque-{suffix}",
+        )
+        cancel_receipt = _receipt(
+            cancel_claim,
+            state="failed",
+            error={"code": "lookup_unknown", "message": "Could not inspect the item."},
+        )
+        ordered = (
+            ((create_claim, create_receipt), (cancel_claim, cancel_receipt))
+            if create_first
+            else ((cancel_claim, cancel_receipt), (create_claim, create_receipt))
+        )
+        for offset, (claim, receipt) in enumerate(ordered, start=2):
+            _record(claim, receipt, now=NOW + timedelta(seconds=offset))
+
+        operation = _get(operation_id, now=NOW + timedelta(seconds=5))
+        assert operation["cleanup"] is None
+        assert claim_next(
+            instance_id="instance-a",
+            device_id="device-a",
+            now=NOW + timedelta(seconds=5),
+        ) is None
+
+
+# I3 review E2: an expired user cancel plus late create receipt creates no Runtime compensation.
+def test_expired_user_cancel_then_late_create_receipt_never_generates_cleanup_attempt(
     isolated_state,
 ):
     _create()
@@ -434,37 +506,22 @@ def test_late_side_effect_after_cancel_failure_creates_compensation_generation(
         session_id="ses-schedule",
         instance_id="instance-a",
         operation_id="wake-up",
+        expires_in=30,
         now=NOW + timedelta(seconds=1),
     )
-    cancel_claim = claim_next(
-        instance_id="instance-a",
-        device_id="device-a",
-        exclude_lease_tokens=[create_claim["leaseToken"]],
-        now=NOW + timedelta(seconds=1),
-    )
-    _record(
-        cancel_claim,
-        _receipt(
-            cancel_claim,
-            state="failed",
-            error={"code": "lookup_unknown", "message": "Could not inspect the item."},
-        ),
-        now=NOW + timedelta(seconds=2),
-    )
+
     operation = _record(
         create_claim,
         _receipt(create_claim, state="scheduled", system_identifier="opaque-late"),
-        now=NOW + timedelta(seconds=3),
+        now=NOW + timedelta(seconds=32),
     )["operation"]
-    assert operation["state"] == "cancelled"
-    assert operation["cleanup"]["purpose"] == "compensation"
-    assert operation["cleanup"]["generation"] == 2
-    compensation = claim_next(
+    assert operation["cancel"]["terminal_state"] == "expired"
+    assert operation["cleanup"] is None
+    assert claim_next(
         instance_id="instance-a",
         device_id="device-a",
-        now=NOW + timedelta(seconds=3),
-    )
-    assert compensation["purpose"] == "compensation"
+        now=NOW + timedelta(seconds=32),
+    ) is None
 
 
 def test_claimed_cancel_survives_deadline_and_retry_uses_new_generation(isolated_state):
