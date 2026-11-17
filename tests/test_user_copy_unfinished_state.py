@@ -6,7 +6,9 @@ limitation is written as a fact the user can act on ("Remote instances don't
 support Mini. Return to this Mac to use it.") or not shown at all.
 
 The scan covers every shipped string catalog: the Web/Desktop/Mini UI bundles,
-the service and IM reply bundles, and the iOS catalogs. A legitimate match must
+the service and IM reply bundles, and the iOS catalogs, plus the bundled Skill
+text (``skills/**/*.md``, entry points and the references they load) that
+Agents read and relay. A legitimate match must
 be listed in ``ALLOWED`` with the reason it is not roadmap or unfinished-state
 copy; keep that list short and specific.
 
@@ -116,6 +118,41 @@ def _entries() -> Iterator[tuple[str, str]]:
             match = re.match(r'\s*"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"\s*;', line)
             if match:
                 yield f"{rel}:{match.group(1)}", match.group(2)
+    for path in sorted(ROOT.glob("skills/**/*.md")):
+        rel = path.relative_to(ROOT).as_posix()
+        for number, paragraph in _paragraphs(path.read_text(encoding="utf-8")):
+            yield f"{rel}:{number}", paragraph
+
+
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_INLINE = re.compile(r"<[^>]+>|[*_`~]")
+
+
+def _plain(markdown: str) -> str:
+    """The words a reader sees in a Markdown paragraph.
+
+    Links and images keep their text; HTML tags and inline emphasis, code and
+    strike delimiters go, so ``coming **soon**`` reads as "coming soon".
+    """
+    text = _MARKDOWN_LINK.sub(r"\1", markdown)
+    return " ".join(_MARKDOWN_INLINE.sub("", text).split())
+
+
+def _paragraphs(text: str) -> Iterator[tuple[int, str]]:
+    """Blank-line separated blocks as plain text, with their first line.
+
+    Markdown prose is hard-wrapped and marked up, so a phrase such as
+    "coming\nsoon" or "coming **soon**" only reads as one once the block is
+    joined and its inline Markdown removed.
+    """
+    start, lines = 0, []
+    for number, line in enumerate([*text.splitlines(), ""], start=1):
+        if line.strip():
+            start = start or number
+            lines.append(line.strip())
+        elif lines:
+            yield start, _plain(" ".join(lines))
+            start, lines = 0, []
 
 
 def test_user_copy_has_no_unfinished_or_roadmap_wording() -> None:
@@ -136,6 +173,26 @@ def test_allowlist_entries_still_match() -> None:
     present = dict(_entries())
     stale = sorted(key for key in ALLOWED if key in present and not FORBIDDEN.search(present[key]))
     assert stale == [], f"remove ALLOWED entries whose copy was rewritten: {stale}"
+
+
+def test_skill_paragraphs_join_wrapped_phrases() -> None:
+    text = "# Title\n\nThis is coming\nsoon for everyone.\n\n- the user asks for a feature\n  Avibe does not support\n  yet\n"
+    paragraphs = list(_paragraphs(text))
+    assert [number for number, _ in paragraphs] == [1, 3, 6]
+    assert all(FORBIDDEN.search(paragraph) for _, paragraph in paragraphs[1:])
+
+
+def test_skill_paragraphs_read_through_inline_markdown() -> None:
+    for marked in (
+        "This is coming **soon**.",
+        "It is not supported *yet*.",
+        "It is `coming soon`.",
+        "Webhooks are [coming soon](https://example.com).",
+        "This is coming <em>soon</em>.",
+        "This is ~~not~~ coming __soon__.",
+    ):
+        [(_, paragraph)] = list(_paragraphs(marked))
+        assert FORBIDDEN.search(paragraph), marked
 
 
 def test_pattern_catches_known_unfinished_copy() -> None:
