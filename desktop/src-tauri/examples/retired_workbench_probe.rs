@@ -244,11 +244,12 @@ fn record_covered_focus(app: &AppHandle, address: SocketAddr, seen: &Shared) {
     start(&runtime, address, seen);
     runtime.show().unwrap();
     let account = workbench(app, "item1-account", true, None);
+    let loading = Instant::now();
     account
         .navigate(format!("http://{address}/frame/item1-account").parse().unwrap())
         .unwrap();
     wait_for("account page", Duration::from_secs(20), || {
-        pings_since(seen, "item1-account-frame", Instant::now() - Duration::from_secs(1)) >= 1
+        pings_since(seen, "item1-account-frame", loading) >= 1
     });
     // The account screen as the shell shows it: account shown and focused,
     // the Runtime covered by hiding it.
@@ -279,8 +280,8 @@ fn record_covered_focus(app: &AppHandle, address: SocketAddr, seen: &Shared) {
     );
     // Recorded, not asserted: this describes WebKit and AppKit, and the shell
     // no longer takes this path (`displayed_webview`).
-    avibe_desktop_lib::instance_store::destroy_completed(&account).unwrap();
-    avibe_desktop_lib::instance_store::destroy_completed(&runtime).unwrap();
+    avibe_desktop_lib::instance_store::retire(&account).unwrap();
+    avibe_desktop_lib::instance_store::retire(&runtime).unwrap();
 }
 
 fn main() {
@@ -329,12 +330,13 @@ fn main() {
                 assert_stopped("disposable", &seen);
                 println!("item 2: instance_store::retire stopped the page, its iframe and its event stream");
 
-                // The local Runtime and the account view are destroyed
-                // without an erase.
-                avibe_desktop_lib::instance_store::destroy_completed(&persistent).unwrap();
+                // A persistent store goes through the same destruction
+                // (`destroy_completed`, which `retire` ends with and which the
+                // local Runtime and the account view use directly).
+                avibe_desktop_lib::instance_store::retire(&persistent).unwrap();
                 assert!(handle.get_webview("persistent").is_none());
                 assert_stopped("persistent", &seen);
-                println!("item 2: instance_store::destroy_completed stopped the page, its iframe and its event stream");
+                println!("item 2: retiring a persistent-store view stopped the page, its iframe and its event stream");
 
                 // The silence above is not the server or WebKit going quiet:
                 // the hidden control page kept running throughout.
