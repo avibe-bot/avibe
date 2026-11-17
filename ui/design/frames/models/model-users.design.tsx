@@ -16,23 +16,23 @@ const route = '/settings/models';
 const weibi = bot('main', '歪比', "The user's main Bot and first point of contact.", { kind: 'mascot' });
 const cso = bot('cso', '首席安全官', '依赖与权限的安全审计，每周汇报', { kind: 'emoji', emoji: '🛡️', hue: 200 });
 const pm = bot('pm', '产品经理', '需求池整理与优先级', { kind: 'emoji', emoji: '🧭', hue: 42 });
+const vibeyModels = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5'];
+// The server lists, on a Source, every gateway model whose route goes through it
+// (`_adopted_by`, sorted by backend then model), so the card reads 「Vibey 正在使用」.
+const relay = { ...relayClaude, adopted_by: [...vibeyModels].sort().map((menu_model) => ({ backend: 'vibey' as const, menu_model })) };
 const uses = (model: string, ...names: string[]) => names.map((name) => ({ name, effective_model_id: model, supply_status: 'ok' as const, route_reason: null }));
 const vibey: AgentSpec = {
   backend: 'vibey',
   cliPresent: false,
-  order: [relayClaude],
-  routes: {
-    'claude-opus-5': { hops: [[relayClaude, 'claude-opus-5']] },
-    'claude-sonnet-5': { hops: [[relayClaude, 'claude-sonnet-5']] },
-    'claude-haiku-5': { hops: [[relayClaude, 'claude-haiku-5']] },
-  },
+  order: [relay],
+  routes: Object.fromEntries(vibeyModels.map((id) => [id, { hops: [[relay, id]] }])),
   namedAgents: [
     ...uses('claude-opus-5', 'main', 'vibey'),
     ...uses('claude-sonnet-5', 'cso', 'reviewer', 'pm', 'slack-triage', 'release-notes'),
   ],
 };
 // The hub's reads answer `/api/bots` with no Bots; these Bots are served from `bots` instead.
-const { '/api/bots': _noBots, ...api } = hubApi({ sources: [relayClaude], agents: [vibey] });
+const { '/api/bots': _noBots, ...api } = hubApi({ sources: [relay], agents: [vibey] });
 const fixtures = settingsFixtures(api, { bots: [weibi, cso, pm] });
 
 const view = (name: string, title: string, width: number, height: number): FrameSpec => ({
