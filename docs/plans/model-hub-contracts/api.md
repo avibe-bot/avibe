@@ -1965,6 +1965,19 @@ runtime. Failure settles at `not_installed` with
 carrier for the persisted failure; raw downloader or verifier text remains only in
 scrubbed logs. `/start` never performs installation.
 
+For a lifecycle-owned engine that the owner publishes as a settled running
+generation, `status.installed_version`, `status.verified` and `manifest` describe
+the exact launch. The owner verified those bytes against the manifest
+synchronously before spawn. `verified: true` therefore means the running
+process's input binary matched its exact manifest at launch. It is not a
+continuous disk audit or a memory attestation, and a later file change or a
+transient read obstruction does not turn a running `ok` into
+`installed_version: null` / `verified: false`. Every other state, including
+`not_started`, `down`, provisional, recovering and blocked, reports a fresh disk
+inspection. Every fresh start re-verifies. `installing` keeps its asynchronous
+shape above. There is no eventual-verification field; the Dependencies
+inspection is where on-disk drift is reported.
+
 On service bootstrap, persisted `installing` with no worker owned by the reconstructed
 process is an orphaned install, never a live-job proof. Recovery atomically replaces the
 claim generation before it re-resolves the pinned target through the shared installer
