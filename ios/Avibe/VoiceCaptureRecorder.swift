@@ -10,6 +10,7 @@ protocol VoiceCaptureAudioSession {
 /// What records the take to its file.
 protocol VoiceCaptureRecordingEngine: AnyObject {
     var currentTime: TimeInterval { get }
+    var isRecording: Bool { get }
     func record() -> Bool
     func stop()
 }

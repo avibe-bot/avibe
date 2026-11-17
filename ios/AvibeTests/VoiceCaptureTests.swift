@@ -566,6 +566,7 @@ private final class FakeSession: VoiceCaptureAudioSession {
 private final class FakeEngine: VoiceCaptureRecordingEngine {
     var records = true
     var currentTime: TimeInterval { 1 }
+    var isRecording: Bool { records }
     func record() -> Bool { records }
     func stop() {}
 }
