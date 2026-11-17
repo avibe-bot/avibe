@@ -182,11 +182,12 @@ export type AppShellProps = {
 const BotProfileDialogHost = lazyPage(() => import('./workbench/bots/BotProfileDialog').then((module) => module.BotProfileDialogHost));
 
 function BotProfileDialogSlot() {
-  const { enabled, profileRequest } = useBots();
+  const { profileRequest } = useBots();
   const [requested, setRequested] = useState(false);
-  if (enabled && profileRequest && !requested) setRequested(true);
+  if (profileRequest && !requested) setRequested(true);
   if (!requested) return null;
-  return <React.Suspense fallback={null}><BotProfileDialogHost /></React.Suspense>;
+  // A chunk that cannot load loses only the dialog, not the shell around it.
+  return <ErrorBoundary variant="inline"><React.Suspense fallback={null}><BotProfileDialogHost /></React.Suspense></ErrorBoundary>;
 }
 
 // The question's code loads when it is first put up; nothing on the first screen draws it.
@@ -195,7 +196,7 @@ const VoiceConsentHost = lazyPage(() => import('./voice/VoiceConsent').then((mod
 function VoiceConsentSlot() {
   const asking = useVoiceConsentAsking();
   if (!asking) return null;
-  return <React.Suspense fallback={null}><VoiceConsentHost /></React.Suspense>;
+  return <ErrorBoundary variant="inline"><React.Suspense fallback={null}><VoiceConsentHost /></React.Suspense></ErrorBoundary>;
 }
 
 export const AppShell: React.FC<AppShellProps> = ({ footer }) => {

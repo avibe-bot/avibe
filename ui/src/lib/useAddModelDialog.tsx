@@ -2,6 +2,7 @@ import { Suspense, useEffect, useState, type ReactNode } from 'react';
 
 import type { AgentBackend } from '../components/settings/models/types';
 import { hubCatalogModels, useAddModelAvailable, type BackendModels } from './backendModels';
+import { ErrorBoundary } from '../components/ui/error-boundary';
 import { lazyPage } from './lazyPage';
 
 // The add dialog's code (with the model editor and picker it opens) loads when a picker first
@@ -32,6 +33,8 @@ export function useAddModelDialog(
   return {
     open: available ? () => setAdding(backend as AgentBackend) : null,
     dialog: adding && (
+      // A chunk that cannot load loses only this dialog, not the form or page that opened it.
+      <ErrorBoundary variant="inline">
       <Suspense fallback={null}>
       <AddModelsDialog
         open
@@ -43,6 +46,7 @@ export function useAddModelDialog(
         }}
       />
       </Suspense>
+      </ErrorBoundary>
     ),
   };
 }
