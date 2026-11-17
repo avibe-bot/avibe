@@ -1132,10 +1132,15 @@ The app and the Notification Service extension each carry a
 own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking;
 the app also declares system boot time (`35F9.1`), which the direct
 transport's deadlines read through `ProcessInfo.systemUptime`.
-The app also declares the data it collects, matching its App Privacy answers:
-the account's email address and user ID, linked to the user, for App
-Functionality only. The extension decrypts and shows notifications on the
-device and collects nothing.
+The app also declares the data it collects, matching its App Privacy answers
+(owner-approved, 2026-11-17): the account's email address and user ID, the
+device's push token, which the avibe.bot relay stores (Device ID), and
+hold-to-talk recordings, which avibe.bot relays to the speech service (Audio
+Data). Each is linked to the user, for App Functionality only, and not used
+for tracking. The extension decrypts and shows notifications on the device and
+collects nothing. `verify-archive` checks that each manifest exists and
+declares no tracking; it does not compare the collected types with App Store
+Connect, so change both together.
 
 `Info.plist` declares `ITSAppUsesNonExemptEncryption = false`: the app uses
 only the system's HTTPS and passkey cryptography, so builds need no export
