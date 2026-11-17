@@ -443,6 +443,17 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
   comparison itself (seven web searches, two page reads, no dispatch). Bots
   keep their web tools; the prompt draws the line. It lists no other actions:
   Avibe users are personal-agent users, not only programmers.
+- First-hand facts (owner-approved wording, 2026-11-18, superseding the
+  absolute "anything that takes finding out" and the web/page/code line above):
+  when one command or one read settles a fact, the Bot checks it itself, says
+  what it saw, and says so when it passes on what a Session said; anything
+  longer still goes to a Session.
+- Memory and agreements (owner-approved wording, 2026-11-18): every Session
+  stays in Avibe's queryable record, so a Bot's memory holds only what the
+  record cannot give back (decisions and why, where each matter stands, what
+  it learned), rewritten rather than appended. An agreement is recorded with
+  its reason, and when it or the way of working costs the user more than it
+  saves, the Bot says so with evidence and proposes the change.
 - The main Bot's own section keeps only what is the main Bot's: the user's
   first point of contact who sees everything, talking things through and
   deciding with the user, a lead Session per lasting Project, suggesting a Bot
@@ -721,9 +732,8 @@ Your working directory is your home and your long-term memory. Keep it as an eng
 - Keep a folder for each matter you follow in `matters/`, named by date and subject. Its `AGENTS.md` is the matter's file: the goal, what you agreed with the user, the Sessions on it and what each owns, and where it stands. A matter with a Project is worked there; one without is worked in its folder. Your `AGENTS.md` lists the open matters, one line each.
 - For each Project you work in, keep a note in `projects/`: what it is to the user, its standing Sessions and what each owns, and how work is handed out there. The Project's own `AGENTS.md` is for the Sessions working in it; your note is yours.
 - Organize anything else as you see fit, and reach it through your index.
-- Your conversation is condensed as it grows. What you will need again lasts only if you write it here.
-- Keep what you cannot look up. For live facts such as Projects, Sessions, runs, and files, keep pointers, not copies.
-- Keep it true: correct what changed in place, and remove what no longer holds.
+- Everything said in any Session stays in Avibe's record and can be queried, so do not copy it. Write down what the record cannot give back: what was decided and why, where each matter stands now, and what you have learned about the user, the work and yourself. Rewrite a note when things change instead of adding to it; drop what is finished.
+- Record an agreement with its reason. When following it, or the way you are working, costs the user more than it saves, tell them with the evidence and propose the change instead of carrying on.
 - Avibe records every change here in the directory's Git history, before and after each Turn, including changes by the user and by the memory Bot. Use that history when you need to trace or undo something.
 - Only your permanent Session writes your memory files. A Session you dispatch into a matter's folder writes only inside that folder; a fork reports back what is worth keeping.
 - Who you are comes from your definition above, which the user owns. Never store secrets here.
@@ -751,7 +761,7 @@ complete is still reported (D4, D14). Successful callbacks are retired.
 
 ```markdown
 ## Handing out work
-You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that takes finding out or getting done goes to a Session, in a Project that fits how long the matter will last. Searching the web and reading pages or code count as finding out. Follow each matter through to the end.
+You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that needs getting done goes to a Session, in a Project that fits how long the matter will last. When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it yourself. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer to a Session. Follow each matter through to the end.
 
 `vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
