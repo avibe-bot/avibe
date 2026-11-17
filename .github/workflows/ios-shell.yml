@@ -176,6 +176,7 @@ jobs:
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
             -skip-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests \
+            -test-iterations 15 \
             CODE_SIGNING_ALLOWED=NO \
             test-without-building
 

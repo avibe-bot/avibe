@@ -321,9 +321,12 @@ enum SheetFixtureReadiness {
             }, object: nil
         )
         guard XCTWaiter.wait(for: [gone], timeout: timeout) == .completed else {
+            print("[dismissal receipt] failed \(dismissalFailure(from: last))")
             XCTFail(dismissalFailure(from: last), file: file, line: line)
             return
         }
+        // draft-only: print the receipt of a passing dismissal too.
+        print("[dismissal receipt] passed \(dismissalFailure(from: last))")
         // Gone, and it does not come back (waitForExistence waits for
         // appearance, which is what this checks).
         XCTAssertFalse(
