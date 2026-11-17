@@ -1321,7 +1321,7 @@
         "routeStatus": {
           "empty": "No models",
           "unknown": "Unknown",
-          "unconfigured": "No provider supplies these",
+          "unconfigured": "No supplier",
           "available": "Ready",
           "partial": "Partial",
           "unavailable": "Unavailable"
@@ -1330,7 +1330,7 @@
           "summary_one": "{{count}} Agent needs attention",
           "summary_other": "{{count}} Agents need attention",
           "modelMissing": "No model selected",
-          "routeMissing": "{{model}} is not a known model name. Change this Agent's model, or add a route for {{model}}.",
+          "routeMissing": "No provider supplies {{model}}. Pick another model, or add a provider that supplies it.",
           "degraded": "Some providers are unavailable; requests fall back to the next one",
           "waiting": "Waiting for a provider to recover",
           "interrupted": "No provider is available for this model"
@@ -1650,12 +1650,12 @@
         "preview": {
           "automatic": "After restore: automatic matching",
           "passthrough": "After restore: forwarded as is",
-          "unconfigured": "After restore: unconfigured"
+          "unconfigured": "After restore: no provider supplies it"
         },
         "previewLoading": "Reading inherited routing...",
         "previewFailed": "Could not preview inherited routing. Nothing has been saved. Retry or undo the restore.",
         "draftEmpty": "No route entries in this draft.",
-        "noDefaults": "No provider lists this model yet. Add one that lists it, or, if your provider does serve it, choose that provider for it under Custom.",
+        "noDefaults": "No provider in default routing lists this model. Add one that lists it or put an existing one in default routing; if your provider does serve it, choose it under Custom.",
         "inventoryNotProvided": "Model list not provided",
         "configureDefaults": "Configure default routing",
         "close": "Close",

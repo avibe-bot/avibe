@@ -1330,7 +1330,7 @@
           "summary_one": "{{count}} 个 Agent 需关注",
           "summary_other": "{{count}} 个 Agent 需关注",
           "modelMissing": "未选择模型",
-          "routeMissing": "{{model}} 模型名不存在，请修改此 agent 的模型名或添加 {{model}} 模型的路由",
+          "routeMissing": "没有供应商提供 {{model}}。请换一个模型，或添加提供它的供应商。",
           "degraded": "部分供应商不可用，请求已自动切换到其他供应商",
           "waiting": "等待供应商恢复",
           "interrupted": "此模型没有可用供应商"
@@ -1650,12 +1650,12 @@
         "preview": {
           "automatic": "恢复后：自动匹配",
           "passthrough": "恢复后：原样转发",
-          "unconfigured": "恢复后：未配置"
+          "unconfigured": "恢复后：没有供应商提供"
         },
         "previewLoading": "正在读取继承路由…",
         "previewFailed": "无法预览继承路由，尚未保存任何更改。请重试或撤销恢复。",
         "draftEmpty": "草稿中暂无路由条目。",
-        "noDefaults": "还没有供应商列出这个模型。添加一个列出它的供应商；或者如果你的供应商其实提供它，在「自定义」里为它指定这个供应商。",
+        "noDefaults": "默认路由里没有列出这个模型的供应商。可以添加一个列出它的供应商，或把已有的加入默认路由；如果你的供应商其实提供它，在「自定义」里为它指定。",
         "inventoryNotProvided": "模型列表未提供",
         "configureDefaults": "设置默认路由",
         "close": "关闭",

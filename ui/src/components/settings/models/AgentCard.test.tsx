@@ -426,8 +426,8 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={instance}><AgentCard agents={[agent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} onOpenAgent={onOpenAgent} /></I18nextProvider>);
     await userEvent.click(screen.getByRole('button', { name: instance.t('settings.models.gateway.agentIssues.summary', { count: 1 }) }));
 
-    const reason = screen.getByText(/grok\/grok-4\.6 模型名不存在/);
-    expect(reason.textContent).toContain('添加 grok/grok-4.6 模型的路由');
+    const reason = screen.getByText(/没有供应商提供 grok\/grok-4\.6/);
+    expect(reason.textContent).toContain('添加提供它的供应商');
     await userEvent.click(reason);
 
     expect(onOpenAgent).toHaveBeenCalledWith('opencode');
