@@ -312,7 +312,12 @@ Activity for as long as it records. It is also a `LiveActivityIntent`, the
 documented way for an App that is not in front to start a Live Activity.
 `UIBackgroundModes` declares `audio`, which Apple requires to keep recording
 once the App is in the background (`AVAudioSession.Category.record`); the
-other Info.plist addition is `NSSupportsLiveActivities`. The system asks
+other Info.plist addition is `NSSupportsLiveActivities`. The background audio mode is
+used only while recording a take the user started (App Store guideline
+2.5.4), with the system microphone indicator and our Live Activity showing:
+the audio session is activated when a take starts recording and deactivated
+on every way it ends (send, cancel, the cap, an interruption, a failure, an
+account change), and Avibe plays no audio. The system asks
 for Face ID first (`authenticationPolicy` `.requiresAuthentication`), because
 the main Bot acts on the user's computer.
 

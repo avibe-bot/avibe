@@ -44,40 +44,55 @@ final class VoiceCaptureRecorder {
         AVAudioApplication.shared.recordPermission == .granted
     }
 
+    /// Whether this take activated the audio session. The session is
+    /// active only while a take records (the background `audio` mode keeps
+    /// the App running for that, and nothing else), and every way a take
+    /// ends goes through `stop()`, which deactivates it.
+    private var sessionActive = false
+
     func start() throws {
         guard Self.hasPermission else {
             throw Failure.permission
         }
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default, options: [])
-        try session.setActive(true)
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 32_000,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-        ]
-        let recorder = try AVAudioRecorder(url: url, settings: settings)
-        guard recorder.record() else {
-            try? session.setActive(false, options: .notifyOthersOnDeactivation)
-            throw Failure.start
+        do {
+            try session.setCategory(.record, mode: .default, options: [])
+            try session.setActive(true)
+            sessionActive = true
+            let settings: [String: Any] = [
+                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+                AVSampleRateKey: 16_000,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 32_000,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+            let recorder = try AVAudioRecorder(url: url, settings: settings)
+            guard recorder.record() else { throw Failure.start }
+            self.recorder = recorder
+        } catch {
+            deactivateSession()
+            throw error
         }
-        self.recorder = recorder
     }
 
-    /// Stops the take and returns its length in seconds.
+    /// Stops the take, releases the audio session, and returns the take's
+    /// length in seconds. Safe to call more than once.
     @discardableResult
     func stop() -> TimeInterval {
-        guard let recorder else { return 0 }
-        let duration = recorder.currentTime
-        recorder.stop()
-        self.recorder = nil
+        let duration = recorder?.currentTime ?? 0
+        recorder?.stop()
+        recorder = nil
+        deactivateSession()
+        return duration
+    }
+
+    private func deactivateSession() {
+        guard sessionActive else { return }
+        sessionActive = false
         try? AVAudioSession.sharedInstance().setActive(
             false,
             options: .notifyOthersOnDeactivation
         )
-        return duration
     }
 
     var isRecording: Bool {

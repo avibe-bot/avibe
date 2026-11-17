@@ -279,6 +279,35 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(modes, ["audio"])
     }
 
+    /// Background audio is held only while a take records: every way a
+    /// take ends releases the audio session.
+    func testEveryWayATakeEndsReleasesTheAudioSession() async {
+        func recording(_ setup: (World) -> Void = { _ in }) async -> (World, VoiceCaptureController) {
+            let world = World()
+            setup(world)
+            let controller = world.controller()
+            _ = await controller.toggle()
+            XCTAssertEqual(world.audio?.holdsSession, true)
+            world.audio?.duration = 2
+            return (world, controller)
+        }
+        var (world, controller) = await recording()
+        _ = await controller.toggle()  // send
+        XCTAssertEqual(world.audio?.holdsSession, false, "send")
+
+        (world, controller) = await recording()
+        await controller.finish(send: false)  // cancel
+        XCTAssertEqual(world.audio?.holdsSession, false, "cancel")
+
+        (world, controller) = await recording { $0.instance.pathFailures = 1 }
+        _ = await controller.toggle()  // failure kept for Retry
+        XCTAssertEqual(world.audio?.holdsSession, false, "failure")
+
+        (world, controller) = await recording()
+        _ = controller.cancelForAccountTransition()
+        XCTAssertEqual(world.audio?.holdsSession, false, "account change")
+    }
+
     func testANoGivenSinceStopsWithoutRetry() async {
         let world = World()
         world.instance.transcribeResult = .failure(Failure.consentRequired)
@@ -413,6 +442,8 @@ private final class FakeAudio: VoiceCaptureAudio {
     let url: URL
     var started = false
     var discarded = false
+    /// Whether the take holds the audio session (started and not stopped).
+    var holdsSession = false
     var duration: TimeInterval = 0
 
     init() {
@@ -420,9 +451,9 @@ private final class FakeAudio: VoiceCaptureAudio {
         try? Data([0, 1, 2]).write(to: url)
     }
 
-    func start() throws { started = true }
-    func stop() -> TimeInterval { duration }
-    func discard() { discarded = true }
+    func start() throws { started = true; holdsSession = true }
+    func stop() -> TimeInterval { holdsSession = false; return duration }
+    func discard() { holdsSession = false; discarded = true }
 }
 
 @MainActor
