@@ -119,6 +119,7 @@
 		16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
 		16000000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
 		16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000030 /* VoiceCaptureTests.swift */; };
+		16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000031 /* VoiceCaptureAlert.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -267,6 +268,7 @@
 		26000000000000000000000015 /* VoiceCapture.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = VoiceCapture.xcstrings; sourceTree = "<group>"; };
 		26000000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		26000000000000000000000030 /* VoiceCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000031 /* VoiceCaptureAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureAlert.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -377,6 +379,7 @@
 				26000000000000000000000003 /* VoiceCaptureController.swift */,
 				26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */,
 				26000000000000000000000005 /* VoiceCaptureRecorder.swift */,
+				26000000000000000000000031 /* VoiceCaptureAlert.swift */,
 				200000000000000000000120 /* DirectIrohByteStream.swift */,
 				200000000000000000000121 /* DirectIrohEngine.swift */,
 				200000000000000000000136 /* DirectIrohBinding.swift */,
@@ -927,6 +930,7 @@
 				16000000000000000000000003 /* VoiceCaptureController.swift in Sources */,
 				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
 				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
+				16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */,
 				16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,

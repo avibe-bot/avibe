@@ -12,8 +12,12 @@ import Foundation
 /// `AudioRecordingIntent` tells the system the App records audio; the
 /// system then requires a Live Activity for as long as it records
 /// (developer.apple.com/documentation/appintents/audiorecordingintent).
+/// It is also a `LiveActivityIntent`: an App that is not in front may start
+/// a Live Activity only from such an intent
+/// (developer.apple.com/documentation/appintents/liveactivityintent), and a
+/// press that finds no running process must still be able to.
 @available(iOS 18.0, *)
-struct SpeakToMainBotIntent: AudioRecordingIntent {
+struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Talk to Main Bot"
     static let description = IntentDescription(
         "Records what you say and sends it to your main Bot without opening Avibe."
@@ -44,6 +48,8 @@ struct SpeakToMainBotIntent: AudioRecordingIntent {
             do {
                 try await continueInForeground(alwaysConfirm: false)
                 controller.openMainBotChat()
+                // Never in front without a word: say why it came forward.
+                VoiceCaptureAlert.present(reason)
                 return .result()
             } catch {
                 // The system declined; the island says to open Avibe.

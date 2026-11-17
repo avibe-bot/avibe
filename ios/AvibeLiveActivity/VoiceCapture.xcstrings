@@ -33,6 +33,22 @@
         }
       }
     },
+    "voiceCapture.action.ok" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "OK"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "好"
+          }
+        }
+      }
+    },
     "voiceCapture.action.retry" : {
       "localizations" : {
         "en" : {
@@ -161,6 +177,22 @@
         }
       }
     },
+    "voiceCapture.reason.activityFailed" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Live Activity couldn't start, so nothing was recorded."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "实时活动没能启动，这次没有录音。"
+          }
+        }
+      }
+    },
     "voiceCapture.reason.consent" : {
       "localizations" : {
         "en" : {
@@ -182,13 +214,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Recording was interrupted."
+            "value" : "Recording stopped; nothing was sent."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "录音被打断了。"
+            "value" : "录音中断了，没有发出去。"
           }
         }
       }
@@ -269,6 +301,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "没能发给主伙伴。"
+          }
+        }
+      }
+    },
+    "voiceCapture.reason.sendUnknown" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "It may have been sent. Check the Main Bot chat."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可能已经发出去了，请在主伙伴对话里看一下。"
           }
         }
       }

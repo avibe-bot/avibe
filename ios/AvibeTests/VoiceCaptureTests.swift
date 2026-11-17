@@ -1,4 +1,5 @@
 import ActivityKit
+import AppIntents
 import XCTest
 @testable import Avibe
 
@@ -154,7 +155,7 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()
         // The POST may have reached the instance; Retry would send it twice.
         XCTAssertEqual(controller.phase, .idle)
-        XCTAssertEqual(world.activities.first?.ended?.reason, .sendFailed)
+        XCTAssertEqual(world.activities.first?.ended?.reason, .sendUnknown, "it may have arrived")
         XCTAssertFalse(VoiceCaptureDetail.retryable(.sendFailed))
         XCTAssertEqual(world.instance.posts, 1)
         XCTAssertEqual(world.audio?.discarded, true)
@@ -184,6 +185,204 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(outcome, .stopped)
         XCTAssertNil(waiting.audio, "nothing recorded for the old account")
         XCTAssertEqual(other.phase, .idle)
+    }
+
+    // MARK: A take whose process is gone (the owner's 11-17 device test)
+
+    /// Start, then the App is killed, then a press: the island the gone
+    /// process left is ended (said to be interrupted) instead of the press
+    /// bringing Avibe forward, and the press after that records again.
+    func testStartThenKillThenPressEndsTheLeftoverAndThenRecordsAgain() async {
+        let world = World()
+        let before = world.controller()
+        _ = await before.toggle()
+        let leftover = try! XCTUnwrap(world.activities.first)
+        // The process is killed: its controller and recorder are gone, the
+        // system keeps the Live Activity.
+        world.leftovers = [leftover]
+        world.activities = []
+        world.audio = nil
+        let discardedBefore = world.leftoverAudioDiscarded
+        let after = world.controller()
+
+        let first = await after.toggle()
+        XCTAssertEqual(first, .stopped, "never .needsApp: the App must not come forward")
+        XCTAssertEqual(leftover.ended?.phase, .failed)
+        XCTAssertEqual(leftover.ended?.reason, .interrupted)
+        XCTAssertNil(world.audio, "the ending press records nothing")
+        XCTAssertEqual(world.leftoverAudioDiscarded, discardedBefore + 1, "its audio is deleted")
+
+        let second = await after.toggle()
+        XCTAssertEqual(second, .started)
+        XCTAssertEqual(after.phase, .listening)
+    }
+
+    /// A press that cold-launches the App after the kill: launch cleanup may
+    /// end the leftover before the intent runs; that press still only ends it.
+    func testThePressThatLaunchesTheAppEndsTheLeftoverEvenIfLaunchCleanupRanFirst() async {
+        let world = World()
+        world.leftovers = [FakeActivity(.init(phase: .listening, startedAt: Date()))]
+        let controller = world.controller()
+        await controller.endLeftoversAtLaunch()
+        let press = await controller.toggle()
+        XCTAssertEqual(press, .stopped)
+        XCTAssertNil(world.audio)
+        let next = await controller.toggle()
+        XCTAssertEqual(next, .started)
+    }
+
+    func testAnOrdinaryLaunchDoesNotSwallowALaterPress() async {
+        let world = World()
+        world.leftovers = [FakeActivity(.init(phase: .listening, startedAt: Date()))]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        await controller.endLeftoversAtLaunch()
+        clock = clock.addingTimeInterval(60)
+        let press = await controller.toggle()
+        XCTAssertEqual(press, .started)
+    }
+
+    func testASendingLeftoverSaysItMayHaveArrived() async {
+        let world = World()
+        let leftover = FakeActivity(.init(phase: .sending, startedAt: Date()))
+        world.leftovers = [leftover]
+        await world.controller().endLeftoversAtLaunch()
+        XCTAssertEqual(leftover.ended?.phase, .needsApp)
+        XCTAssertEqual(leftover.ended?.reason, .sendUnknown)
+    }
+
+    func testLaunchEndsALeftoverIsland() async {
+        let world = World()
+        let leftover = FakeActivity(.init(phase: .listening, startedAt: Date()))
+        world.leftovers = [leftover]
+        await world.controller().endLeftoversAtLaunch()
+        XCTAssertEqual(leftover.ended?.reason, .interrupted)
+    }
+
+    func testTheIslandsButtonsEndATakeNoProcessHolds() async {
+        let cancel = World()
+        let cancelled = FakeActivity(.init(phase: .listening, startedAt: Date()))
+        cancel.leftovers = [cancelled]
+        await cancel.controller().finish(send: false)
+        XCTAssertTrue(cancelled.endedImmediately)
+
+        let send = World()
+        let sent = FakeActivity(.init(phase: .listening, startedAt: Date()))
+        send.leftovers = [sent]
+        await send.controller().finish(send: true)
+        XCTAssertEqual(sent.ended?.reason, .interrupted, "nothing to send: say it was interrupted")
+        XCTAssertTrue(send.instance.sent.isEmpty)
+    }
+
+    func testALeftoverNeverTouchesTheTakeThisProcessHolds() async {
+        let world = World()
+        let controller = world.controller()
+        _ = await controller.toggle()
+        await controller.endLeftoversAtLaunch()
+        XCTAssertNil(world.activities.first?.ended)
+        XCTAssertEqual(controller.phase, .listening)
+    }
+
+    func testAnIslandThatCannotStartRecordsNothingAndSaysWhy() async {
+        let world = World()
+        world.activityRequestFails = true
+        let outcome = await world.controller().toggle()
+        XCTAssertEqual(outcome, .needsApp(.activityFailed))
+        XCTAssertEqual(world.audio?.started, false, "no island, no recording")
+        XCTAssertEqual(world.audio?.discarded, true)
+    }
+
+    func testAStaleIslandShowsTheTakeAsInterruptedNotARunningTimer() {
+        let start = Date(timeIntervalSince1970: 0)
+        let listening = VoiceCaptureShown(state: .init(phase: .listening, startedAt: start), isStale: true).state
+        XCTAssertEqual(listening.phase, .failed)
+        XCTAssertEqual(listening.reason, .interrupted)
+        let sending = VoiceCaptureShown(state: .init(phase: .sending, startedAt: start), isStale: true).state
+        XCTAssertEqual(sending.reason, .sendUnknown, "a stale send may have arrived")
+        let fresh = VoiceCaptureShown(state: .init(phase: .listening, startedAt: start), isStale: false).state
+        XCTAssertEqual(fresh.phase, .listening)
+    }
+
+    func testTheIntentMayStartItsIslandAndKeepRecordingInTheBackground() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("iOS 18") }
+        // A Live Activity may be started from the background only by a
+        // LiveActivityIntent (Apple: LiveActivityIntent).
+        XCTAssertTrue((SpeakToMainBotIntent.self as Any) is any LiveActivityIntent.Type)
+        // Recording continues in the background only with the audio mode
+        // (Apple: AVAudioSession.Category.record).
+        let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
+        XCTAssertEqual(modes, ["audio"])
+    }
+
+    /// Background audio is held only while a take records: every way a take
+    /// ends stops its recorder (whose `stop()` releases the session, below).
+    func testEveryWayATakeEndsStopsItsRecorder() async {
+        func recording(_ setup: (World) -> Void = { _ in }) async -> (World, VoiceCaptureController) {
+            let world = World()
+            setup(world)
+            let controller = world.controller()
+            _ = await controller.toggle()
+            world.audio?.duration = 2
+            return (world, controller)
+        }
+        var (world, controller) = await recording()
+        _ = await controller.toggle()
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "send")
+
+        (world, controller) = await recording()
+        await controller.finish(send: false)
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "cancel")
+
+        (world, controller) = await recording { $0.instance.pathFailures = 1 }
+        _ = await controller.toggle()
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "failure")
+
+        (world, controller) = await recording()
+        _ = controller.cancelForAccountTransition()
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "account change")
+    }
+
+    /// The real recorder: the session is active only between a start that
+    /// recorded and the first stop, and a start that fails leaves it off.
+    func testTheRecorderHoldsTheAudioSessionOnlyWhileRecording() throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "take-\(UUID().uuidString).m4a")
+        let session = FakeSession()
+        let engine = FakeEngine()
+        let recorder = VoiceCaptureRecorder(url: url, session: session, permission: { true }, makeEngine: { _ in engine })
+        try recorder.start()
+        XCTAssertTrue(session.active)
+        recorder.stop()
+        XCTAssertFalse(session.active)
+        recorder.stop()
+        recorder.discard()
+        XCTAssertEqual(session.deactivations, 1, "released exactly once")
+
+        let refusing = FakeEngine()
+        refusing.records = false
+        let refused = FakeSession()
+        XCTAssertThrowsError(try VoiceCaptureRecorder(
+            url: url, session: refused, permission: { true }, makeEngine: { _ in refusing }
+        ).start())
+        XCTAssertFalse(refused.active, "a recorder that would not record")
+
+        let broken = FakeSession()
+        XCTAssertThrowsError(try VoiceCaptureRecorder(
+            url: url, session: broken, permission: { true }, makeEngine: { _ in throw CancellationError() }
+        ).start())
+        XCTAssertFalse(broken.active, "a recorder that could not be made")
+
+        let discarded = FakeSession()
+        let other = VoiceCaptureRecorder(url: url, session: discarded, permission: { true }, makeEngine: { _ in FakeEngine() })
+        try other.start()
+        other.discard()
+        XCTAssertFalse(discarded.active, "discard")
+
+        let denied = FakeSession()
+        XCTAssertThrowsError(try VoiceCaptureRecorder(
+            url: url, session: denied, permission: { false }, makeEngine: { _ in FakeEngine() }
+        ).start())
+        XCTAssertEqual(denied.activations, 0)
     }
 
     func testANoGivenSinceStopsWithoutRetry() async {
@@ -230,6 +429,11 @@ private final class World {
     let instance = FakeInstance()
     var audio: FakeAudio?
     var activities: [FakeActivity] = []
+    /// Live Activities a gone process left behind.
+    var leftovers: [FakeActivity] = []
+    var activityRequestFails = false
+    var leftoverAudioDiscarded = 0
+    var now: () -> Date = Date.init
 
     func controller() -> VoiceCaptureController {
         VoiceCaptureController(environment: VoiceCaptureEnvironment(
@@ -243,11 +447,14 @@ private final class World {
             microphoneAllowed: { self.microphone },
             activitiesEnabled: { self.activitiesEnabled },
             requestActivity: { state in
+                if self.activityRequestFails { throw CancellationError() }
                 let activity = FakeActivity(state)
                 self.activities.append(activity)
                 return activity
             },
-            now: Date.init,
+            existingActivities: { (self.leftovers + self.activities).filter { $0.ended == nil } },
+            discardLeftoverAudio: { self.leftoverAudioDiscarded += 1 },
+            now: { self.now() },
             sleep: { _ in await Task.yield(); try? await Task.sleep(for: .seconds(3600)) }
         ))
     }
@@ -313,6 +520,7 @@ private final class FakeAudio: VoiceCaptureAudio {
     let url: URL
     var started = false
     var discarded = false
+    var stops = 0
     var duration: TimeInterval = 0
 
     init() {
@@ -321,14 +529,20 @@ private final class FakeAudio: VoiceCaptureAudio {
     }
 
     func start() throws { started = true }
-    func stop() -> TimeInterval { duration }
+    func stop() -> TimeInterval { stops += 1; return duration }
     func discard() { discarded = true }
 }
 
 @MainActor
 private final class FakeActivity: VoiceCaptureActivityHandle {
+    let id = UUID().uuidString
     var states: [VoiceCaptureAttributes.ContentState]
     var ended: VoiceCaptureAttributes.ContentState?
+    var endedImmediately = false
+
+    var currentState: VoiceCaptureAttributes.ContentState? {
+        ended == nil ? states.last : nil
+    }
 
     init(_ state: VoiceCaptureAttributes.ContentState) {
         states = [state]
@@ -338,5 +552,24 @@ private final class FakeActivity: VoiceCaptureActivityHandle {
 
     func end(_ state: VoiceCaptureAttributes.ContentState?, dismissal: ActivityUIDismissalPolicy) async {
         ended = state ?? states.last
+        // Cancel ends with no final state (gone at once); an ending that
+        // says something carries one.
+        endedImmediately = state == nil
     }
+}
+
+private final class FakeSession: VoiceCaptureAudioSession {
+    var active = false
+    var activations = 0
+    var deactivations = 0
+    func activateForRecording() throws { active = true; activations += 1 }
+    func deactivate() { active = false; deactivations += 1 }
+}
+
+private final class FakeEngine: VoiceCaptureRecordingEngine {
+    var records = true
+    var currentTime: TimeInterval { 1 }
+    var isRecording: Bool { records }
+    func record() -> Bool { records }
+    func stop() {}
 }
