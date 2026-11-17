@@ -777,7 +777,7 @@
     "Discard" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Discard" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不要了" } }
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "放弃" } }
       }
     }
   },
