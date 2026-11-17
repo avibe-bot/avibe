@@ -17,7 +17,7 @@ import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
 import { phoneShell } from '../workbench/fixtures';
 import { Workbench } from '@/components/Workbench';
-import { AccountSheetPage, InstanceSheetPage, InstancesPage } from '@/mobile/MobileOnboarding';
+import { AccountDataSheetPage, AccountSheetPage, InstanceSheetPage, InstancesPage } from '@/mobile/MobileOnboarding';
 import type { MobileInstance, MobileSessionState } from '@/mobile/bridge';
 import { GestureNote, NativeSheet, RuntimeFailed, SheetLanguage, SheetPanel, Underneath } from '../../kit/mobile-instance-sheet';
 
@@ -117,8 +117,7 @@ const accountPage = (props: Partial<AccountProps> = {}) => (
     onSwitch={noop}
     onLogout={noop}
     onLicenses={noop}
-    onPrivacy={noop}
-    onDeleteAccount={noop}
+    onAccountData={noop}
     {...props}
   />
 );
@@ -182,6 +181,11 @@ const designFrames = frames([
         en="Swipe from the left edge to go back"
       />
     </Underneath>
+  )),
+  // Account and data, one page below Account (owner, 2026-11-17): the privacy policy, and deleting
+  // the account as one plain line at the very bottom.
+  ...both('account-data', '账号与数据：从账号页推入；隐私政策，最底部一行灰字「删除账号」', () => (
+    <NativeSheet><AccountDataSheetPage locked={false} onBack={noop} onPrivacy={noop} onDelete={noop} /></NativeSheet>
   )),
   ...both('account-long', '账号 · 完整长邮箱 · 375×667', () => <NativeSheet>{accountPage({ session: session([personal, ...others], personal.id, longEmail) })}</NativeSheet>, { size: SMALL, email: longEmail, status: 'shipped' }),
   // First use: the same rows, as a full page.

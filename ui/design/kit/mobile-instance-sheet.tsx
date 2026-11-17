@@ -46,7 +46,7 @@ export function SheetPanel({ children, className, atEnd = false }: { children: R
       className={cn('absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+0.75rem)] flex flex-col overflow-hidden rounded-t-3xl border-t border-edge bg-background shadow-elevation-3-up', className)}
     >
       <span aria-hidden="true" className="mx-auto mt-2 h-1.5 w-10 shrink-0 rounded-full bg-muted/40" />
-      <div className={cn('min-h-0 flex-1', atEnd ? 'flex flex-col justify-end overflow-hidden [&>*]:shrink-0' : 'overflow-y-auto')}>{children}</div>
+      <div className={cn('min-h-0 flex-1 [container-type:size]', atEnd ? 'flex flex-col justify-end overflow-hidden [&>*]:shrink-0' : 'overflow-y-auto')}>{children}</div>
     </section>
   );
 }
