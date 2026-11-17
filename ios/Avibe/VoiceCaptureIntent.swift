@@ -35,7 +35,6 @@ struct SpeakToMainBotIntent: AudioRecordingIntent {
     func perform() async throws -> some IntentResult {
         let controller = VoiceCaptureController.shared
         let outcome = await controller.toggle()
-        VoiceCaptureProbe.record("intent outcome \(outcome)")
         guard case .needsApp(let reason) = outcome else {
             return .result()
         }
@@ -47,7 +46,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent {
                 controller.openMainBotChat()
                 return .result()
             } catch {
-                VoiceCaptureProbe.record("continueInForeground failed \(error)")
+                // The system declined; the island says to open Avibe.
             }
         }
         controller.showNeedsApp(reason)

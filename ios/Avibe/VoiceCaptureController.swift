@@ -2,7 +2,86 @@ import ActivityKit
 import AVFoundation
 import Foundation
 import OSLog
-import UIKit
+
+/// What a take needs from the selected instance.
+@MainActor
+protocol VoiceCaptureInstance: AnyObject {
+    func status() async throws -> VoiceCaptureInstanceClient.Status
+    func transcribe(audio: Data, name: String, mime: String) async throws -> String
+    func sendToMainBot(_ text: String) async throws
+    func close()
+}
+
+extension VoiceCaptureInstanceClient: VoiceCaptureInstance {}
+
+/// One take's recording.
+protocol VoiceCaptureAudio: AnyObject {
+    var url: URL { get }
+    func start() throws
+    /// Stops and returns the take's length in seconds.
+    @discardableResult func stop() -> TimeInterval
+    func discard()
+}
+
+extension VoiceCaptureRecorder: VoiceCaptureAudio {}
+
+/// One take's Live Activity.
+@MainActor
+protocol VoiceCaptureActivityHandle: AnyObject {
+    func update(_ state: VoiceCaptureAttributes.ContentState) async
+    func end(_ state: VoiceCaptureAttributes.ContentState?, dismissal: ActivityUIDismissalPolicy) async
+}
+
+@MainActor
+private final class LiveVoiceCaptureActivity: VoiceCaptureActivityHandle {
+    let activity: Activity<VoiceCaptureAttributes>
+
+    init(_ activity: Activity<VoiceCaptureAttributes>) {
+        self.activity = activity
+    }
+
+    func update(_ state: VoiceCaptureAttributes.ContentState) async {
+        await activity.update(ActivityContent(state: state, staleDate: nil, relevanceScore: 100))
+    }
+
+    func end(_ state: VoiceCaptureAttributes.ContentState?, dismissal: ActivityUIDismissalPolicy) async {
+        await activity.end(
+            state.map { ActivityContent(state: $0, staleDate: nil) },
+            dismissalPolicy: dismissal
+        )
+    }
+}
+
+/// Everything the controller reaches outside itself; tests replace it.
+@MainActor
+struct VoiceCaptureEnvironment {
+    var target: () -> VoiceCaptureTarget?
+    var makeInstance: (VoiceCaptureTarget) -> VoiceCaptureInstance
+    var makeAudio: (UUID) throws -> VoiceCaptureAudio
+    var microphoneAllowed: () -> Bool
+    var activitiesEnabled: () -> Bool
+    var requestActivity: (VoiceCaptureAttributes.ContentState) throws -> VoiceCaptureActivityHandle
+    var now: () -> Date
+    var sleep: (Duration) async -> Void
+
+    static let live = VoiceCaptureEnvironment(
+        target: { VoiceCaptureTarget.current() },
+        makeInstance: { VoiceCaptureInstanceClient(target: $0) },
+        makeAudio: { VoiceCaptureRecorder(url: try VoiceCaptureRecorder.takeURL(id: $0)) },
+        microphoneAllowed: { VoiceCaptureRecorder.hasPermission },
+        activitiesEnabled: { ActivityAuthorizationInfo().areActivitiesEnabled },
+        requestActivity: { state in
+            LiveVoiceCaptureActivity(
+                try Activity.request(
+                    attributes: VoiceCaptureAttributes(botName: nil),
+                    content: ActivityContent(state: state, staleDate: nil, relevanceScore: 100)
+                )
+            )
+        },
+        now: Date.init,
+        sleep: { try? await Task.sleep(for: $0) }
+    )
+}
 
 /// One background voice take at a time: from the Action Button press,
 /// through the Live Activity, to the message the main Bot receives.
@@ -11,7 +90,7 @@ import UIKit
 /// on the main actor, so the state below has one writer.
 @MainActor
 final class VoiceCaptureController {
-    static let shared = VoiceCaptureController()
+    static let shared = VoiceCaptureController(environment: .live)
 
     enum Outcome: Equatable {
         case started
@@ -21,26 +100,30 @@ final class VoiceCaptureController {
     }
 
     /// The longest take; it is then sent as if the user stopped it.
-    static let maximumDuration: TimeInterval = 5 * 60
+    static let maximumDuration: Duration = .seconds(5 * 60)
     /// A take shorter than this is treated as a slip and discarded.
     static let minimumDuration: TimeInterval = 0.6
     /// How long the island keeps a sent take before it goes.
     static let sentDismissal: TimeInterval = 4
     /// How long a failed take stays offered for Retry.
-    static let failedDismissal: TimeInterval = 10 * 60
-    /// How long a "needs the App" notice stays.
-    static let needsAppDismissal: TimeInterval = 30
+    static let failedDismissal: Duration = .seconds(10 * 60)
+    /// How long a notice (needs the App, an older Avibe) stays.
+    static let noticeDismissal: TimeInterval = 30
 
     private struct Take {
         let id: UUID
-        let client: VoiceCaptureInstanceClient
-        let recorder: VoiceCaptureRecorder
-        let activity: Activity<VoiceCaptureAttributes>
+        let instance: VoiceCaptureInstance
+        let audio: VoiceCaptureAudio
+        let activity: VoiceCaptureActivityHandle
         let startedAt: Date
         var endedAt: Date?
         /// Kept once transcribed, so Retry after a failed send does not
-        /// transcribe (and bill) the audio again.
+        /// transcribe the audio again.
         var text: String?
+    }
+
+    enum Phase: Equatable {
+        case idle, preparing, listening, sending, failed
     }
 
     private enum State {
@@ -56,11 +139,24 @@ final class VoiceCaptureController {
         category: "VoiceCapture"
     )
 
+    private let environment: VoiceCaptureEnvironment
     private var state: State = .idle
     private var maximumDurationTask: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
 
-    private init() {}
+    init(environment: VoiceCaptureEnvironment) {
+        self.environment = environment
+    }
+
+    var phase: Phase {
+        switch state {
+        case .idle: return .idle
+        case .preparing: return .preparing
+        case .listening: return .listening
+        case .sending: return .sending
+        case .failed: return .failed
+        }
+    }
 
     // MARK: Entry points
 
@@ -74,8 +170,8 @@ final class VoiceCaptureController {
             return .busy
         case .failed(let take):
             // A new press replaces a failed take the user did not retry.
-            await end(take, discardAudio: true, dismissal: .immediate)
             state = .idle
+            await end(take, dismissal: .immediate)
             return await start()
         case .idle:
             return await start()
@@ -83,23 +179,24 @@ final class VoiceCaptureController {
     }
 
     /// The island's Send (`send: true`) or Cancel, or the second press.
+    /// Cancel on a failed take discards it.
     func finish(send: Bool) async {
         guard case .listening(var take) = state else {
             if !send, case .failed(let take) = state {
-                await end(take, discardAudio: true, dismissal: .immediate)
                 state = .idle
+                await end(take, dismissal: .immediate)
             }
             return
         }
         stopObservingInterruptions()
         maximumDurationTask?.cancel()
         maximumDurationTask = nil
-        let duration = take.recorder.stop()
-        take.endedAt = Date()
+        let duration = take.audio.stop()
+        take.endedAt = environment.now()
         record("stop send=\(send) duration=\(String(format: "%.1f", duration))")
         guard send, duration >= Self.minimumDuration else {
-            await end(take, discardAudio: true, dismissal: .immediate)
             state = .idle
+            await end(take, dismissal: .immediate)
             return
         }
         await deliver(take)
@@ -120,44 +217,24 @@ final class VoiceCaptureController {
     /// Shows a "needs the App" notice when the intent cannot bring the App
     /// to the front itself (before iOS 26, or when the system declines).
     func showNeedsApp(_ reason: VoiceCaptureAttributes.Reason) {
-        let now = Date()
-        let content = ActivityContent(
-            state: VoiceCaptureAttributes.ContentState(
-                phase: .needsApp, startedAt: now, endedAt: now, reason: reason
-            ),
-            staleDate: nil
-        )
-        do {
-            let activity = try Activity.request(
-                attributes: VoiceCaptureAttributes(botName: nil),
-                content: content
-            )
-            Task {
-                await activity.end(
-                    content,
-                    dismissalPolicy: .after(now.addingTimeInterval(Self.needsAppDismissal))
-                )
-            }
-        } catch {
-            record("needsApp activity failed: \(error)")
-        }
+        showNotice(phase: .needsApp, reason: reason)
     }
 
     // MARK: Take lifecycle
 
     private func start() async -> Outcome {
         state = .preparing
-        guard let target = VoiceCaptureTarget.current() else {
+        guard let target = environment.target() else {
             state = .idle
             record("start: no selected instance")
             return .needsApp(.signIn)
         }
-        guard VoiceCaptureRecorder.hasPermission else {
+        guard environment.microphoneAllowed() else {
             state = .idle
             record("start: no microphone permission")
             return .needsApp(.microphone)
         }
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+        guard environment.activitiesEnabled() else {
             // Without a Live Activity the system stops the recording.
             state = .idle
             record("start: Live Activities are off")
@@ -166,169 +243,162 @@ final class VoiceCaptureController {
 
         // Ask the instance before the microphone opens: never record for an
         // account that has not said yes to voice input (5.1.2(i)).
-        let client = VoiceCaptureInstanceClient(target: target)
-        do {
-            let status = try await client.status()
-            guard status.available else {
-                client.close()
-                state = .idle
-                showFailureNotice(.voiceUnavailable)
-                return .stopped
-            }
-            guard status.consent == .granted else {
-                client.close()
-                state = .idle
-                record("start: consent \(status.consent)")
-                return .needsApp(.consent)
-            }
-        } catch let failure as VoiceCaptureInstanceClient.Failure {
-            client.close()
+        let instance = environment.makeInstance(target)
+        if let refusal = await checkStatus(instance) {
+            instance.close()
             state = .idle
-            record("start: status failed \(failure)")
-            switch failure {
-            case .signIn: return .needsApp(.signIn)
-            case .consentRequired: return .needsApp(.consent)
-            case .olderAvibe:
-                showFailureNotice(.updateAvibe)
-                return .stopped
-            case .unavailable:
-                showFailureNotice(.voiceUnavailable)
-                return .stopped
-            default:
-                showFailureNotice(.offline)
-                return .stopped
-            }
-        } catch {
-            client.close()
-            state = .idle
-            showFailureNotice(.offline)
-            return .stopped
+            return refusal
         }
 
         let id = UUID()
-        let recorder: VoiceCaptureRecorder
+        let audio: VoiceCaptureAudio
         do {
-            recorder = VoiceCaptureRecorder(url: try VoiceCaptureRecorder.takeURL(id: id))
+            audio = try environment.makeAudio(id)
         } catch {
-            client.close()
+            instance.close()
             state = .idle
-            showFailureNotice(.microphone)
+            showNotice(phase: .failed, reason: .microphone)
             return .stopped
         }
 
         // The system requires the Live Activity when recording begins.
-        let startedAt = Date()
-        let activity: Activity<VoiceCaptureAttributes>
+        let startedAt = environment.now()
+        let activity: VoiceCaptureActivityHandle
         do {
-            activity = try Activity.request(
-                attributes: VoiceCaptureAttributes(botName: nil),
-                content: ActivityContent(
-                    state: VoiceCaptureAttributes.ContentState(
-                        phase: .listening, startedAt: startedAt
-                    ),
-                    staleDate: nil,
-                    relevanceScore: 100
-                )
+            activity = try environment.requestActivity(
+                VoiceCaptureAttributes.ContentState(phase: .listening, startedAt: startedAt)
             )
         } catch {
-            client.close()
+            instance.close()
             state = .idle
             record("start: activity request failed \(error)")
             return .needsApp(.liveActivities)
         }
         do {
-            try recorder.start()
+            try audio.start()
         } catch {
             record("start: recorder failed \(error)")
-            client.close()
-            await endActivity(activity, phase: .failed, reason: .microphone,
-                              dismissal: .after(Date().addingTimeInterval(Self.needsAppDismissal)))
+            instance.close()
             state = .idle
+            await activity.end(
+                VoiceCaptureAttributes.ContentState(
+                    phase: .failed, startedAt: startedAt, endedAt: startedAt, reason: .microphone
+                ),
+                dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal))
+            )
             return .stopped
         }
-        let take = Take(
-            id: id,
-            client: client,
-            recorder: recorder,
-            activity: activity,
-            startedAt: startedAt
-        )
-        state = .listening(take)
+        state = .listening(Take(
+            id: id, instance: instance, audio: audio, activity: activity, startedAt: startedAt
+        ))
         observeInterruptions()
+        let sleep = environment.sleep
         maximumDurationTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.maximumDuration))
-            guard !Task.isCancelled else { return }
-            await self?.finish(send: true)
+            await sleep(Self.maximumDuration)
+            guard !Task.isCancelled, let self, case .listening(let take) = self.state, take.id == id else {
+                return
+            }
+            await self.finish(send: true)
         }
         record("start: listening")
         return .started
     }
 
+    /// Nil when the take may record; otherwise what the press returns.
+    private func checkStatus(_ instance: VoiceCaptureInstance) async -> Outcome? {
+        do {
+            let status = try await instance.status()
+            guard status.available else {
+                showNotice(phase: .failed, reason: .voiceUnavailable)
+                return .stopped
+            }
+            guard status.consent == .granted else {
+                record("start: consent \(status.consent)")
+                return .needsApp(.consent)
+            }
+            return nil
+        } catch let failure as VoiceCaptureInstanceClient.Failure {
+            record("start: status failed \(failure)")
+            switch failure {
+            case .signIn: return .needsApp(.signIn)
+            case .consentRequired: return .needsApp(.consent)
+            case .olderAvibe:
+                showNotice(phase: .failed, reason: .updateAvibe)
+                return .stopped
+            case .unavailable:
+                showNotice(phase: .failed, reason: .voiceUnavailable)
+                return .stopped
+            default:
+                showNotice(phase: .failed, reason: .offline)
+                return .stopped
+            }
+        } catch {
+            showNotice(phase: .failed, reason: .offline)
+            return .stopped
+        }
+    }
+
     private func deliver(_ initial: Take) async {
         var take = initial
         state = .sending(take)
-        await update(take, phase: .sending)
+        await take.activity.update(content(for: take, phase: .sending))
         do {
             if take.text == nil {
-                let audio = try Data(contentsOf: take.recorder.url)
-                take.text = try await take.client.transcribe(
+                let audio = try Data(contentsOf: take.audio.url)
+                take.text = try await take.instance.transcribe(
                     audio: audio, name: "voice.m4a", mime: "audio/mp4"
                 )
                 state = .sending(take)
             }
             guard let text = take.text else { throw VoiceCaptureInstanceClient.Failure.nothingHeard }
-            try await take.client.sendToMainBot(text)
+            try await take.instance.sendToMainBot(text)
             record("deliver: sent")
+            state = .idle
             let heard = String(text.prefix(VoiceCaptureAttributes.ContentState.heardLimit))
             await end(
-                take, discardAudio: true,
-                dismissal: .after(Date().addingTimeInterval(Self.sentDismissal)),
-                phase: .sent, heard: heard
+                take,
+                dismissal: .after(environment.now().addingTimeInterval(Self.sentDismissal)),
+                final: content(for: take, phase: .sent, heard: heard)
             )
-            state = .idle
         } catch let failure as VoiceCaptureInstanceClient.Failure {
             record("deliver: failed \(failure)")
             switch failure {
             case .nothingHeard:
-                await end(take, discardAudio: true,
-                          dismissal: .after(Date().addingTimeInterval(Self.sentDismissal)),
-                          phase: .failed, reason: .nothingHeard)
                 state = .idle
+                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.sentDismissal)),
+                          final: content(for: take, phase: .failed, reason: .nothingHeard))
             case .consentRequired:
                 // A "no" given since: stop, send nothing, keep nothing.
-                await end(take, discardAudio: true,
-                          dismissal: .after(Date().addingTimeInterval(Self.needsAppDismissal)),
-                          phase: .needsApp, reason: .consent)
                 state = .idle
+                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
+                          final: content(for: take, phase: .needsApp, reason: .consent))
             case .signIn:
-                await end(take, discardAudio: true,
-                          dismissal: .after(Date().addingTimeInterval(Self.needsAppDismissal)),
-                          phase: .needsApp, reason: .signIn)
                 state = .idle
+                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
+                          final: content(for: take, phase: .needsApp, reason: .signIn))
             default:
                 let reason: VoiceCaptureAttributes.Reason =
                     failure == .offline ? .offline
                     : take.text == nil ? .transcriptionFailed : .sendFailed
-                await update(take, phase: .failed, reason: reason)
-                state = .failed(take)
-                scheduleFailedExpiry(take)
+                await keepForRetry(take, reason: reason)
             }
         } catch {
             record("deliver: failed \(error)")
-            await update(take, phase: .failed, reason: .transcriptionFailed)
-            state = .failed(take)
-            scheduleFailedExpiry(take)
+            await keepForRetry(take, reason: .transcriptionFailed)
         }
     }
 
-    /// A failed take the user leaves alone is dropped with its island.
-    private func scheduleFailedExpiry(_ take: Take) {
+    private func keepForRetry(_ take: Take, reason: VoiceCaptureAttributes.Reason) async {
+        state = .failed(take)
+        await take.activity.update(content(for: take, phase: .failed, reason: reason))
+        // A failed take the user leaves alone is dropped with its island.
         let id = take.id
+        let sleep = environment.sleep
         Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.failedDismissal))
+            await sleep(Self.failedDismissal)
             guard let self, case .failed(let current) = self.state, current.id == id else { return }
-            await self.end(current, discardAudio: true, dismissal: .immediate)
             self.state = .idle
+            await self.end(current, dismissal: .immediate)
         }
     }
 
@@ -339,85 +409,41 @@ final class VoiceCaptureController {
         phase: VoiceCaptureAttributes.Phase,
         reason: VoiceCaptureAttributes.Reason? = nil,
         heard: String? = nil
-    ) -> ActivityContent<VoiceCaptureAttributes.ContentState> {
-        ActivityContent(
-            state: VoiceCaptureAttributes.ContentState(
-                phase: phase,
-                startedAt: take.startedAt,
-                endedAt: take.endedAt,
-                reason: reason,
-                heard: heard
-            ),
-            staleDate: nil,
-            relevanceScore: 100
+    ) -> VoiceCaptureAttributes.ContentState {
+        VoiceCaptureAttributes.ContentState(
+            phase: phase,
+            startedAt: take.startedAt,
+            endedAt: take.endedAt,
+            reason: reason,
+            heard: heard
         )
     }
 
-    private func update(
-        _ take: Take,
-        phase: VoiceCaptureAttributes.Phase,
-        reason: VoiceCaptureAttributes.Reason? = nil
-    ) async {
-        await take.activity.update(content(for: take, phase: phase, reason: reason))
-    }
-
+    /// Ends a take: closes its instance client, deletes its audio, and ends
+    /// its Live Activity, with `final` shown until `dismissal`.
     private func end(
         _ take: Take,
-        discardAudio: Bool,
         dismissal: ActivityUIDismissalPolicy,
-        phase: VoiceCaptureAttributes.Phase? = nil,
-        reason: VoiceCaptureAttributes.Reason? = nil,
-        heard: String? = nil
+        final: VoiceCaptureAttributes.ContentState? = nil
     ) async {
-        take.client.close()
-        if discardAudio {
-            take.recorder.discard()
-        }
-        let finalContent = phase.map { content(for: take, phase: $0, reason: reason, heard: heard) }
-        await take.activity.end(finalContent, dismissalPolicy: dismissal)
+        take.instance.close()
+        take.audio.discard()
+        await take.activity.end(final, dismissal: dismissal)
     }
 
-    private func endActivity(
-        _ activity: Activity<VoiceCaptureAttributes>,
-        phase: VoiceCaptureAttributes.Phase,
-        reason: VoiceCaptureAttributes.Reason,
-        dismissal: ActivityUIDismissalPolicy
-    ) async {
-        let now = Date()
-        await activity.end(
-            ActivityContent(
-                state: VoiceCaptureAttributes.ContentState(
-                    phase: phase, startedAt: now, endedAt: now, reason: reason
-                ),
-                staleDate: nil
-            ),
-            dismissalPolicy: dismissal
-        )
-    }
-
-    /// A short notice for a take that never started (the instance is
-    /// offline, older, or has no voice input).
-    private func showFailureNotice(_ reason: VoiceCaptureAttributes.Reason) {
-        let now = Date()
-        let content = ActivityContent(
-            state: VoiceCaptureAttributes.ContentState(
-                phase: .failed, startedAt: now, endedAt: now, reason: reason
-            ),
-            staleDate: nil
+    /// A short notice for a press that never recorded.
+    private func showNotice(phase: VoiceCaptureAttributes.Phase, reason: VoiceCaptureAttributes.Reason) {
+        let now = environment.now()
+        let notice = VoiceCaptureAttributes.ContentState(
+            phase: phase, startedAt: now, endedAt: now, reason: reason
         )
         do {
-            let activity = try Activity.request(
-                attributes: VoiceCaptureAttributes(botName: nil),
-                content: content
-            )
+            let activity = try environment.requestActivity(notice)
             Task {
-                await activity.end(
-                    content,
-                    dismissalPolicy: .after(now.addingTimeInterval(Self.needsAppDismissal))
-                )
+                await activity.end(notice, dismissal: .after(now.addingTimeInterval(Self.noticeDismissal)))
             }
         } catch {
-            record("failure notice failed: \(error)")
+            record("notice failed: \(error)")
         }
     }
 
@@ -452,42 +478,7 @@ final class VoiceCaptureController {
         interruptionObserver = nil
     }
 
-    // MARK: Diagnostics
-
     private func record(_ event: String) {
         Self.logger.info("\(event, privacy: .public)")
-        VoiceCaptureProbe.record(event)
-    }
-}
-
-/// Debug builds append each event, with the App's state, to a file that the
-/// Simulator CI probe collects. Release builds record nothing here.
-@MainActor
-enum VoiceCaptureProbe {
-    static func record(_ event: String) {
-        #if DEBUG
-        let appState: String
-        switch UIApplication.shared.applicationState {
-        case .active: appState = "active"
-        case .inactive: appState = "inactive"
-        case .background: appState = "background"
-        @unknown default: appState = "unknown"
-        }
-        let line = "\(ISO8601DateFormatter().string(from: Date())) [\(appState)] \(event)\n"
-        guard
-            let directory = try? FileManager.default.url(
-                for: .cachesDirectory, in: .userDomainMask,
-                appropriateFor: nil, create: true
-            )
-        else { return }
-        let url = directory.appending(path: "voice-capture-probe.log")
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? Data(line.utf8).write(to: url)
-        }
-        #endif
     }
 }
