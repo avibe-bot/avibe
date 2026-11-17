@@ -4,6 +4,8 @@
 
 The owner approved the status-dot placement and preview gesture on 2026-11-17.
 Implementation starts at master `ad0f863729c0169cfe9bc4c3d5dae9314c1c2a57`.
+The PR candidate is rebased onto master `3bba33b3e96acc534726dc2bc859d6d199e6e2fb`,
+explicitly fetched on 2026-11-17 before its final local validation.
 The approved source is the `design/ios-instance-status-dots-20261117` frame/kit
 and its image-dismiss prototype. This change introduces no copy or API fields.
 
@@ -41,10 +43,11 @@ PR builds do not sign/upload. Its signing team is `68B2SQ6YK3`. The two local
 valid development identities belong to other teams; no physical device is
 currently available to devicectl. This establishes no usable local installation
 route, without changing credentials or testing signing against an Apple account.
-The owner must authorize either a usable pre-merge device route or an explicit
-review/CI → merge → Internal TestFlight acceptance exception for this change.
-Implementation and local verification proceed without push, PR, installation,
-service restart, signing changes, or TestFlight publication until then.
+At 17:10 on 2026-11-17 (Asia/Shanghai), the owner approved this change's
+sequence exception: local validation → one PR through review/CI → separately
+authorized merge and Internal TestFlight/Runtime delivery → device acceptance.
+The current authorization ends at Merge-ready. Merge, TestFlight dispatch,
+Runtime updates and installation still need separate owner authorization.
 
 ## Validation
 
