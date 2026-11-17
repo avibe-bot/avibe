@@ -1118,7 +1118,10 @@ final class MobileSessionCoordinator {
         }
         let resetToken = try beginReset()
         defer { finishReset(resetToken) }
-        try detachScheduleOwner()
+        // Notify before the first await so the schedule slot loses authority
+        // immediately. Its store retains pending durable revocation; a local
+        // write failure must not keep the account snapshot authorized.
+        _ = onDetachActiveOwner()
         let resetGeneration = generation
         try await preparePushLogout(
             publishing: .signedOut, generation: resetGeneration,

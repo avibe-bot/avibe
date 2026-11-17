@@ -553,6 +553,418 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testDeferredColdLogoutRemainsUnmanagedThroughAppRecoveryAndAccountReopen() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ColdLogoutAppTests.\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("ledger.json")
+        let initial = FileSystemSystemScheduleStore(fileURL: url)
+        let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
+        let request = try XCTUnwrap(SystemScheduleRequest.parse(
+            scheduleParams(requestID: "cold-create", operationID: "cold-created", now: now)))
+        let platform = RuntimeSystemSchedulePlatform()
+        let previous = SystemScheduleCoordinator(platform: platform, store: initial, now: { now })
+        let context = SystemScheduleContext(owner: owner, instanceID: "instance-1",
+            origin: instance.serialized, runtimeIdentity: 1, navigationEpoch: 1)
+        let created = await previous.schedule(request, context: context,
+            creationFence: { nil }, postWriteFence: { nil })
+        XCTAssertEqual(created.state, .scheduled)
+        var failing = true
+        let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+            systemScheduleNow: { now },
+            systemScheduleCheckpoint: {
+                if failing && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
+            },
+            systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            if case .loading = app.route { return false }
+            return true
+        }
+        let store = try XCTUnwrap(appScheduleStore)
+        XCTAssertEqual(store.persistenceState, .writeFailed)
+        XCTAssertNil(app.systemScheduleDeviceID)
+        let signedOut = try await app.mobileSessionCoordinator.logout()
+        XCTAssertEqual(signedOut, .signedOut)
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        XCTAssertEqual(store.persistenceState, .writeFailed)
+        XCTAssertFalse(store.isActive(owner: owner))
+        XCTAssertNil(app.systemScheduleConfirmation)
+        XCTAssertNil(app.captureSystemScheduleAdmission(origin: instance))
+        XCTAssertEqual(platform.cancelCalls, 0)
+        failing = false
+        enterForeground()
+        try await eventually {
+            store.record(operationID: request.operationID,
+                         instanceID: request.instanceID, owner: owner)?.lifecycle == .detachedRetained
+        }
+        _ = try await app.mobileSessionCoordinator.refresh()
+        let sameAccountOwner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        XCTAssertNotEqual(sameAccountOwner, owner)
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        let rejected = try jsonObject(try await page.systemScheduleCancel(
+            requestID: "same-account-cancel", operationID: request.operationID, kind: "alarm"))
+        XCTAssertEqual((rejected["error"] as? [String: Any])?["code"] as? String, "item_not_found")
+        page.close()
+        _ = try await app.mobileSessionCoordinator.logout()
+        trackStore(of: app)
+
+        let next = try await makeApp(directTransport: nil, sessionResponse: {
+            .json("""
+                {"account":{"id":"account-2","email":"other@example.com"},"instances":[
+                  {"id":"instance-1","name":"One","host":"instance-one.example",
+                   "url":"https://instance-one.example","relationship":"owner",
+                   "owner_email":"other@example.com","available":true}]}
+                """)
+        }, systemSchedulePlatform: platform, systemScheduleNow: { now },
+            systemScheduleFileURL: url, launchesWithInstanceOneSelected: true,
+            beforeTheAppExists: {
+                self.appDefaults?.removeObject(forKey: Self.selectionKey)
+            })
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            next.mobileSessionCoordinator.currentAccount?.id == "account-2"
+        }
+        let reopened = try XCTUnwrap(appScheduleStore)
+        XCTAssertFalse(reopened.isActive(owner: owner))
+        XCTAssertFalse(reopened.isActive(owner: sameAccountOwner))
+        let nextRuntime = try await select("instance-1", in: next)
+        let nextPage = try await showRuntimePage(next, nextRuntime)
+        defer { nextPage.close() }
+        let cancel = try jsonObject(try await nextPage.systemScheduleCancel(
+            requestID: "new-account-cancel", operationID: request.operationID, kind: "alarm"))
+        XCTAssertEqual((cancel["error"] as? [String: Any])?["code"] as? String, "item_not_found")
+        let replay = try jsonObject(try await nextPage.systemScheduleRequest(
+            scheduleParams(requestID: "new-account-replay", operationID: request.operationID, now: now)))
+        XCTAssertEqual(replay["state"] as? String, "scheduled")
+        XCTAssertNil(next.systemScheduleConfirmation)
+        XCTAssertEqual(reopened.record(operationID: request.operationID,
+            instanceID: request.instanceID, owner: owner)?.lifecycle, .detachedRetained)
+        XCTAssertEqual(platform.systemCreationCalls, 1)
+        XCTAssertEqual(platform.cancelCalls, 0)
+    }
+
+    @MainActor
+    func testCompletedDeletionWithFailedReadbackAndDetachCannotAuthorizeCachedAccount() async throws {
+        // Contract: a confirmed account deletion is not the recoverable
+        // failed-signout exception. The existing deletion test covers only
+        // a successful fallback; this uses the actual bundled click and
+        // native completion navigation while both follow-up paths fail.
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let session = SessionAnswerOverride()
+        let platform = RuntimeSystemSchedulePlatform()
+        var failing = false
+        var failedWrites = 0
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { session.response },
+            systemSchedulePlatform: platform,
+            systemScheduleNow: { now },
+            systemScheduleCheckpoint: {
+                if failing && $0 == .beforeFileSync {
+                    failedWrites += 1
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            }
+        )
+        let store = try XCTUnwrap(appScheduleStore)
+        let oldOwner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        app.showAccountRoot()
+        let controller = MobileOnboardingViewController(
+            coordinator: app.mobileSessionCoordinator,
+            startScreen: .account
+        )
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        controller.loadViewIfNeeded()
+        let webView = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            (try? await webView.evaluateJavaScript(
+                "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Delete account' && !b.disabled)"
+            ) as? Bool) == true
+        }
+        let clicked = try await webView.evaluateJavaScript("""
+            (() => {
+              const button = Array.from(document.querySelectorAll('button'))
+                .find(b => b.textContent.trim() === 'Delete account' && !b.disabled);
+              button?.click();
+              return Boolean(button);
+            })()
+            """) as? Bool
+        XCTAssertEqual(clicked, true)
+        try await eventually { controller.presentedViewController != nil }
+        let deletion = try XCTUnwrap(
+            (controller.presentedViewController as? UINavigationController)?
+                .topViewController as? AvibePageViewController
+        )
+        session.replace(with: .status(500))
+        failing = true
+        // Simulate only the server's completion navigation, through the
+        // real native deletion-page policy. No real account is deleted.
+        deletion.webView.load(URLRequest(
+            url: app.mobileSessionCoordinator.controlPlaneURL
+                .appendingPathComponent("account/delete/done")
+        ))
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            failedWrites > 0 && controller.presentedViewController == nil
+        }
+        try await eventually {
+            (try? await webView.evaluateJavaScript(
+                """
+                Array.from(document.querySelectorAll('button')).some(b =>
+                  ['Delete account', 'Sign in / Create account'].includes(b.textContent.trim()) && !b.disabled)
+                """
+            ) as? Bool) == true
+        }
+        XCTAssertFalse(store.isActive(owner: oldOwner))
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        print("[deletion boundary] completion=true readback=500 detach=write_failed cachedAccount=\(app.mobileSessionCoordinator.currentAccount?.id ?? "nil")")
+        failing = false
+        let selected = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('session.selectInstance', {id: 'instance-1'});
+              return 'selected';
+            } catch (error) { return error.code; }
+            """,
+            arguments: [:], in: nil, contentWorld: .page
+        ) as? String
+        print("[deletion boundary] reopen_without_new_auth=\(selected ?? "nil")")
+        XCTAssertNotEqual(selected, "selected")
+        if case .browser(let runtime) = app.route {
+            let page = try await showRuntimePage(app, runtime)
+            defer { page.close() }
+            let admission = app.captureSystemScheduleAdmission(origin: instance)
+            if case .authorized(let context) = admission {
+                print("[deletion boundary] authorizedCachedAccount=\(context.owner.accountID) oldEpoch=\(context.owner == oldOwner) persistence=\(store.persistenceState)")
+            }
+            XCTAssertNil(admission, "Confirmed deletion must not recover schedule authority from the cached account without authentication.")
+        } else {
+            XCTAssertNotEqual(selected, "selected")
+        }
+        XCTAssertEqual(platform.systemCreationCalls, 0)
+        XCTAssertEqual(platform.cancelCalls, 0)
+    }
+
+    @MainActor
+    func testDetachReopenRequiresRealAuthenticationAcrossEveryRestartOutcome() async throws {
+        // Distinct from the core/store test: every reconstructed AppModel
+        // goes through real MobileAuthTransport discovery, never an injected
+        // accountID. This expands the original interrupted-logout regression.
+        // Route B accepts loss of uncommitted process-local intent, followed
+        // by verified same-account authentication. The original stronger-
+        // contract red assertions/log remain preserved in the matter.
+        for durable in [false, true] {
+            for authentication in ["same", "different", "signedOut", "secondFactor", "network"] {
+                let label = "\(durable ? "durable" : "not-durable")/\(authentication)"
+                let now = Date(timeIntervalSince1970: 1_800_000_000)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("DetachAuthenticationTests.\(UUID().uuidString)", isDirectory: true)
+                    .appendingPathComponent("ledger.json")
+                let seed = FileSystemSystemScheduleStore(fileURL: url)
+                let owner = try XCTUnwrap(seed.managementOwner(accountID: "account-1"))
+                let request = try XCTUnwrap(SystemScheduleRequest.parse(
+                    scheduleParams(requestID: "seed", operationID: "retained", now: now)))
+                let platform = RuntimeSystemSchedulePlatform()
+                let previous = SystemScheduleCoordinator(platform: platform, store: seed, now: { now })
+                let created = await previous.schedule(request,
+                    context: SystemScheduleContext(owner: owner, instanceID: "instance-1",
+                        origin: instance.serialized, runtimeIdentity: 1, navigationEpoch: 1),
+                    creationFence: { nil }, postWriteFence: { nil })
+                XCTAssertEqual(created.state, .scheduled, label)
+                let departing = try await makeApp(directTransport: nil,
+                    systemSchedulePlatform: platform, systemScheduleNow: { now },
+                    systemScheduleCheckpoint: {
+                        if !durable && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
+                    }, systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
+                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                    if case .loading = departing.route { return false }
+                    return true
+                }
+                let logout = try await departing.mobileSessionCoordinator.logout()
+                XCTAssertEqual(logout, .signedOut, label)
+                XCTAssertNil(departing.mobileSessionCoordinator.currentAccount, label)
+                XCTAssertFalse(try XCTUnwrap(appScheduleStore).isActive(owner: owner), label)
+                let answers = SessionAnswerOverride()
+                switch authentication {
+                case "different":
+                    answers.replace(with: .json("""
+                        {"account":{"id":"account-2","email":"other@example.com"},"instances":[
+                        {"id":"instance-1","name":"One","host":"instance-one.example",
+                         "url":"https://instance-one.example","relationship":"owner",
+                         "owner_email":"other@example.com","available":true}]}
+                        """))
+                case "signedOut": answers.replace(with: .status(401))
+                case "secondFactor":
+                    answers.replace(with: LocalHTTPResponse(status: 403,
+                        headers: [("Content-Type", "application/json")],
+                        body: Data("""
+                            {"error":"two_factor_required","email":"max@example.com",
+                             "gate":"challenge","methods":["totp"]}
+                            """.utf8)))
+                case "network": answers.replace(with: .status(500))
+                default: break
+                }
+                let reopened = try await makeApp(directTransport: nil,
+                    sessionResponse: { answers.response }, systemSchedulePlatform: platform,
+                    systemScheduleNow: { now }, systemScheduleFileURL: url,
+                    launchesWithInstanceOneSelected: true, beforeTheAppExists: {
+                        self.appDefaults?.removeObject(forKey: Self.selectionKey)
+                    })
+                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                    if case .loading = reopened.route { return false }
+                    return true
+                }
+                let store = try XCTUnwrap(appScheduleStore)
+                if authentication == "same" || authentication == "different" {
+                    XCTAssertEqual(reopened.mobileSessionCoordinator.currentAccount?.id,
+                        authentication == "same" ? "account-1" : "account-2", label)
+                    let runtime = try await select("instance-1", in: reopened)
+                    let page = try await showRuntimePage(reopened, runtime)
+                    let admission = try XCTUnwrap(reopened.captureSystemScheduleAdmission(origin: instance), label)
+                    if case .authorized(let context) = admission {
+                        XCTAssertEqual(context.owner == owner, !durable && authentication == "same", label)
+                    } else {
+                        XCTFail("Authenticated recovered runtime must be admitted: \(label)")
+                    }
+                    page.close()
+                } else {
+                    XCTAssertNil(reopened.mobileSessionCoordinator.currentAccount, label)
+                    XCTAssertThrowsError(try reopened.mobileSessionCoordinator.selectInstance(id: "instance-1"), label)
+                    XCTAssertNil(reopened.captureSystemScheduleAdmission(origin: instance), label)
+                }
+                let retained = durable || authentication == "different"
+                XCTAssertEqual(store.record(operationID: request.operationID,
+                    instanceID: request.instanceID, owner: owner)?.lifecycle,
+                    retained ? .detachedRetained : .managedScheduled, label)
+                XCTAssertEqual(platform.cancelCalls, 0, label)
+                XCTAssertEqual(platform.systemCreationCalls, 1, label)
+                print("[detach authentication] \(label) account=\(reopened.mobileSessionCoordinator.currentAccount?.id ?? "nil") oldActive=\(store.isActive(owner: owner))")
+            }
+        }
+    }
+
+    @MainActor
+    func testActualAccountAndSheetSignoutFinishWhileScheduleWriteFails() async throws {
+        // Real RootView routing and rebuilt bundled button clicks, including
+        // replacement of the sheet during immediate Runtime revocation.
+        for sheet in [false, true] {
+            var failing = false
+            let platform = RuntimeSystemSchedulePlatform()
+            let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                systemScheduleCheckpoint: {
+                    if failing && $0 == .beforeFileSync { throw CocoaError(.fileWriteUnknown) }
+                })
+            let store = try XCTUnwrap(appScheduleStore)
+            let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+            if sheet { _ = try await select("instance-1", in: app) }
+            let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+            let window = UIWindow(windowScene: scene)
+            window.frame = scene.screen.bounds
+            window.rootViewController = UIHostingController(rootView: RootView().environmentObject(app))
+            window.makeKeyAndVisible()
+            defer { window.isHidden = true; window.rootViewController = nil }
+            app.showAccountRoot()
+            var account: WKWebView?
+            try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                for page in self.bundledWebViews(in: window) {
+                    if (try? await page.evaluateJavaScript(
+                        "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Sign out on this device' && !b.disabled)"
+                    ) as? Bool) == true {
+                        account = page
+                        return true
+                    }
+                }
+                return false
+            }
+            failing = true
+            _ = try await XCTUnwrap(account).evaluateJavaScript("""
+                Array.from(document.querySelectorAll('button'))
+                  .find(b => b.textContent.trim() === 'Sign out on this device').click()
+                """)
+            try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                for page in self.bundledWebViews(in: window) {
+                    if (try? await page.evaluateJavaScript(
+                        "document.body.textContent.includes('Sign in / Create account')"
+                    ) as? Bool) == true { return true }
+                }
+                return false
+            }
+            trackStore(of: app)
+            XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+            XCTAssertNil(app.route.runtime)
+            XCTAssertNil(app.systemScheduleConfirmation)
+            XCTAssertFalse(store.isActive(owner: owner))
+            XCTAssertNil(store.managementOwner(accountID: "account-1"))
+            XCTAssertNil(store.managementOwner(accountID: "account-2"))
+            XCTAssertEqual(store.persistenceState, .writeFailed)
+            failing = false
+            XCTAssertTrue(store.retryCommit())
+            XCTAssertFalse(store.isActive(owner: owner))
+            XCTAssertEqual(platform.cancelCalls, 0)
+            print("[account signout click] sheet=\(sheet) welcome=true account=nil detachRecovered=true")
+        }
+    }
+
+    @MainActor
+    func testBundledColdFaultShowsLocalRecordsAndRetryRecoversDiscovery() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalRecordsPresentationTests.\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("ledger.json")
+        let seed = FileSystemSystemScheduleStore(fileURL: url)
+        _ = try XCTUnwrap(seed.managementOwner(accountID: "account-1"))
+        var failing = true
+        let app = try await makeApp(directTransport: nil, systemScheduleCheckpoint: {
+            if failing && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
+        }, systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            if case .loading = app.route { return false }
+            return true
+        }
+        let controller = MobileOnboardingViewController(coordinator: app.mobileSessionCoordinator)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        controller.loadViewIfNeeded()
+        let webView = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
+        let message = "Avibe couldn't read or save alarm and reminder records on this iPhone. Try again."
+        func showsLocalError() async -> Bool {
+            (try? await webView.callAsyncJavaScript(
+                "return document.body.textContent.includes(message);",
+                arguments: ["message": message], in: nil, contentWorld: .page) as? Bool) == true
+        }
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) { await showsLocalError() }
+        let retry = """
+            Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Retry').click()
+            """
+        _ = try await webView.evaluateJavaScript(retry)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) { await showsLocalError() }
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        XCTAssertNil(app.captureSystemScheduleAdmission(origin: instance))
+        failing = false
+        _ = try await webView.evaluateJavaScript(retry)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            let hasInstance = (try? await webView.evaluateJavaScript(
+                "document.body.textContent.includes('One')") as? Bool) == true
+            return app.mobileSessionCoordinator.currentAccount?.id == "account-1" && hasInstance
+        }
+        let remainsInError = await showsLocalError()
+        XCTAssertFalse(remainsInError)
+    }
+
+    @MainActor
+    private func bundledWebViews(in view: UIView) -> [WKWebView] {
+        let own = (view as? WKWebView).map { [$0] } ?? []
+        return own.filter { MobileBundleSchemeHandler.isTrustedBundleURL($0.url) }
+            + view.subviews.flatMap { bundledWebViews(in: $0) }
+    }
+
+    @MainActor
     func testColdBootstrapFailurePreservesScheduleOwnerAndManagedRecord() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let request = try XCTUnwrap(
@@ -907,6 +1319,98 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(submittedCreateResult["state"] as? String, "cancelled")
         XCTAssertEqual(submittedCancelResult["state"] as? String, "cancelled")
         XCTAssertEqual(platform.systemCreationCalls, 0)
+    }
+
+    @MainActor
+    func testCrossOperationCommitFailureCannotSwallowCapturedOrBridgeCancelControl() async throws {
+        for route in ["captured", "bridge"] {
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            var commits = 0
+            var failAt = Int.max
+            let platform = RuntimeSystemSchedulePlatform()
+            platform.holdBeforeSystemCreation = true
+            let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                systemScheduleNow: { now }, systemScheduleCheckpoint: {
+                    if $0 == .beforeDirectorySync {
+                        commits += 1
+                        if commits >= failAt { throw CocoaError(.fileWriteUnknown) }
+                    }
+                })
+            let runtime = try await select("instance-1", in: app)
+            let page = try await showRuntimePage(app, runtime)
+            defer { platform.releasePermission(); page.close() }
+            let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
+            let admission = try XCTUnwrap(app.captureSystemScheduleAdmission(origin: origin))
+            guard case .authorized(let context) = admission else {
+                return XCTFail("fixture must capture the actual document authority")
+            }
+            let create = Task { @MainActor in
+                try await page.systemScheduleRequest(scheduleParams(
+                    requestID: "create-A", operationID: "operation-A", now: now))
+            }
+            try await eventually { app.systemScheduleConfirmation != nil }
+            app.confirmSystemSchedule(id: try XCTUnwrap(app.systemScheduleConfirmation).id)
+            try await eventually { platform.isWaitingForPermission }
+            let otherRequest = try XCTUnwrap(SystemScheduleRequest.parse(scheduleParams(
+                requestID: "create-B", operationID: "operation-B", now: now)))
+            var otherRecord = cleanupPendingRecord(request: otherRequest, owner: context.owner,
+                systemIdentifier: "system-B", updatedAt: now)
+            otherRecord.lifecycle = .managedScheduled
+            otherRecord.createState = .scheduled
+            XCTAssertTrue(try XCTUnwrap(appScheduleStore).save(otherRecord))
+            // B's cleanup intent commits; removal succeeds; its terminal
+            // rename becomes visible but every following directory sync fails.
+            failAt = commits + 2
+            let otherCancel = await app.cancelSystemSchedule(.init(requestID: "cancel-B",
+                operationID: "operation-B", kind: .alarm, purpose: .user), admission: admission)
+            XCTAssertEqual((otherCancel?["error"] as? [String: Any])?["code"] as? String,
+                           "local_state_write_failed")
+            XCTAssertEqual(platform.cancelIdentifiers, ["system-B"])
+            let stale = SystemScheduleContext(owner: context.owner, instanceID: context.instanceID,
+                origin: context.origin, runtimeIdentity: context.runtimeIdentity,
+                navigationEpoch: context.navigationEpoch + 1, webViewIdentity: context.webViewIdentity)
+            let rejected = await app.cancelSystemSchedule(.init(requestID: "stale-cancel",
+                operationID: "operation-A", kind: .alarm, purpose: .user), admission: .authorized(stale))
+            XCTAssertEqual((rejected?["error"] as? [String: Any])?["code"] as? String,
+                           "local_state_write_failed")
+            XCTAssertEqual(platform.systemCreationCalls, 0)
+            XCTAssertNotNil(app.systemScheduleConfirmation)
+            XCTAssertNil(app.captureSystemScheduleAdmission(
+                origin: try XCTUnwrap(WebOrigin.parseConfigured("https://untrusted.example"))))
+            var cancelReturned = false
+            let cancel = Task { @MainActor () throws -> [String: Any] in
+                let receipt: [String: Any]
+                if route == "captured" {
+                    let result = await app.cancelSystemSchedule(.init(requestID: "cancel-A",
+                        operationID: "operation-A", kind: .alarm, purpose: .user), admission: admission)
+                    receipt = try XCTUnwrap(result)
+                } else {
+                    receipt = try jsonObject(try await page.systemScheduleCancel(
+                        requestID: "cancel-A", operationID: "operation-A", kind: "alarm"))
+                }
+                cancelReturned = true
+                return receipt
+            }
+            try await eventually { cancelReturned || app.systemScheduleConfirmation == nil }
+            XCTAssertNil(app.systemScheduleConfirmation, route)
+            platform.releasePermission()
+            let createReceipt = try jsonObject(try await create.value)
+            let cancelReceipt = try await cancel.value
+            XCTAssertEqual(createReceipt["requestId"] as? String, "create-A")
+            XCTAssertEqual(cancelReceipt["requestId"] as? String, "cancel-A")
+            for receipt in [createReceipt, cancelReceipt] {
+                XCTAssertEqual((receipt["error"] as? [String: Any])?["code"] as? String,
+                               "local_state_write_failed", route)
+                XCTAssertEqual(receipt["systemIdentifier"] as? String, "system-1")
+            }
+            XCTAssertEqual(platform.systemCreationCalls, 0, route)
+            XCTAssertEqual(platform.cancelIdentifiers, ["system-B"], route)
+            failAt = Int.max
+            let recovered = await app.cancelSystemSchedule(.init(requestID: "recovered-cancel",
+                operationID: "operation-A", kind: .alarm, purpose: .user), admission: admission)
+            XCTAssertEqual(recovered?["state"] as? String, "cancelled")
+            XCTAssertEqual(platform.systemCreationCalls, 0)
+        }
     }
 
     @MainActor
@@ -4761,6 +5265,7 @@ final class DirectPathAppTests: XCTestCase {
         systemSchedulePlatform: SystemSchedulePlatforming? = nil,
         systemScheduleNow: @escaping @MainActor () -> Date = Date.init,
         systemScheduleCheckpoint: ((FileSystemSystemScheduleStore.IOCheckpoint) throws -> Void)? = nil,
+        systemScheduleFileURL: URL? = nil,
         launchesWithInstanceOneSelected: Bool = false,
         notifications: NotificationsOn? = nil,
         // Before `beforeTheAppExists`: an unlabeled trailing closure at a
@@ -4825,7 +5330,8 @@ final class DirectPathAppTests: XCTestCase {
         }
         let suiteName = "DirectPathAppTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        let scheduleDirectory = FileManager.default.temporaryDirectory
+        let scheduleDirectory = systemScheduleFileURL?.deletingLastPathComponent()
+            ?? FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "DirectPathScheduleTests.\(UUID().uuidString)",
                 isDirectory: true
@@ -4834,7 +5340,7 @@ final class DirectPathAppTests: XCTestCase {
             at: scheduleDirectory,
             withIntermediateDirectories: true
         )
-        let scheduleLedgerURL = scheduleDirectory.appendingPathComponent("ledger.json")
+        let scheduleLedgerURL = systemScheduleFileURL ?? scheduleDirectory.appendingPathComponent("ledger.json")
         let scheduleStore = FileSystemSystemScheduleStore(fileURL: scheduleLedgerURL,
                                                          checkpoint: systemScheduleCheckpoint)
         appScheduleStore = scheduleStore

@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
+from sqlalchemy.schema import CreateIndex
 
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -16,6 +17,7 @@ from storage.models import (
 from storage.system_schedule_service import (
     SystemScheduleServiceError,
     _canonical_receipt,
+    _sticky_attempt,
     cancel_operation,
     claim_next,
     create_operation,
@@ -658,22 +660,155 @@ def test_every_observable_entry_advances_unclaimed_expiry(isolated_state):
         assert _get(operation_id, now=later)["state"] == "expired"
 
 
-def test_poll_and_expiry_queries_have_matching_sqlite_indexes(isolated_state):
+def test_sticky_poll_work_is_bounded_by_live_attempts_not_cancelled_history(
+    isolated_state,
+):
+    _create()
+    claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+    cancel_operation(
+        session_id="ses-schedule",
+        instance_id="instance-a",
+        operation_id="wake-up",
+        now=NOW + timedelta(seconds=1),
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        index_name = "idx_system_schedule_attempts_sticky_claim"
+        migrated_ddl = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            (index_name,),
+        ).scalar_one()
+        model_index = next(
+            index for index in system_schedule_attempts.indexes if index.name == index_name
+        )
+        model_ddl = str(CreateIndex(model_index).compile(dialect=engine.dialect))
+        def normalize(ddl):
+            return " ".join(ddl.replace("IF NOT EXISTS ", "").split()).lower()
+
+        assert normalize(migrated_ddl) == normalize(model_ddl)
+        assert migrated_ddl.endswith(
+            "WHERE terminal_state IS NULL AND receipt_json IS NULL"
+        )
+        history = dict(
+            conn.execute(
+                select(system_schedule_attempts).where(
+                    system_schedule_attempts.c.action == "create"
+                )
+            ).mappings().one()
+        )
+        assert history["claim_state"] == "claimed"
+        assert history["terminal_state"] == "cancelled"
+        assert history["receipt_json"] is None
+        raw = conn.connection.driver_connection
+        query_plans = []
+
+        def measure(*, instance_id="instance-a", device_id="device-a", excluded=()):
+            steps = 0
+            statements = []
+
+            def progress():
+                nonlocal steps
+                steps += 1
+                return 0
+
+            def capture(_conn, _cursor, statement, parameters, _context, _many):
+                statements.append((statement, parameters))
+
+            event.listen(conn, "before_cursor_execute", capture)
+            raw.set_progress_handler(progress, 1)
+            try:
+                result = _sticky_attempt(
+                    conn,
+                    action="create",
+                    instance_id=instance_id,
+                    device_id=device_id,
+                    excluded=excluded,
+                )
+            finally:
+                raw.set_progress_handler(None, 0)
+                event.remove(conn, "before_cursor_execute", capture)
+            assert len(statements) == 1
+            statement, parameters = statements[0]
+            assert "INDEXED BY" not in statement
+            plan = " ".join(
+                row[3]
+                for row in conn.exec_driver_sql(
+                    f"EXPLAIN QUERY PLAN {statement}", parameters
+                )
+            )
+            assert "SEARCH system_schedule_attempts" in plan
+            assert "SCAN system_schedule_attempts" not in plan
+            assert "USE TEMP B-TREE" not in plan
+            query_plans.append(plan)
+            return result, steps
+
+        rows = []
+        for index in range(10_009):
+            row = dict(history)
+            row.update(
+                operation_id=f"history-{index}",
+                attempt_key=f"history-{index}:create:0",
+                request_id=f"history-request-{index}",
+                lease_token=f"history-lease-{index}",
+            )
+            rows.append(row)
+        empty, single_steps = measure()
+        assert empty is None
+        conn.execute(system_schedule_attempts.insert(), rows[:9])
+        empty, small_steps = measure()
+        assert empty is None
+        conn.execute(system_schedule_attempts.insert(), rows[9:])
+        empty, large_steps = measure()
+        assert empty is None
+        assert large_steps <= small_steps + 200, (small_steps, large_steps)
+        assert large_steps <= single_steps + 200, (single_steps, large_steps)
+        for suffix, instance_id, device in [
+            ("a", "instance-a", "device-a"),
+            ("b", "instance-a", "device-a"),
+            ("foreign", "instance-a", "device-b"),
+            ("other-instance", "instance-b", "device-a"),
+        ]:
+            live = dict(history)
+            live.update(
+                operation_id=f"live-{suffix}",
+                attempt_key=f"live-{suffix}:create:0",
+                request_id=f"live-{suffix}",
+                lease_token=f"live-lease-{suffix}",
+                instance_id=instance_id,
+                device_id=device,
+                terminal_state=None,
+            )
+            conn.execute(system_schedule_attempts.insert(), live)
+        result, live_steps = measure()
+        assert result["request_id"] == "live-a"
+        assert live_steps <= small_steps + 300, (small_steps, live_steps)
+        second, _ = measure(excluded=("live-lease-a",))
+        assert second["request_id"] == "live-b"
+        assert measure(excluded=("live-lease-a", "live-lease-b"))[0] is None
+        foreign, _ = measure(device_id="device-b")
+        assert foreign["request_id"] == "live-foreign"
+        other, _ = measure(instance_id="instance-b")
+        assert other["request_id"] == "live-other-instance"
+        print(
+            f"sticky actual query: history=1/10/10010 steps={single_steps}/{small_steps}/{large_steps} "
+            f"live_steps={live_steps} plans={query_plans} migrated_ddl={migrated_ddl}"
+        )
+
+
+def test_poll_and_expiry_queries_search_without_forcing_an_index(isolated_state):
     engine = create_sqlite_engine()
     queries = {
         "idx_system_schedule_attempts_expiry": (
-            "SELECT request_id FROM system_schedule_attempts INDEXED BY "
-            "idx_system_schedule_attempts_expiry WHERE action='create' "
+            "SELECT request_id FROM system_schedule_attempts WHERE action='create' "
             "AND claim_state='pending' AND terminal_state IS NULL AND deadline <= ?"
         ),
         "idx_system_schedule_attempts_pending_claim": (
-            "SELECT request_id FROM system_schedule_attempts INDEXED BY "
-            "idx_system_schedule_attempts_pending_claim WHERE action='create' "
-            "AND claim_state='pending' AND instance_id=? ORDER BY created_at, request_id LIMIT 1"
+            "SELECT request_id FROM system_schedule_attempts WHERE action='create' "
+            "AND claim_state='pending' AND terminal_state IS NULL AND instance_id=? "
+            "AND device_id IS NULL ORDER BY created_at, request_id LIMIT 1"
         ),
         "idx_system_schedule_attempts_sticky_claim": (
-            "SELECT request_id FROM system_schedule_attempts INDEXED BY "
-            "idx_system_schedule_attempts_sticky_claim WHERE action='cancel' "
+            "SELECT request_id FROM system_schedule_attempts WHERE action='cancel' "
             "AND claim_state='claimed' AND instance_id=? AND device_id=? "
             "AND terminal_state IS NULL AND receipt_json IS NULL "
             "ORDER BY updated_at, request_id LIMIT 1"
@@ -700,7 +835,9 @@ def test_poll_and_expiry_queries_have_matching_sqlite_indexes(isolated_state):
                     params,
                 )
             )
-            assert index_name in plan
+            assert "SEARCH system_schedule_attempts" in plan
+            assert "SCAN system_schedule_attempts" not in plan
+            assert "USE TEMP B-TREE" not in plan
 
 
 def test_attempt_rows_keep_every_cancel_generation(isolated_state):

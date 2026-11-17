@@ -4149,35 +4149,47 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(transitionPreparations, 1)
     }
 
-    // I3 review E1/E5: failed durable detach stops logout before any awaited cleanup.
-    func testDetachFailureStopsLogoutBeforePushCleanup() async throws {
+    // Route B: schedule persistence cannot retain an account's authorization.
+    // E1/E5 still require immediate detach notification before awaited cleanup;
+    // the file store owns its pending durable revocation, not this transaction.
+    func testDetachFailureStillCompletesLogoutAfterImmediateRevocation() async throws {
         let transport = FakeMobileAuthTransport()
         transport.session = snapshot(accountID: "account-1")
         var transitionPreparations = 0
         var pushCleanupCalls = 0
+        let cleanupStarted = expectation(description: "push cleanup after failed detach")
+        let releaseCleanup = expectation(description: "release push cleanup after failed detach")
         let coordinator = makeCoordinator(
             defaults: makeDefaults(),
-            transports: [transport],
+            transports: [transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
             onPrepareAccountTransition: {
                 transitionPreparations += 1
                 return []
             },
             onDetachActiveOwner: { false },
-            onPreparePushLogout: { pushCleanupCalls += 1 }
+            onPreparePushLogout: {
+                pushCleanupCalls += 1
+                cleanupStarted.fulfill()
+                await self.fulfillment(of: [releaseCleanup], timeout: 30)
+            }
         )
         coordinator.activateAccountSurface()
         _ = try await coordinator.bootstrap()
         _ = try coordinator.selectInstance(id: instance.id)
 
-        do {
-            _ = try await coordinator.logout()
-            XCTFail("Logout should stop when the ledger cannot durably detach.")
-        } catch let error as MobileAccountError {
-            XCTAssertEqual(error.code, "local_state_unavailable")
-        }
+        let logout = Task { try await coordinator.logout() }
+        await fulfillment(of: [cleanupStarted], timeout: 30)
         XCTAssertEqual(transitionPreparations, 1)
-        XCTAssertEqual(pushCleanupCalls, 0)
-        XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id))
+        let duringCleanup = try await coordinator.bootstrap()
+        XCTAssertEqual(duringCleanup, .signedOut)
+        releaseCleanup.fulfill()
+        let state = try await logout.value
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertEqual(transitionPreparations, 1)
+        XCTAssertEqual(pushCleanupCalls, 1)
+        XCTAssertNil(coordinator.currentAccount)
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id))
     }
 
     // I3 review E1: a new authenticated account is not exposed until owner sync commits.

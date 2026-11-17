@@ -317,7 +317,7 @@ struct SystemScheduleManagementOwner: Codable, Equatable {
 enum SystemScheduleAdmission {
     case authorized(SystemScheduleContext)
     case localStateUnavailable
-    case localStateWriteFailed(instanceID: String)
+    case localStateWriteFailed(instanceID: String, controlContext: SystemScheduleContext? = nil)
 }
 
 struct SystemScheduleContext: Equatable {
@@ -570,6 +570,14 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
     private var committed: Envelope?
     private var pending: Envelope?
     private var pendingColdOpen = false
+    private enum DeferredDetach {
+        /// A failed read/listing has not yet identified the departing owner.
+        case awaitingSnapshot
+        case owner(SystemScheduleManagementOwner)
+    }
+    /// Revoke immediately, but classify a cold image only after its barrier.
+    /// This intent is deliberately process-local until detach commits.
+    private var deferredDetach: DeferredDetach?
     private(set) var persistenceState: SystemSchedulePersistenceState = .unavailable
     private var working: Envelope? { pending ?? committed }
 
@@ -602,7 +610,7 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
     @discardableResult
     func retryCommit() -> Bool {
         if let pending {
-            return commit(pending, coldOpen: pendingColdOpen)
+            guard commit(pending, coldOpen: pendingColdOpen) else { return false }
         }
         if let committed {
             do {
@@ -616,7 +624,28 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
         } else if persistenceState == .unavailable {
             bootstrap()
         }
-        return persistenceState == .ready
+        guard persistenceState == .ready else { return false }
+        if let deferredDetach, var envelope = committed {
+            let owner: SystemScheduleManagementOwner?
+            switch deferredDetach {
+            case .awaitingSnapshot:
+                owner = envelope.activeOwner
+                if let owner { self.deferredDetach = .owner(owner) }
+            case .owner(let departing):
+                owner = departing
+            }
+            if let owner, let active = envelope.activeOwner {
+                // Never apply an old event to a later account/epoch.
+                guard active == owner else {
+                    persistenceState = .unavailable
+                    return false
+                }
+                detach(owner, in: &envelope)
+                guard commit(envelope) else { return false }
+            }
+            self.deferredDetach = nil
+        }
+        return true
     }
 
     func managementOwner(accountID: String) -> SystemScheduleManagementOwner? {
@@ -630,7 +659,7 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
     }
 
     func isActive(owner: SystemScheduleManagementOwner) -> Bool {
-        working?.activeOwner == owner
+        deferredDetach == nil && working?.activeOwner == owner
     }
 
     func record(operationID: String, instanceID: String,
@@ -676,8 +705,19 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
 
     @discardableResult
     func detachActiveOwner() -> Bool {
-        guard var envelope = working else { return false }
+        guard var envelope = working else {
+            // Explicit logout still matters when no envelope could be read.
+            // Bind to the first verified image, before any owner can be granted.
+            if deferredDetach == nil { deferredDetach = .awaitingSnapshot }
+            return retryCommit()
+        }
         guard let active = envelope.activeOwner else { return retryCommit() }
+        if pendingColdOpen {
+            // Neither absence nor a prior acknowledgement can be inferred
+            // from a cold image whose durability barrier still fails.
+            deferredDetach = .owner(active)
+            return retryCommit()
+        }
         // Deliberately do not retry a pending promotion before revocation.
         detach(active, in: &envelope)
         return commit(envelope)
@@ -1806,7 +1846,7 @@ final class SystemScheduleCoordinator {
         excludingOperationID: String? = nil,
         context: SystemScheduleContext? = nil
     ) async {
-        guard !store.cleanupRecords().isEmpty, store.retryCommit(), store.isAvailable else { return }
+        guard store.retryCommit(), store.isAvailable else { return }
         let records = store.cleanupRecords().filter { record in
             !(record.operationID == excludingOperationID
                 && record.owner == context?.owner && record.intent.instanceID == context?.instanceID)

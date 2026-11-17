@@ -599,7 +599,14 @@ final class AppModel: ObservableObject {
         switch resolveCurrentSystemScheduleContext(origin: origin) {
         case .available(let context): return .authorized(context)
         case .localStateUnavailable: return .localStateUnavailable
-        case .localStateWriteFailed(let instanceID): return .localStateWriteFailed(instanceID: instanceID)
+        case .localStateWriteFailed(let instanceID):
+            // A live request already has an immutable admitted context. Keep
+            // it only for cancel control, after checking the same document
+            // authority again; create still returns the typed write failure.
+            let controlContext = pendingSystemSchedule.flatMap {
+                isCurrentSystemScheduleContext($0.context) ? $0.context : nil
+            }
+            return .localStateWriteFailed(instanceID: instanceID, controlContext: controlContext)
         case .invalid: return nil
         }
     }
@@ -799,13 +806,17 @@ final class AppModel: ObservableObject {
         case .authorized(let captured): context = captured
         case .localStateUnavailable:
             return systemScheduleCoordinator.localStateUnavailable(request).jsonObject
-        case .localStateWriteFailed(let instanceID):
-            return systemScheduleCoordinator.localStateWriteFailed(request, instanceID: instanceID).jsonObject
+        case .localStateWriteFailed(let instanceID, let controlContext):
+            guard let controlContext else {
+                return systemScheduleCoordinator.localStateWriteFailed(request, instanceID: instanceID).jsonObject
+            }
+            context = controlContext
         }
-        if let failure = systemScheduleCoordinator.persistenceFailure(request, context: context) {
-            return failure.jsonObject
+        guard isCurrentSystemScheduleContext(context) else {
+            // A rejected caller never sends control to a slot. Preserve an
+            // already unresolved write outcome without treating it as success.
+            return systemScheduleCoordinator.persistenceFailure(request, context: context)?.jsonObject
         }
-        guard isCurrentSystemScheduleContext(context) else { return nil }
         let pending = pendingSystemSchedule.flatMap { candidate in
             candidate.request.operationID == request.operationID
                 && candidate.request.kind == request.kind

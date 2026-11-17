@@ -356,7 +356,8 @@
       "rateLimited_one": "Too many attempts. Try again in {{count}} minute."
     },
     "errors": {
-      "network": "Could not reach avibe.bot. Check your connection and retry."
+      "network": "Could not reach avibe.bot. Check your connection and retry.",
+      "localRecords": "Avibe couldn't read or save alarm and reminder records on this iPhone. Try again."
     },
     "licenses": {
       "about": "About",

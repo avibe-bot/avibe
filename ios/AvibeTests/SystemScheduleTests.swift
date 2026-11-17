@@ -474,6 +474,124 @@ final class SystemScheduleTests: XCTestCase {
     }
 
     @MainActor
+    func testColdOpenFailureThenLogoutNeverDeletesPreviouslyCompletedSystemItem() async throws {
+        for history in ["acknowledged", "failed-visible", "in-flight"] {
+            let (directory, _) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("ledger.json")
+            var promotionFailing = false
+            let initial = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+                if promotionFailing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
+            })
+            let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
+            let request = makeRequest()
+            let platform = SystemSchedulePlatformSpy()
+            let previous = SystemScheduleCoordinator(platform: platform, store: initial, now: { self.now })
+            platform.onScheduleWrite = { promotionFailing = history == "failed-visible" }
+            let scheduled = await previous.schedule(request, context: makeContext(owner: owner),
+                creationFence: { nil }, postWriteFence: { nil })
+            XCTAssertEqual(scheduled.state, history == "failed-visible" ? .failed : .scheduled, history)
+            XCTAssertEqual(scheduled.error?.code,
+                           history == "failed-visible" ? "local_state_write_failed" : nil, history)
+            if history == "in-flight" {
+                // A crash image explicitly persisted before effect completion.
+                var record = try XCTUnwrap(initial.record(operationID: request.operationID,
+                    instanceID: request.instanceID, owner: owner))
+                record.lifecycle = .creatingUnknown
+                record.createState = nil
+                XCTAssertTrue(initial.save(record))
+            }
+            var failing = true
+            let reopened = FileSystemSystemScheduleStore(fileURL: url,
+                checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } })
+            XCTAssertEqual(reopened.persistenceState, .writeFailed)
+            XCTAssertNil(reopened.installationID)
+            let coordinator = SystemScheduleCoordinator(platform: platform, store: reopened, now: { self.now })
+            XCTAssertFalse(coordinator.detachActiveOwner(), history)
+            XCTAssertFalse(coordinator.isActive(owner: owner), history)
+            for _ in 0..<2 {
+                await coordinator.retryPendingCleanup()
+                XCTAssertNil(coordinator.managementOwner(accountID: "account-2"), history)
+                XCTAssertEqual(coordinator.prepare(request, context: makeContext(owner: owner))?.error?.code,
+                               "local_state_write_failed", history)
+                XCTAssertEqual(platform.cancelWriteCalls, 0, history)
+                XCTAssertEqual(platform.systemItems.count, 1, history)
+                XCTAssertEqual(reopened.record(operationID: request.operationID,
+                    instanceID: request.instanceID, owner: owner)?.lifecycle,
+                    history == "in-flight" ? .creatingUnknown : .managedScheduled, history)
+            }
+            failing = false
+            await coordinator.retryPendingCleanup()
+            let expected: StoredSystemSchedule.Lifecycle =
+                history == "in-flight" ? .detachedCleaned : .detachedRetained
+            XCTAssertEqual(reopened.record(operationID: request.operationID,
+                instanceID: request.instanceID, owner: owner)?.lifecycle, expected, history)
+            XCTAssertEqual(platform.cancelWriteCalls, history == "in-flight" ? 1 : 0, history)
+            XCTAssertEqual(platform.systemItems.count, history == "in-flight" ? 0 : 1, history)
+            let again = FileSystemSystemScheduleStore(fileURL: url)
+            XCTAssertFalse(again.isActive(owner: owner), history)
+            let next = try XCTUnwrap(again.managementOwner(accountID: "account-2"))
+            XCTAssertNotEqual(next, owner)
+            XCTAssertEqual(again.record(operationID: request.operationID,
+                instanceID: request.instanceID, owner: owner)?.lifecycle, expected, history)
+            await coordinator.retryPendingCleanup()
+            XCTAssertEqual(platform.scheduleWriteCalls, 1, history)
+            XCTAssertEqual(platform.cancelWriteCalls, history == "in-flight" ? 1 : 0, history)
+        }
+    }
+
+    @MainActor
+    func testLogoutWithoutReadableImageBlocksOwnersUntilRecoveredDetachCommits() async throws {
+        // No decoded image exists when logout arrives. Previously that event
+        // was forgotten, allowing retry to hand out the original active epoch.
+        // Cover both failed directory enumeration and unreadable canonical.
+        for failure in ["listing", "read"] {
+            let (directory, initial) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("ledger.json")
+            let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
+            let request = makeRequest()
+            let platform = SystemSchedulePlatformSpy()
+            let coordinator = SystemScheduleCoordinator(platform: platform, store: initial, now: { self.now })
+            let scheduled = await coordinator.schedule(request, context: makeContext(owner: owner),
+                creationFence: { nil }, postWriteFence: { nil })
+            XCTAssertEqual(scheduled.state, .scheduled)
+            let manager = BoundaryListingFileManager()
+            manager.failListing = failure == "listing"
+            if failure == "read" {
+                try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: url.path)
+            }
+            var failWrite = true
+            let store = FileSystemSystemScheduleStore(fileURL: url, fileManager: manager,
+                checkpoint: {
+                    if failWrite && $0 == .beforeFileSync { throw CocoaError(.fileWriteUnknown) }
+                })
+            XCTAssertEqual(store.persistenceState, .unavailable, failure)
+            XCTAssertNil(store.record(operationID: request.operationID,
+                                      instanceID: request.instanceID, owner: owner), failure)
+            XCTAssertFalse(store.detachActiveOwner(), failure)
+            XCTAssertNil(store.managementOwner(accountID: "account-1"), failure)
+            XCTAssertNil(store.managementOwner(accountID: "account-2"), failure)
+            manager.failListing = false
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            // Reading the image is now possible, but detach still cannot
+            // commit. Neither account may bypass that separate write barrier.
+            XCTAssertNil(store.managementOwner(accountID: "account-1"), failure)
+            XCTAssertNil(store.managementOwner(accountID: "account-2"), failure)
+            XCTAssertFalse(store.isActive(owner: owner), failure)
+            failWrite = false
+            XCTAssertTrue(store.retryCommit(), failure)
+            XCTAssertEqual(store.record(operationID: request.operationID,
+                instanceID: request.instanceID, owner: owner)?.lifecycle, .detachedRetained, failure)
+            let next = try XCTUnwrap(store.managementOwner(accountID: "account-2"))
+            XCTAssertNotEqual(next, owner, failure)
+            XCTAssertTrue(store.retryCommit(), failure)
+            XCTAssertTrue(store.isActive(owner: next), "Consumed logout must not detach a later account.")
+            XCTAssertEqual(platform.cancelWriteCalls, 0, failure)
+        }
+    }
+
+    @MainActor
     func testOwnerFailureAndLogoutDoNotPromoteUncommittedManagedSuccess() async throws {
         let (directory, initial) = try makeStore()
         defer { try? FileManager.default.removeItem(at: directory) }
