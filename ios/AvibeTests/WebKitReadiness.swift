@@ -28,6 +28,20 @@ enum WebKitReadiness {
             + MobileAuthTransportDeadlines.standard.requestMilliseconds
     ) + .seconds(5)
 
+    /// `standardTransportOperation` for `XCTestCase.fulfillment(of:timeout:)`:
+    /// the budget for a request that has to reach the control plane through
+    /// an account transport the App launches for it.
+    static var standardTransportOperationSeconds: TimeInterval {
+        let components = standardTransportOperation.components
+        return TimeInterval(components.seconds)
+            + TimeInterval(components.attoseconds) / 1e18
+    }
+
+    /// `webContentLaunch` for `XCTestCase.fulfillment(of:timeout:)`.
+    static var webContentLaunchSeconds: TimeInterval {
+        TimeInterval(webContentLaunch.components.seconds)
+    }
+
     /// Waits until `webView` shows a loaded document of its own: a web content
     /// process is running, and its document is complete and not the initial
     /// `about:blank`. Script evaluated before then waits for the process, so
