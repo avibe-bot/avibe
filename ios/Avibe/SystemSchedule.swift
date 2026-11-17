@@ -800,11 +800,17 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
             guard sources.isEmpty else { throw StoreError.invalidEvidence }
             return
         }
-        guard sources.count == 1, let source = sources.first,
-              source.lastPathComponent == migration.filename,
-              try legacyIdentifier(migration.filename) == envelope.installationID else {
+        guard try legacyIdentifier(migration.filename) == envelope.installationID,
+              migration.fingerprint.utf8.count == 64,
+              migration.fingerprint.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw StoreError.invalidEvidence
         }
+        guard !sources.isEmpty else {
+            Self.logger.debug("System schedule migration source_absent; canonical provenance preserved")
+            return
+        }
+        guard sources.count == 1, let source = sources.first,
+              source.lastPathComponent == migration.filename else { throw StoreError.invalidEvidence }
         let bytes = try requiredData(source)
         let original = try decoder.decode(LegacyEnvelope.self, from: bytes)
         guard original.version == 1, fingerprint(bytes) == migration.fingerprint else {

@@ -272,7 +272,44 @@ final class SystemScheduleTests: XCTestCase {
         XCTAssertEqual(FileSystemSystemScheduleStore(fileURL: url).persistenceState, .unavailable)
         try FileManager.default.removeItem(at: extra)
         try FileManager.default.removeItem(at: legacyURL)
-        XCTAssertEqual(FileSystemSystemScheduleStore(fileURL: url).persistenceState, .unavailable)
+        let canonicalBytes = try Data(contentsOf: url)
+        let sourceAbsent = FileSystemSystemScheduleStore(fileURL: url)
+        XCTAssertEqual(sourceAbsent.persistenceState, .ready)
+        XCTAssertEqual(sourceAbsent.installationID, identifier)
+        XCTAssertTrue(sourceAbsent.isActive(owner: owner))
+        for record in records {
+            XCTAssertEqual(sourceAbsent.record(operationID: record.operationID,
+                instanceID: record.intent.instanceID, owner: owner), record)
+        }
+        XCTAssertTrue(sourceAbsent.retryCommit())
+        XCTAssertEqual(try Data(contentsOf: url), canonicalBytes,
+                       "source absence must not rewrite canonical provenance")
+        let manager = BoundaryListingFileManager()
+        manager.failListing = true
+        let listingFailed = FileSystemSystemScheduleStore(fileURL: url, fileManager: manager)
+        XCTAssertEqual(listingFailed.persistenceState, .unavailable)
+        XCTAssertNil(listingFailed.installationID)
+        XCTAssertFalse(listingFailed.retryCommit())
+        XCTAssertEqual(try Data(contentsOf: url), canonicalBytes)
+        let valid = try XCTUnwrap(canonical)
+        let provenance = try XCTUnwrap(valid["migration"] as? [String: Any])
+        for (key, value) in [
+            ("filename", "system-schedule-ledger-default-v1.json"),
+            ("filename", "system-schedule-ledger-\(UUID().uuidString)-v1.json"),
+            ("fingerprint", String(repeating: "a", count: 63)),
+            ("fingerprint", String(repeating: "G", count: 64)),
+        ] {
+            var invalid = valid
+            var invalidProvenance = provenance
+            invalidProvenance[key] = value
+            invalid["migration"] = invalidProvenance
+            try JSONSerialization.data(withJSONObject: invalid).write(to: url)
+            let rejected = FileSystemSystemScheduleStore(fileURL: url)
+            XCTAssertEqual(rejected.persistenceState, .unavailable, "\(key)=\(value)")
+            XCTAssertNil(rejected.installationID)
+        }
+        try canonicalBytes.write(to: url)
+        XCTAssertEqual(FileSystemSystemScheduleStore(fileURL: url).installationID, identifier)
     }
 
     @MainActor
