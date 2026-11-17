@@ -159,9 +159,9 @@ and Web resizing cannot both run.
   keyboard-free geometry without hiding chrome; a known software keyboard stays
   active across rotation until the resized viewport recovers. Safari and
   installed Web apps keep their existing chrome behavior.
-- `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
-  upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
-  replaced when a native 1024-pixel source is delivered.
+- `AppIcon.appiconset` contains one opaque 1024-by-1024 RGB icon with square
+  corners and no alpha, built from the native 1024-pixel Vibey source with the
+  same composition as the earlier 512-pixel Home Screen artwork.
 - The user agent includes `AvibeiOS/<CFBundleShortVersionString>`.
 
 The closed deviation list is:
