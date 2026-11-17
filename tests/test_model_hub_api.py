@@ -4194,14 +4194,19 @@ def test_mh_unlisted_002_opencode_fallback_row_keeps_an_agent_running(
 
     response = client.put(endpoint, json=request_body, headers=headers, base_url=base_url)
 
-    # A supplied fallback leaves only the removed row's passthrough hop to confirm.
+    # The removed unlisted row has no automatic hop; a supplied fallback needs
+    # no confirmation. Only a real interruption still asks for consent.
+    if fallback_supplied:
+        assert response.status_code == 200
+        assert "removed_hops" not in response.get_json()
+        assert "interrupted" not in response.get_json()
+        assert [model.id for model in store.config.agents["opencode"].models] == ["kimi-k2"]
+        return
     assert response.status_code == 409
     refusal = response.get_json()
     _assert_valid("guard-refusal.schema.json", refusal)
     assert refusal["would_interrupt"] == expected_gaps
-    assert [hop["menu_model"] for hop in refusal["would_remove_hops"]] == (
-        ["moonshotai/kimi-k2"] if fallback_supplied else []
-    )
+    assert refusal["would_remove_hops"] == []
 
     committed = client.put(
         endpoint,
@@ -5480,7 +5485,7 @@ _PROJECTION_MUTATIONS = {
         lambda service: _confirm_guard(lambda guard: service.set_agent_sources(
             "claude", {"order": ["src_first0001"], **guard},
         )),
-        lambda bindings: bindings["src_second001"].route_model_ids == (_PROJECTION_MODEL,),
+        None,  # The surviving manual hop already registers this exact model.
     ),
     "shorten_chain": (
         _shorten_chain_past_a_newer_family_member,
@@ -5494,7 +5499,7 @@ _PROJECTION_MUTATIONS = {
             confirmed_remove_hops=guard.get("would_remove_hops"),
             confirmed_interruptions=guard.get("would_interrupt"),
         )),
-        lambda bindings: "claude-opus-4-7" not in bindings["src_first0001"].route_model_ids,
+        None,  # An unlisted automatic row never registered a transport target.
     ),
 }
 
@@ -7373,10 +7378,10 @@ def test_delete_guard_includes_all_newly_unsupplied_inherited_routes(tmp_path):
     assert exc_info.value.data["would_interrupt"] == [
         {
             "backend": "claude",
-            "model_id": model.id,
+            "model_id": model,
             "agents": [],
         }
-        for model in claude.models
+        for model in ["claude-opus-4-6", "opus", "opus[1m]"]
     ]
 
 
@@ -9581,7 +9586,7 @@ def test_failed_hub_reauth_rolls_back_when_old_journal_cleanup_fails(tmp_path):
     assert service.oauth_flows.binding(flow["flow_id"]) is None
 
 
-def test_credential_inventory_narrowing_preserves_exact_routes(
+def test_credential_inventory_narrowing_guards_lost_automatic_supply(
     monkeypatch,
     tmp_path,
 ):
@@ -9626,16 +9631,27 @@ def test_credential_inventory_narrowing_preserves_exact_routes(
         base_url=base_url,
     )
 
+    assert response.status_code == 409
+    refusal = response.get_json()
+    assert {gap["model_id"] for gap in refusal["would_interrupt"]} == {
+        "claude-opus-4-6", "opus", "opus[1m]", "claude-sonnet-4-6", "sonnet", "sonnet[1m]",
+    }
+    response = client.put(
+        f"/api/models/sources/{created['id']}/credential",
+        json={**request_body, "force": True, **{
+            key: refusal[key] for key in ("would_remove_hops", "would_interrupt")
+        }}, headers=headers, base_url=base_url,
+    )
     assert response.status_code == 200
     committed = response.get_json()
-    assert committed["removed_hops"] == []
-    assert committed["interrupted"] == []
-    assert committed["source"]["credential_ref"] == "cred_route_2"
+    assert committed["removed_hops"] == refusal["would_remove_hops"]
+    assert committed["interrupted"] == refusal["would_interrupt"]
+    assert committed["source"]["credential_ref"] == "cred_route_3"
     assert store.config.agents["claude"].to_payload()["routes"] == before_routes
     chain = service.agent_chain("claude", "claude-opus-4-6")
-    assert chain["current"] == {"source_id": created["id"], "model_id": "claude-opus-4-6"}
-    assert chain["route_origin"] == "passthrough"
-    assert adapter.revoked == ["cred_test001", "cred_route_1"]
+    assert chain["current"] is chain["route_origin"] is None
+    assert chain["chain"] == []
+    assert adapter.revoked == ["cred_test001", "cred_route_2", "cred_route_1"]
 
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
@@ -11221,6 +11237,11 @@ def test_base_url_change_preserves_missing_inventory_exact_hops(
     headers = csrf_headers(client, origin)
     replacement_url = "https://other-relay.example/v1"
 
+    # Make the claimed exact route explicit; missing inventory only preserves
+    # manual forwarding, not automatic aliases on the same Source.
+    store.config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source["id"], "claude-opus-4-6"),)
+    )
     before_routes = store.config.agents["claude"].to_payload()["routes"]
     response = client.patch(
         f"/api/models/sources/{source['id']}",
@@ -11229,9 +11250,17 @@ def test_base_url_change_preserves_missing_inventory_exact_hops(
         base_url=origin,
     )
 
+    assert response.status_code == 409
+    refusal = response.get_json()
+    response = client.patch(
+        f"/api/models/sources/{source['id']}",
+        json={"base_url": replacement_url, "force": True, **{
+            key: refusal[key] for key in ("would_remove_hops", "would_interrupt")
+        }}, headers=headers, base_url=origin,
+    )
     assert response.status_code == 200
     committed = response.get_json()
-    committed_retarget = adapter.retargeted_credentials[0]
+    committed_retarget = adapter.retargeted_credentials[-1]
     assert committed_retarget[:4] == (
         old_credential_ref,
         "anthropic",
@@ -11240,11 +11269,12 @@ def test_base_url_change_preserves_missing_inventory_exact_hops(
     )
     assert committed["source"]["base_url"] == replacement_url
     assert committed["source"]["credential_ref"] == committed_retarget[4]
-    assert discovery_refs == [committed_retarget[4]]
+    assert discovery_refs == [item[4] for item in adapter.retargeted_credentials]
     assert old_credential_ref in adapter.revoked
     assert committed_retarget[4] not in adapter.revoked
-    assert committed["removed_hops"] == []
-    assert committed["interrupted"] == []
+    assert committed["removed_hops"] == refusal["would_remove_hops"]
+    assert all(hop["menu_model"] != "claude-opus-4-6" for hop in committed["removed_hops"])
+    assert committed["interrupted"] == refusal["would_interrupt"]
     assert store.config.sources[0].base_url == replacement_url
     assert store.config.agents["claude"].to_payload()["routes"] == before_routes
     assert service.agent_chain("claude", "claude-opus-4-6")["current"] == {

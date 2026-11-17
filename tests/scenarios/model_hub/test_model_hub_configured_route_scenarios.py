@@ -73,7 +73,7 @@ def _routing_config(backend, sources, *, manual=None):
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize("inventory", [[], ["unrelated-inventory-model"]], ids=["empty", "incomplete"])
 @pytest.mark.parametrize("override", [None, []], ids=["absent-route", "legacy-empty-route"])
-def test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes_membership(
+def test_mh_routing_002_only_matching_inventory_supplies_automatic_routes_and_health_never_changes_membership(
     tmp_path, backend, inventory, override,
 ):
     """MH-ROUTING-002: inventory evidence selects the tier; health only annotates its ordered members."""
@@ -88,10 +88,8 @@ def test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes
     before = config.to_payload()
     chain = service.agent_chain(backend, model)
     assert chain["manual_override"] is None
-    assert chain["route_origin"] == "passthrough"
-    assert [(hop["source_id"], hop["model_id"]) for hop in chain["chain"]] == [
-        (second.id, model), (first.id, model),
-    ]
+    assert chain["route_origin"] is None
+    assert chain["chain"] == []
     assert store.load().to_payload() == before
     first.models.append(source_model(model))
     first.state.status = "needs_action"
@@ -101,7 +99,7 @@ def test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes
     assert [(hop["source_id"], hop["model_id"]) for hop in chain["chain"]] == [(first.id, model)]
     assert chain["manual_override"] is None
     first.models.clear()
-    assert service.agent_chain(backend, model)["route_origin"] == "passthrough"
+    assert service.agent_chain(backend, model)["route_origin"] is None
     assert model not in round_trip(store.load()).agents[backend].routes
     assert store.saved_payloads == []
 
@@ -123,15 +121,15 @@ def test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reloa
     reordered = service.agent_chain(backend, model)
     assert reordered["manual_override"] == original
     assert [(hop["source_id"], hop["model_id"]) for hop in reordered["chain"]] == (
-        manual if intent == "manual" else [(second.id, model), (first.id, model)]
+        manual if intent == "manual" else []
     )
     asyncio.run(service.reorder_agent_chains(backend, [first.id, second.id]))
     reloaded = service_for(tmp_path / "reload", MemoryModelHubStore(round_trip(store.load())), adapter)
     chain = reloaded.agent_chain(backend, model)
     assert chain["manual_override"] == original
-    assert chain["route_origin"] == ("manual" if intent == "manual" else "passthrough")
+    assert chain["route_origin"] == ("manual" if intent == "manual" else None)
     assert [(hop["source_id"], hop["model_id"]) for hop in chain["chain"]] == (
-        manual if intent == "manual" else [(first.id, model), (second.id, model)]
+        manual if intent == "manual" else []
     )
     if intent != "manual":
         assert model not in round_trip(store.load()).agents[backend].routes
@@ -199,8 +197,8 @@ def test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_o
     preview = service.preview_agent_chain(backend, model, {"manual_override": None})
     assert service.preview_agent_chain(backend, model, {"manual_override": {"hops": []}}) == preview
     assert preview["manual_override"] is None
-    assert preview["route_origin"] == "passthrough"
-    assert [(hop["source_id"], hop["model_id"]) for hop in preview["chain"]] == [(first.id, model)]
+    assert preview["route_origin"] is None
+    assert preview["chain"] == []
     undone = service.preview_agent_chain(
         backend, model, {"manual_override": config.agents[backend].routes[model].to_payload()},
     )
@@ -216,15 +214,15 @@ def test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_o
 
     with pytest.raises(ModelHubError) as refused:
         asyncio.run(restore())
-    assert refused.value.code == "source_in_route_chain"
+    assert refused.value.code == "source_last_supplier"
     assert refused.value.data == {"would_remove_hops": [{
         "backend": backend, "menu_model": model, "source_id": first.id,
         "model_id": "vendor/manual-target", "position": 1,
-    }], "would_interrupt": []}
+    }], "would_interrupt": [{"backend": backend, "model_id": model, "agents": []}]}
     assert store.load().to_payload() == original
     restored = asyncio.run(restore({"force": True, **refused.value.data}))
     assert restored["chain"]["manual_override"] is None
-    assert restored["chain"]["route_origin"] == "passthrough"
+    assert restored["chain"]["route_origin"] is None
     assert model not in round_trip(store.load()).agents[backend].routes
     repeated = asyncio.run(restore())
     assert repeated["chain"]["manual_override"] is None
@@ -607,8 +605,14 @@ def test_mh_supply_gap_001_manual_target_survives_inventory_loss(
     )
     service = service_for(tmp_path, store, adapter)
 
-    result = asyncio.run(service.refresh_source(supplied.id))
-    assert result["removed_hops"] == []
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.refresh_source(supplied.id))
+    result = asyncio.run(service.refresh_source(
+        supplied.id, force=True,
+        confirmed_remove_hops=refusal.value.data["would_remove_hops"],
+        confirmed_interruptions=refusal.value.data["would_interrupt"],
+    ))
+    assert all(hop["menu_model"] != menu_model for hop in result["removed_hops"])
     claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
     model_supply = next(row for row in claude["model_supply"] if row["model_id"] == menu_model)
     assert model_supply["chain_length"] == 1
@@ -842,8 +846,7 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
     assert menu_model not in reloaded.agents["claude"].routes
     inherited = service_for(tmp_path, MemoryModelHubStore(reloaded), adapter).agent_chain("claude", menu_model)
     assert inherited["manual_override"] is None
-    # Migration fetches no inventory, so the saved key serves the menu model
-    # by passthrough until discovery or a real call says otherwise.
-    [migrated] = reloaded.sources
-    assert inherited["route_origin"] == "passthrough"
-    assert [(hop["source_id"], hop["model_id"]) for hop in inherited["chain"]] == [(migrated.id, menu_model)]
+    # Migration fetches no inventory; saving a key is not evidence that it
+    # supplies every model. Discovery or a manual route is required.
+    assert inherited["route_origin"] is None
+    assert inherited["chain"] == []

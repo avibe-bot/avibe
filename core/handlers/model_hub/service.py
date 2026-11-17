@@ -5463,8 +5463,7 @@ class ModelHubService:
         previous: ModelHubConfig,
         updated: ModelHubConfig,
     ) -> list[dict]:
-        # Inventory evidence narrows speculative candidates without deleting routes.
-        # It also re-targets an inherited hop on a Source that still serves the
+        # Inventory re-targets an inherited hop on a Source that still serves the
         # same row, which is not a removal: a Claude family alias follows the
         # newest member its Source lists. Literal matching inherits only the
         # row's own id, so no other inherited hop can move this way.
@@ -5480,8 +5479,6 @@ class ModelHubService:
                 effective_model_route(previous, backend, menu_model).route_origin,
                 effective_model_route(updated, backend, menu_model).route_origin,
             )
-            if origins == ("passthrough", "automatic"):
-                return False
             return "manual" in origins or (backend, menu_model, item["source_id"]) not in serving
 
         return [item for item in removed if moved_supply(item)]
@@ -6851,8 +6848,9 @@ class ModelHubService:
         selection itself is untouched, so switching back to Direct still runs
         it. A row the user removed stays removed, and a selection nothing
         serves stays visible as an Agent that needs attention. During migration,
-        a static Source carried from that selection's native provider can instead
-        retain it by passthrough, without claiming an upstream inventory.
+        a static Source carried from that selection's native provider can retain
+        the menu identity without claiming inventory or automatic supply. The
+        selection remains unsupplied until discovery or an explicit manual hop.
         """
 
         if self.named_agents_override is None:
@@ -9735,7 +9733,7 @@ class ModelHubService:
                 async for _chunk in handle.stream:
                     pass
             outcome = await self._engine_call(handle.outcome())
-            decision = await self._classify_source_outcome(source, outcome)
+            decision = await self._classify_source_outcome(source, outcome, inventory_member=inventory_member)
             if decision.action == "refresh":
                 await handle.close_stream()
                 self.recovery.release(source.id, settlement_generation)
@@ -9754,7 +9752,7 @@ class ModelHubService:
                     async for _chunk in handle.stream:
                         pass
                 outcome = await self._engine_call(handle.outcome())
-                decision = classify_outcome(outcome, refresh_attempted=True)
+                decision = classify_outcome(outcome, refresh_attempted=True, inventory_member=inventory_member)
             elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
             reachable = decision.action == "return"
             if reachable:
@@ -9781,7 +9779,6 @@ class ModelHubService:
                         detail_key=error_key,
                         settlement_generation=settlement_generation,
                         outcome=outcome,
-                        inventory_member=inventory_member,
                     )
             return {
                 "contract_version": PROBE_RESULT_CONTRACT_VERSION,
@@ -10627,28 +10624,12 @@ class ModelHubService:
         detail_key: Optional[str] = None,
         settlement_generation: Optional[int] = None,
         outcome: RawCallOutcome | None = None,
-        inventory_member: bool = True,
-        recovery_request: RecoveryRequest | None = None,
-        recovery_identity: tuple | None = None,
     ) -> tuple[EventReason, bool]:
         """Persist one fallback-class Source result before the turn settles."""
 
         if decision.reason is None:
             raise AssertionError("fallback-class outcome must retain its Source reason")
         event_reason = cast(EventReason, decision.reason)
-        if (
-            not inventory_member and source.supply_channel == "hub"
-            and outcome is not None and outcome.kind is RawOutcomeKind.HTTP_ERROR
-            and outcome.http_status == 503 and decision.reason == "server_error"
-        ):
-            # This model's refusal is not evidence against the whole provider.
-            # Each request still owes its own backoff, even when another admission
-            # superseded this attempt's shared settlement generation.
-            self.recovery.release(source.id, settlement_generation)
-            if recovery_request is not None:
-                assert recovery_identity is not None
-                recovery_request.defer_unlisted(source.id, recovery_identity, outcome)
-            return event_reason, False
         settlement_rule = source_settlement_rule(event_reason)
         if decision.reason == "network" and outcome is not None and outcome.stream_started:
             return event_reason, False
@@ -10774,6 +10755,7 @@ class ModelHubService:
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
         source_transition_persisted: bool | None = None,
+        inventory_member: bool = True,
     ) -> TurnOutcomeProjectionInput | None:
         """Produce the sole complete terminal projection after attempt settlement."""
 
@@ -10795,6 +10777,11 @@ class ModelHubService:
                 config=config,
                 resolution=resolution,
                 upstream_detail=outcome.upstream_detail,
+                # Identifies the refusing hop only; this row appends no suffix.
+                last_upstream_failure=self._upstream_failure(
+                    self._source_label(config, source_id), outcome, source_id=source_id,
+                    model_id=source_model_id, inventory_member=inventory_member,
+                ),
             )
         if category == "upstream_protocol":
             # The Gateway's existing protocol-error copy is the positive row;
@@ -10821,21 +10808,28 @@ class ModelHubService:
             backend=backend,
             model_id=model_id,
         )
-        source_label = next(
-            (source.display_name for source in config.sources if source.id == source_id), source_id,
-        )
         return produce_turn_outcome(
             "turn.streamed_fallback",
             config=config,
             resolution=resolution,
             attempted_hop=(source_id, source_model_id),
             source_transition_persisted=source_transition_persisted,
-            last_upstream_failure=self._upstream_failure(source_label, outcome, source_id=source_id),
+            last_upstream_failure=self._upstream_failure(
+                self._source_label(config, source_id), outcome, source_id=source_id,
+                model_id=source_model_id, inventory_member=inventory_member,
+            ),
+        )
+
+    @staticmethod
+    def _source_label(config: ModelHubConfig, source_id: str) -> str:
+        return next(
+            (source.display_name for source in config.sources if source.id == source_id), source_id,
         )
 
     @staticmethod
     def _upstream_failure(
         source_label: str, outcome: RawCallOutcome, *, source_id: str = "",
+        model_id: str = "", inventory_member: bool = True,
     ) -> TurnUpstreamFailure | None:
         if not outcome.upstream_detail and outcome.kind is not RawOutcomeKind.HTTP_ERROR:
             return None
@@ -10847,6 +10841,8 @@ class ModelHubService:
                 detail=outcome.upstream_detail,
                 connection_error=True,
                 source_id=source_id,
+                model_id=model_id,
+                inventory_member=inventory_member,
             )
         status = outcome.http_status
         return TurnUpstreamFailure(
@@ -10858,6 +10854,8 @@ class ModelHubService:
             ),
             detail=outcome.upstream_detail or "",
             source_id=source_id,
+            model_id=model_id,
+            inventory_member=inventory_member,
         )
 
     @staticmethod
@@ -10994,6 +10992,7 @@ class ModelHubService:
         decision = await self._classify_credential_outcome(
             resolved.credential_ref,
             outcome,
+            inventory_member=resolved.inventory_member,
         )
         # Only the gateway can grant this after matching the exact overload
         # in a fully buffered, uncommitted Responses body. Keep the upstream
@@ -11055,7 +11054,6 @@ class ModelHubService:
                     model_id=resolved.requested_model_id,
                     settlement_generation=resolved.settlement_generation,
                     outcome=outcome,
-                    inventory_member=resolved.inventory_member,
                 )
         if retry_overload:
             # An attempt failed, not the Turn. The resolver still owns its
@@ -11072,6 +11070,7 @@ class ModelHubService:
                 outcome=outcome,
                 decision=decision,
                 source_transition_persisted=source_transition_persisted,
+                inventory_member=resolved.inventory_member,
             ),
         )
 
@@ -11127,7 +11126,6 @@ class ModelHubService:
         backend: BackendName,
         model_id: str,
         supply_channel: Literal["hub"] | None = None,
-        recovery_request: RecoveryRequest | None = None,
     ) -> ModelHubTurnResolution:
         if config.agents[backend].mode != "hub":
             # Only Hub turns reach the gateway. One admitted before a switch to
@@ -11136,8 +11134,6 @@ class ModelHubService:
             config = self._clone_config(config)
             config.agents[backend].mode = "hub"
         live_recovery = self.recovery_annotations(config)
-        if recovery_request is not None:
-            live_recovery = recovery_request.annotations(config, live_recovery)
         resolution = resolve_model_hub_turn(
             config,
             backend,
@@ -11191,7 +11187,7 @@ class ModelHubService:
             try:
                 config = self.store.load()
                 resolution = self._invocation_resolution(
-                    config, backend, requested_model_id, supply_channel, recovery_request,
+                    config, backend, requested_model_id, supply_channel,
                 )
                 pinned_hop = _pinned_hop(request, backend)
                 candidates = [
@@ -11472,7 +11468,6 @@ class ModelHubService:
         decision: ResolutionDecision,
         settlement_generation: int,
         attempt_observer: Optional[AttemptObserver],
-        inventory_member: bool,
     ) -> None:
         """Persist facts from an upstream call that beat downstream cancellation."""
 
@@ -11501,7 +11496,6 @@ class ModelHubService:
                 model_id=requested_model_id,
                 settlement_generation=settlement_generation,
                 outcome=outcome,
-                inventory_member=inventory_member,
             )
         elif decision.action == "return" and self._verified_recovery_outcome(outcome):
             await self._record_recovery_success(
@@ -11567,10 +11561,12 @@ class ModelHubService:
         self,
         source: ModelHubSourceConfig,
         outcome: RawCallOutcome,
+        *,
+        inventory_member: bool = True,
     ) -> ResolutionDecision:
         """Apply the credential-capability branch of the section 4.3 matrix once."""
 
-        decision = classify_outcome(outcome)
+        decision = classify_outcome(outcome, inventory_member=inventory_member)
         if decision.action != "refresh":
             return decision
         return await self._classify_credential_outcome(
@@ -11585,10 +11581,11 @@ class ModelHubService:
         outcome: RawCallOutcome,
         *,
         decision: Optional[ResolutionDecision] = None,
+        inventory_member: bool = True,
     ) -> ResolutionDecision:
         """Resolve one credential failure using its exact refresh capability."""
 
-        decision = decision or classify_outcome(outcome)
+        decision = decision or classify_outcome(outcome, inventory_member=inventory_member)
         if decision.action != "refresh":
             return decision
         if not credential_ref:
@@ -11655,7 +11652,7 @@ class ModelHubService:
         async with self._mutation_lock:
             config = self.store.load()
             resolution = self._invocation_resolution(
-                config, cast(BackendName, backend), model_id, supply_channel, recovery_request,
+                config, cast(BackendName, backend), model_id, supply_channel,
             )
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
@@ -11715,7 +11712,7 @@ class ModelHubService:
                     break
                 config = self.store.load()
                 resolution = self._invocation_resolution(
-                    config, cast(BackendName, backend), model_id, supply_channel, recovery_request,
+                    config, cast(BackendName, backend), model_id, supply_channel,
                 )
                 inspection = next(
                     (
@@ -11758,14 +11755,12 @@ class ModelHubService:
                 )
             settlement_generation = None
             inventory_member = True
-            recovery_identity = None
 
             def admitted(generation: int, listed: bool) -> None:
-                nonlocal attempted, settlement_generation, inventory_member, recovery_identity
+                nonlocal attempted, settlement_generation, inventory_member
                 attempted = True
                 settlement_generation = generation
                 inventory_member = listed
-                recovery_identity = source_identity(source)
                 if recovery_request is not None:
                     recovery_request.attempt_count += 1
                     recovery_request.source_id = source.id
@@ -11857,7 +11852,7 @@ class ModelHubService:
                     fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                     inventory_member=inventory_member,
                 )
-            decision = await self._classify_source_outcome(source, outcome)
+            decision = await self._classify_source_outcome(source, outcome, inventory_member=inventory_member)
             learned = await self._learn_capability_evidence(source, target_model, request, outcome)
             if cancelled is not None:
                 await self._settle_cancelled_attempt(
@@ -11869,7 +11864,6 @@ class ModelHubService:
                     decision=decision,
                     settlement_generation=settlement_generation,
                     attempt_observer=attempt_observer,
-                    inventory_member=inventory_member,
                 )
                 raise cancelled
             if decision.action == "refresh":
@@ -11928,7 +11922,7 @@ class ModelHubService:
                         fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                         inventory_member=inventory_member,
                     )
-                decision = classify_outcome(outcome, refresh_attempted=True)
+                decision = classify_outcome(outcome, refresh_attempted=True, inventory_member=inventory_member)
                 learned = await self._learn_capability_evidence(source, target_model, request, outcome)
                 if cancelled is not None:
                     await self._settle_cancelled_attempt(
@@ -11940,7 +11934,6 @@ class ModelHubService:
                         decision=decision,
                         settlement_generation=settlement_generation,
                         attempt_observer=attempt_observer,
-                        inventory_member=inventory_member,
                     )
                     raise cancelled
             if attempt_observer is not None and settlement_generation is not None:
@@ -12011,7 +12004,6 @@ class ModelHubService:
                         model_id=model_id,
                         settlement_generation=settlement_generation,
                         outcome=outcome,
-                        inventory_member=inventory_member,
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
@@ -12034,6 +12026,7 @@ class ModelHubService:
                         outcome=outcome,
                         decision=decision,
                         source_transition_persisted=source_transition_persisted,
+                        inventory_member=inventory_member,
                     ),
                 )
             if decision.action == "fallback" and pinned_hop is not None:
@@ -12047,7 +12040,6 @@ class ModelHubService:
                     model_id=model_id,
                     settlement_generation=settlement_generation,
                     outcome=outcome,
-                    inventory_member=inventory_member,
                 )
                 raise _pin_unavailable()
             if decision.action == "fallback":
@@ -12059,7 +12051,10 @@ class ModelHubService:
                     recovery_request.non_retryable_failure = True
                 # The newest refusal wins even without text: an older message
                 # would name a response that did not end this request.
-                last_upstream_failure = self._upstream_failure(source.display_name, outcome, source_id=source.id)
+                last_upstream_failure = self._upstream_failure(
+                    source.display_name, outcome, source_id=source.id,
+                    model_id=target_model, inventory_member=inventory_member,
+                )
                 if recovery_request is not None:
                     recovery_request.last_upstream_failure = last_upstream_failure
                 event_reason, _persisted = await self._settle_fallback_source(
@@ -12069,9 +12064,6 @@ class ModelHubService:
                     model_id=model_id,
                     settlement_generation=settlement_generation,
                     outcome=outcome,
-                    inventory_member=inventory_member,
-                    recovery_request=recovery_request,
-                    recovery_identity=recovery_identity,
                 )
                 globally_blocked_source_ids.add(source.id)
                 failed_source = source
@@ -12183,6 +12175,7 @@ class ModelHubService:
                     pending.reason = "server_error"
                     pending.last_upstream_failure = self._upstream_failure(
                         resolved.source_label, retry_outcome, source_id=resolved.source_id,
+                        model_id=resolved.model_id, inventory_member=resolved.inventory_member,
                     )
                     if getattr(kwargs.get("request"), "pinned_hop", None) is not None:
                         # Never replay opaque continuation content on a different
@@ -12201,7 +12194,7 @@ class ModelHubService:
                         raise self._recovery_exhausted(exc, pending.reason) from exc
                     config = self.store.load()
                     resolution = self._invocation_resolution(
-                        config, kwargs["backend"], kwargs["model_id"], supply_channel, pending,
+                        config, kwargs["backend"], kwargs["model_id"], supply_channel,
                     )
                     request = kwargs.get("request")
                     if any(
@@ -12219,7 +12212,7 @@ class ModelHubService:
                     waitable = resolution.self_healing_hops(supply_channel)
                     if not waitable:
                         raise
-                    annotations = pending.annotations(config, self.recovery.annotations(config))
+                    annotations = self.recovery.annotations(config)
                     waits = [
                         (
                             max(0.0, (parse_model_hub_timestamp(hop.retry_at) - self.now()).total_seconds()),

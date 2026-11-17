@@ -718,9 +718,41 @@ Source order, sparse manual Routes, and effective supply summaries.
 
 ### Manual Route configuration and preview
 
-Owner decision `c1d398d5f` scopes unknown-model passthrough and inventory-independent
-manual invocation to Hub API-key Sources. Subscriptions retain known-model admission and
-automatic matching; unmatched subscription-only defaults yield an empty/null-origin plan.
+The 2026-11-17 routing amendment removes automatic unknown-model forwarding.
+Inherited routes contain only matching non-retired inventory from eligible defaults.
+No match yields `manual_override: null`, `route_origin: null`, `chain: []`,
+`current: null`, and `supply_state: interrupted`. The `passthrough` enum remains
+accepted for compatibility with older producers, but is no longer produced.
+`contract_version` and stored Route shapes are unchanged.
+
+Forwarding an unlisted id requires an explicit Hub API-key manual hop. Subscriptions
+retain known-model admission. For example, send:
+
+```http
+PUT /api/models/agents/codex/chain?model=gpt-6-astra
+Content-Type: application/json
+
+{"hops":[{"source_id":"src_relay9c1x","model_id":"gpt-6-astra"}]}
+```
+
+Preview sends `{"manual_override":{"hops":[{"source_id":"src_relay9c1x","model_id":"gpt-6-astra"}]}}`
+to the corresponding `/chain/preview?model=gpt-6-astra` endpoint. The result has
+`route_origin: manual` and the exact submitted `manual_override`; an otherwise
+healthy hop is runnable even when the Source does not list that id. No Source
+inventory mutation or provider-default membership change is required.
+
+Upgrade never rewrites a saved nonempty manual Route. Inherited results recompute:
+a previously passthrough-only model now has `chain_length: 0`,
+`has_runnable_hop: false`, and null origin. Its selected enabled Agents appear in
+`named_agents` with their unchanged `effective_model_id`,
+`route_reason: route_unconfigured`, and `supply_status: interrupted`. This includes
+the enabled Agent definition used by the main Bot; `named_agents` lists Agents,
+not Bot names. A different model override on a Bot's permanent Session is an
+existing reporting limitation: this callback reads the Agent model, not the Session
+override. Effective Bot-Session selection reporting (and its supply-guard consequences)
+is a separate follow-up; controller/store are unchanged here. For the reported
+Agent selections, existing issue reporting identifies the unsupplied selection
+instead of counting the relay as a supplier. No automatic model replacement is performed.
 
 `AgentSupply.routes` is the canonical sparse map of nonempty `{hops: RouteHop[]}`
 overrides. Missing and valid empty values both inherit. Nonempty PUT creates a manual
@@ -759,13 +791,41 @@ same pure planner with isolated draft configuration,
 returns the existing chain success envelope, and performs no persistent mutation,
 event, runtime startup/sync, credential access or upstream request. The returned
 `manual_override` describes normalized draft intent, not persisted intent. Empty input
-may therefore return Automatic or Passthrough; only an empty inherited plan has null
-origin. Removing the final manual hop uses this Restore preview and its existing
+may therefore return Automatic or an empty/null-origin plan. Removing the final manual hop uses this Restore preview and its existing
 Undo/Save/guard/Done flow; the old nonempty override stays saved until success. Preview is available
 while runtime is stopped. Save responses remain authoritative, and failed/ambiguous
 writes follow existing reconciliation using intent as well as effective hops.
 
-<!-- authority-consumer: route_plan.manual route_plan.automatic route_plan.passthrough route_plan.empty -->
+<!-- authority-consumer: route_plan.manual route_plan.automatic route_plan.empty -->
+
+## Request-scoped opaque HTTP failures
+
+An HTTP 4xx whose body yields no recognized classification, except 401/403/429,
+ends only that request: `upstream_request_invalid`, downstream status 400, terminal
+`request_nonfallback`. This includes HTML, plain text, empty bodies and unknown JSON
+codes at 400/404/422 and also opaque 402/408. It neither falls through to another
+provider nor writes Source health, cooldown, live backoff or a Source-state event.
+The route and the Source's prior state stay unchanged; another model on that Source
+can run immediately. The existing unlisted-model hint uses the failing hop's exact
+target and its admission-time inventory membership, not route origin; a mapped
+manual target therefore receives the unchanged hint, while a listed manual target
+does not. Raw HTML/text is not promoted into a code, detail key or log.
+
+Recognized machine codes retain precedence (including a named billing error and the
+existing 408 plus recognized request-code timeout rule). 401/403 retain credential
+handling; 429, 5xx, and actual network failures retain their existing recovery policy,
+except the unlisted-target server refusal below.
+`unclassified_error` remains for residual Source-level unknown failures outside this
+request-status rule. Unrecognized error frames inside 2xx still follow the existing
+turn-only rule. A request refusal alone is not evidence that every model supplied by
+the credential is broken, regardless of whether this particular target is listed.
+
+An HTTP 5xx classified as `server_error` on a hop whose actual target was absent from
+its Source's listed inventory at admission ends the same way: `upstream_request_invalid`,
+downstream 400, terminal `request_nonfallback`, with no fallback to another hop of the
+Route, no retry or recovery wait, and no Source health, cooldown, backoff or event
+(2026-11-17 amendment; supersedes the 2026-11-12 request-private 503 wait). Named
+auth, quota and rate-limit codes and transport failures keep their existing policy.
 
 ## Source creation outcome
 
@@ -864,12 +924,12 @@ state. It counts only runnable exact hops in that model's effective Route chain,
 eligible inventory or the backend Source order by itself. A pair with no runnable hop
 appears once in `would_interrupt` or `interrupted`.
 
-Inventory updates that refine an inherited `passthrough` plan into `automatic`
-matching do not report displaced speculative candidates as `would_remove_hops` or
-`removed_hops`, in either Hub or Direct mode. They leave saved route intent unchanged.
+Inventory updates may add matching inherited hops to a previously empty plan;
+there are no speculative candidates to displace. Saved route intent stays unchanged.
 Explicit manual-hop invalidations, lost inventory matches, and newly introduced
-protected-supply gaps still use the exact-plan guard. This exception does not apply
-to Source deletion, default-membership changes, or Restore.
+protected-supply gaps use the exact-plan guard. Losing the final automatic inventory
+match is now a real removal even when that API-key Source could still accept a
+manually forwarded target.
 
 **Model-list save.** For `PUT /api/models/agents/<backend>/models`, the producer
 `ModelHubService.set_agent_models` reports in `would_interrupt` exactly the removed menu
@@ -1166,7 +1226,8 @@ reference is created.
 
 In Hub mode, `AgentChain.chain` is the shared effective per-model route in planner
 order. `manual_override` reports a normalized nonempty manual override or null and
-`route_origin` reports `automatic | manual | passthrough | null`, independently of live
+`route_origin` reports `automatic | manual | passthrough | null` (`passthrough` is
+legacy-compatible and no longer generated), independently of live
 health. Valid empty input inherits; an empty effective chain therefore has both null
 manual_override and null origin. Live inspection annotates it: cooling, missing, model-unsupported,
 source-blocked, live connection-backoff, and process-unavailable native CLI hops stay at their effective-plan

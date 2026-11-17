@@ -13,14 +13,14 @@ and outside this change.
 
 Do not shorten or cap the existing wait to make failures appear sooner. A
 provider's definite credential or model rejection remains terminal; HTTP 503
-continues retrying under today's policy, including when the provider does not
-list the requested model. The final error may explain that inventory mismatch
-as context, never as proof that it caused a transient refusal. Isolating an
-unlisted model's shared cooldown must not make that request fail sooner. For a
-literal HTTP 503 classified as `server_error` where the admitted upstream model
-is absent from the Hub Source inventory, Part 3 keeps the same wait privately
-inside that request by Source id; listed-model 503s and all other shared
-blockers retain today's behavior.
+continues retrying under today's policy for a listed model. The final error may
+explain an inventory mismatch as context, never as proof that it caused a
+refusal. **Amended 2026-11-17:** when the admitted upstream model is absent from
+the Hub Source inventory, an HTTP 5xx classified as `server_error` is not retried.
+The request ends at once with the inventory guidance, without fallback, wait or
+shared state (`model-hub.md` §4.3). This supersedes Part 3, which kept that wait
+privately inside the request; listed models and all other shared blockers retain
+today's behavior.
 
 ## Start with the reported case
 
@@ -190,9 +190,10 @@ preflight availability and terminal rendering participate in this proposal.
 
 ### Backoff and cooldown
 
-The exception is request-private and has no model-level or persisted state.
-Inventory membership is frozen at transport admission, so a later inventory
-refresh cannot change settlement scope. HTTP 200 buffered overload remains
+The unlisted-target exception (amended 2026-11-17) has no wait at all and no
+model-level or persisted state: it ends the request. Inventory membership is
+frozen at transport admission, so a later inventory refresh cannot change its
+classification. HTTP 200 buffered overload remains
 under its exact existing shared policy.
 
 Count consecutive eligible failed attempts for the same Source identity.
@@ -202,7 +203,7 @@ whose settlement generation is stale.
 | Classified failure | Approved local delay, before upstream advice | Storage / action |
 | --- | --- | --- |
 | Unclassified pre-output connection failure | 1, 2, 4, 8, 16, 30 seconds; cap 30 | Reuse contracted live Source-scoped backoff; no Source/config write. |
-| Retryable server/overload | 30, 60, 120 seconds; cap 120 | Keep existing shaped-error Source cooldown; streak is live state. A literal HTTP 503 classified as `server_error` for a model absent from the admitted Hub Source inventory is the Part 3 exception: shared health stays unchanged and that request carries the same timing privately by Source id. |
+| Retryable server/overload | 30, 60, 120 seconds; cap 120 | Keep existing shaped-error Source cooldown; streak is live state. An HTTP 5xx classified as `server_error` for a model absent from the admitted Hub Source inventory is not retried (2026-11-17 amendment, superseding Part 3): the request ends as `request_nonfallback`, shared health is unchanged, and no private timing is kept. |
 | Recoverable rate limit | 60, 120, 240, 300 seconds; cap 300 | Keep existing cooldown classification. |
 | Recoverable quota exhaustion | 300 seconds | Keep existing cooldown; normally beyond the automatic window. |
 | Refreshable credential rejection | Existing same-Source retry once | No independent retry loop; a second rejection follows the existing terminal rule. |

@@ -29,8 +29,8 @@ describe('Models page vocabulary', () => {
     expect(zh.settings.models.billing.metered).toBe('按量付费');
     expect(en.settings.models.billing.monthly).toBe('Subscription');
     expect(en.settings.models.billing.metered).toBe('Pay as you go');
-    expect(zh.settings.models.order.subtitle).toBe('作用于自动和原样转发的路由，已保存的手动路由保持不变。');
-    expect(en.settings.models.order.subtitle).toBe('Applies to automatic and forwarded-as-is routes. Saved manual routes stay unchanged.');
+    expect(zh.settings.models.order.subtitle).toBe('作用于自动路由，已保存的手动路由保持不变。');
+    expect(en.settings.models.order.subtitle).toBe('Applies to automatic routes. Saved manual routes stay unchanged.');
     expect(zh.settings.models.order.section['heldOut.note']).toBe('可用于手动路由。');
     expect(en.settings.models.order.section['heldOut.note']).toBe('Available for manual routes.');
     expect(zh.settings.models.supplyMode.fixHint).toBe('去「模型」页添加或启用供应商即可恢复。');

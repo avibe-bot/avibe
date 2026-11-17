@@ -101,7 +101,11 @@ export const BackendModelPickerDialog: React.FC<{
   initialQuery?: string;
   /** The add is being written: the dialog holds still until it settles. */
   busy?: boolean;
-}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom, choose = 'many', initialQuery = '', busy = false }) => {
+  /** Offer only models a provider lists. Setup has no step to route a model nothing
+   *  supplies, so there a catalog row or a typed ID would leave the assistant with no
+   *  model; Settings offers them, where the model's route can be set by hand. */
+  suppliedOnly?: boolean;
+}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom, choose = 'many', initialQuery = '', busy = false, suppliedOnly = false }) => {
   const { t } = useTranslation();
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [candidates, setCandidates] = React.useState<BackendModelCandidates | null>(null);
@@ -139,7 +143,13 @@ export const BackendModelPickerDialog: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load, open, seed]);
 
-  const groups = candidates ? pickerGroups(candidates, listedIds) : EMPTY_PICKER_GROUPS;
+  const allGroups = candidates ? pickerGroups(candidates, listedIds) : EMPTY_PICKER_GROUPS;
+  const supplied = (candidate: ModelCandidate) => !suppliedOnly || candidate.suppliers.length > 0;
+  const groups: PickerGroups = {
+    builtin: allGroups.builtin.filter(supplied),
+    providers: allGroups.providers.filter(supplied),
+    listed: allGroups.listed,
+  };
   const needle = query.trim().toLowerCase();
   const filtering = needle !== '';
   const shown: PickerGroups = {
@@ -159,7 +169,7 @@ export const BackendModelPickerDialog: React.FC<{
   const searchText = query.trim();
   // Only the answer is stored: an answer for another query reads as 「still asking」.
   React.useEffect(() => {
-    if (!open || readState !== 'ready' || searchText === '') return undefined;
+    if (suppliedOnly || !open || readState !== 'ready' || searchText === '') return undefined;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       void modelsApi.searchModelsDev(searchText, controller.signal).then(
@@ -173,7 +183,7 @@ export const BackendModelPickerDialog: React.FC<{
     };
   }, [open, readState, searchText]);
   const offeredIds = new Set([...groups.builtin, ...groups.providers, ...groups.listed].map((candidate) => candidate.id));
-  const catalogPicks = filtering && catalog.query === searchText
+  const catalogPicks = !suppliedOnly && filtering && catalog.query === searchText
     ? catalog.matches
       .map((match) => catalogPick(match, backend))
       .filter((pick, index, all) => pick.candidate.id !== ''
@@ -181,13 +191,13 @@ export const BackendModelPickerDialog: React.FC<{
         && all.findIndex((other) => other.candidate.id === pick.candidate.id) === index)
       .slice(0, CATALOG_ROWS)
     : [];
-  const catalogSettled = !filtering || catalog.query === searchText;
+  const catalogSettled = suppliedOnly || !filtering || catalog.query === searchText;
   const addableShown = shown.builtin.length + shown.providers.length + catalogPicks.length;
   const nothingShown = addableShown === 0 && shown.listed.length === 0;
   /** What was typed, as an ID — offered once nothing that can be added matched and
    *  the catalog has answered, and never for an ID the list or a group already holds. */
   const typedId = backendModelId(searchText);
-  const offerTyped = filtering && catalogSettled && addableShown === 0 && typedId !== ''
+  const offerTyped = !suppliedOnly && filtering && catalogSettled && addableShown === 0 && typedId !== ''
     && !offeredIds.has(typedId) && !listedIds.has(typedId);
 
   /** Picking a row records the row: the id and the suppliers it is showing.
@@ -307,7 +317,9 @@ export const BackendModelPickerDialog: React.FC<{
               <div className="model-hub-picker-empty">
                 {catalogSettled ? (
                   <>
-                    <p>{t('settings.models.gateway.picker.noMatch')}</p>
+                    <p>{t(!suppliedOnly ? 'settings.models.gateway.picker.noMatch'
+                      // Nothing typed and nothing supplied: no provider lists a model yet.
+                      : filtering ? 'settings.models.gateway.picker.noSuppliedMatch' : 'onboarding.setup.noModelsToPick')}</p>
                     {/* Only for a typed query: with none there is nothing to name. */}
                     {offerTyped && typedAction(true)}
                   </>

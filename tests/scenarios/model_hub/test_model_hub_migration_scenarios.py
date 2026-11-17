@@ -1399,13 +1399,17 @@ def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
     } == {
         "opencode": (
             ("openrouter/openrouter-model", "route_unconfigured") if removed
-            else ("openrouter-model", None)
+            else ("openrouter-model", "route_unconfigured")
         ),
-        "zhipu": ("zhipuai-model", None),
+        "zhipu": ("zhipuai-model", "route_unconfigured"),
         "stranger": ("openai/manual-openrouter-model", "route_unconfigured"),
     }
     # Carrying a saved selection creates a menu row, not a made-up discovered
-    # Source inventory. The old provider prefix stays on the named Agent.
+    # Source inventory or automatic supply. Unlisted selections stay interrupted.
+    assert all(
+        row["supply_status"] == "interrupted"
+        for row in service.get_agent_sources("opencode")["named_agents"]
+    )
     assert all(
         model.id not in {"openrouter-model", "zhipuai-model"}
         for source in store.config.sources for model in source.models

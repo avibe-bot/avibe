@@ -1,6 +1,10 @@
 # Model Hub Routing Modes: Implementation Contract
 
 Status: owner-approved design, orchestrator-frozen implementation contract, 2026-09-06.
+Amended 2026-11-17: no automatic forwarding. The current authority is `model-hub.md`
+§4.2/§4.3 and `model-hub-contracts/api.md`. Older acceptance notes below describing
+an automatic passthrough tier are superseded; MH-ROUTING-002/003/004/013 now test
+empty unsupplied inheritance instead. The compatibility enum is retained, not produced.
 Implementation base: `1e21561fa374a95005aa9d2776719bb9fc5ac8a0`.
 
 This contract replaces the former one-time matching and stored-route-only policy.
@@ -12,7 +16,7 @@ retain contradictory current-policy claims when this implementation ships.
 
 For backend defaults `[A, B]`, model M automatically uses B if B lists M and A does
 not. A is not prepended as a speculative candidate. If neither lists M, the chain
-is `[A/M, B/M]`, with M forwarded unchanged. A saved manual chain replaces this
+is empty and unsupplied. An unlisted API-key target requires an explicit manual hop. A saved manual chain replaces this
 generated chain completely only when it contains at least one hop. An empty
 route value is equivalent to absence and inherits the generated route.
 
@@ -22,8 +26,9 @@ membership, explicit retirement, and live health remain separate boundaries.
 
 ### Owner Scope Decision
 
-The owner selected API-key passthrough for this delivery on 2026-09-06.
-Unknown-model passthrough is available only to eligible Hub sources whose
+The owner selected API-key passthrough on 2026-09-06; the 2026-11-17 amendment
+restricts forwarding to explicit manual hops. Automatic routes require inventory.
+Unknown-model manual forwarding is available only to eligible Hub sources whose
 `kind` is `api_key`. Subscription sources, including Hub-held OAuth and native
 CLI subscriptions, retain their existing model admission and exact invocation
 capabilities. They still participate in automatic matching and manual routes;
@@ -85,9 +90,8 @@ draft configuration; no public sentinel or duplicate matching algorithm is neede
    are treated exactly as key absence, including for directly constructed config.
 2. Otherwise scan configuration-eligible sources in backend default order for
    matching evidence. Include all accepted matching pairs in that order.
-3. If there are no matching pairs, use each eligible API-key default source with
-   the exact requested id. Do not append speculative candidates to a matched tier
-   or include subscription sources as unknown-model passthrough candidates.
+3. If there are no matching pairs, return an empty plan, never speculate about
+   API-key or subscription supply.
 4. An empty resulting chain has null origin. A nonempty chain has its chosen
    origin regardless of current health or native process readiness.
 

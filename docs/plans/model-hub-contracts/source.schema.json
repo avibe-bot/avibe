@@ -238,7 +238,7 @@
             "error"
           ],
           "$comment": "Source-global health never implies process-local native CLI availability. Live process availability is resolved separately and takes precedence when deciding hop runnability.",
-          "description": "Source-global recovery state. cooldown is self-healing with retry_at; needs_action and error require user action; active and standby are healthy. Process availability and short connection backoff are distinct live facts carried by Route-hop annotations, so neither is persisted here. Only shaped explicit upstream classifications may change Source-global health; an unclassified transport failure never does."
+          "description": "Source-global recovery state. cooldown is self-healing with retry_at; needs_action and error require user action; active and standby are healthy. Process availability and short connection backoff are distinct live facts carried by Route-hop annotations, so neither is persisted here. Only explicit upstream Source-level classifications may change Source-global health. An unrecognized HTTP 4xx other than 401/403/429 is request-scoped and writes no Source health, cooldown, or live backoff, even for a listed model; opaque 402/408 are included. Recognized machine-code rules, credential handling, 5xx and network handling remain unchanged. An unclassified transport failure never writes durable state."
         },
         "retry_at": {
           "type": [

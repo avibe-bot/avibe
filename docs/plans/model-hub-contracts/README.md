@@ -260,7 +260,7 @@ commit is not evidence that the complete final protocol has landed.
 - Gateway stores one default Source membership/order per backend and sparse manual
   overrides per model. Absent and valid empty values inherit; only nonempty arrays override.
 - The shared pure planner returns nonempty manual hops verbatim, otherwise all accepted matches
-  in default order, otherwise unchanged-id passthrough on eligible non-retired Hub API-key defaults.
+  in default order, otherwise an empty/null-origin unsupplied plan.
 - Reads, previews, summaries, guards, adoption, probes, launches and execution use that
   effective plan. Health and process readiness annotate it without changing its origin.
 - New catalog rows have no override; Source creation appends defaults but never writes
@@ -287,8 +287,13 @@ Normative routing behavior lives only in `docs/plans/model-hub.md`: §4.2 owns e
 turn copy, and guarded mutation envelopes, and §6 owns native-config import actions.
 Contract prose points to those authorities and does not add branches.
 
-API-key passthrough is the delivery scope. Subscriptions continue automatic matching and
-known-model manual routes; an unmatched subscription-only default set is Unconfigured.
+Unlisted API-key forwarding requires an explicit manual hop (2026-11-17 amendment).
+The `passthrough` enum is retained for compatibility but no longer produced.
+Subscriptions continue automatic matching and known-model manual routes; every unmatched
+automatic model is Unconfigured. Opaque request-level 4xx (except 401/403/429) never
+poison Source health, and neither does an unlisted target's `server_error` 5xx, which
+ends that request without fallback or retry; §4.3 defines machine-code and transport
+precedence.
 No underlying engine expansion or OAuth alias substitution is part of this change.
 
 ## Invariants

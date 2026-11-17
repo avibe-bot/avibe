@@ -407,11 +407,21 @@ def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, pr
                     headers={"Authorization": f"Bearer {token}"},
                     json={"model": "shared-model", "stream": streaming},
                 ) as response:
-                    assert response.status == 200
-                    assert await response.read() == (metadata + output + terminal if streaming else buffered)
-            assert len(calls) == 3
-            assert calls[0] == calls[1] == calls[2]
-            assert clock.delays == [30, 60]
+                    assert response.status == (200 if listed else 400)
+                    body = await response.read()
+                    if listed:
+                        assert body == (metadata + output + terminal if streaming else buffered)
+                    else:
+                        assert "Retry-After" not in response.headers
+                        assert body
+            assert len(calls) == (3 if listed else 1)
+            assert all(call == calls[0] for call in calls)
+            assert clock.delays == ([30, 60] if listed else [])
+            if not listed:
+                assert clock.elapsed == 0
+                assert service.store.load().sources[0].state.status == "standby"
+                assert service.events.list() == []
+                assert service.recovery.annotations(service.store.load()) == {}
             assert adapter._active_transports == 0
             assert gateway.correlation.recovery_snapshot("turn_recovered") == []
             assert (source.id not in service.recovery._sources) is (verified or not listed)
