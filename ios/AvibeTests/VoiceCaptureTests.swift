@@ -314,33 +314,74 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(modes, ["audio"])
     }
 
-    /// Background audio is held only while a take records: every way a
-    /// take ends releases the audio session.
-    func testEveryWayATakeEndsReleasesTheAudioSession() async {
+    /// Background audio is held only while a take records: every way a take
+    /// ends stops its recorder (whose `stop()` releases the session, below).
+    func testEveryWayATakeEndsStopsItsRecorder() async {
         func recording(_ setup: (World) -> Void = { _ in }) async -> (World, VoiceCaptureController) {
             let world = World()
             setup(world)
             let controller = world.controller()
             _ = await controller.toggle()
-            XCTAssertEqual(world.audio?.holdsSession, true)
             world.audio?.duration = 2
             return (world, controller)
         }
         var (world, controller) = await recording()
-        _ = await controller.toggle()  // send
-        XCTAssertEqual(world.audio?.holdsSession, false, "send")
+        _ = await controller.toggle()
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "send")
 
         (world, controller) = await recording()
-        await controller.finish(send: false)  // cancel
-        XCTAssertEqual(world.audio?.holdsSession, false, "cancel")
+        await controller.finish(send: false)
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "cancel")
 
         (world, controller) = await recording { $0.instance.pathFailures = 1 }
-        _ = await controller.toggle()  // failure kept for Retry
-        XCTAssertEqual(world.audio?.holdsSession, false, "failure")
+        _ = await controller.toggle()
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "failure")
 
         (world, controller) = await recording()
         _ = controller.cancelForAccountTransition()
-        XCTAssertEqual(world.audio?.holdsSession, false, "account change")
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "account change")
+    }
+
+    /// The real recorder: the session is active only between a start that
+    /// recorded and the first stop, and a start that fails leaves it off.
+    func testTheRecorderHoldsTheAudioSessionOnlyWhileRecording() throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "take-\(UUID().uuidString).m4a")
+        let session = FakeSession()
+        let engine = FakeEngine()
+        let recorder = VoiceCaptureRecorder(url: url, session: session, permission: { true }, makeEngine: { _ in engine })
+        try recorder.start()
+        XCTAssertTrue(session.active)
+        recorder.stop()
+        XCTAssertFalse(session.active)
+        recorder.stop()
+        recorder.discard()
+        XCTAssertEqual(session.deactivations, 1, "released exactly once")
+
+        let refusing = FakeEngine()
+        refusing.records = false
+        let refused = FakeSession()
+        XCTAssertThrowsError(try VoiceCaptureRecorder(
+            url: url, session: refused, permission: { true }, makeEngine: { _ in refusing }
+        ).start())
+        XCTAssertFalse(refused.active, "a recorder that would not record")
+
+        let broken = FakeSession()
+        XCTAssertThrowsError(try VoiceCaptureRecorder(
+            url: url, session: broken, permission: { true }, makeEngine: { _ in throw CancellationError() }
+        ).start())
+        XCTAssertFalse(broken.active, "a recorder that could not be made")
+
+        let discarded = FakeSession()
+        let other = VoiceCaptureRecorder(url: url, session: discarded, permission: { true }, makeEngine: { _ in FakeEngine() })
+        try other.start()
+        other.discard()
+        XCTAssertFalse(discarded.active, "discard")
+
+        let denied = FakeSession()
+        XCTAssertThrowsError(try VoiceCaptureRecorder(
+            url: url, session: denied, permission: { false }, makeEngine: { _ in FakeEngine() }
+        ).start())
+        XCTAssertEqual(denied.activations, 0)
     }
 
     func testANoGivenSinceStopsWithoutRetry() async {
@@ -478,8 +519,7 @@ private final class FakeAudio: VoiceCaptureAudio {
     let url: URL
     var started = false
     var discarded = false
-    /// Whether the take holds the audio session (started and not stopped).
-    var holdsSession = false
+    var stops = 0
     var duration: TimeInterval = 0
 
     init() {
@@ -487,9 +527,9 @@ private final class FakeAudio: VoiceCaptureAudio {
         try? Data([0, 1, 2]).write(to: url)
     }
 
-    func start() throws { started = true; holdsSession = true }
-    func stop() -> TimeInterval { holdsSession = false; return duration }
-    func discard() { holdsSession = false; discarded = true }
+    func start() throws { started = true }
+    func stop() -> TimeInterval { stops += 1; return duration }
+    func discard() { discarded = true }
 }
 
 @MainActor
@@ -513,4 +553,19 @@ private final class FakeActivity: VoiceCaptureActivityHandle {
         ended = state ?? states.last
         endedImmediately = String(describing: dismissal).contains("immediate")
     }
+}
+
+private final class FakeSession: VoiceCaptureAudioSession {
+    var active = false
+    var activations = 0
+    var deactivations = 0
+    func activateForRecording() throws { active = true; activations += 1 }
+    func deactivate() { active = false; deactivations += 1 }
+}
+
+private final class FakeEngine: VoiceCaptureRecordingEngine {
+    var records = true
+    var currentTime: TimeInterval { 1 }
+    func record() -> Bool { records }
+    func stop() {}
 }
