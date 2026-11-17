@@ -499,6 +499,8 @@ describe('AddSourceDialog — the one write it owns', () => {
     renderDialog();
     const user = userEvent.setup();
     await fill(user);
+    // Detection speaks first: the handoff below is only meaningful once it has.
+    await screen.findByText('This address refused the key. Check or replace it.', undefined, { timeout: 3000 });
 
     await user.click(primary());
 
