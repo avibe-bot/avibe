@@ -146,8 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           nohup python3 ios/scripts/voice_capture_probe_server.py 8765 "$RUNNER_TEMP/probe-server.log" >/dev/null 2>&1 &
-          sleep 1
-          curl -sf http://127.0.0.1:8765/api/csrf-token
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8765/api/csrf-token && break; sleep 1; done
           xcrun simctl privacy "$SIMULATOR_ID" grant microphone bot.avibe.ios || echo "microphone grant failed"
 
       - name: Run XCTest on iPhone Simulator
