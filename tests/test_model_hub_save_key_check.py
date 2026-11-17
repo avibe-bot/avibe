@@ -21,8 +21,9 @@ from vibe.model_hub_runtime.state import EngineStateStore
 
 @pytest.mark.parametrize("operation", ["create", "replace_key", "base_url"])
 @pytest.mark.parametrize("outcome", [
-    "confirmed", "rejected_401", "rejected_403", "public", "unreachable",
+    "confirmed", "rejected_401", "rejected_403", "rejected_401_slow_body", "public", "unreachable",
     "timeout", "keyless_timeout", "keyless_unreachable", "connection_refused", "empty_confirmed",
+    "keyless_slow_401",
 ])
 def test_save_time_models_witness(tmp_path, monkeypatch, operation, outcome):
     """Confirmed clears only pending; unknown saves; rejection is atomic."""
@@ -49,6 +50,11 @@ def test_save_time_models_witness(tmp_path, monkeypatch, operation, outcome):
             has_key = bool(request.headers.get("Authorization"))
             if has_key:
                 assert request.headers["Authorization"] == f"Bearer {expected_key}"
+            if mode == "rejected_401_slow_body" or (mode == "keyless_slow_401" and not has_key):
+                response = web.StreamResponse(status=401)
+                await response.prepare(request)
+                await asyncio.sleep(0.3)
+                return response
             if mode.startswith("rejected"):
                 return web.Response(status=int(mode.split("_")[1]))
             if mode == "unreachable" or (mode == "keyless_unreachable" and not has_key):
@@ -119,7 +125,7 @@ def test_save_time_models_witness(tmp_path, monkeypatch, operation, outcome):
                 result = await action
                 source = result["source"]
                 _assert_valid("source.schema.json", source)
-                confirmed = outcome in {"confirmed", "empty_confirmed"}
+                confirmed = outcome in {"confirmed", "empty_confirmed", "keyless_slow_401"}
                 assert ("verification_pending" not in source) is confirmed
                 assert (store.config.sources[0].verification_pending is None) is confirmed
                 assert source["credential_generation"]

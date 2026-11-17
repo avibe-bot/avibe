@@ -1202,16 +1202,16 @@ async def _authenticate_with_models_witness(
 
     scheme_options = {"auth_scheme": auth_scheme} if auth_scheme is not None else {}
     try:
-        models = await asyncio.wait_for(
-            probe_models(
-                vendor=vendor,
-                protocol=protocol,
-                base_url=base_url,
-                secret=secret,
-                timeout=timeout,
-                **scheme_options,
-            ),
+        # probe_models owns the transport/parser deadline and preserves a received
+        # rejection status even if its error body times out. An outer wait_for
+        # would cancel that preservation just before the transport timeout fires.
+        models = await probe_models(
+            vendor=vendor,
+            protocol=protocol,
+            base_url=base_url,
+            secret=secret,
             timeout=timeout,
+            **scheme_options,
         )
     except asyncio.TimeoutError:
         return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
@@ -1220,16 +1220,14 @@ async def _authenticate_with_models_witness(
             return _ModelsWitnessResult(credential=_ModelsWitness.REJECTED)
         return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
     try:
-        await asyncio.wait_for(
-            probe_models(
-                vendor=vendor,
-                protocol=protocol,
-                base_url=base_url,
-                secret=None,
-                timeout=timeout,
-                **scheme_options,
-            ),
+        await probe_models(
+            vendor=vendor,
+            protocol=protocol,
+            base_url=base_url,
+            secret=None,
             timeout=timeout,
+            first_page_only=True,
+            **scheme_options,
         )
     except asyncio.TimeoutError:
         pass
