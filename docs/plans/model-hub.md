@@ -436,11 +436,10 @@ The three owners above still determine the interface, but explicit API-key
 `save_unverified: true` no longer requires a successful observation. It saves only
 a catalog-pinned or user-declared protocol, with canonical validation, credential
 custody, nonce reconciliation and rollback unchanged. Custom Auto without a
-declaration is refused before credential work. No upstream probe gates this explicit
-save path. It attempts one bounded inventory discovery with the provisioned
-credential, which fills the Source without answering the credential question and
-never blocks the save or replaces manual entries; supplied manual models remain
-manual.
+declaration is refused before credential work. The save-time models witness described
+below now gates explicit credential rejection; inconclusive evidence still permits
+saving. It reuses usable inventory without replacing manual entries; supplied manual
+models remain manual.
 
 Schema errors may precede authentication and never authenticate a key. There is no
 synthetic credential control: unknown grammar/checksums and other valid credentials
@@ -470,6 +469,26 @@ the third request that would separate them is the altered credential this ladder
 declines. A credential no interface validated is caught by the first real call,
 like one revoked after its add. Custom Auto is never asked, because a listing names no protocol.
 
+**Save-time API-key witness (2026-11-17).** Explicit `save_unverified: true` now
+uses that same credential-gated models witness before permanent provisioning.
+Confirmation clears `verification_pending` and retains discovered inventory; a
+credential-bearing listing's 401/403 refuses creation with HTTP 422,
+`error: discovery_failed`, `detail: modelHub.errors.authentication_failed`, without
+persisting a Source or credential. Public, unavailable or timed-out listings remain
+unknown and save pending. The authenticated and keyless listings each use the existing
+15-second discovery budget; the control adds at most one request. A successful first
+listing supplies inventory even if its keyless control is inconclusive or times out.
+There is no additional discovery fetch and no model invocation.
+
+API-key replacement and Base URL edits follow the same three-way rule. Rejection
+refuses the whole mutation, preserving the prior Source/credential and using the
+existing replacement rollback lifecycle. Unknown saves pending; if no inventory was
+available it keeps all existing models and discovery timestamps rather than inventing
+an empty listing. Valid returned inventory retains the canonical and route guards.
+No new response field is needed: confirmed omits `verification_pending`, unknown
+returns it equal to the new `credential_generation`; that generation survives later
+verification. Tool-only search and Hub OAuth behavior are unchanged.
+
 Completed Hub OAuth consent may retain its bound credential as an unverified Source
 under the fixed vendor protocol. The engine retains OAuth token custody; optional
 model-free observation uses the existing allowlisted auth-index transport and token
@@ -479,13 +498,13 @@ the existing needs-action state. Native CLI OAuth is unchanged.
 `Source.verification_pending` is one optional persisted opaque identity, independent
 of health and routing eligibility. It marks a credential nothing upstream has
 accepted yet, so an API-key create whose add-time observation authenticated the
-credential stores none — superseding, for that path only, the earlier rule that every
-observed create is marked. Native-config imports, Hub OAuth admission and every
-credential or endpoint replacement still get one. Source list/detail use neutral
+credential stores none. API-key save or replacement whose gated models witness
+confirms the credential likewise clears its newly generated marker. Native-config
+imports and Hub OAuth admission still get one. Source list/detail use neutral
 Saved / 已保存 instead of advisory unverified or healthy/in-use copy; real
 error, needs-action and cooldown states retain precedence. The shared accessible
 connection hint explains saved configuration and successful-call status updates,
-without promising a Test entry for every Source kind. Inventory never clears it.
+without promising a Test entry for every Source kind. Plain inventory refresh never clears it.
 A call captures the marker before invocation; any successful same-credential call
 with that marker, including the existing backend probe, clears it in a fresh shared
 config transaction. Later same-credential attempts do not invalidate success.

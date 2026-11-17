@@ -4445,7 +4445,7 @@ def test_api_key_setup_does_not_schedule_a_model(
     service, store, adapter = _service(tmp_path)
     # Keep engine lifecycle simulated; exercise real credential custody, HTTP
     # observation, inventory discovery, and Source admission together.
-    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models"):
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models", "check_api_key_models"):
         monkeypatch.setattr(adapter, method, getattr(transport, method))
 
     async def scenario():
@@ -4550,10 +4550,9 @@ def test_api_key_setup_does_not_schedule_a_model(
                     })
                 before = len(requests)
                 await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
-                # The explicit save observes nothing. Its one request is the
-                # best-effort inventory, which fills the Source without
-                # answering the credential question the listing left open.
-                assert requests[before:] == [("GET", listing_path, None)]
+                # Save reuses the models witness, without a model-less POST or
+                # an inference call. A public catalogue still cannot verify it.
+                assert requests[before:] == [("GET", listing_path, None)] * 2
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
@@ -4605,10 +4604,9 @@ def test_api_key_setup_does_not_schedule_a_model(
 def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-164
 
-    The wizard's key, carried through real credential custody and real model
-    listing: saved unverified, checked and refused with the provider's 401,
-    replaced by another refused key without losing the stored one, replaced by
-    the right key, checked again, and removed.
+    The service refuses a known-bad key at save, permits an offline pending save,
+    later names its refusal, preserves it on a rejected replacement, then accepts
+    the right replacement and removes the Source.
     """
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -4621,7 +4619,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
     # Engine lifecycle stays simulated; custody, listing and replacement are real.
     for method in (
         "provision_credential", "credential_auth_scheme", "revoke_credential",
-        "revoke_api_key_credential", "discover_models",
+        "revoke_api_key_credential", "discover_models", "check_api_key_models",
     ):
         monkeypatch.setattr(adapter, method, getattr(transport, method))
 
@@ -4629,10 +4627,13 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
 
     async def scenario():
         presented = []
+        listing_available = True
 
         async def models(request):
             supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
             presented.append(supplied)
+            if not listing_available:
+                return web.Response(status=503)
             if supplied != right_key:
                 return web.json_response({"error": {
                     "code": "invalid_api_key", "message": "This key cannot list models.",
@@ -4653,12 +4654,27 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             [source] = store.config.sources
             return state_store.read_api_key(source.credential_ref)
 
+        draft = {
+            "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
+            "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
+        }
+
+        async def refuse_known_wrong_key(h):
+            with pytest.raises(ModelHubError) as refused:
+                await service.create_source(draft)
+            assert refused.value.status == 422
+            assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert not store.config.sources
+
         async def save_wrong_key(h):
-            # What the wizard's key form sends: saved without verification.
-            created = (await service.create_source({
-                "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
-                "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
-            }))["source"]
+            # An unavailable listing cannot reject a key; the saved Source stays
+            # pending until a later check or real invocation can answer it.
+            nonlocal listing_available
+            listing_available = False
+            try:
+                created = (await service.create_source(draft))["source"]
+            finally:
+                listing_available = True
             h.source_id = created["id"]
             assert created["state"]["status"] == "standby"
             assert created["verification_pending"]
@@ -4676,13 +4692,15 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             with pytest.raises(ModelHubError) as refused:
                 await service.replace_credential(h.source_id, {"key": other_wrong_key})
             assert refused.value.detail == "modelHub.errors.authentication_failed"
-            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
+            assert refused.value.status == 422
+            assert refused.value.data == {}
             assert stored_key(h) == wrong_key
 
         async def right_replacement_lists_models(h):
             replaced = (await service.replace_credential(h.source_id, {"key": right_key}))["source"]
             assert [model["id"] for model in replaced["models"]] == ["relay-model-a", "relay-model-b"]
             assert replaced["state"]["status"] == "standby"
+            assert "verification_pending" not in replaced
             assert stored_key(h) == right_key
 
         async def check_passes(h):
@@ -4702,6 +4720,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             assert store.config.sources == []
 
         steps = [
+            ("refuse_known_wrong_key", refuse_known_wrong_key),
             ("save_wrong_key", save_wrong_key),
             ("check_names_the_refusal", check_names_the_refusal),
             ("refused_replacement_keeps_the_key", refused_replacement_keeps_the_key),
@@ -4712,7 +4731,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
         try:
             await runner.run(*(ScenarioStep(name, action) for name, action in steps))
             ScenarioExpect.step_history(runner, [name for name, _ in steps])
-            assert set(presented) == {wrong_key, other_wrong_key, right_key}
+            assert set(presented) == {wrong_key, other_wrong_key, right_key, ""}
         finally:
             await web_runner.cleanup()
 

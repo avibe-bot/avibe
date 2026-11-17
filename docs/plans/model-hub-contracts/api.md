@@ -338,19 +338,41 @@ with failed inventory discovery produces no Source unless this request explicitl
 existing uncertain health projection.
 
 The add dialog always uses `save_unverified: true`: it saves the catalog-pinned or user-declared
-interface without upstream observation as an admission gate. It attempts one bounded
-inventory discovery with the provisioned credential before committing the new Source;
-failure preserves manual entries and does not block saving. Custom Auto without a declaration
-is rejected before credential provisioning. Manual models remain manual; no inventory
-is invented. The Source carries an opaque `verification_pending` marker, independently of its
-routing health, and may be configured and invoked. List/detail surfaces label it
+interface without protocol observation as an admission gate. Before provisioning a new
+credential it runs the owned interface's models witness: list with the supplied key,
+then (only if listing succeeds) without a key. The three outcomes reuse the existing wire:
+
+- **Confirmed:** save and omit `source.verification_pending`; keep the new
+  `source.credential_generation` and the discovered models. This proves credential
+  admission, not support for every model or operation.
+- **Rejected:** an authenticated listing's `401`/`403` returns HTTP 422,
+  `error: "discovery_failed"`, `detail: "modelHub.errors.authentication_failed"`.
+  No Source or credential is persisted; the create nonce reservation is released.
+- **Unknown:** a public list, missing/invalid listing, transport error or timeout
+  saves with `source.verification_pending` equal to its new `credential_generation`.
+  Keep usable discovered inventory even if the keyless control fails or times out;
+  missing/invalid inventory preserves manual entries. No inference request is made.
+
+Each listing uses `_SOURCE_DISCOVERY_TIMEOUT_SECONDS` (15 seconds), so the extra
+keyless listing adds at most one such request budget. No extra inventory fetch follows
+this check. API-key replacement and Base URL changes use the same witness against the
+replacement credential/target: rejection refuses the whole change, preserves the old
+Source and credential, and rolls back the uncommitted replacement through the existing
+cleanup lifecycle. Unknown saves the change; unavailable inventory preserves existing
+models and their discovery timestamp. Valid inventory still passes the existing
+canonical-model and route-mutation guards. Tool-only search and Hub OAuth are unchanged.
+
+Custom Auto without a declaration is rejected before credential provisioning. Manual
+models remain manual; no inventory is invented. A Source still carrying the opaque
+`verification_pending` marker is independently routable and may be configured and invoked.
+List/detail surfaces label it
 Saved / 已保存 in neutral styling, not unverified, healthy or in use; real error,
 needs-action and cooldown states retain precedence. The accessible hint describes
 stored configuration, not a guaranteed connection or a universally available Test action.
-Successful inventory discovery never clears this flag.
-A newly stored Hub credential starts pending unless an add-time observation
-authenticated it, so an explicit unverified save and a native-config import always
-start pending while an observed api-key create does not. A call captures the persisted marker before invocation; any
+Plain inventory refresh never clears this flag.
+A newly stored Hub credential starts pending unless an add-time observation or the
+save-time gated models witness authenticated it. Native-config imports start pending
+while an observed api-key create does not. A call captures the persisted marker before invocation; any
 successful call using the same current credential and marker clears it through a
 fresh cross-process config transaction. Newer same-credential attempts do not negate
 success. Credential/endpoint replacement generates a new marker, including same-handle

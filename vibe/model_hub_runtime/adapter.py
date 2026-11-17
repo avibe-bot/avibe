@@ -26,6 +26,7 @@ from config.v2_config import (
 )
 from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
 from core.handlers.model_hub.adapter import (
+    ApiKeyModelsCheck,
     DiscoveredModel,
     EngineEnsureResult,
     EngineHealth,
@@ -1153,7 +1154,7 @@ class _ModelsWitness(Enum):
 @dataclass(frozen=True)
 class _ModelsWitnessResult:
     credential: _ModelsWitness
-    models: tuple[DiscoveredModel, ...] = ()
+    models: tuple[DiscoveredModel, ...] | None = None
 
 
 async def _authenticate_with_models_witness(
@@ -1163,6 +1164,7 @@ async def _authenticate_with_models_witness(
     base_url: str | None,
     secret: str,
     auth_scheme: str | None = None,
+    timeout: float = 15.0,
 ) -> _ModelsWitnessResult:
     """Read the owned interface's model listing as the authentication witness.
 
@@ -1200,13 +1202,19 @@ async def _authenticate_with_models_witness(
 
     scheme_options = {"auth_scheme": auth_scheme} if auth_scheme is not None else {}
     try:
+        # probe_models owns the transport/parser deadline and preserves a received
+        # rejection status even if its error body times out. An outer wait_for
+        # would cancel that preservation just before the transport timeout fires.
         models = await probe_models(
             vendor=vendor,
             protocol=protocol,
             base_url=base_url,
             secret=secret,
+            timeout=timeout,
             **scheme_options,
         )
+    except asyncio.TimeoutError:
+        return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
     except EngineClientError as exc:
         if exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
             return _ModelsWitnessResult(credential=_ModelsWitness.REJECTED)
@@ -1217,15 +1225,19 @@ async def _authenticate_with_models_witness(
             protocol=protocol,
             base_url=base_url,
             secret=None,
+            timeout=timeout,
+            first_page_only=True,
             **scheme_options,
         )
+    except asyncio.TimeoutError:
+        pass
     except EngineClientError as refusal:
         if refusal.status_code in _AUTHENTICATION_ERROR_STATUSES:
             return _ModelsWitnessResult(
                 credential=_ModelsWitness.ACCEPTED,
                 models=tuple(models),
             )
-    return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE)
+    return _ModelsWitnessResult(credential=_ModelsWitness.INCONCLUSIVE, models=tuple(models))
 
 
 def _anthropic_wrapperless_elimination_proof(
@@ -3214,6 +3226,47 @@ class CLIProxyEngineAdapter:
                 upstream_status=exc.status_code,
                 upstream_detail=exc.upstream_detail,
             ) from exc
+
+    @engine_operation
+    async def check_api_key_models(
+        self,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+        *,
+        secret: str | None = None,
+        credential_ref: str | None = None,
+        timeout: float,
+    ) -> ApiKeyModelsCheck:
+        if (secret is None) == (credential_ref is None):
+            raise EngineStateError("exactly one API-key input is required")
+        auth_scheme = None
+        if credential_ref is not None:
+            base_url = await run_owned_in_thread(
+                self.state_store.validate_api_key_target,
+                credential_ref,
+                vendor=vendor,
+                protocol=protocol,
+                base_url=base_url,
+            )
+            auth_scheme = await self.credential_auth_scheme(credential_ref)
+            secret = await run_owned_in_thread(self.state_store.read_api_key, credential_ref)
+        witness = await _authenticate_with_models_witness(
+            vendor=vendor,
+            protocol=protocol,
+            base_url=base_url,
+            secret=secret,
+            auth_scheme=auth_scheme,
+            timeout=timeout,
+        )
+        return ApiKeyModelsCheck(
+            authenticated=(
+                True if witness.credential is _ModelsWitness.ACCEPTED
+                else False if witness.credential is _ModelsWitness.REJECTED
+                else None
+            ),
+            models=witness.models,
+        )
 
     @engine_operation
     async def observe_source(

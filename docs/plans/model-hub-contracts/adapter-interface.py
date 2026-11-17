@@ -341,6 +341,18 @@ class DiscoveredModel:
     supported_parameters: tuple[str, ...] | None = None
 
 
+@dataclass(frozen=True)
+class ApiKeyModelsCheck:
+    """Credential evidence, independent of whether inventory was available.
+
+    ``authenticated`` is true/false only for confirmed acceptance/rejection.
+    ``models=None`` means no inventory, unlike a successfully listed empty tuple.
+    """
+
+    authenticated: bool | None
+    models: tuple[DiscoveredModel, ...] | None = None
+
+
 class ModelInventory(tuple):
     """A sequence with the admitted engine identity retained for later writes."""
 
@@ -909,6 +921,24 @@ class EngineAdapter(Protocol):
 
         With ``start_engine=False`` an engine-held credential is listed only
         from an engine that is already running; it is never started for this.
+        """
+        ...
+
+    async def check_api_key_models(
+        self,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+        *,
+        secret: str | None = None,
+        credential_ref: str | None = None,
+        timeout: float,
+    ) -> ApiKeyModelsCheck:
+        """List with and without a key; never infer acceptance from a public list.
+
+        Exactly one of raw unsaved ``secret`` or a target-bound stored reference
+        is required. Each of the at-most-two listings has the supplied budget.
+        No credential is provisioned by this operation.
         """
         ...
 
