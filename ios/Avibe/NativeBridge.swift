@@ -295,6 +295,7 @@ enum NativeBridgeConfiguration {
         ) -> Bool = { _, _ in
             false
         },
+        systemScheduleAdmission: @escaping @MainActor (WKWebView, WebOrigin) -> SystemScheduleAdmission? = { _, _ in nil },
         systemScheduleCapabilities: @escaping @MainActor (
             WKWebView,
             WebOrigin
@@ -304,14 +305,14 @@ enum NativeBridgeConfiguration {
         systemScheduleRequest: @escaping @MainActor (
             WKWebView,
             SystemScheduleRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _, _ in
             nil
         },
         systemScheduleCancel: @escaping @MainActor (
             WKWebView,
             SystemScheduleCancelRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _, _ in
             nil
         }
@@ -342,6 +343,7 @@ enum NativeBridgeConfiguration {
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
             reconcileNotifications: reconcileNotifications,
+            systemScheduleAdmission: systemScheduleAdmission,
             systemScheduleCapabilities: systemScheduleCapabilities,
             systemScheduleRequest: systemScheduleRequest,
             systemScheduleCancel: systemScheduleCancel
@@ -631,6 +633,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         NotificationReconcile,
         WebOrigin
     ) -> Bool
+    private let systemScheduleAdmission: @MainActor (WKWebView, WebOrigin) -> SystemScheduleAdmission?
     private let systemScheduleCapabilities: @MainActor (
         WKWebView,
         WebOrigin
@@ -638,12 +641,12 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let systemScheduleRequest: @MainActor (
         WKWebView,
         SystemScheduleRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
     private let systemScheduleCancel: @MainActor (
         WKWebView,
         SystemScheduleCancelRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
 
     init(
@@ -684,6 +687,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             NotificationReconcile,
             WebOrigin
         ) -> Bool,
+        systemScheduleAdmission: @escaping @MainActor (WKWebView, WebOrigin) -> SystemScheduleAdmission? = { _, _ in nil },
         systemScheduleCapabilities: @escaping @MainActor (
             WKWebView,
             WebOrigin
@@ -691,12 +695,12 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         systemScheduleRequest: @escaping @MainActor (
             WKWebView,
             SystemScheduleRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]?,
         systemScheduleCancel: @escaping @MainActor (
             WKWebView,
             SystemScheduleCancelRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]?
     ) {
         self.policy = policy
@@ -718,6 +722,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleAdmission = systemScheduleAdmission
         self.systemScheduleCapabilities = systemScheduleCapabilities
         self.systemScheduleRequest = systemScheduleRequest
         self.systemScheduleCancel = systemScheduleCancel
@@ -953,6 +958,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 )
                 return
             }
+            guard let admission = systemScheduleAdmission(sourceWebView, instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
             Task { @MainActor [weak self, weak sourceWebView] in
                 guard let self, let sourceWebView else {
                     replyHandler(nil, nil)
@@ -961,7 +970,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 guard let result = await self.systemScheduleRequest(
                     sourceWebView,
                     schedule,
-                    instanceOrigin
+                    admission
                 ) else {
                     self.reply(replyHandler, error: .forbidden)
                     return
@@ -980,6 +989,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 )
                 return
             }
+            guard let admission = systemScheduleAdmission(sourceWebView, instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
             Task { @MainActor [weak self, weak sourceWebView] in
                 guard let self, let sourceWebView else {
                     replyHandler(nil, nil)
@@ -988,7 +1001,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 guard let result = await self.systemScheduleCancel(
                     sourceWebView,
                     cancellation,
-                    instanceOrigin
+                    admission
                 ) else {
                     self.reply(replyHandler, error: .forbidden)
                     return

@@ -4,7 +4,7 @@ Date: 2026-11-17
 Base: `origin/master@2a7ab2841aafd594e26e569ad5452dcbe28c9614`
 Branch: `feat/ios-system-schedule`
 
-Revision note: the 06:24 simplification after the third circuit breaker supersedes earlier compensation/UserDefaults/inferred-detach design in this plan.
+Revision note: the 06:24 simplification after the third circuit breaker supersedes earlier compensation/UserDefaults/inferred-detach design in this plan. The 09:45 bounded execution amendment below closes round-five F1–F3 at baseline `7b2c7e1f493e29d7079c197be10ade5c18caca3e` (review base `e708e3ecf4c7d9f9d120e0be40e1705613c07910`); it does not change Runtime/Web contracts or user semantics.
 
 ## Goal
 
@@ -47,6 +47,30 @@ The implementation now follows seven reductions from the authoritative state mac
 
 The cross-layer regression suite names the committed-head finding ID (`C*`, `D*`, or `E*`) beside every added race test.
 
+## 09:45 bounded execution amendment
+
+- **F2 / admission:** `NativeBridge.handleSystemSchedule` captures authority synchronously after main-frame/exact-origin/primary-WebView checks, before creating its Task. The immutable admission contains account/owner epoch, instance, Runtime identity, a per-WebView-lifetime UUID and navigation epoch. Later AppModel fences only validate that snapshot; validation never creates an owner epoch. Native closure wiring carries the snapshot rather than an origin to resolve later.
+- **F1 / execution:** the existing coordinator owns one in-memory execution slot per `(accountID, ownerEpoch, instanceID, operationID)`. Admission installs the slot before its driver Task. Each OS suspension has one running-effect token and an observed completion. Create, recovery, cancel and lifecycle cleanup join the same slot; cancellation and synchronous exact-owner detach revoke creation immediately. No absent lookup can settle an outstanding create. AppModel owns confirmation presentation and delivery, not OS arbitration. A bridge claim retries other pending operations; its own exact operation is settled only by its slot, not retried again by that same claim's lifecycle sweep.
+- **F3 / completion:** required commits use the unchanged fsync/rename file writer. Slots retain OS observation separately from commit failure and fan out one settled result under each waiter's request ID. No successful receipt precedes its required terminal commit. An unresolved `local_state_write_failed` cannot be replaced with an older ledger receipt; explicit recovery re-enters the slot from durable uncertainty and re-commits a visible-but-failed terminal row before replay. A failed pre-create reservation still requires phone confirmation. AppModel no longer derives cancel outcomes from the ledger. Confirmation-only retry continuations simply deliver the coordinator's result.
+- **Preserved boundary:** durable `managedScheduled` before exact-owner detach remains `detachedRetained` forever. Losing authority while create can still land requests exact-item local cleanup. Re-login can wait for historical cleanup evidence but never regain management. MobileAccount's synchronous exact-owner detach is unchanged; network, 2FA and unknown account state still do not detach.
+
+The three baseline counterexamples are captured as tests before product changes. F2's pre-fix cleanup suspension is removed from the request path; its post-fix checks therefore inject the frozen admission before the suspension/replacement instead. Its fixture forwards real WKNavigation callbacks, and a separate real-WebKit bridge test asserts admission runs outside a Swift Task before synchronously reopening the Runtime. No product-only testing hooks were added.
+
+| Matrix | Owning evidence (`SystemScheduleTests` unless noted) |
+| --- | --- |
+| 1 | `testConcurrentRetryJoinsIssuedCreateWithoutRecoveryLookup` |
+| 2 / F1 | `testInFlightCreateOwnsLateCompletionAcrossDetachAndCleanup` |
+| 3 | `testUserCancelWhilePlatformCreateIsInFlightRemovesTheCreatedItem`; App `testTwoBridgeCancelsDismissInFlightConfirmationBeforeOSCompletion` |
+| 4 | `testRemoveCompletionIsSharedByCancelAndForegroundCleanup` |
+| 5 / F2 | App `testCancelDoesNotAdoptDocumentAuthorityAfterCleanupSuspension`, `testBridgeFreezesAuthorityBeforeItsTaskForCreateAndCancel` |
+| 6 | `testCancelRevokesBeforeSuspendedPermissionReturns`; existing App permission/Runtime-replacement and late-success tests |
+| 7 | `testRequiredIntentCommitFailurePreventsDependentOSWrites` (real file `beforeRename` fault) |
+| 8 / F3 | `testCleanupTerminalCommitFailureReachesCreateReceipt`, `testCleanupCommitFailureFansOutAndRestartRecoversDurablePending`, `testVisibleButFailedTerminalCommitMustBeRecommittedBeforeReplay`; existing Web sticky-write-error test |
+| 9 | `testCleanupCommitFailureFansOutAndRestartRecoversDurablePending` (second coordinator reopens actual ledger) |
+| 10 | `testDetachIsPermanentAndReloginGetsANewOwnerEpoch`; existing App lifecycle cleanup and MobileOnboarding ambiguous-auth tests |
+
+The slot tests use controlled continuations and explicit admission signals, with effect counts, persisted lifecycle, per-request errors/identities and exactly-once completion assertions. Simulator/fixture and unsigned-build evidence is not real-device AlarmKit/EventKit evidence. This round freezes one repair head and obtains the original independent review before any PR, release or installation; recurring execution/authority/commit findings stop the lane.
+
 ## Review-fix invariants
 
 These invariants close the defect classes found by the first read-only review. Tests assert the properties rather than only the reported examples.
@@ -63,7 +87,7 @@ These invariants close the defect classes found by the first read-only review. T
 - An OS item has a deterministic identity scoped by the selected Avibe instance and operation before the system call. Two instances using the same Agent-chosen operation ID cannot collide in the iPhone's system namespace. Recovery can find the corresponding AlarmKit/EventKit item after a crash between OS acceptance and local persistence, so retry never blindly creates a duplicate.
 - A locally persisted `scheduled` state is written only after the system accepted the item. If the final commit fails, the earlier crash-durable `creatingUnknown` record remains sufficient for deterministic recovery; Web does not submit that `local_state_write_failed` result as a terminal Runtime receipt, so the same sticky lease re-enters Native recovery on a later poll.
 - Every cleanup failure retains the real opaque system identifier and a cleanup-pending recovery record. Native retries these records on launch, foreground, and every bridge create/cancel claim.
-- A waiting user-cancel request is settled from the exact persisted cleanup record, independently of the immutable create outcome. Cleanup failure reports a failed cancel with the identifier; only proven absence/removal reports `cancelled`.
+- A waiting user-cancel request is settled from the coordinator's execution outcome and required commit outcome, independently of the immutable create outcome. Cleanup failure reports a failed cancel with the identifier; only proven absence/removal plus a successful terminal commit reports `cancelled`. A failed commit is delivered unchanged to every affected create/retry/cancel waiter, never reconstructed from the older pending record.
 - Completed no-item/removed cleanup tombstones replay idempotently after Web/receipt loss, while deliberately retained detached items never become cleanup targets.
 - Runtime keeps `(operationId, action, generation)` unique through a canonical `attempt_key` stored in a literal unique column on the new table, so the repository's existing additive analyzer proves the constraint without an analyzer exception.
 - Permission-denied and unsupported platform results atomically persist and return the authorization observed by that result; an earlier `not_determined` capability snapshot cannot leak into the terminal receipt.

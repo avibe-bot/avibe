@@ -49,6 +49,8 @@ enum NativePushError: Error, Equatable {
     }
 }
 
+enum SystemScheduleAdmission {}
+
 struct SystemScheduleRequest {
     static func parse(_ params: [String: Any]) -> SystemScheduleRequest? {
         nil

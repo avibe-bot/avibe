@@ -208,11 +208,6 @@ final class AppModel: ObservableObject {
         var expiryTask: Task<Void, Never>?
         var isSubmitting = false
         var isInvalidated = false
-        var cancellationRequested = false
-        var cancellationContinuations: [(
-            request: SystemScheduleCancelRequest,
-            continuation: CheckedContinuation<SystemScheduleReceipt, Never>
-        )] = []
 
         init(
             id: UUID,
@@ -604,27 +599,52 @@ final class AppModel: ObservableObject {
         return systemScheduleCoordinator.capabilities().jsonObject
     }
 
+    /// Called synchronously by NativeBridge admission, before its Task exists.
+    func captureSystemScheduleAdmission(origin: WebOrigin) -> SystemScheduleAdmission? {
+        switch resolveCurrentSystemScheduleContext(origin: origin) {
+        case .available(let context): return .authorized(context)
+        case .localStateUnavailable: return .localStateUnavailable
+        case .invalid: return nil
+        }
+    }
+
+    private func isCurrentSystemScheduleContext(_ context: SystemScheduleContext) -> Bool {
+        guard let url = URL(string: context.origin),
+              let origin = WebOrigin(url: url, requiresHTTPS: false),
+              case .browser(let runtime) = route,
+              sessionCoordinator.isSelectedRuntime(runtime),
+              runtime.account.id == context.accountID,
+              sessionCoordinator.currentAccount?.id == context.accountID,
+              runtime.instance.id == context.instanceID,
+              WebOrigin(url: runtime.instance.url) == origin,
+              runtimeIdentity == context.runtimeIdentity,
+              runtimeController?.primaryScheduleWebViewIdentity == context.webViewIdentity,
+              runtimeController?.trustedPrimaryScheduleNavigationEpoch(origin: origin) == context.navigationEpoch
+        else { return false }
+        return systemScheduleCoordinator.isActive(owner: context.owner)
+    }
+
     func requestSystemSchedule(
         _ request: SystemScheduleRequest,
-        origin: WebOrigin
+        admission: SystemScheduleAdmission
     ) async -> [String: Any] {
-        await systemScheduleCoordinator.retryPendingCleanup()
         let context: SystemScheduleContext
-        switch resolveCurrentSystemScheduleContext(
-            origin: origin,
-            instanceID: request.instanceID
-        ) {
-        case .available(let current):
-            context = current
+        switch admission {
+        case .authorized(let captured): context = captured
         case .localStateUnavailable:
             return systemScheduleCoordinator.localStateUnavailable(request).jsonObject
-        case .invalid:
+        }
+        guard request.instanceID == context.instanceID, isCurrentSystemScheduleContext(context) else {
             return systemScheduleReceipt(
                 request,
                 state: .staleContext,
                 code: "stale_context",
                 message: "The request no longer belongs to the selected account, instance, and Runtime."
             ).jsonObject
+        }
+        Task { @MainActor in
+            await systemScheduleCoordinator.retryPendingCleanup(
+                excludingOperationID: request.operationID, context: context)
         }
         if let existing = systemScheduleCoordinator.prepare(
             request,
@@ -642,6 +662,13 @@ final class AppModel: ObservableObject {
                         state: .failed,
                         code: "operation_conflict",
                         message: "This operation ID already belongs to a different system schedule."
+                    ).jsonObject
+                }
+                if pending.isSubmitting {
+                    return await systemScheduleCoordinator.schedule(
+                        request, context: context,
+                        creationFence: { [weak self] in self?.systemScheduleCreationFence(pending) ?? .staleContext },
+                        postWriteFence: { [weak self] in self?.systemSchedulePostWriteFence(pending) ?? .staleContext }
                     ).jsonObject
                 }
                 let receipt = await withCheckedContinuation {
@@ -764,55 +791,41 @@ final class AppModel: ObservableObject {
 
     func cancelSystemSchedule(
         _ request: SystemScheduleCancelRequest,
-        origin: WebOrigin
+        admission: SystemScheduleAdmission
     ) async -> [String: Any]? {
-        await systemScheduleCoordinator.retryPendingCleanup()
         let context: SystemScheduleContext
-        switch resolveCurrentSystemScheduleContext(origin: origin) {
-        case .available(let current):
-            context = current
+        switch admission {
+        case .authorized(let captured): context = captured
         case .localStateUnavailable:
             return systemScheduleCoordinator.localStateUnavailable(request).jsonObject
-        case .invalid:
-            return nil
         }
-        if let pending = pendingSystemSchedule,
-           request.purpose == .user,
-           pending.request.operationID == request.operationID,
-           pending.request.kind == request.kind,
-           pending.context.hasSameOwner(as: context)
-        {
-            if pending.isSubmitting {
-                pending.cancellationRequested = true
-                pending.isInvalidated = true
-                pending.expiryTask?.cancel()
-                pending.expiryTask = nil
-                systemScheduleConfirmation = nil
-                let receipt = await withCheckedContinuation {
-                    (continuation: CheckedContinuation<SystemScheduleReceipt, Never>) in
-                    pending.cancellationContinuations.append(
-                        (request: request, continuation: continuation)
-                    )
-                }
-                return receipt.jsonObject
-            }
-            let receipt = systemScheduleCoordinator.finishWithoutEffect(
-                pending.request,
-                context: pending.context,
-                state: .cancelled,
-                code: nil,
-                message: nil
-            )
-            finishSystemSchedule(pending, receipt: receipt)
-            return receipt.replacingRequestID(request.requestID).jsonObject
+        guard isCurrentSystemScheduleContext(context) else { return nil }
+        let pending = pendingSystemSchedule.flatMap { candidate in
+            candidate.request.operationID == request.operationID
+                && candidate.request.kind == request.kind
+                && candidate.context.hasSameOwner(as: context) ? candidate : nil
         }
-        return await systemScheduleCoordinator.cancel(
+        // Presentation revocation is immediate; execution/commit settlement is
+        // owned by the coordinator, including each cancel request's waiter.
+        if let pending {
+            pending.isInvalidated = true
+            pending.expiryTask?.cancel()
+            pending.expiryTask = nil
+            systemScheduleConfirmation = nil
+        }
+        Task { @MainActor in
+            await systemScheduleCoordinator.retryPendingCleanup(
+                excludingOperationID: request.operationID, context: context)
+        }
+        let receipt = await systemScheduleCoordinator.cancel(
             request,
             context: context,
-            stillCurrent: { [weak self] in
-                self?.currentSystemScheduleContext(origin: origin) == context
-            }
-        ).jsonObject
+            stillCurrent: { [weak self] in self?.isCurrentSystemScheduleContext(context) == true }
+        )
+        if let pending, !pending.isSubmitting {
+            finishSystemSchedule(pending, receipt: receipt.replacingRequestID(pending.request.requestID))
+        }
+        return receipt.jsonObject
     }
 
     func confirmSystemSchedule(id: UUID) {
@@ -951,7 +964,8 @@ final class AppModel: ObservableObject {
                 instanceID: runtime.instance.id,
                 origin: origin.serialized,
                 runtimeIdentity: runtimeIdentity,
-                navigationEpoch: navigationEpoch
+                navigationEpoch: navigationEpoch,
+                webViewIdentity: runtimeController?.primaryScheduleWebViewIdentity
             )
         )
     }
@@ -959,24 +973,13 @@ final class AppModel: ObservableObject {
     private func systemScheduleStillCurrent(
         _ pending: PendingSystemSchedule
     ) -> Bool {
-        guard pendingSystemSchedule === pending,
-              !pending.isInvalidated,
-              let url = URL(string: pending.context.origin),
-              let origin = WebOrigin(url: url, requiresHTTPS: false),
-              let current = currentSystemScheduleContext(
-                  origin: origin,
-                  instanceID: pending.context.instanceID
-              )
-        else {
-            return false
-        }
-        return current == pending.context
+        pendingSystemSchedule === pending && !pending.isInvalidated
+            && isCurrentSystemScheduleContext(pending.context)
     }
 
     private func systemScheduleCreationFence(
         _ pending: PendingSystemSchedule
     ) -> SystemScheduleFenceFailure? {
-        if pending.cancellationRequested { return .cancelled }
         guard systemScheduleStillCurrent(pending) else {
             return .staleContext
         }
@@ -989,7 +992,6 @@ final class AppModel: ObservableObject {
     private func systemSchedulePostWriteFence(
         _ pending: PendingSystemSchedule
     ) -> SystemScheduleFenceFailure? {
-        if pending.cancellationRequested { return .cancelled }
         return systemScheduleStillCurrent(pending) ? nil : .staleContext
     }
 
@@ -1049,15 +1051,6 @@ final class AppModel: ObservableObject {
             )
         }
         pending.retryContinuations.removeAll()
-        for cancellation in pending.cancellationContinuations {
-            cancellation.continuation.resume(
-                returning: systemScheduleCoordinator.pendingCancellationReceipt(
-                    cancellation.request,
-                    context: pending.context
-                )
-            )
-        }
-        pending.cancellationContinuations.removeAll()
     }
 
     private func showRuntimeSheet(

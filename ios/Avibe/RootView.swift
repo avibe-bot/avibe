@@ -391,6 +391,7 @@ private struct BrowserScreen: View {
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,
                         reconcileNotifications: appModel.reconcileNotifications,
+                        systemScheduleAdmission: appModel.captureSystemScheduleAdmission,
                         systemScheduleCapabilities: appModel.systemScheduleCapabilities,
                         systemScheduleRequest: appModel.requestSystemSchedule,
                         systemScheduleCancel: appModel.cancelSystemSchedule,

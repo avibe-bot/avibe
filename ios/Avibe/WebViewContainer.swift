@@ -28,14 +28,15 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
     let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
+    let systemScheduleAdmission: (WebOrigin) -> SystemScheduleAdmission?
     let systemScheduleCapabilities: (WebOrigin) -> [String: Any]?
     let systemScheduleRequest: (
         SystemScheduleRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
     let systemScheduleCancel: (
         SystemScheduleCancelRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
@@ -61,16 +62,17 @@ struct WebViewContainer: UIViewControllerRepresentable {
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
+        systemScheduleAdmission: @escaping (WebOrigin) -> SystemScheduleAdmission? = { _ in nil },
         systemScheduleCapabilities: @escaping (
             WebOrigin
         ) -> [String: Any]? = { _ in nil },
         systemScheduleRequest: @escaping (
             SystemScheduleRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _ in nil },
         systemScheduleCancel: @escaping (
             SystemScheduleCancelRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _ in nil },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
@@ -95,6 +97,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleAdmission = systemScheduleAdmission
         self.systemScheduleCapabilities = systemScheduleCapabilities
         self.systemScheduleRequest = systemScheduleRequest
         self.systemScheduleCancel = systemScheduleCancel
@@ -129,6 +132,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
             reconcileNotifications: reconcileNotifications,
+            systemScheduleAdmission: systemScheduleAdmission,
             systemScheduleCapabilities: systemScheduleCapabilities,
             systemScheduleRequest: systemScheduleRequest,
             systemScheduleCancel: systemScheduleCancel,

@@ -314,12 +314,28 @@ struct SystemScheduleManagementOwner: Codable, Equatable {
     let ownerEpoch: String
 }
 
+enum SystemScheduleAdmission {
+    case authorized(SystemScheduleContext)
+    case localStateUnavailable
+}
+
 struct SystemScheduleContext: Equatable {
     let owner: SystemScheduleManagementOwner
     let instanceID: String
     let origin: String
     let runtimeIdentity: Int
     let navigationEpoch: Int
+    let webViewIdentity: UUID?
+
+    init(owner: SystemScheduleManagementOwner, instanceID: String, origin: String,
+         runtimeIdentity: Int, navigationEpoch: Int, webViewIdentity: UUID? = nil) {
+        self.owner = owner
+        self.instanceID = instanceID
+        self.origin = origin
+        self.runtimeIdentity = runtimeIdentity
+        self.navigationEpoch = navigationEpoch
+        self.webViewIdentity = webViewIdentity
+    }
 
     var accountID: String { owner.accountID }
 
@@ -831,6 +847,151 @@ final class SystemScheduleCoordinator {
     private let store: SystemScheduleStoring
     private let now: () -> Date
 
+    private struct ExecutionKey: Hashable {
+        let accountID: String
+        let ownerEpoch: String
+        let instanceID: String
+        let operationID: String
+
+        init(owner: SystemScheduleManagementOwner, instanceID: String, operationID: String) {
+            accountID = owner.accountID
+            ownerEpoch = owner.ownerEpoch
+            self.instanceID = instanceID
+            self.operationID = operationID
+        }
+    }
+
+    /// MainActor isolation serializes admission, not effects across suspension.
+    /// This slot, installed before the driver Task, owns every issued completion.
+    private final class ExecutionSlot {
+        enum Effect { case create, recovery, remove }
+        struct RunningEffect {
+            let token = UUID()
+            let kind: Effect
+        }
+        enum Observation {
+            case create(Result<SystemScheduleSubmission, SystemSchedulePlatformFailure>)
+            case recovery(SystemScheduleExistence)
+            case remove(Result<SystemScheduleAuthorization, SystemSchedulePlatformFailure>)
+        }
+        struct Waiter {
+            let requestID: String
+            let isCancel: Bool
+            let continuation: CheckedContinuation<SystemScheduleReceipt, Never>
+        }
+        let key: ExecutionKey
+        var waiters: [Waiter] = []
+        var runningEffect: RunningEffect?
+        var observation: Observation?
+        var revoked: SystemScheduleFenceFailure?
+        var cleanupRequested = false
+        var cleanupReceipt: SystemScheduleReceipt?
+        var writeFailure: SystemScheduleReceipt?
+        var settled = false
+        var drivesCreate = false
+        var recommitRequired = false
+
+        init(key: ExecutionKey) { self.key = key }
+    }
+    private var executions: [ExecutionKey: ExecutionSlot] = [:]
+
+    private func key(_ request: SystemScheduleRequest, _ context: SystemScheduleContext) -> ExecutionKey {
+        ExecutionKey(owner: context.owner, instanceID: request.instanceID, operationID: request.operationID)
+    }
+
+    private func join(
+        _ slot: ExecutionSlot, requestID: String, isCancel: Bool,
+        driver: (@MainActor () async -> SystemScheduleReceipt)? = nil
+    ) async -> SystemScheduleReceipt {
+        await withCheckedContinuation { continuation in
+            slot.waiters.append(.init(requestID: requestID, isCancel: isCancel, continuation: continuation))
+            if let driver {
+                Task { @MainActor in
+                    let receipt: SystemScheduleReceipt
+                    if slot.recommitRequired,
+                       let current = self.store.record(operationID: slot.key.operationID,
+                           instanceID: slot.key.instanceID,
+                           owner: .init(accountID: slot.key.accountID, ownerEpoch: slot.key.ownerEpoch)),
+                       !self.commit(current, slot: slot) {
+                        receipt = slot.writeFailure!
+                    } else {
+                        receipt = await driver()
+                    }
+                    precondition(slot.runningEffect == nil)
+                    slot.settled = true
+                    let waiters = slot.waiters
+                    slot.waiters.removeAll()
+                    // Retain a failed commit until an explicit recovery joins it;
+                    // prepare/replay may not turn an older ledger row into success.
+                    if slot.writeFailure == nil { self.executions.removeValue(forKey: slot.key) }
+                    let record = self.store.record(operationID: slot.key.operationID,
+                        instanceID: slot.key.instanceID,
+                        owner: .init(accountID: slot.key.accountID, ownerEpoch: slot.key.ownerEpoch))
+                    let createOutcome = slot.drivesCreate ? receipt
+                        : (record?.createReceipt(requestID: receipt.requestID) ?? receipt)
+                    let cancelOutcome = slot.cleanupReceipt
+                        ?? record?.cancelReceipt(requestID: receipt.requestID) ?? receipt
+                    for waiter in waiters {
+                        let outcome = slot.writeFailure ?? (waiter.isCancel ? cancelOutcome : createOutcome)
+                        waiter.continuation.resume(returning: outcome.replacingRequestID(waiter.requestID))
+                    }
+                }
+            }
+        }
+    }
+
+    private func beginEffect(_ kind: ExecutionSlot.Effect, in slot: ExecutionSlot) -> UUID {
+        precondition(slot.runningEffect == nil)
+        let effect = ExecutionSlot.RunningEffect(kind: kind)
+        slot.runningEffect = effect
+        return effect.token
+    }
+
+    private func endEffect(_ token: UUID, in slot: ExecutionSlot, observation: ExecutionSlot.Observation) {
+        precondition(slot.runningEffect?.token == token)
+        slot.runningEffect = nil
+        slot.observation = observation
+        if let failure = slot.writeFailure {
+            let observed: SystemScheduleAuthorization
+            switch observation {
+            case .create(.success(let submission)): observed = submission.authorization
+            case .create(.failure(let error)), .remove(.failure(let error)), .recovery(.unknown(let error)):
+                observed = observedAuthorization(for: error, fallback: failure.authorization)
+            case .remove(.success(let authorization)), .recovery(.exists(let authorization)),
+                 .recovery(.absentConclusive(let authorization)): observed = authorization
+            }
+            slot.writeFailure = SystemScheduleReceipt(
+                requestID: failure.requestID, operationID: failure.operationID, kind: failure.kind,
+                state: failure.state, systemIdentifier: failure.systemIdentifier, fireAt: failure.fireAt,
+                timeZoneIdentifier: failure.timeZoneIdentifier, authorization: observed, error: failure.error
+            )
+        }
+    }
+
+    private func commit(_ record: StoredSystemSchedule, slot: ExecutionSlot) -> Bool {
+        guard slot.writeFailure == nil else { return false }
+        let didPersist = store.save(record)
+        guard didPersist else {
+            slot.writeFailure = SystemScheduleReceipt.terminal(
+                request: record.request(requestID: "native-commit"), state: .failed,
+                authorization: record.authorization, systemIdentifier: record.systemIdentifier,
+                code: "local_state_write_failed",
+                message: "The system item changed, but Avibe could not finish saving its management record."
+            )
+            return false
+        }
+        return true
+    }
+
+    private func persist(_ record: StoredSystemSchedule) -> Bool {
+        let executionKey = ExecutionKey(owner: record.owner, instanceID: record.intent.instanceID,
+                                        operationID: record.operationID)
+        if let slot = executions[executionKey], !slot.settled {
+            return commit(record, slot: slot)
+        }
+        return store.save(record)
+    }
+
     init(
         platform: SystemSchedulePlatforming,
         store: SystemScheduleStoring,
@@ -846,13 +1007,24 @@ final class SystemScheduleCoordinator {
     }
 
     func managementOwner(accountID: String) -> SystemScheduleManagementOwner? {
-        store.managementOwner(accountID: accountID)
+        guard detachActiveOwner(unlessAccountID: accountID) else { return nil }
+        return store.managementOwner(accountID: accountID)
+    }
+
+    func isActive(owner: SystemScheduleManagementOwner) -> Bool {
+        store.isActive(owner: owner)
     }
 
     func requiresRecovery(
         _ request: SystemScheduleRequest,
         context: SystemScheduleContext
     ) -> Bool {
+        let execution = executions[key(request, context)]
+        if let execution, !execution.settled { return true }
+        if let historical = store.latestRecord(operationID: request.operationID, instanceID: request.instanceID),
+           historical.owner != context.owner,
+           historical.intent == StoredSystemScheduleIntent(request: request),
+           historical.lifecycle == .detachedCleanupPending { return true }
         guard let record = store.record(
             operationID: request.operationID,
             instanceID: request.instanceID,
@@ -860,8 +1032,10 @@ final class SystemScheduleCoordinator {
         ) else {
             return false
         }
+        if record.lifecycle == .reserved { return execution?.cleanupRequested == true }
+        if execution != nil { return true }
         return record.intent == StoredSystemScheduleIntent(request: request)
-            && record.lifecycle == .creatingUnknown
+            && [.creatingUnknown, .managedCleanupPending, .detachedCleanupPending].contains(record.lifecycle)
     }
 
     func prepare(
@@ -885,6 +1059,10 @@ final class SystemScheduleCoordinator {
                     message: "This operation ID already belongs to a different system schedule."
                 )
             }
+            if executions[key(request, context)] != nil
+                || [.creatingUnknown, .managedCleanupPending, .detachedCleanupPending].contains(existing.lifecycle) {
+                return nil
+            }
             return existing.createReceipt(
                 requestID: request.requestID,
                 authorization: authorization(for: request.kind)
@@ -902,6 +1080,7 @@ final class SystemScheduleCoordinator {
                     message: "This operation ID already belongs to a different system schedule."
                 )
             }
+            if historical.lifecycle == .detachedCleanupPending { return nil }
             if let receipt = historical.createReceipt(
                 requestID: request.requestID,
                 authorization: authorization(for: request.kind)
@@ -915,8 +1094,8 @@ final class SystemScheduleCoordinator {
             )
             historical.generation += 1
             historical.updatedAt = now()
-            guard store.save(historical) else {
-                return localStateUnavailable(request)
+            guard persist(historical) else {
+                return writeFailure(request, identifier: historical.systemIdentifier)
             }
             return historical.createReceipt(requestID: request.requestID)!
         }
@@ -936,7 +1115,7 @@ final class SystemScheduleCoordinator {
             lastError: nil,
             updatedAt: now()
         )
-        guard store.save(record) else { return localStateUnavailable(request) }
+        guard persist(record) else { return writeFailure(request, identifier: record.systemIdentifier) }
         return nil
     }
 
@@ -965,7 +1144,7 @@ final class SystemScheduleCoordinator {
         record.lastError = error(code: code, message: message)
         record.generation += 1
         record.updatedAt = now()
-        guard store.save(record) else { return localStateUnavailable(request) }
+        guard persist(record) else { return writeFailure(request, identifier: record.systemIdentifier) }
         return record.createReceipt(requestID: request.requestID)!
     }
 
@@ -975,8 +1154,45 @@ final class SystemScheduleCoordinator {
         creationFence: @escaping @MainActor () -> SystemScheduleFenceFailure?,
         postWriteFence: @escaping @MainActor () -> SystemScheduleFenceFailure?
     ) async -> SystemScheduleReceipt {
-        if let prepared = prepare(request, context: context) {
-            return prepared
+        let executionKey = key(request, context)
+        if let slot = executions[executionKey], !slot.settled {
+            guard store.record(operationID: request.operationID, instanceID: request.instanceID,
+                               owner: context.owner)?.intent == StoredSystemScheduleIntent(request: request) else {
+                return terminal(request, state: .failed, code: "operation_conflict",
+                                message: "This operation ID already belongs to a different system schedule.")
+            }
+            return await join(slot, requestID: request.requestID, isCancel: false)
+        }
+        if let historical = store.latestRecord(operationID: request.operationID, instanceID: request.instanceID),
+           historical.owner != context.owner,
+           historical.intent == StoredSystemScheduleIntent(request: request),
+           historical.lifecycle == .detachedCleanupPending {
+            return await joinCleanup(historical, requestID: request.requestID, isCancel: false)
+        }
+        if let prepared = prepare(request, context: context) { return prepared }
+        let previous = executions[executionKey]
+        let slot = ExecutionSlot(key: executionKey)
+        slot.drivesCreate = true
+        slot.recommitRequired = previous?.writeFailure != nil
+        slot.cleanupRequested = previous?.cleanupRequested ?? false
+        slot.revoked = previous?.revoked
+        executions[executionKey] = slot
+        return await join(slot, requestID: request.requestID, isCancel: false, driver: {
+            await self.driveSchedule(request, context: context, slot: slot,
+                creationFence: { slot.revoked ?? creationFence() },
+                postWriteFence: { slot.revoked ?? postWriteFence() })
+        })
+    }
+
+    private func driveSchedule(
+        _ request: SystemScheduleRequest,
+        context: SystemScheduleContext,
+        slot: ExecutionSlot,
+        creationFence: @escaping @MainActor () -> SystemScheduleFenceFailure?,
+        postWriteFence: @escaping @MainActor () -> SystemScheduleFenceFailure?
+    ) async -> SystemScheduleReceipt {
+        if store.isActive(owner: context.owner) {
+            if let prepared = prepare(request, context: context) { return prepared }
         }
         guard var record = store.record(
             operationID: request.operationID,
@@ -984,11 +1200,29 @@ final class SystemScheduleCoordinator {
             owner: context.owner
         ) else { return localStateUnavailable(request) }
 
+        if record.lifecycle == .detachedRetained {
+            return record.createReceipt(requestID: request.requestID)
+                ?? terminal(request, state: .staleContext, code: "stale_context", message: nil)
+        }
+        if let failure = slot.writeFailure { return failure }
+        if [.managedCleanupPending, .detachedCleanupPending].contains(record.lifecycle)
+            || slot.cleanupRequested {
+            return await settleStaleCreatedItem(&record, request: request, context: context,
+                slot: slot, failure: slot.revoked ?? .cancelled)
+        }
+        // A slot can have been installed just before a synchronous cancellation
+        // closed a reservation. Never turn that tombstone into another create.
+        if record.lifecycle != .reserved && record.lifecycle != .creatingUnknown {
+            return record.createReceipt(requestID: request.requestID)
+                ?? terminal(request, state: .staleContext, code: "stale_context", message: nil)
+        }
         if record.lifecycle == .creatingUnknown {
+            let token = beginEffect(.recovery, in: slot)
             let recovery = await platform.existence(
                 kind: record.intent.kind,
                 systemIdentifier: record.systemIdentifier
             )
+            endEffect(token, in: slot, observation: .recovery(recovery))
             guard let current = store.record(
                 operationID: record.operationID,
                 instanceID: record.intent.instanceID,
@@ -1001,7 +1235,8 @@ final class SystemScheduleCoordinator {
                     current,
                     recovery: recovery,
                     request: request,
-                    context: context
+                    context: context,
+                    slot: slot
                 )
             }
             record = current
@@ -1012,6 +1247,7 @@ final class SystemScheduleCoordinator {
                         &record,
                         request: request,
                         context: context,
+                        slot: slot,
                         failure: failure
                     )
                 }
@@ -1022,7 +1258,7 @@ final class SystemScheduleCoordinator {
                 record.lastError = nil
                 record.generation += 1
                 record.updatedAt = now()
-                guard store.save(record) else {
+                guard persist(record) else {
                     return writeFailure(request, identifier: record.systemIdentifier)
                 }
                 return record.createReceipt(requestID: request.requestID)!
@@ -1037,7 +1273,7 @@ final class SystemScheduleCoordinator {
                 )
                 record.generation += 1
                 record.updatedAt = now()
-                guard store.save(record) else { return localStateUnavailable(request) }
+                guard persist(record) else { return writeFailure(request, identifier: record.systemIdentifier) }
                 return record.createReceipt(requestID: request.requestID)!
             case .unknown(let failure):
                 record.authorization = observedAuthorization(
@@ -1046,7 +1282,7 @@ final class SystemScheduleCoordinator {
                 )
                 record.lastError = storedError(failure)
                 record.updatedAt = now()
-                guard store.save(record) else {
+                guard persist(record) else {
                     return writeFailure(
                         request,
                         identifier: record.systemIdentifier
@@ -1069,30 +1305,29 @@ final class SystemScheduleCoordinator {
         record.effectMayExist = true
         record.generation += 1
         record.updatedAt = now()
-        guard store.save(record),
+        guard persist(record),
               let persisted = store.record(
                   operationID: record.operationID,
                   instanceID: record.intent.instanceID,
                   owner: record.owner
               ), persisted == record
-        else { return localStateUnavailable(request) }
-        let enteredGeneration = record.generation
-
+        else { return writeFailure(request, identifier: record.systemIdentifier) }
+        let token = beginEffect(.create, in: slot)
         let result = await platform.schedule(
             request,
             systemIdentifier: record.systemIdentifier,
-            stillCurrent: { creationFence() == nil }
+            stillCurrent: { slot.writeFailure == nil && creationFence() == nil }
         )
+        endEffect(token, in: slot, observation: .create(result))
         guard var latest = store.record(
             operationID: record.operationID,
             instanceID: record.intent.instanceID,
             owner: record.owner
         ) else { return localStateUnavailable(request) }
-        if latest.lifecycle == .detachedCleanupPending,
-           latest.generation != enteredGeneration
-        {
+        if latest.lifecycle == .detachedCleanupPending {
             switch result {
             case .success(let submission):
+                latest.authorization = submission.authorization
                 guard submission.systemIdentifier == record.systemIdentifier else {
                     latest.createState = .failed
                     latest.lastError = StoredSystemScheduleError(
@@ -1100,7 +1335,7 @@ final class SystemScheduleCoordinator {
                         message: "The system returned an unexpected item identity."
                     )
                     latest.updatedAt = now()
-                    guard store.save(latest) else {
+                    guard persist(latest) else {
                         return writeFailure(
                             request,
                             identifier: latest.systemIdentifier
@@ -1112,6 +1347,7 @@ final class SystemScheduleCoordinator {
                     &latest,
                     request: request,
                     context: context,
+                    slot: slot,
                     failure: .staleContext
                 )
             case .failure(let failure) where failure.effectMayExist:
@@ -1119,6 +1355,7 @@ final class SystemScheduleCoordinator {
                     &latest,
                     request: request,
                     context: context,
+                    slot: slot,
                     failure: .staleContext
                 )
             case .failure:
@@ -1131,7 +1368,7 @@ final class SystemScheduleCoordinator {
                 )
                 latest.generation += 1
                 latest.updatedAt = now()
-                guard store.save(latest) else {
+                guard persist(latest) else {
                     return writeFailure(
                         request,
                         identifier: latest.systemIdentifier
@@ -1140,15 +1377,10 @@ final class SystemScheduleCoordinator {
                 return latest.createReceipt(requestID: request.requestID)!
             }
         }
-        if latest.generation != enteredGeneration
-            || latest.lifecycle == .managedCleanupPending
-        {
-            if latest.createState == nil { latest.createState = .cancelled }
-            return latest.createReceipt(requestID: request.requestID)
-                ?? terminal(request, state: .cancelled, code: nil, message: nil)
-        }
+        if let writeFailure = slot.writeFailure { return writeFailure }
         switch result {
         case .success(let submission):
+            latest.authorization = submission.authorization
             guard submission.systemIdentifier == record.systemIdentifier else {
                 latest.lifecycle = store.isActive(owner: latest.owner)
                     ? .managedCleanupPending
@@ -1161,7 +1393,7 @@ final class SystemScheduleCoordinator {
                 )
                 latest.generation += 1
                 latest.updatedAt = now()
-                guard store.save(latest) else {
+                guard persist(latest) else {
                     return writeFailure(
                         request,
                         identifier: latest.systemIdentifier
@@ -1174,6 +1406,7 @@ final class SystemScheduleCoordinator {
                     &latest,
                     request: request,
                     context: context,
+                    slot: slot,
                     failure: failure
                 )
             }
@@ -1184,7 +1417,7 @@ final class SystemScheduleCoordinator {
             latest.lastError = nil
             latest.generation += 1
             latest.updatedAt = now()
-            guard store.save(latest) else {
+            guard persist(latest) else {
                 return writeFailure(request, identifier: latest.systemIdentifier)
             }
             return latest.createReceipt(requestID: request.requestID)!
@@ -1194,6 +1427,10 @@ final class SystemScheduleCoordinator {
                 fallback: latest.authorization
             )
             let effectMayExist = failure.effectMayExist
+            if effectMayExist, let revoked = postWriteFence() {
+                return await settleStaleCreatedItem(&latest, request: request,
+                    context: context, slot: slot, failure: revoked)
+            }
             if effectMayExist {
                 latest.lifecycle = store.isActive(owner: latest.owner)
                     ? .managedCleanupPending
@@ -1213,7 +1450,7 @@ final class SystemScheduleCoordinator {
             } ?? storedError(failure)
             latest.generation += 1
             latest.updatedAt = now()
-            guard store.save(latest) else {
+            guard persist(latest) else {
                 return writeFailure(
                     request,
                     identifier: latest.systemIdentifier
@@ -1229,6 +1466,47 @@ final class SystemScheduleCoordinator {
         context: SystemScheduleContext,
         stillCurrent: @escaping @MainActor () -> Bool
     ) async -> SystemScheduleReceipt {
+        guard stillCurrent() else { return cancelFailure(request, code: "stale_context") }
+        let executionKey = ExecutionKey(owner: context.owner, instanceID: context.instanceID,
+                                        operationID: request.operationID)
+        if let slot = executions[executionKey], !slot.settled {
+            guard var record = store.record(operationID: request.operationID,
+                instanceID: context.instanceID, owner: context.owner), record.intent.kind == request.kind,
+                store.isActive(owner: context.owner) else {
+                return cancelFailure(request, code: "item_not_found")
+            }
+            slot.revoked = .cancelled
+            slot.cleanupRequested = true
+            // Control events never wait behind create. Persist the cleanup
+            // demand, but leave every issued effect with its original driver.
+            if record.lifecycle == .creatingUnknown {
+                record.lifecycle = .managedCleanupPending
+                record.createState = .cancelled
+                record.generation += 1
+                record.updatedAt = now()
+                _ = commit(record, slot: slot)
+            }
+            return await join(slot, requestID: request.requestID, isCancel: true)
+        }
+        let slot = ExecutionSlot(key: executionKey)
+        slot.recommitRequired = executions[executionKey]?.writeFailure != nil
+        slot.revoked = .cancelled
+        slot.cleanupRequested = true
+        executions[executionKey] = slot
+        return await join(slot, requestID: request.requestID, isCancel: true, driver: {
+            let receipt = await self.driveCancel(request, context: context, slot: slot, stillCurrent: stillCurrent)
+            slot.cleanupReceipt = receipt
+            return receipt
+        })
+    }
+
+    private func driveCancel(
+        _ request: SystemScheduleCancelRequest,
+        context: SystemScheduleContext,
+        slot: ExecutionSlot,
+        stillCurrent: @escaping @MainActor () -> Bool
+    ) async -> SystemScheduleReceipt {
+        guard stillCurrent() else { return cancelFailure(request, code: "stale_context") }
         guard store.isAvailable else {
             return cancelFailure(request, code: "local_state_unavailable")
         }
@@ -1260,7 +1538,7 @@ final class SystemScheduleCoordinator {
             record.lastError = nil
             record.generation += 1
             record.updatedAt = now()
-            guard store.save(record) else {
+            guard persist(record) else {
                 return cancelFailure(request, code: "local_state_write_failed")
             }
             return record.cancelReceipt(requestID: request.requestID)
@@ -1272,12 +1550,13 @@ final class SystemScheduleCoordinator {
         record.effectMayExist = true
         record.generation += 1
         record.updatedAt = now()
-        guard store.save(record) else {
+        guard persist(record) else {
             return cancelFailure(request, code: "local_state_write_failed")
         }
         return await cleanup(
             record,
             requestID: request.requestID,
+            slot: slot,
             stillAuthorized: stillCurrent
         )
     }
@@ -1285,15 +1564,17 @@ final class SystemScheduleCoordinator {
     private func cleanup(
         _ record: StoredSystemSchedule,
         requestID: String,
+        slot: ExecutionSlot,
         stillAuthorized: @escaping @MainActor () -> Bool
     ) async -> SystemScheduleReceipt {
-        let expectedGeneration = record.generation
+        if let failure = slot.writeFailure { return failure.replacingRequestID(requestID) }
         let request = SystemScheduleCancelRequest(
             requestID: requestID,
             operationID: record.operationID,
             kind: record.intent.kind,
             purpose: .user
         )
+        let token = beginEffect(.remove, in: slot)
         let result = await platform.cancel(
             kind: record.intent.kind,
             systemIdentifier: record.systemIdentifier,
@@ -1305,16 +1586,17 @@ final class SystemScheduleCoordinator {
                           owner: record.owner
                       )
                 else { return false }
-                return current.generation == expectedGeneration
+                return slot.writeFailure == nil
                     && [.managedCleanupPending, .detachedCleanupPending]
                         .contains(current.lifecycle)
             }
         )
+        endEffect(token, in: slot, observation: .remove(result))
         guard var current = store.record(
             operationID: record.operationID,
             instanceID: record.intent.instanceID,
             owner: record.owner
-        ), current.generation == expectedGeneration
+        )
         else {
             return cancelFailure(request, code: "stale_context")
         }
@@ -1328,7 +1610,7 @@ final class SystemScheduleCoordinator {
             current.lastError = nil
             current.generation += 1
             current.updatedAt = now()
-            guard store.save(current) else {
+            guard persist(current) else {
                 return cancelFailure(
                     request,
                     code: "local_state_write_failed",
@@ -1343,7 +1625,7 @@ final class SystemScheduleCoordinator {
             )
             current.lastError = storedError(failure)
             current.updatedAt = now()
-            guard store.save(current) else {
+            guard persist(current) else {
                 return cancelFailure(
                     request,
                     code: "local_state_write_failed",
@@ -1358,56 +1640,98 @@ final class SystemScheduleCoordinator {
         }
     }
 
-    func pendingCancellationReceipt(
-        _ request: SystemScheduleCancelRequest,
-        context: SystemScheduleContext
-    ) -> SystemScheduleReceipt {
-        guard store.isAvailable else {
-            return cancelFailure(request, code: "local_state_unavailable")
-        }
-        guard let record = store.record(
-            operationID: request.operationID,
-            instanceID: context.instanceID,
-            owner: context.owner
-        ), record.intent.kind == request.kind
-        else {
-            return cancelFailure(request, code: "item_not_found")
-        }
-        return record.cancelReceipt(requestID: request.requestID)
-    }
-
     @discardableResult
     func detachActiveOwner() -> Bool {
-        store.detachActiveOwner()
+        let affected = executions.values.filter { slot in
+            store.isActive(owner: .init(accountID: slot.key.accountID, ownerEpoch: slot.key.ownerEpoch))
+        }
+        let committed = store.detachActiveOwner()
+        revokeDetached(affected, committed: committed)
+        return committed
     }
 
     @discardableResult
     func detachActiveOwner(unlessAccountID accountID: String) -> Bool {
-        store.detachActiveOwner(unlessAccountID: accountID)
+        let affected = executions.values.filter { slot in
+            slot.key.accountID != accountID
+                && store.isActive(owner: .init(accountID: slot.key.accountID, ownerEpoch: slot.key.ownerEpoch))
+        }
+        let committed = store.detachActiveOwner(unlessAccountID: accountID)
+        revokeDetached(affected, committed: committed)
+        return committed
+    }
+
+    private func revokeDetached(_ slots: [ExecutionSlot], committed: Bool) {
+        for slot in slots {
+            slot.revoked = .staleContext
+            if let record = store.record(operationID: slot.key.operationID, instanceID: slot.key.instanceID,
+                owner: .init(accountID: slot.key.accountID, ownerEpoch: slot.key.ownerEpoch)) {
+                slot.cleanupRequested = [.creatingUnknown, .managedCleanupPending, .detachedCleanupPending]
+                    .contains(record.lifecycle)
+                if !committed {
+                    slot.writeFailure = writeFailure(record.request(requestID: "native-detach"),
+                                                     identifier: record.systemIdentifier)
+                }
+            }
+        }
     }
 
     @discardableResult
     func synchronizeAccount(accountID: String?) -> Bool {
         guard let accountID else { return true }
+        guard detachActiveOwner(unlessAccountID: accountID) else { return false }
         return store.managementOwner(accountID: accountID) != nil
     }
 
-    func retryPendingCleanup() async {
+    func retryPendingCleanup(
+        excludingOperationID: String? = nil,
+        context: SystemScheduleContext? = nil
+    ) async {
         guard store.isAvailable else { return }
-        for record in store.cleanupRecords() {
-            _ = await cleanup(
-                record,
-                requestID: "native-cleanup-\(UUID().uuidString.lowercased())",
-                stillAuthorized: { true }
-            )
+        let records = store.cleanupRecords().filter { record in
+            !(record.operationID == excludingOperationID
+                && record.owner == context?.owner && record.intent.instanceID == context?.instanceID)
         }
+        let tasks = records.map { record in
+            Task { @MainActor in
+                await self.joinCleanup(record,
+                    requestID: "native-cleanup-\(UUID().uuidString.lowercased())", isCancel: true)
+            }
+        }
+        for task in tasks { _ = await task.value }
+    }
+
+    private func joinCleanup(_ record: StoredSystemSchedule, requestID: String, isCancel: Bool) async -> SystemScheduleReceipt {
+        let executionKey = ExecutionKey(owner: record.owner, instanceID: record.intent.instanceID,
+                                        operationID: record.operationID)
+        if let slot = executions[executionKey], !slot.settled {
+            slot.cleanupRequested = true
+            return await join(slot, requestID: requestID, isCancel: isCancel)
+        }
+        let slot = ExecutionSlot(key: executionKey)
+        slot.recommitRequired = executions[executionKey]?.writeFailure != nil
+        slot.cleanupRequested = true
+        executions[executionKey] = slot
+        return await join(slot, requestID: requestID, isCancel: isCancel, driver: {
+            // Re-read only to inherit synchronous detach, never to arbitrate
+            // a competing OS effect. This slot is its sole owner.
+            guard let current = self.store.record(operationID: record.operationID,
+                instanceID: record.intent.instanceID, owner: record.owner),
+                [.managedCleanupPending, .detachedCleanupPending].contains(current.lifecycle) else {
+                return record.cancelReceipt(requestID: requestID)
+            }
+            let result = await self.cleanup(current, requestID: requestID, slot: slot, stillAuthorized: { true })
+            slot.cleanupReceipt = result
+            return result
+        })
     }
 
     private func reconcileRecoveryAfterRecordChange(
         _ current: StoredSystemSchedule,
         recovery: SystemScheduleExistence,
         request: SystemScheduleRequest,
-        context: SystemScheduleContext
+        context: SystemScheduleContext,
+        slot: ExecutionSlot
     ) async -> SystemScheduleReceipt {
         guard current.intent == StoredSystemScheduleIntent(request: request) else {
             return terminal(
@@ -1417,10 +1741,7 @@ final class SystemScheduleCoordinator {
                 message: "This operation ID already belongs to a different system schedule."
             )
         }
-        if let receipt = current.createReceipt(requestID: request.requestID) {
-            return receipt
-        }
-        guard current.lifecycle == .detachedCleanupPending else {
+        guard [.managedCleanupPending, .detachedCleanupPending].contains(current.lifecycle) else {
             return SystemScheduleReceipt.terminal(
                 request: request,
                 state: .staleContext,
@@ -1441,16 +1762,17 @@ final class SystemScheduleCoordinator {
                 &record,
                 request: request,
                 context: context,
-                failure: .staleContext
+                slot: slot,
+                failure: slot.revoked ?? .staleContext
             )
         case .absentConclusive(let authorization):
             record.authorization = authorization
-            record.lifecycle = .detachedAbsent
+            record.lifecycle = current.lifecycle.isDetached ? .detachedAbsent : .closedNoItem
             record.effectMayExist = false
-            record.createState = .staleContext
+            record.createState = state(for: slot.revoked ?? .staleContext)
             record.lastError = error(
-                code: code(for: .staleContext),
-                message: message(for: .staleContext)
+                code: code(for: slot.revoked ?? .staleContext),
+                message: message(for: slot.revoked ?? .staleContext)
             )
         case .unknown(let failure):
             record.authorization = observedAuthorization(
@@ -1458,12 +1780,12 @@ final class SystemScheduleCoordinator {
                 fallback: record.authorization
             )
             record.effectMayExist = true
-            record.createState = .staleContext
+            record.createState = state(for: slot.revoked ?? .staleContext)
             record.lastError = storedError(failure)
         }
         record.generation += 1
         record.updatedAt = now()
-        guard store.save(record) else {
+        guard persist(record) else {
             return writeFailure(request, identifier: record.systemIdentifier)
         }
         return record.createReceipt(requestID: request.requestID)!
@@ -1473,24 +1795,31 @@ final class SystemScheduleCoordinator {
         _ record: inout StoredSystemSchedule,
         request: SystemScheduleRequest,
         context: SystemScheduleContext,
+        slot: ExecutionSlot,
         failure: SystemScheduleFenceFailure
     ) async -> SystemScheduleReceipt {
+        slot.cleanupRequested = true
         record.lifecycle = store.isActive(owner: record.owner)
             ? .managedCleanupPending
             : .detachedCleanupPending
         record.effectMayExist = true
-        record.createState = state(for: failure)
+        if record.createState != .scheduled { record.createState = state(for: failure) }
         record.lastError = error(code: code(for: failure), message: message(for: failure))
         record.generation += 1
         record.updatedAt = now()
-        guard store.save(record) else {
+        guard persist(record) else {
             return writeFailure(request, identifier: record.systemIdentifier)
         }
-        _ = await cleanup(
+        let cleanupReceipt = await cleanup(
             record,
             requestID: request.requestID,
+            slot: slot,
             stillAuthorized: { true }
         )
+        slot.cleanupReceipt = cleanupReceipt
+        if cleanupReceipt.error?.code == "local_state_write_failed" {
+            return cleanupReceipt
+        }
         return store.record(
             operationID: record.operationID,
             instanceID: record.intent.instanceID,

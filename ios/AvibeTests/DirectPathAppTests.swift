@@ -910,6 +910,58 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testTwoBridgeCancelsDismissInFlightConfirmationBeforeOSCompletion() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        platform.holdAfterSystemCreation = true
+        let entered = expectation(description: "OS create issued")
+        platform.onCreationSuspended = { entered.fulfill() }
+        let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                                    systemScheduleNow: { now })
+        let runtime = try await select("instance-1", in: app)
+        let cancelsAdmitted = expectation(description: "two bridge cancel deliveries")
+        cancelsAdmitted.expectedFulfillmentCount = 2
+        let controller = try makeRuntimeController(app, runtime, onScheduleDelivery: { _ in
+            if platform.isWaitingAfterSystemCreation { cancelsAdmitted.fulfill() }
+        })
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        defer { platform.releaseCreationResult(); page.close() }
+        try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+        let create = Task { @MainActor in
+            try await page.systemScheduleRequest(scheduleParams(
+                requestID: "create-two-cancels", operationID: "two-cancels", now: now))
+        }
+        try await eventually { app.systemScheduleConfirmation != nil }
+        app.confirmSystemSchedule(id: try XCTUnwrap(app.systemScheduleConfirmation).id)
+        await fulfillment(of: [entered], timeout: 3)
+        var completed: [String] = []
+        let cancels = ["cancel-one", "cancel-two"].map { id in
+            Task { @MainActor in
+                let result = try await page.systemScheduleCancel(requestID: id, operationID: "two-cancels", kind: "alarm")
+                completed.append(id)
+                return result
+            }
+        }
+        await fulfillment(of: [cancelsAdmitted], timeout: 3)
+        XCTAssertNil(app.systemScheduleConfirmation)
+        XCTAssertTrue(completed.isEmpty)
+        XCTAssertEqual(platform.cancelCalls, 0)
+        platform.releaseCreationResult()
+        let created = try jsonObject(try await create.value)
+        XCTAssertEqual(created["state"] as? String, "cancelled")
+        for (index, cancel) in cancels.enumerated() {
+            let receipt = try jsonObject(try await cancel.value)
+            XCTAssertEqual(receipt["requestId"] as? String, ["cancel-one", "cancel-two"][index])
+            XCTAssertEqual(receipt["state"] as? String, "cancelled")
+        }
+        XCTAssertEqual(completed.count, 2)
+        XCTAssertEqual(Set(completed), ["cancel-one", "cancel-two"])
+        XCTAssertEqual(platform.cancelCalls, 1)
+        XCTAssertEqual(platform.systemCreationCalls, 1)
+    }
+
+    @MainActor
     func testCancelAfterSystemWriteReportsCleanupFailureIndependently() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let platform = RuntimeSystemSchedulePlatform()
@@ -1280,6 +1332,150 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(app.systemScheduleConfirmation)
         XCTAssertEqual(platform.scheduleCalls, 0)
         XCTAssertEqual(platform.systemCreationCalls, 0)
+    }
+
+    // F2: an admitted cancel cannot sample replacement document authority
+    // after unrelated local cleanup suspends it. Earlier tests only navigated
+    // after confirmation, missing this entry window.
+    @MainActor
+    func testCancelDoesNotAdoptDocumentAuthorityAfterCleanupSuspension() async throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let platform = RuntimeSystemSchedulePlatform()
+        let app = try await makeApp(
+            directTransport: nil, systemSchedulePlatform: platform, systemScheduleNow: { now }
+        )
+        let runtime = try await select("instance-1", in: app)
+        let page = try await showRuntimePage(app, runtime)
+        defer { platform.releaseCancel(); page.close() }
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
+        let store = try XCTUnwrap(appScheduleStore)
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let target = try XCTUnwrap(SystemScheduleRequest.parse(scheduleParams(
+            requestID: "target-create", operationID: "target", now: now
+        )))
+        let blocker = try XCTUnwrap(SystemScheduleRequest.parse(scheduleParams(
+            requestID: "blocker-create", operationID: "blocker", now: now
+        )))
+        XCTAssertTrue(store.save(cleanupPendingRecord(request: blocker, owner: owner,
+            systemIdentifier: "cleanup-blocker", updatedAt: now)))
+        var targetRecord = cleanupPendingRecord(request: target, owner: owner,
+            systemIdentifier: "target-item", updatedAt: now)
+        targetRecord.lifecycle = .managedScheduled
+        targetRecord.createState = .scheduled
+        XCTAssertTrue(store.save(targetRecord))
+        let entered = expectation(description: "cleanup suspended")
+        platform.holdCancelIdentifier = "cleanup-blocker"
+        platform.onCancelSuspended = { entered.fulfill() }
+        let admission = try XCTUnwrap(app.captureSystemScheduleAdmission(origin: origin))
+        let cleanup = Task { @MainActor in
+            await app.cancelSystemSchedule(SystemScheduleCancelRequest(
+                requestID: "blocker-cancel", operationID: "blocker", kind: .alarm, purpose: .user
+            ), admission: admission)
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        try await page.load("<!doctype html><title>Replacement</title>", baseURL: runtime.instance.url,
+                            forwardingNativeNavigation: true)
+        // This is the same frozen admission the bridge carries across its Task
+        // boundary; no call is allowed to resolve it against the new document.
+        let result = await app.cancelSystemSchedule(SystemScheduleCancelRequest(
+            requestID: "old-cancel", operationID: "target", kind: .alarm, purpose: .user
+        ), admission: admission)
+        platform.releaseCancel()
+        _ = await cleanup.value
+        XCTAssertFalse(platform.cancelIdentifiers.contains("target-item"))
+        XCTAssertNotEqual(result?["state"] as? String, "cancelled")
+        let createResult = await app.requestSystemSchedule(target, admission: admission)
+        XCTAssertEqual(createResult["state"] as? String, "stale_context")
+        XCTAssertNil(app.systemScheduleConfirmation)
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        guard case .authorized(let oldContext) = admission,
+              case .authorized(let newContext) = app.captureSystemScheduleAdmission(origin: origin) else {
+            return XCTFail("the new same-origin document must have its own valid authority")
+        }
+        XCTAssertNotEqual(oldContext.navigationEpoch, newContext.navigationEpoch)
+        XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
+                       .managedScheduled)
+    }
+
+    // Matrix 5: actual WebKit delivery invokes admission outside any Swift
+    // Task. Reopen the same Runtime synchronously before that admission returns;
+    // both operations must receive, and reject, the original snapshot.
+    @MainActor
+    func testBridgeFreezesAuthorityBeforeItsTaskForCreateAndCancel() async throws {
+        for action in ["create", "cancel"] {
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let platform = RuntimeSystemSchedulePlatform()
+            let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                                        systemScheduleNow: { now })
+            let runtime = try await select("instance-1", in: app)
+            let originalIdentity = app.runtimeIdentity
+            var captures = 0
+            var capturedAdmission: SystemScheduleAdmission?
+            var deliveries = 0
+            let controller = try makeRuntimeController(app, runtime, afterScheduleAdmission: { admission in
+                captures += 1
+                capturedAdmission = admission
+                withUnsafeCurrentTask { XCTAssertNil($0, "admission must precede NativeBridge's Task") }
+                guard case .authorized(let context) = admission else {
+                    XCTFail("trusted primary source must be admitted")
+                    return
+                }
+                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                app.openSelectedInstance(path: "/")
+                XCTAssertNotEqual(app.runtimeIdentity, originalIdentity)
+            }, onScheduleDelivery: { admission in
+                deliveries += 1
+                guard case .authorized(let context) = admission else {
+                    XCTFail("delivery must carry the original admission")
+                    return
+                }
+                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                XCTAssertNotEqual(context.runtimeIdentity, app.runtimeIdentity)
+            })
+            app.registerRuntimeController(controller, for: runtime)
+            let page = try RuntimePage(controller: controller)
+            defer { page.close() }
+            try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+            let params = scheduleParams(requestID: "old-\(action)", operationID: "target", now: now)
+            let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
+            let store = try XCTUnwrap(appScheduleStore)
+            let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+            if action == "cancel" {
+                var record = cleanupPendingRecord(request: request, owner: owner,
+                    systemIdentifier: "must-remain", updatedAt: now)
+                record.lifecycle = .managedScheduled
+                record.createState = .scheduled
+                XCTAssertTrue(store.save(record))
+            }
+            let payload: [String: Any] = action == "create" ? params : [
+                "requestId": "old-cancel", "operationId": "target", "kind": "alarm", "purpose": "user"
+            ]
+            let bridgeResult = try jsonObject(try await page.systemScheduleOutcome(
+                method: action == "create" ? "systemSchedule.request" : "systemSchedule.cancel", params: payload))
+            // Reopening retires the old factory as well. It may refuse delivery
+            // before AppModel, but may never resolve into the replacement owner.
+            if let receipt = bridgeResult["receipt"] as? [String: Any] {
+                XCTAssertEqual(action, "create")
+                XCTAssertEqual(receipt["state"] as? String, "stale_context")
+            } else {
+                XCTAssertEqual(bridgeResult["errorCode"] as? String, "forbidden")
+            }
+            XCTAssertEqual(captures, 1)
+            XCTAssertLessThanOrEqual(deliveries, 1)
+            let originalAdmission = try XCTUnwrap(capturedAdmission)
+            let deliveredCreate = await app.requestSystemSchedule(request, admission: originalAdmission)
+            XCTAssertEqual(deliveredCreate["state"] as? String, "stale_context")
+            let deliveredCancel = await app.cancelSystemSchedule(.init(requestID: "old-cancel",
+                operationID: "target", kind: .alarm, purpose: .user), admission: originalAdmission)
+            XCTAssertNil(deliveredCancel)
+            XCTAssertEqual(platform.scheduleCalls, 0)
+            XCTAssertEqual(platform.cancelCalls, 0)
+            XCTAssertNil(app.systemScheduleConfirmation)
+            if action == "cancel" {
+                XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
+                               .managedScheduled)
+            }
+        }
     }
 
     @MainActor
@@ -4076,6 +4272,7 @@ final class DirectPathAppTests: XCTestCase {
             WebOrigin(url: baseURL, requiresHTTPS: false)
         )
         var capabilityCalls = 0
+        var admissionCalls = 0
         var requestCalls = 0
         let controller = WebViewController(
             instanceOrigin: origin,
@@ -4084,6 +4281,13 @@ final class DirectPathAppTests: XCTestCase {
                 instanceOrigins: [origin],
                 authenticationOrigins: []
             ),
+            systemScheduleAdmission: { origin in
+                admissionCalls += 1
+                return .authorized(SystemScheduleContext(
+                    owner: .init(accountID: "account-1", ownerEpoch: "popup-test"),
+                    instanceID: "instance-1", origin: origin.serialized,
+                    runtimeIdentity: 0, navigationEpoch: 0))
+            },
             systemScheduleCapabilities: { _ in
                 capabilityCalls += 1
                 return ["contract": 1]
@@ -4162,6 +4366,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(result as? String, #"["forbidden","forbidden"]"#)
         XCTAssertEqual(capabilityCalls, 0)
+        XCTAssertEqual(admissionCalls, 0)
         XCTAssertEqual(requestCalls, 0)
     }
 
@@ -4803,21 +5008,30 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     private func makeRuntimeController(
         _ app: AppModel,
-        _ runtime: MobileRuntimeContext
+        _ runtime: MobileRuntimeContext,
+        afterScheduleAdmission: ((SystemScheduleAdmission?) -> Void)? = nil,
+        onScheduleDelivery: ((SystemScheduleAdmission) -> Void)? = nil
     ) throws -> WebViewController {
         let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
         return WebViewController(
             instanceOrigin: origin,
             websiteDataStore: app.runtimeWebsiteDataStore,
             directStatus: app.directStatusProvider,
+            systemScheduleAdmission: { [weak app] origin in
+                let admission = app?.captureSystemScheduleAdmission(origin: origin)
+                afterScheduleAdmission?(admission)
+                return admission
+            },
             systemScheduleCapabilities: { [weak app] origin in
                 app?.systemScheduleCapabilities(origin: origin)
             },
-            systemScheduleRequest: { [weak app] request, origin in
-                await app?.requestSystemSchedule(request, origin: origin)
+            systemScheduleRequest: { [weak app] request, admission in
+                onScheduleDelivery?(admission)
+                return await app?.requestSystemSchedule(request, admission: admission)
             },
-            systemScheduleCancel: { [weak app] request, origin in
-                await app?.cancelSystemSchedule(request, origin: origin)
+            systemScheduleCancel: { [weak app] request, admission in
+                onScheduleDelivery?(admission)
+                return await app?.cancelSystemSchedule(request, admission: admission)
             },
             didStartLoading: {},
             didFinishLoading: {},
@@ -5099,11 +5313,16 @@ private final class RendezvousRequests {
 private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
     private var permissionContinuation: CheckedContinuation<Void, Never>?
     private var creationResultContinuation: CheckedContinuation<Void, Never>?
+    private var cancelContinuation: CheckedContinuation<Void, Never>?
+    var holdCancelIdentifier: String?
+    var onCancelSuspended: (() -> Void)?
+    private(set) var cancelIdentifiers: [String] = []
     private(set) var scheduleCalls = 0
     private(set) var systemCreationCalls = 0
     private(set) var cancelCalls = 0
     var holdBeforeSystemCreation = false
     var holdAfterSystemCreation = false
+    var onCreationSuspended: (() -> Void)?
     var existenceResult: SystemScheduleExistence = .absentConclusive(.authorized)
     var cancelResult: Result<
         SystemScheduleAuthorization,
@@ -5161,6 +5380,7 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
         if holdAfterSystemCreation {
             await withCheckedContinuation { continuation in
                 creationResultContinuation = continuation
+                onCreationSuspended?()
             }
         }
         return .success(
@@ -5176,9 +5396,23 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
         systemIdentifier: String,
         stillAuthorized: @escaping @MainActor () -> Bool
     ) async -> Result<SystemScheduleAuthorization, SystemSchedulePlatformFailure> {
+        if holdCancelIdentifier == systemIdentifier {
+            await withCheckedContinuation { continuation in
+                cancelContinuation = continuation
+                onCancelSuspended?()
+            }
+        }
         guard stillAuthorized() else { return .failure(.staleContext) }
         cancelCalls += 1
+        cancelIdentifiers.append(systemIdentifier)
         return cancelResult
+    }
+
+    func releaseCancel() {
+        let continuation = cancelContinuation
+        cancelContinuation = nil
+        holdCancelIdentifier = nil
+        continuation?.resume()
     }
 
     func releasePermission() {
@@ -5250,8 +5484,10 @@ private final class RuntimePage {
         self.webView = webView
     }
 
-    func load(_ html: String, baseURL: URL) async throws {
+    func load(_ html: String, baseURL: URL, forwardingNativeNavigation: Bool = false) async throws {
         let webView = try XCTUnwrap(webView)
+        loader.forwardingDelegate = forwardingNativeNavigation ? controller : nil
+        defer { loader.forwardingDelegate = nil }
         try await loader.loadHTML(html, baseURL: baseURL, in: webView)
     }
 
@@ -5313,6 +5549,16 @@ private final class RuntimePage {
             arguments: ["params": params],
             in: nil,
             contentWorld: .page
+        ) as? String
+    }
+
+    func systemScheduleOutcome(method: String, params: [String: Any]) async throws -> String? {
+        try await webView?.callAsyncJavaScript(
+            """
+            try { return JSON.stringify({ receipt: await window.avibeNative.call(method, params) }); }
+            catch (error) { return JSON.stringify({ errorCode: error.code }); }
+            """,
+            arguments: ["method": method, "params": params], in: nil, contentWorld: .page
         ) as? String
     }
 
@@ -5572,6 +5818,15 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<Void, Error>?
     private var navigation: WKNavigation?
     private weak var loadingWebView: WKWebView?
+    weak var forwardingDelegate: WKNavigationDelegate?
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
+        forwardingDelegate?.webView?(webView, didStartProvisionalNavigation: navigation)
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation?) {
+        forwardingDelegate?.webView?(webView, didCommit: navigation)
+    }
 
     func loadHTML(
         _ html: String,
@@ -5592,6 +5847,7 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
+        forwardingDelegate?.webView?(webView, didFinish: navigation)
         finish(in: webView, navigation: navigation, with: .success(()))
     }
 

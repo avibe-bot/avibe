@@ -338,6 +338,7 @@ final class WebViewFactory {
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
     private let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
+    private let systemScheduleAdmission: (WKWebView, WebOrigin) -> SystemScheduleAdmission?
     private let systemScheduleCapabilities: (
         WKWebView,
         WebOrigin
@@ -345,12 +346,12 @@ final class WebViewFactory {
     private let systemScheduleRequest: (
         WKWebView,
         SystemScheduleRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
     private let systemScheduleCancel: (
         WKWebView,
         SystemScheduleCancelRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
@@ -410,6 +411,9 @@ final class WebViewFactory {
         reconcileNotifications: { [weak self] reconcile, origin in
             self?.reconcileNotifications(reconcile, origin) ?? false
         },
+        systemScheduleAdmission: { [weak self] webView, origin in
+            self?.systemScheduleAdmission(webView, origin)
+        },
         systemScheduleCapabilities: { [weak self] webView, origin in
             self?.systemScheduleCapabilities(webView, origin)
         },
@@ -437,6 +441,7 @@ final class WebViewFactory {
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
+        systemScheduleAdmission: @escaping (WKWebView, WebOrigin) -> SystemScheduleAdmission? = { _, _ in nil },
         systemScheduleCapabilities: @escaping (
             WKWebView,
             WebOrigin
@@ -444,12 +449,12 @@ final class WebViewFactory {
         systemScheduleRequest: @escaping (
             WKWebView,
             SystemScheduleRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _, _ in nil },
         systemScheduleCancel: @escaping (
             WKWebView,
             SystemScheduleCancelRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _, _ in nil },
         pushCoordinator: NativePushCoordinator? = nil
     ) {
@@ -468,6 +473,7 @@ final class WebViewFactory {
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleAdmission = systemScheduleAdmission
         self.systemScheduleCapabilities = systemScheduleCapabilities
         self.systemScheduleRequest = systemScheduleRequest
         self.systemScheduleCancel = systemScheduleCancel
@@ -642,14 +648,15 @@ final class WebViewController: UIViewController {
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
     private let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
+    private let systemScheduleAdmission: (WebOrigin) -> SystemScheduleAdmission?
     private let systemScheduleCapabilities: (WebOrigin) -> [String: Any]?
     private let systemScheduleRequest: (
         SystemScheduleRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
     private let systemScheduleCancel: (
         SystemScheduleCancelRequest,
-        WebOrigin
+        SystemScheduleAdmission
     ) async -> [String: Any]?
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
@@ -663,6 +670,7 @@ final class WebViewController: UIViewController {
     private var isInvalidatedForAccountTransition = false
     private var accountActionAvailable = false
     private var primaryNavigationInProgress = false
+    private let systemScheduleWebViewIdentity = UUID()
     private var systemScheduleNavigationEpoch = 0
     /// One Runtime settlement is owed for the current primary main-frame
     /// navigation or policy action. Every terminal delegate exit claims this
@@ -734,6 +742,12 @@ final class WebViewController: UIViewController {
             reconcileNotifications: { [weak self] reconcile, origin in
                 self?.reconcileNotifications(reconcile, origin) ?? false
             },
+            systemScheduleAdmission: { [weak self] sourceWebView, origin in
+                guard let self, self.isTrustedPrimaryScheduleSource(sourceWebView, origin: origin) else {
+                    return nil
+                }
+                return self.systemScheduleAdmission(origin)
+            },
             systemScheduleCapabilities: { [weak self] sourceWebView, origin in
                 guard let self,
                       self.isTrustedPrimaryScheduleSource(
@@ -745,27 +759,11 @@ final class WebViewController: UIViewController {
                 }
                 return self.systemScheduleCapabilities(origin)
             },
-            systemScheduleRequest: { [weak self] sourceWebView, request, origin in
-                guard let self,
-                      self.isTrustedPrimaryScheduleSource(
-                          sourceWebView,
-                          origin: origin
-                      )
-                else {
-                    return nil
-                }
-                return await self.systemScheduleRequest(request, origin)
+            systemScheduleRequest: { [weak self] _, request, admission in
+                await self?.systemScheduleRequest(request, admission)
             },
-            systemScheduleCancel: { [weak self] sourceWebView, request, origin in
-                guard let self,
-                      self.isTrustedPrimaryScheduleSource(
-                          sourceWebView,
-                          origin: origin
-                      )
-                else {
-                    return nil
-                }
-                return await self.systemScheduleCancel(request, origin)
+            systemScheduleCancel: { [weak self] _, request, admission in
+                await self?.systemScheduleCancel(request, admission)
             },
             pushCoordinator: pushCoordinator
         )
@@ -781,6 +779,10 @@ final class WebViewController: UIViewController {
         retainedWebView = created
         observePrimaryNavigationState(created)
         return created
+    }
+
+    var primaryScheduleWebViewIdentity: UUID? {
+        retainedWebView == nil ? nil : systemScheduleWebViewIdentity
     }
 
     func trustedPrimaryScheduleNavigationEpoch(origin: WebOrigin) -> Int? {
@@ -828,16 +830,17 @@ final class WebViewController: UIViewController {
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
+        systemScheduleAdmission: @escaping (WebOrigin) -> SystemScheduleAdmission? = { _ in nil },
         systemScheduleCapabilities: @escaping (
             WebOrigin
         ) -> [String: Any]? = { _ in nil },
         systemScheduleRequest: @escaping (
             SystemScheduleRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _ in nil },
         systemScheduleCancel: @escaping (
             SystemScheduleCancelRequest,
-            WebOrigin
+            SystemScheduleAdmission
         ) async -> [String: Any]? = { _, _ in nil },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
@@ -865,6 +868,7 @@ final class WebViewController: UIViewController {
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleAdmission = systemScheduleAdmission
         self.systemScheduleCapabilities = systemScheduleCapabilities
         self.systemScheduleRequest = systemScheduleRequest
         self.systemScheduleCancel = systemScheduleCancel

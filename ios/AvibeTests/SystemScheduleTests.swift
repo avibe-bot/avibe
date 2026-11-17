@@ -693,7 +693,14 @@ final class SystemScheduleTests: XCTestCase {
         )
         XCTAssertEqual(cancellation.state, .failed)
         XCTAssertEqual(cancellation.error?.code, "item_not_found")
+        await coordinator.retryPendingCleanup()
+        let reopened = SystemScheduleCoordinator(platform: platform,
+            store: FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json")))
+        await reopened.retryPendingCleanup()
         XCTAssertEqual(platform.cancelWriteCalls, 0)
+        XCTAssertTrue(platform.systemItems.contains(try XCTUnwrap(scheduled.systemIdentifier)))
+        XCTAssertEqual(store.record(operationID: request.operationID, instanceID: request.instanceID,
+            owner: firstOwner)?.lifecycle, .detachedRetained)
 
         XCTAssertNotEqual(
             platform.systemIdentifier(for: request, owner: firstOwner),
@@ -753,12 +760,11 @@ final class SystemScheduleTests: XCTestCase {
         )
         XCTAssertNotEqual(newOwner, owner)
         let newContext = makeContext(owner: newOwner)
-        let createRetry = try XCTUnwrap(
-            coordinator.prepare(
-                makeRequest(requestID: "request-after-relogin"),
-                context: newContext
-            )
-        )
+        let retryRequest = makeRequest(requestID: "request-after-relogin")
+        XCTAssertNil(coordinator.prepare(retryRequest, context: newContext))
+        XCTAssertTrue(coordinator.requiresRecovery(retryRequest, context: newContext))
+        let createRetry = await coordinator.schedule(retryRequest, context: newContext,
+            creationFence: { nil }, postWriteFence: { nil })
         XCTAssertEqual(createRetry.state, .staleContext)
         XCTAssertEqual(createRetry.systemIdentifier, receipt.systemIdentifier)
         XCTAssertEqual(platform.scheduleWriteCalls, 1)
@@ -808,6 +814,8 @@ final class SystemScheduleTests: XCTestCase {
         platform.suspendScheduleAfterWrite = true
         let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
 
+        let entered = expectation(description: "create suspended")
+        platform.onScheduleSuspended = { entered.fulfill() }
         let createTask = Task { @MainActor in
             await coordinator.schedule(
                 request,
@@ -816,18 +824,33 @@ final class SystemScheduleTests: XCTestCase {
                 postWriteFence: { nil }
             )
         }
-        await eventually { platform.hasSuspendedSchedule }
-
-        let cancellation = await coordinator.cancel(
-            makeCancelRequest(),
-            context: context,
-            stillCurrent: { true }
-        )
-        XCTAssertEqual(cancellation.state, .cancelled)
-        XCTAssertEqual(platform.cancelWriteCalls, 1)
-
+        await fulfillment(of: [entered], timeout: 3)
+        let admitted = expectation(description: "both cancels admitted")
+        admitted.expectedFulfillmentCount = 2
+        var completions: [String] = []
+        let cancels = ["cancel-one", "cancel-two"].map { id in
+            Task { @MainActor in
+                admitted.fulfill()
+                let receipt = await coordinator.cancel(
+                    makeCancelRequest(requestID: id), context: context, stillCurrent: { true }
+                )
+                completions.append(id)
+                return receipt
+            }
+        }
+        await fulfillment(of: [admitted], timeout: 3)
+        XCTAssertTrue(completions.isEmpty)
+        XCTAssertEqual(platform.cancelCalls, 0)
         platform.resumeSchedule()
         let createReceipt = await createTask.value
+        for (index, task) in cancels.enumerated() {
+            let receipt = await task.value
+            XCTAssertEqual(receipt.requestID, ["cancel-one", "cancel-two"][index])
+            XCTAssertEqual(receipt.state, .cancelled)
+        }
+        XCTAssertEqual(Set(completions), ["cancel-one", "cancel-two"])
+        XCTAssertEqual(completions.count, 2)
+        XCTAssertEqual(platform.cancelWriteCalls, 1)
         XCTAssertEqual(createReceipt.state, .cancelled)
         XCTAssertEqual(
             store.record(
@@ -837,6 +860,349 @@ final class SystemScheduleTests: XCTestCase {
             )?.lifecycle,
             .closedRemoved
         )
+    }
+
+    // F1: a local cleanup trigger must join an outstanding create, not prove
+    // absence before that create can land. Prior tests released create first.
+    @MainActor
+    func testInFlightCreateOwnsLateCompletionAcrossDetachAndCleanup() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let context = makeContext(owner: owner)
+        let request = makeRequest()
+        let platform = SystemSchedulePlatformSpy()
+        let entered = expectation(description: "create suspended")
+        platform.suspendScheduleAfterWrite = true
+        platform.onScheduleSuspended = { entered.fulfill() }
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        let create = Task { @MainActor in
+            await coordinator.schedule(
+                request, context: context,
+                creationFence: { store.isActive(owner: owner) ? nil : .staleContext },
+                postWriteFence: { store.isActive(owner: owner) ? nil : .staleContext }
+            )
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(coordinator.detachActiveOwner())
+        let cleanupEntered = expectation(description: "cleanup admitted")
+        let cleanup = Task { @MainActor in
+            cleanupEntered.fulfill()
+            await coordinator.retryPendingCleanup()
+        }
+        await fulfillment(of: [cleanupEntered], timeout: 3)
+        XCTAssertEqual(platform.cancelCalls, 0, "absence cannot settle while create can land")
+        XCTAssertEqual(store.record(
+            operationID: request.operationID, instanceID: request.instanceID, owner: owner
+        )?.lifecycle, .detachedCleanupPending)
+        platform.resumeSchedule()
+        let receipt = await create.value
+        await cleanup.value
+        XCTAssertEqual(receipt.state, .staleContext)
+        XCTAssertEqual(platform.scheduleWriteCalls, 1)
+        XCTAssertEqual(platform.cancelCalls, 1)
+        XCTAssertTrue(platform.systemItems.isEmpty, "the original slot must remove late success")
+        XCTAssertEqual(store.record(
+            operationID: request.operationID, instanceID: request.instanceID, owner: owner
+        )?.lifecycle, .detachedCleaned)
+    }
+
+    // F3: terminal persistence failure must survive the cleanup -> create
+    // return path, rather than being reconstructed from the older pending row.
+    @MainActor
+    func testCleanupTerminalCommitFailureReachesCreateReceipt() async {
+        let owner = SystemScheduleManagementOwner(accountID: "account-1", ownerEpoch: "epoch-f3")
+        let store = SystemScheduleStoreSpy(activeOwner: owner, failOnSaveCalls: [4])
+        let platform = SystemSchedulePlatformSpy()
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        let request = makeRequest(requestID: "create-f3")
+        let receipt = await coordinator.schedule(
+            request, context: makeContext(owner: owner),
+            creationFence: { nil }, postWriteFence: { .cancelled }
+        )
+        XCTAssertEqual(platform.cancelWriteCalls, 1)
+        XCTAssertTrue(platform.systemItems.isEmpty)
+        XCTAssertEqual(receipt.requestID, "create-f3")
+        XCTAssertEqual(receipt.error?.code, "local_state_write_failed")
+        XCTAssertEqual(receipt.systemIdentifier, platform.systemIdentifier(for: request, owner: owner))
+        XCTAssertEqual(store.record(
+            operationID: request.operationID, instanceID: request.instanceID, owner: owner
+        )?.lifecycle, .managedCleanupPending)
+    }
+
+    // Matrix 1: recovery/retry joins an issued create; the OS lookup is not a
+    // substitute for its completion. The old suite tested sequential replay.
+    @MainActor
+    func testConcurrentRetryJoinsIssuedCreateWithoutRecoveryLookup() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let context = makeContext(owner: owner)
+        let platform = SystemSchedulePlatformSpy()
+        platform.suspendScheduleAfterWrite = true
+        let entered = expectation(description: "create issued")
+        platform.onScheduleSuspended = { entered.fulfill() }
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        var completed: [String] = []
+        let first = Task { @MainActor in
+            let result = await coordinator.schedule(makeRequest(requestID: "first"), context: context,
+                creationFence: { nil }, postWriteFence: { nil })
+            completed.append(result.requestID)
+            return result
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        let joined = expectation(description: "retry admitted")
+        let retry = Task { @MainActor in
+            joined.fulfill()
+            let result = await coordinator.schedule(makeRequest(requestID: "retry"), context: context,
+                creationFence: { nil }, postWriteFence: { nil })
+            completed.append(result.requestID)
+            return result
+        }
+        await fulfillment(of: [joined], timeout: 3)
+        XCTAssertTrue(completed.isEmpty)
+        XCTAssertEqual(platform.existenceCalls, 0)
+        platform.resumeSchedule()
+        let original = await first.value
+        let replay = await retry.value
+        XCTAssertEqual(original.state, .scheduled)
+        XCTAssertEqual(replay.state, .scheduled)
+        XCTAssertEqual(replay.requestID, "retry")
+        XCTAssertEqual(platform.scheduleCalls, 1)
+        XCTAssertEqual(completed.count, 2)
+        XCTAssertEqual(Set(completed), ["first", "retry"])
+    }
+
+    // Matrix 4: a suspended remove has one owner even when both a second
+    // cancel and foreground cleanup arrive. No generation may discard it.
+    @MainActor
+    func testRemoveCompletionIsSharedByCancelAndForegroundCleanup() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let context = makeContext(owner: owner)
+        let platform = SystemSchedulePlatformSpy()
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        _ = await coordinator.schedule(makeRequest(), context: context,
+            creationFence: { nil }, postWriteFence: { nil })
+        let entered = expectation(description: "remove issued")
+        platform.suspendCancelAfterWrite = true
+        platform.onCancelSuspended = { entered.fulfill() }
+        var completed: [String] = []
+        let first = Task { @MainActor in
+            let result = await coordinator.cancel(makeCancelRequest(requestID: "first"),
+                context: context, stillCurrent: { true })
+            completed.append(result.requestID)
+            return result
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        let joined = expectation(description: "two cleanup triggers admitted")
+        joined.expectedFulfillmentCount = 2
+        let second = Task { @MainActor in
+            joined.fulfill()
+            let result = await coordinator.cancel(makeCancelRequest(requestID: "second"),
+                context: context, stillCurrent: { true })
+            completed.append(result.requestID)
+            return result
+        }
+        let foreground = Task { @MainActor in
+            joined.fulfill()
+            await coordinator.retryPendingCleanup()
+        }
+        await fulfillment(of: [joined], timeout: 3)
+        XCTAssertEqual(platform.cancelCalls, 1)
+        XCTAssertTrue(completed.isEmpty)
+        platform.resumeCancel()
+        let one = await first.value
+        let two = await second.value
+        await foreground.value
+        XCTAssertEqual(one.state, .cancelled)
+        XCTAssertEqual(two.state, .cancelled)
+        XCTAssertEqual(Set(completed), ["first", "second"])
+        XCTAssertEqual(completed.count, 2)
+        XCTAssertEqual(platform.cancelCalls, 1)
+        XCTAssertEqual(store.record(operationID: makeRequest().operationID,
+            instanceID: context.instanceID, owner: owner)?.lifecycle, .closedRemoved)
+    }
+
+    // Matrix 6: revocation is a synchronous control event, not queued behind
+    // permission. No OS write follows a late permission completion.
+    @MainActor
+    func testCancelRevokesBeforeSuspendedPermissionReturns() async throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let context = makeContext(owner: owner)
+        let platform = SystemSchedulePlatformSpy()
+        platform.suspendBeforeScheduleWrite = true
+        let entered = expectation(description: "permission suspended")
+        platform.onPermissionSuspended = { entered.fulfill() }
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        let create = Task { @MainActor in
+            await coordinator.schedule(makeRequest(), context: context,
+                creationFence: { nil }, postWriteFence: { nil })
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        let joined = expectation(description: "cancel admitted")
+        let cancel = Task { @MainActor in
+            joined.fulfill()
+            return await coordinator.cancel(makeCancelRequest(), context: context, stillCurrent: { true })
+        }
+        await fulfillment(of: [joined], timeout: 3)
+        platform.resumePermission()
+        let created = await create.value
+        let cancelled = await cancel.value
+        XCTAssertEqual(created.state, .cancelled)
+        XCTAssertEqual(cancelled.state, .cancelled)
+        XCTAssertEqual(platform.scheduleWriteCalls, 0)
+        XCTAssertEqual(platform.cancelWriteCalls, 0)
+    }
+
+    // Matrix 7: fail real file commits at the named intent boundaries. The
+    // committed predecessor remains readable and no dependent write is issued.
+    @MainActor
+    func testRequiredIntentCommitFailurePreventsDependentOSWrites() async throws {
+        for failAt in [2, 3] {
+            let (directory, initial) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
+            var commits = 0
+            let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
+                beforeRename: {
+                    commits += 1
+                    if commits == failAt { throw CocoaError(.fileWriteUnknown) }
+                })
+            let platform = SystemSchedulePlatformSpy()
+            let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+            let request = makeRequest()
+            let result = await coordinator.schedule(request, context: makeContext(owner: owner),
+                creationFence: { nil }, postWriteFence: { .cancelled })
+            XCTAssertEqual(result.error?.code, "local_state_write_failed")
+            XCTAssertEqual(result.requestID, request.requestID)
+            XCTAssertEqual(result.systemIdentifier, platform.systemIdentifier(for: request, owner: owner))
+            XCTAssertEqual(platform.scheduleWriteCalls, failAt == 2 ? 0 : 1)
+            XCTAssertEqual(platform.cancelWriteCalls, 0)
+            if failAt == 2 {
+                XCTAssertFalse(coordinator.requiresRecovery(request, context: makeContext(owner: owner)),
+                               "an unissued create still needs confirmation, not automatic recovery")
+            }
+            XCTAssertEqual(initial.record(operationID: request.operationID, instanceID: request.instanceID,
+                owner: owner)?.lifecycle, failAt == 2 ? .reserved : .creatingUnknown)
+        }
+    }
+
+    // Matrix 8 + 9: one failed terminal commit reaches every affected waiter.
+    // A new coordinator then reopens the actual file and cleans exact identity,
+    // with no recreation and no invented durable success before recovery.
+    @MainActor
+    func testCleanupCommitFailureFansOutAndRestartRecoversDurablePending() async throws {
+        let (directory, initial) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
+        var failCommits = false
+        let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
+            beforeRename: { if failCommits { throw CocoaError(.fileWriteUnknown) } })
+        let platform = SystemSchedulePlatformSpy()
+        platform.respectSystemItems = true
+        platform.suspendScheduleAfterWrite = true
+        platform.suspendCancelAfterWrite = true
+        let created = expectation(description: "create issued")
+        let removed = expectation(description: "remove issued")
+        platform.onScheduleSuspended = { created.fulfill() }
+        platform.onCancelSuspended = { removed.fulfill() }
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        let context = makeContext(owner: owner)
+        var completions: [String] = []
+        let create = Task { @MainActor in
+            let result = await coordinator.schedule(makeRequest(requestID: "create"), context: context,
+                creationFence: { nil }, postWriteFence: { nil })
+            completions.append(result.requestID)
+            return result
+        }
+        await fulfillment(of: [created], timeout: 3)
+        let joined = expectation(description: "retry and two cancels admitted")
+        joined.expectedFulfillmentCount = 3
+        let retry = Task { @MainActor in
+            joined.fulfill()
+            let result = await coordinator.schedule(makeRequest(requestID: "retry"), context: context,
+                creationFence: { nil }, postWriteFence: { nil })
+            completions.append(result.requestID)
+            return result
+        }
+        let cancels = ["cancel-a", "cancel-b"].map { id in
+            Task { @MainActor in
+                joined.fulfill()
+                let result = await coordinator.cancel(makeCancelRequest(requestID: id),
+                    context: context, stillCurrent: { true })
+                completions.append(result.requestID)
+                return result
+            }
+        }
+        await fulfillment(of: [joined], timeout: 3)
+        XCTAssertTrue(completions.isEmpty)
+        platform.resumeSchedule()
+        await fulfillment(of: [removed], timeout: 3)
+        XCTAssertTrue(platform.systemItems.isEmpty)
+        failCommits = true
+        platform.resumeCancel()
+        let receipts = [await create.value, await retry.value, await cancels[0].value, await cancels[1].value]
+        for (index, receipt) in receipts.enumerated() {
+            XCTAssertEqual(receipt.requestID, ["create", "retry", "cancel-a", "cancel-b"][index])
+            XCTAssertEqual(receipt.error?.code, "local_state_write_failed")
+            XCTAssertEqual(receipt.systemIdentifier, platform.systemIdentifier(for: makeRequest(), owner: owner))
+        }
+        XCTAssertEqual(Set(completions), ["create", "retry", "cancel-a", "cancel-b"])
+        XCTAssertEqual(completions.count, 4)
+        XCTAssertEqual(platform.scheduleCalls, 1)
+        XCTAssertEqual(platform.cancelCalls, 1)
+        XCTAssertEqual(initial.record(operationID: makeRequest().operationID,
+            instanceID: context.instanceID, owner: owner)?.lifecycle, .managedCleanupPending)
+        failCommits = false
+        let restarted = SystemScheduleCoordinator(platform: platform,
+            store: FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json")))
+        await restarted.retryPendingCleanup()
+        XCTAssertEqual(platform.scheduleCalls, 1)
+        XCTAssertEqual(platform.cancelCalls, 2)
+        XCTAssertEqual(platform.cancelWriteCalls, 1, "restart sees conclusive absence")
+        XCTAssertEqual(Set(platform.cancelSystemIdentifiers), [platform.systemIdentifier(for: makeRequest(), owner: owner)])
+        XCTAssertEqual(initial.record(operationID: makeRequest().operationID,
+            instanceID: context.instanceID, owner: owner)?.lifecycle, .closedRemoved)
+    }
+
+    // A rename may be visible even when directory fsync reports failure. A
+    // retry must re-establish durability, not accept that visible terminal row.
+    @MainActor
+    func testVisibleButFailedTerminalCommitMustBeRecommittedBeforeReplay() async {
+        for cancelling in [false, true] {
+            let owner = SystemScheduleManagementOwner(accountID: "account-1", ownerEpoch: "visible-failure")
+            let store = SystemScheduleStoreSpy(activeOwner: owner)
+            let platform = SystemSchedulePlatformSpy()
+            let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+            let context = makeContext(owner: owner)
+            store.failAfterSaveCalls = cancelling ? [5] : [3]
+            store.failOnSaveCalls = cancelling ? [6] : [4]
+            let create = await coordinator.schedule(makeRequest(), context: context,
+                creationFence: { nil }, postWriteFence: { nil })
+            let first: SystemScheduleReceipt
+            let retry: SystemScheduleReceipt
+            if cancelling {
+                XCTAssertEqual(create.state, .scheduled)
+                first = await coordinator.cancel(makeCancelRequest(requestID: "first"), context: context,
+                    stillCurrent: { true })
+                retry = await coordinator.cancel(makeCancelRequest(requestID: "retry"), context: context,
+                    stillCurrent: { true })
+            } else {
+                first = create
+                retry = await coordinator.schedule(makeRequest(requestID: "retry"), context: context,
+                    creationFence: { nil }, postWriteFence: { nil })
+            }
+            XCTAssertEqual(first.error?.code, "local_state_write_failed")
+            XCTAssertEqual(retry.error?.code, "local_state_write_failed")
+            XCTAssertEqual(retry.requestID, "retry")
+            XCTAssertNotNil(retry.systemIdentifier)
+            XCTAssertEqual(platform.scheduleWriteCalls, 1)
+            XCTAssertEqual(platform.cancelWriteCalls, cancelling ? 1 : 0)
+        }
     }
 
     @MainActor
@@ -1762,6 +2128,16 @@ private final class SystemSchedulePlatformSpy: SystemSchedulePlatforming {
     var onScheduleWrite: (() -> Void)?
     var onBeforeCancelWrite: (() -> Void)?
     var suspendScheduleAfterWrite = false
+    var onScheduleSuspended: (() -> Void)?
+    var suspendBeforeScheduleWrite = false
+    var onPermissionSuspended: (() -> Void)?
+    var suspendCancelAfterWrite = false
+    var onCancelSuspended: (() -> Void)?
+    var respectSystemItems = false
+    private var permissionContinuation: CheckedContinuation<Void, Never>?
+    private var cancelContinuation: CheckedContinuation<Void, Never>?
+    private(set) var systemItems: Set<String> = []
+    private var suspendedIdentifier: String?
     private var suspendedExistence: CheckedContinuation<
         SystemScheduleExistence,
         Never
@@ -1834,6 +2210,12 @@ private final class SystemSchedulePlatformSpy: SystemSchedulePlatforming {
         stillCurrent: @escaping @MainActor () -> Bool
     ) async -> Result<SystemScheduleSubmission, SystemSchedulePlatformFailure> {
         scheduleCalls += 1
+        if suspendBeforeScheduleWrite {
+            await withCheckedContinuation { continuation in
+                permissionContinuation = continuation
+                onPermissionSuspended?()
+            }
+        }
         onBeforeScheduleWrite?()
         guard stillCurrent() else {
             return .failure(.staleContext)
@@ -1848,16 +2230,23 @@ private final class SystemSchedulePlatformSpy: SystemSchedulePlatforming {
         )
         if suspendScheduleAfterWrite {
             suspendedScheduleResult = result
+            suspendedIdentifier = systemIdentifier
             return await withCheckedContinuation { continuation in
                 suspendedSchedule = continuation
+                onScheduleSuspended?()
             }
         }
+        if case .success = result { systemItems.insert(systemIdentifier) }
         return result
     }
 
     func resumeSchedule() {
         let continuation = suspendedSchedule
         let result = suspendedScheduleResult
+        if case .success = result, let suspendedIdentifier {
+            systemItems.insert(suspendedIdentifier)
+        }
+        self.suspendedIdentifier = nil
         suspendedSchedule = nil
         suspendedScheduleResult = nil
         continuation?.resume(returning: result ?? .failure(.staleContext))
@@ -1874,8 +2263,29 @@ private final class SystemSchedulePlatformSpy: SystemSchedulePlatforming {
         guard stillAuthorized() else {
             return .failure(.staleContext)
         }
-        cancelWriteCalls += 1
+        if !respectSystemItems || systemItems.contains(systemIdentifier) { cancelWriteCalls += 1 }
+        if case .success = cancelResult { systemItems.remove(systemIdentifier) }
+        if suspendCancelAfterWrite {
+            await withCheckedContinuation { continuation in
+                cancelContinuation = continuation
+                onCancelSuspended?()
+            }
+        }
         return cancelResult
+    }
+
+    func resumePermission() {
+        let continuation = permissionContinuation
+        permissionContinuation = nil
+        suspendBeforeScheduleWrite = false
+        continuation?.resume()
+    }
+
+    func resumeCancel() {
+        let continuation = cancelContinuation
+        cancelContinuation = nil
+        suspendCancelAfterWrite = false
+        continuation?.resume()
     }
 
     private func authorization(
@@ -1888,6 +2298,7 @@ private final class SystemSchedulePlatformSpy: SystemSchedulePlatforming {
 @MainActor
 private final class SystemScheduleStoreSpy: SystemScheduleStoring {
     var failOnSaveCalls: Set<Int>
+    var failAfterSaveCalls: Set<Int> = []
     private(set) var activeOwner: SystemScheduleManagementOwner?
     private var saveCalls = 0
     private var ownerGeneration = 1
@@ -1974,7 +2385,7 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
                 && $0.owner == record.owner
         }
         records.append(record)
-        return true
+        return !failAfterSaveCalls.contains(saveCalls)
     }
 
     @discardableResult
