@@ -94,7 +94,7 @@ import type {
 import { DeferredMentionEditor } from './deferredMentionEditor';
 import type { MentionReference } from '../../lib/mentions';
 import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
-import { askVoiceConsent, beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
+import { beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
 
 export type ComposerAttachment = {
   localId: string;
@@ -1293,11 +1293,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // Voice goes to a third-party AI service: the mic button and ⌥Z ask until this account
     // said yes, and record nothing meanwhile. The draft's caret and the
     // conversation are taken first, as they were when the press came (ui/design: composer/voice-consent/*).
-    const consent = await resolveVoicePress();
-    if (consent !== 'granted') {
-      if (consent === 'declined') askVoiceConsent();
-      return;
-    }
+    if (await resolveVoicePress() !== 'granted') return;
     if (recordingStartRef.current || voiceSessionsById.has(voiceKey)) return;
     // Start compiling the capture graph in parallel with the permission and
     // lock steps. The microphone is still requested only by getUserMedia below.
