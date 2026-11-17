@@ -51,9 +51,12 @@ the sandbox unmodified.
 
 ### Rules
 
-1. **Which requests.** A request from the main window's webview for exactly the
+1. **Which requests.** A request from a Workbench's web view for exactly the
    sandbox origin (`https`, `sandbox.avibe.bot`, default port, no credentials),
-   or for exactly `about:blank`. Everything else goes to wry.
+   or for exactly `about:blank`, while that web view is in place (in its
+   window, not hidden, not covered; see "One native window, several web
+   views"). One that is not in place gets `null`. Everything else goes to
+   wry.
 2. **What the window may load.** Only the sandbox origin. Every frame is
    checked when a navigation starts (this also sees each redirect) and when its
    response arrives; the main frame is checked again when it commits. The
@@ -231,8 +234,9 @@ hidden Workbench. Three things follow.
   window that is not hidden lies in front of it. The first matters because
   closing a web view takes it out of its window without changing its `hidden`,
   and the shell does not rely on a closed web view being freed, on its page
-  having stopped, or on a weak reference to it clearing; admission at
-  `window.open` uses the same read. The third
+  having stopped, or on a weak reference to it clearing. Admission at
+  `window.open` makes the same three reads (not the window being on screen
+  or the app being active, which are judged at the commit). The third
   matters because the shell covers a Workbench by hiding it, but one path
   (bringing the main window forward while the account page reloads) can show
   the Workbench under the account screen.
@@ -263,11 +267,24 @@ hidden Workbench. Three things follow.
   erases its data store and then closes it; the hide closes the cards and
   destroys their pages, so that is done before the erase starts. What is
   asked of WebKit there is `_close` on the card's web view, in the same turn
-  as the hide; the erase is asked for in a later turn. Admission at
-  `window.open` is unchanged: it reads only that the opener is in its window,
-  so a hidden Workbench can still reserve an empty window. That window can
-  never be shown; it goes when a sandbox document commits in it, at the
-  deadline, or when the Workbench's web view is closed, whichever is first.
+  as the hide; the erase is asked for in a later turn.
+- **A sandbox window exists only for an opener in place: one that is not in
+  place cannot get one, and one that leaves its place loses those it has in
+  that turn.** So admission at `window.open` reads all three too, and a web
+  view that is not in place gets `null`. Without that, a window created after
+  the opener left its place would not be looked at again until the next
+  announcement or its commit, and a hidden Workbench could reserve a window in
+  a store that is being erased. The native window being on screen and the app
+  being active are not part of this: nothing is retired or erased by those,
+  and a window reserved while the main window is hidden or the app is not
+  active is still judged at its commit. The Workbench page takes a `null` as
+  "the app could not open the window" and moves its passkey steps to the
+  browser for the life of the page, so a page that asked while hidden would
+  stay in the browser hand-off after it is shown again, until it reloads. No
+  path in the Workbench does that: each of its requests for a window is made
+  inside a click on the page (Approve on a request card, Show or Copy on a
+  protected secret, creating a seed wallet, turning off Ask), and the sandbox
+  frame opens its own window moments after one.
 - Not announced: a web view that is moved, resized or reordered over a
   Workbench without being created or shown there. The shell has no such
   path. If it gets one, a card stays on screen without input (every event
@@ -391,11 +408,15 @@ the sandbox's window goes to the browser with every other link.
     delivering. A card displayed while another window of the app is in front
     is the app's frontmost window and key, and neither changes when it starts
     to take input. With the Workbench's own web view hidden: its card is
-    closed, a window it asks for is closed without ever being on screen, and
-    after the web view is shown again a card asked for at once takes no input
-    for two seconds. With another web view of the main window shown in front of
-    the Workbench: a window it asks for is closed without ever being on screen,
-    and after that web view is removed a card takes no input for two seconds.
+    closed, `window.open` returns `null` for the sandbox and for a reserved
+    page and no window is created, and after the web view is shown again a
+    card asked for at once takes no input for two seconds. With another web
+    view of the main window shown in front of the Workbench: `window.open`
+    returns `null`. That web view is then moved aside, the Workbench reserves
+    a window, and the web view is moved back over it; neither move is
+    announced, so the reserved window is still there, and when the sandbox
+    document commits in it the window is closed without ever being on screen.
+    After that web view is removed a card takes no input for two seconds.
     With a replacement web view in the same window, which has a data store of
     its own, three times: the replacement gets the marker and a card that
     shares its data store and writes a cookie every 20 ms; then the

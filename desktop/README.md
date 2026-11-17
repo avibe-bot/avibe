@@ -225,8 +225,13 @@ rules are stated at the top of that file. In short:
   minimized, and Avibe the active app. All of that is read afresh each time it
   matters, at the commit and for every click and key. The shell hides a Workbench's
   web view under its account screen and before it retires one, while the page
-  keeps running; such a page gets no window, and a window it already has is
-  closed. Being told that a web view was hidden or shown only ever closes
+  keeps running; such a page is refused a window when it asks (`window.open`
+  returns `null`), and a window it already has is closed. The same goes for a
+  Workbench that is out of its window or behind another web view: a sandbox
+  window exists only for a Workbench in its place. The Workbench page takes a
+  `null` as "the app could not open the window" and moves its passkey steps
+  to the browser until it reloads; every request it makes comes from a click
+  on the page, so a hidden or covered Workbench has no path to one. Being told that a web view was hidden or shown only ever closes
   windows; the shell does not take it as word of how long the Workbench has
   been in front of the user, and does not assume: the first
   window a Workbench asks for when it has none counts as an arrival, from the
@@ -277,9 +282,7 @@ rules are stated at the top of that file. In short:
   that is no longer in place, closes its sandbox windows and destroys their
   pages before it returns. The shell erases a retired Workbench's data store
   after hiding its web view, so by then the store's sandbox pages have been
-  destroyed. (A hidden Workbench can still reserve an empty window. It is
-  never shown, and it goes when a sandbox document commits in it, at the
-  deadline, or when the Workbench's web view is closed.) A web view moved or
+  destroyed, and a hidden Workbench is refused any new one. A web view moved or
   resized over a Workbench without being created or shown there is not
   announced; the reads above still keep a window from appearing or taking
   input. A sandbox window becomes the key window when its content is

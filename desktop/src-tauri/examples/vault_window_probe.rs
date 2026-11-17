@@ -892,6 +892,17 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             assert_eq!(refused["closed"], true, "{what}: {refused}");
         }
 
+        /// The Workbench asks for a window and is refused at once: `window.open`
+        /// returns `null` and nothing was created, on screen or off.
+        fn refused_at_open(&mut self, what: &str, address: &str) {
+            self.eval(&format!(
+                "probe.report({{ case: 'refused-at-open', none: window.open('{address}') === null }})"
+            ));
+            let refused = self.report("refused-at-open");
+            assert_eq!(refused["none"], true, "{what} was not refused: {refused}");
+            assert_eq!(self.child_windows(), 0, "{what} was created");
+        }
+
         /// Makes the Finder the active app, as a user clicking its window would.
         /// This app's windows stay where they are. (`-[NSApplication deactivate]`
         /// alone leaves the app active when nothing else asks for the front.)
@@ -1069,8 +1080,8 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
 
             // The Workbench's own web view is hidden while its page keeps
             // running, as under the app's account screen. Its card is closed,
-            // it cannot bring up another, and when it is shown again a card is
-            // not live for two seconds.
+            // it is refused another when it asks, and when it is shown again a
+            // card is not live for two seconds.
             let workbench: &tauri::Webview = self.main.as_ref();
             workbench.hide().unwrap();
             self.wait_children("the card of a hidden Workbench to close", |children| {
@@ -1094,8 +1105,11 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 "vault window probe: a hidden Workbench saw its card closed {} ms after it asked",
                 hidden["after"]
             );
-            self.eval(&format!("probe.windows.unseen = window.open('{sandbox}/quiet')"));
-            self.never_on_screen("a sandbox window asked for by a hidden Workbench", "unseen", 0);
+            self.refused_at_open(
+                "a sandbox window asked for by a hidden Workbench",
+                &format!("{sandbox}/quiet"),
+            );
+            self.refused_at_open("a reserved window asked for by a hidden Workbench", "about:blank");
             let back = now_ms();
             let workbench: &tauri::Webview = self.main.as_ref();
             workbench.show().unwrap();
@@ -1103,7 +1117,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
 
             // Another web view of the main window is shown in front of the
             // Workbench, which is not hidden: the Workbench is covered all the
-            // same, and gets no card. Uncovered, the user has arrived.
+            // same, and is refused a window when it asks.
             let in_front = self
                 .main
                 .as_ref()
@@ -1119,8 +1133,37 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 )
                 .unwrap();
             self.on_main(|_| ());
-            self.eval(&format!("probe.windows.covered = window.open('{sandbox}/quiet')"));
-            self.never_on_screen("a sandbox window asked for by a covered Workbench", "covered", 0);
+            self.refused_at_open(
+                "a sandbox window asked for by a covered Workbench",
+                &format!("{sandbox}/quiet"),
+            );
+
+            // The web view in front is moved aside, which nothing announces:
+            // the Workbench is in place again and reserves a window. Then the
+            // web view is moved back over it, which nothing announces either,
+            // so the reserved window is still there when the sandbox document
+            // commits. The Workbench is read again there, and the window is
+            // closed without ever being on screen.
+            in_front.set_position(tauri::LogicalPosition::new(20000., 0.)).unwrap();
+            self.on_main(|_| ());
+            self.eval("probe.windows.covered = window.open('about:blank')");
+            self.wait_children("a window reserved by an uncovered Workbench", |children| {
+                children.len() == 1
+            });
+            in_front.set_position(tauri::LogicalPosition::new(0., 0.)).unwrap();
+            self.on_main(|_| ());
+            assert_eq!(
+                self.child_windows(),
+                1,
+                "moving a web view is not announced, so the reserved window stays until its commit"
+            );
+            self.eval(&format!("probe.windows.covered.location.replace('{sandbox}/quiet')"));
+            self.never_on_screen(
+                "a sandbox window whose Workbench was covered before the commit",
+                "covered",
+                0,
+            );
+            // Uncovered, the user has arrived.
             let back = now_ms();
             in_front.close().unwrap();
             self.on_main(|_| ());

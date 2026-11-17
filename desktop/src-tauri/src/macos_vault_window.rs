@@ -94,7 +94,11 @@
 //!   That covers a web view the shell hides, one it closes without hiding,
 //!   and one that another web view was created in front of. The shell erases
 //!   a retired Workbench's data store after hiding its web view, so a child's
-//!   page is gone before the erase starts. An announcement only ever closes:
+//!   page is gone before the erase starts. A web view that is not in place
+//!   is refused a window when it asks (`window.open` returns `null`), so a
+//!   sandbox window exists only for an opener in place: one that is not in
+//!   place cannot get one, and one that leaves its place loses those it has
+//!   in that turn. An announcement only ever closes:
 //!   the input rule does not wait for one, and wherever it matters the opener
 //!   is read afresh. Nothing is observed and no web view is held, so nothing
 //!   here depends on when a web view is freed. The first window an opener
@@ -763,6 +767,12 @@ fn observe_arrivals(webview: &Retained<WKWebView>, window: &Retained<NSWindow>) 
         .collect()
     };
     (sight, observers)
+}
+
+/// Whether an opener may have one more sandbox window: it is in place, and
+/// the app has fewer than the most it may have.
+fn admits(opener_in_place: bool, children: usize) -> bool {
+    opener_in_place && children < MAX_CHILDREN
 }
 
 type AnnounceImp = unsafe extern "C-unwind" fn(&AnyObject, Sel);
@@ -1521,19 +1531,22 @@ unsafe extern "C-unwind" fn create_web_view(
     // SAFETY: WebKit calls this on the main thread with live arguments.
     let url = unsafe { nsurl(action.request().URL()) };
     let key = opener as *const WKWebView as usize;
-    // Only a web view the support was installed on, and only while it is still
-    // in the window it was installed in. The weak reference alone is not
-    // relied on to say so: a closed web view need not have been freed yet.
-    let in_place = in_home_window(opener).is_some();
+    // Only a web view the support was installed on, and only while it is in
+    // place: in the window it was installed in, not hidden, not covered. A
+    // sandbox window exists only for such an opener, so one that is not in
+    // place is refused here as one that leaves its place loses those it has.
+    // The weak reference alone is not relied on to say that a web view is
+    // still there: a closed web view need not have been freed yet.
+    let in_place = in_place(opener).is_some();
     let admitted = STATE.with_borrow(|state| {
         let opener = state.openers.iter().find(|opener| opener.key == key)?;
-        opener.webview.load().filter(|_| in_place)?;
         let policy = state.policy.clone()?;
         match classify(url.as_ref(), &policy.origin) {
             Request::Other => None,
-            Request::Sandbox | Request::Reserve => {
-                Some((state.children.len() < MAX_CHILDREN).then(|| (policy, opener.app.clone())))
-            }
+            Request::Sandbox | Request::Reserve => Some(
+                admits(opener.webview.load().is_some() && in_place, state.children.len())
+                    .then(|| (policy, opener.app.clone())),
+            ),
         }
     });
     match admitted {
@@ -1915,6 +1928,16 @@ mod tests {
             assert!(!sandbox.holds(&url(raw)), "{raw}");
         }
         assert_eq!(sandbox.title(), "sandbox.avibe.bot");
+    }
+
+    #[test]
+    fn a_window_is_admitted_only_for_an_opener_in_place_and_below_the_cap() {
+        assert!(admits(true, 0));
+        assert!(admits(true, MAX_CHILDREN - 1));
+        assert!(!admits(true, MAX_CHILDREN));
+        // Hidden, covered, or out of its window: whatever the count.
+        assert!(!admits(false, 0));
+        assert!(!admits(false, MAX_CHILDREN));
     }
 
     #[test]
