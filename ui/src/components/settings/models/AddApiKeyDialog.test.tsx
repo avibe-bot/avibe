@@ -267,9 +267,24 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'anthropic', save_unverified: true });
   });
 
+  it('names a refused key once, at save, without a format question', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation('rejected'));
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(
+      new ApiCallError('discovery_failed', 'modelHub.errors.authentication_failed', true, [], [], [], 422),
+    );
+    renderDialog();
+    const user = await fillCredentials();
+    await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
+    await waitFor(() => expect(screen.queryByText(/Detecting the API format/)).toBeNull(), DETECTION_WAIT);
+    // No detection line and no formats forced open: the key, not the format, is the problem.
+    expect(screen.queryByRole('button', { name: 'OpenAI Chat Completions' })).toBeNull();
+    expect(screen.queryByText(/Couldn't recognise the format/)).toBeNull();
+    await clickConfirm(user);
+    expect(await screen.findByText('API key invalid or lacks permission. Check or replace it.')).toBeTruthy();
+  });
+
   it.each([
     ['unknown', /Couldn't recognise the format, so OpenAI Chat Completions is used/],
-    ['rejected', /The endpoint rejected this key/],
   ] as const)('keeps the default when nothing answers (%s) and still saves a picked format', async (authenticated, note) => {
     vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation(authenticated));
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({

@@ -116,11 +116,7 @@ const DetectionNote: React.FC<{ detection: ProtocolDetection }> = ({ detection }
       ? [<CircleCheck key="icon" className="model-hub-ink-mint size-3 shrink-0" aria-hidden="true" />,
         t('settings.models.addKey.protocol.detected', { format: t(PROTOCOL_COPY_KEYS[detection.protocol]) })]
       : detection.kind === 'unrecognised'
-        ? [null, t(detection.rejected
-          ? 'settings.models.addKey.protocol.unrecognisedRejected'
-          : 'settings.models.addKey.protocol.unrecognised', {
-          format: t(PROTOCOL_COPY_KEYS.openai_chat),
-        })]
+        ? [null, t('settings.models.addKey.protocol.unrecognised', { format: t(PROTOCOL_COPY_KEYS.openai_chat) })]
         : [null, t('settings.models.addKey.protocol.idleHint')];
   return (
     <p className="model-hub-add-key-hint model-hub-add-key-protocol-note" role="status" aria-live="polite" data-detection={detection.kind}>
@@ -216,7 +212,10 @@ export const ApiKeySourceForm: React.FC<{
   const [formatOpen, setFormatOpen] = React.useState(false);
   // Detection failing or a choice already made opens the formats by themselves;
   // otherwise one toggle opens them, and stays where it is so focus does too.
-  const formatsForced = draft.protocolChosen || detection.kind === 'unrecognised';
+  // A refused key is not a format question: saving says so in one red line (the
+  // server checks the key), so detection neither speaks nor opens the formats.
+  const keyRefused = detection.kind === 'unrecognised' && detection.rejected;
+  const formatsForced = draft.protocolChosen || (detection.kind === 'unrecognised' && !keyRefused);
   const showFormats = formatOpen || formatsForced;
   const formatsId = React.useId();
   // The name is optional and defaults to the address, so it waits behind 「更多设置」.
@@ -305,7 +304,7 @@ export const ApiKeySourceForm: React.FC<{
               />
             )}
           </div>
-          {draft.protocolChosen ? null : <DetectionNote detection={detection} />}
+          {draft.protocolChosen || keyRefused ? null : <DetectionNote detection={detection} />}
           {!formatsForced && (
             <button
               type="button"
