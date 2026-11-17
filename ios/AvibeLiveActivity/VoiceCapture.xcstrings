@@ -305,6 +305,22 @@
         }
       }
     },
+    "voiceCapture.reason.sendUnknown" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "It may have been sent. Check the Main Bot chat."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可能已经发出去了，请在主伙伴对话里看一下。"
+          }
+        }
+      }
+    },
     "voiceCapture.reason.signIn" : {
       "localizations" : {
         "en" : {

@@ -309,10 +309,17 @@ final class VoiceCaptureController {
             wasRunning = wasRunning || running
             if running, let reason {
                 let now = environment.now()
-                await activity.end(
-                    VoiceCaptureAttributes.ContentState(
+                // A sending take may already have reached the main Bot: say
+                // so, rather than that nothing was sent.
+                let ended = shown.phase == .sending
+                    ? VoiceCaptureAttributes.ContentState(
+                        phase: .needsApp, startedAt: shown.startedAt, endedAt: now, reason: .sendUnknown
+                    )
+                    : VoiceCaptureAttributes.ContentState(
                         phase: .failed, startedAt: shown.startedAt, endedAt: now, reason: reason
-                    ),
+                    )
+                await activity.end(
+                    ended,
                     dismissal: .after(now.addingTimeInterval(Self.sentDismissal))
                 )
             } else {
@@ -534,7 +541,7 @@ final class VoiceCaptureController {
                 // It may have arrived; the chat shows whether it did.
                 state = .idle
                 await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
-                          final: content(for: take, phase: .failed, reason: .sendFailed))
+                          final: content(for: take, phase: .needsApp, reason: .sendUnknown))
                 return
             }
             switch failure {
@@ -563,7 +570,7 @@ final class VoiceCaptureController {
             if posted {
                 state = .idle
                 await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
-                          final: content(for: take, phase: .failed, reason: .sendFailed))
+                          final: content(for: take, phase: .needsApp, reason: .sendUnknown))
             } else {
                 await keepForRetry(take, reason: .transcriptionFailed)
             }

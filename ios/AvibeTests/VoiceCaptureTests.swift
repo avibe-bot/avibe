@@ -155,7 +155,7 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()
         // The POST may have reached the instance; Retry would send it twice.
         XCTAssertEqual(controller.phase, .idle)
-        XCTAssertEqual(world.activities.first?.ended?.reason, .sendFailed)
+        XCTAssertEqual(world.activities.first?.ended?.reason, .sendUnknown, "it may have arrived")
         XCTAssertFalse(VoiceCaptureDetail.retryable(.sendFailed))
         XCTAssertEqual(world.instance.posts, 1)
         XCTAssertEqual(world.audio?.discarded, true)
@@ -242,6 +242,15 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(press, .started)
     }
 
+    func testASendingLeftoverSaysItMayHaveArrived() async {
+        let world = World()
+        let leftover = FakeActivity(.init(phase: .sending, startedAt: Date()))
+        world.leftovers = [leftover]
+        await world.controller().endLeftoversAtLaunch()
+        XCTAssertEqual(leftover.ended?.phase, .needsApp)
+        XCTAssertEqual(leftover.ended?.reason, .sendUnknown)
+    }
+
     func testLaunchEndsALeftoverIsland() async {
         let world = World()
         let leftover = FakeActivity(.init(phase: .listening, startedAt: Date()))
@@ -285,11 +294,11 @@ final class VoiceCaptureTests: XCTestCase {
 
     func testAStaleIslandShowsTheTakeAsInterruptedNotARunningTimer() {
         let start = Date(timeIntervalSince1970: 0)
-        for phase in [VoiceCaptureAttributes.Phase.listening, .sending] {
-            let shown = VoiceCaptureShown(state: .init(phase: phase, startedAt: start), isStale: true).state
-            XCTAssertEqual(shown.phase, .failed)
-            XCTAssertEqual(shown.reason, .interrupted)
-        }
+        let listening = VoiceCaptureShown(state: .init(phase: .listening, startedAt: start), isStale: true).state
+        XCTAssertEqual(listening.phase, .failed)
+        XCTAssertEqual(listening.reason, .interrupted)
+        let sending = VoiceCaptureShown(state: .init(phase: .sending, startedAt: start), isStale: true).state
+        XCTAssertEqual(sending.reason, .sendUnknown, "a stale send may have arrived")
         let fresh = VoiceCaptureShown(state: .init(phase: .listening, startedAt: start), isStale: false).state
         XCTAssertEqual(fresh.phase, .listening)
     }

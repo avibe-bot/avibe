@@ -30,6 +30,9 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         case nothingHeard
         case transcriptionFailed
         case sendFailed
+        /// The message was posted but its outcome is unknown (a lost
+        /// response, or the App ended while sending): it may have arrived.
+        case sendUnknown
         case signIn
         case microphone
         case consent

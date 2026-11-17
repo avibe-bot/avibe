@@ -65,8 +65,9 @@ struct VoiceCaptureShown {
     init(state: VoiceCaptureAttributes.ContentState, isStale: Bool) {
         if isStale, state.phase == .listening || state.phase == .sending {
             var interrupted = state
-            interrupted.phase = .failed
-            interrupted.reason = .interrupted
+            // A stale send may have arrived; a stale recording was not sent.
+            interrupted.phase = state.phase == .sending ? .needsApp : .failed
+            interrupted.reason = state.phase == .sending ? .sendUnknown : .interrupted
             interrupted.endedAt = interrupted.endedAt ?? state.startedAt.addingTimeInterval(Self.timerCap)
             self.state = interrupted
         } else {
@@ -99,6 +100,7 @@ enum VoiceCaptureCopy {
         case .nothingHeard: return text("voiceCapture.reason.nothingHeard")
         case .transcriptionFailed: return text("voiceCapture.reason.transcriptionFailed")
         case .sendFailed: return text("voiceCapture.reason.sendFailed")
+        case .sendUnknown: return text("voiceCapture.reason.sendUnknown")
         case .signIn: return text("voiceCapture.reason.signIn")
         case .microphone: return text("voiceCapture.reason.microphone")
         case .consent: return text("voiceCapture.reason.consent")
