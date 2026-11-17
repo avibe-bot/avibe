@@ -186,7 +186,7 @@ const designFrames = frames([
   // the account as one plain line at the very bottom.
   ...both('account-data', '账号与数据：从账号页推入；隐私政策，最底部一行灰字「删除账号」', () => (
     <NativeSheet><AccountDataSheetPage locked={false} onBack={noop} onPrivacy={noop} onDelete={noop} /></NativeSheet>
-  )),
+  ), { status: 'shipped' }),
   ...both('account-long', '账号 · 完整长邮箱 · 375×667', () => <NativeSheet>{accountPage({ session: session([personal, ...others], personal.id, longEmail) })}</NativeSheet>, { size: SMALL, email: longEmail, status: 'shipped' }),
   // First use: the same rows, as a full page.
   ...both('first-run', '首次使用（还没选过实例）：同样的行，整页', () => firstRunPage(), { status: 'shipped' }),
