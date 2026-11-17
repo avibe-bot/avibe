@@ -57,7 +57,16 @@ mod probe {
 
     use crate::macos_vault_window;
 
-    const RESERVE_DEADLINE: Duration = Duration::from_secs(5);
+    /// How long a window may stay hidden or empty here; the shell's own value
+    /// is 60 s. It is long enough that a case which expects a window to be
+    /// displayed is not undone by a slow moment on the runner: on hosted
+    /// runners the probe has stood still for a little over five seconds at a
+    /// time, and with a deadline of five seconds that closed windows the
+    /// cases were still waiting for. The cases that test the deadline itself
+    /// wait this long.
+    const RESERVE_DEADLINE: Duration = Duration::from_secs(15);
+    /// How much later than the deadline a window may be found closed.
+    const DEADLINE_SLACK: Duration = Duration::from_secs(15);
     const CHILD_CLASS: &std::ffi::CStr = c"AvibeVaultSandboxWebView";
     /// Stands in for the shell's own init scripts: it must run once per
     /// Workbench document and never in a child.
@@ -161,7 +170,7 @@ addEventListener('message', (event) => {
     /// The same page with a stylesheet that outlasts the shell's deadline.
     const STUCK_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>stuck</title>
 <link rel="stylesheet" href="/never.css"><body>"#;
-    const STUCK_HOLD: Duration = Duration::from_secs(8);
+    const STUCK_HOLD: Duration = Duration::from_secs(RESERVE_DEADLINE.as_secs() + 10);
 
     /// A sandbox page that behaves as the sandbox's card does where it matters
     /// here: it arms itself half a second after it starts running, whether or
@@ -312,6 +321,13 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                             probe.run_inactive();
                         }
                     }));
+                    if outcome.is_err() {
+                        println!(
+                            "vault window probe: the last requests for a window and the sandbox windows that \
+                             closed, with where each close came from:\n{}",
+                            trace::seen()
+                        );
+                    }
                     handle.exit(if outcome.is_ok() { 0 } else { 1 });
                 });
             }
@@ -338,6 +354,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 self.activate();
             }
             self.open_workbench();
+            self.on_main_window(|_, workbench| trace::arm(workbench));
             self.reserve_and_draw();
 
             // Pointed at the sandbox, the reserved window appears once that
@@ -671,6 +688,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             );
             assert!(self.on_main_window(|window, _| window.isVisible()));
             self.open_workbench();
+            self.on_main_window(|_, workbench| trace::arm(workbench));
             self.reserve_and_draw();
 
             self.eval(&format!("probe.windows.reserved.location.replace('{sandbox}/quiet')"));
@@ -1210,17 +1228,16 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         /// the unanswered window is closed at the deadline.
         fn a_redirect_never_shows(&mut self) {
             self.eval(&format!(
-                "probe.windows.redirect = window.open('http://localhost:{}/redirect')",
+                r#"probe.windows.redirect = window.open('http://localhost:{}/redirect');
+                   probe.report({{ case: 'redirect-asked', given: !!probe.windows.redirect }})"#,
                 self.port
             ));
-            let pending = self.wait_children("the redirecting window", |children| children.len() == 1);
-            assert!(!pending[0].visible, "{pending:?}");
-            std::thread::sleep(Duration::from_millis(1200));
-            let pending = self.children();
-            assert!(pending.len() == 1 && !pending[0].visible, "{pending:?}");
-            self.wait_children("the deadline to close an unanswered window", |children| {
-                children.is_empty()
-            });
+            let asked = self.report("redirect-asked");
+            assert_eq!(asked["given"], true, "{asked}");
+            // The rule: it is never on screen, and it is gone by the deadline.
+            // How long it stays before that is not promised; a window that
+            // goes early has only gone sooner.
+            self.gone_by_the_deadline("a window whose address redirected elsewhere");
             self.eval("probe.report({ case: 'redirect-closed', closed: probe.windows.redirect.closed })");
             let redirect = self.report("redirect-closed");
             assert_eq!(redirect["closed"], true, "{redirect}");
@@ -1274,7 +1291,28 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             let held = self.children();
             assert_eq!(held.len(), 4, "{held:?}");
             assert!(held.iter().all(|child| !child.visible), "{held:?}");
-            self.wait_children("the deadline to close reserved windows", |children| children.is_empty());
+            self.gone_by_the_deadline("the reserved windows");
+        }
+
+        /// The sandbox windows there are now are never on screen and are all
+        /// closed by the deadline.
+        fn gone_by_the_deadline(&mut self, what: &str) {
+            let started = Instant::now();
+            loop {
+                let children = self.children();
+                assert!(
+                    children.iter().all(|child| !child.visible),
+                    "{what} came on screen: {children:?}"
+                );
+                if children.is_empty() {
+                    return;
+                }
+                assert!(
+                    started.elapsed() < RESERVE_DEADLINE + DEADLINE_SLACK,
+                    "{what} outlived the deadline: {children:?}"
+                );
+                std::thread::sleep(Duration::from_millis(40));
+            }
         }
 
         fn the_main_window_takes_its_children_along(&mut self) {
@@ -1481,6 +1519,169 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         /// Counted without the main window, which may be gone.
         fn child_windows(&self) -> usize {
             self.on_main(|mtm| child_windows(mtm).len())
+        }
+    }
+
+    /// A record of every request for a window and of every sandbox window
+    /// that closes, with the call stack of the close, kept by the probe alone
+    /// and printed when the probe fails. It wraps the module's answer to a
+    /// request and listens for windows closing; the module is not changed
+    /// for it. A window that is gone sooner than a case expects is then
+    /// explained by the failure itself: which rule closed it, and how long
+    /// after it was asked for.
+    mod trace {
+        use std::{
+            backtrace::Backtrace,
+            collections::VecDeque,
+            ptr::NonNull,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Mutex, OnceLock,
+            },
+        };
+
+        use objc2::{
+            rc::Retained,
+            runtime::{AnyObject, Imp, Sel},
+            sel, MainThreadMarker,
+        };
+        use objc2_app_kit::{NSWindow, NSWindowWillCloseNotification};
+        use objc2_foundation::{NSNotification, NSNotificationCenter};
+        use objc2_web_kit::WKWebView;
+
+        type Create = unsafe extern "C-unwind" fn(
+            &AnyObject,
+            Sel,
+            &AnyObject,
+            &AnyObject,
+            &AnyObject,
+            &AnyObject,
+        ) -> *mut AnyObject;
+
+        const KEPT: usize = 80;
+        static ARMED: AtomicBool = AtomicBool::new(false);
+        static ANSWER: OnceLock<Imp> = OnceLock::new();
+        static LINES: Mutex<VecDeque<(f64, String, Option<Backtrace>)>> = Mutex::new(VecDeque::new());
+
+        fn note(line: String, stack: Option<Backtrace>) {
+            let mut lines = LINES.lock().expect("the record");
+            if lines.len() == KEPT {
+                lines.pop_front();
+            }
+            lines.push_back((super::now_ms(), line, stack));
+        }
+
+        /// The record, oldest first, with the time since the entry before.
+        pub fn seen() -> String {
+            let lines = LINES.lock().expect("the record");
+            let mut before = None;
+            lines
+                .iter()
+                .map(|(at, line, stack)| {
+                    let since = before.replace(*at).map_or(0.0, |before: f64| at - before);
+                    // The module's frames on the stack of a close, innermost first.
+                    let from = stack.as_ref().map_or(String::new(), |stack| {
+                        let frames: Vec<String> = stack
+                            .to_string()
+                            .lines()
+                            .map(str::trim)
+                            .filter(|frame| frame.contains("macos_vault_window::"))
+                            .map(|frame| frame.split_once(": ").map_or(frame, |(_, name)| name).to_owned())
+                            .take(4)
+                            .collect();
+                        format!(", from {}", frames.join(" <- "))
+                    });
+                    format!("  [{at:.0}, +{since:.0} ms] {line}{from}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn windows(mtm: MainThreadMarker) -> Vec<isize> {
+            super::child_windows(mtm)
+                .iter()
+                .map(|window| window.windowNumber())
+                .collect()
+        }
+
+        /// A page asked for a new window: the module's answer is passed on
+        /// untouched.
+        unsafe extern "C-unwind" fn asked_for_a_window(
+            delegate: &AnyObject,
+            selector: Sel,
+            opener: &AnyObject,
+            configuration: &AnyObject,
+            action: &AnyObject,
+            features: &AnyObject,
+        ) -> *mut AnyObject {
+            // SAFETY: The implementation this one replaced, for this selector,
+            // called with the arguments WebKit passed.
+            let given = unsafe {
+                let answer = std::mem::transmute::<Imp, Create>(*ANSWER.get().expect("armed"));
+                answer(delegate, selector, opener, configuration, action, features)
+            };
+            if let Some(mtm) = MainThreadMarker::new() {
+                note(
+                    format!(
+                        "a window was asked for and {}; sandbox windows now {:?}",
+                        if given.is_null() { "refused" } else { "given" },
+                        windows(mtm)
+                    ),
+                    None,
+                );
+            }
+            given
+        }
+
+        /// Starts the record, once, for the Workbench's web view.
+        pub fn arm(workbench: &WKWebView) {
+            if ARMED.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            // The answer to a page's request for a window: the module put its
+            // own in front of wry's on the UI delegate's class.
+            // SAFETY: Main thread; the delegate is a live object.
+            if let Some(delegate) = unsafe { workbench.UIDelegate() } {
+                let delegate: &AnyObject = delegate.as_ref();
+                let selector = sel!(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:);
+                let own = delegate.class().instance_methods();
+                if let Some(method) = own.iter().find(|method| method.name() == selector) {
+                    // SAFETY: The wrapper has the method's own signature and
+                    // calls what it replaces.
+                    let answer =
+                        unsafe { method.set_implementation(std::mem::transmute::<Create, Imp>(asked_for_a_window)) };
+                    let _ = ANSWER.set(answer);
+                }
+            }
+            let closing = block2::RcBlock::new(|notification: NonNull<NSNotification>| {
+                // SAFETY: AppKit posts this on the main thread with a live
+                // notification whose object is the window.
+                let notification = unsafe { notification.as_ref() };
+                let Some(object) = notification.object() else {
+                    return;
+                };
+                // SAFETY: The object of this notification is an `NSWindow`.
+                let window: &NSWindow = unsafe { &*Retained::as_ptr(&object).cast::<NSWindow>() };
+                if super::child_view(window).is_none() {
+                    return;
+                }
+                // The frames are named only if the record is printed.
+                note(
+                    format!("sandbox window {} is closing", window.windowNumber()),
+                    Some(Backtrace::force_capture()),
+                );
+            });
+            // SAFETY: Main thread; the name is AppKit's. The observation is
+            // kept for the life of the process.
+            let observer = unsafe {
+                NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                    Some(NSWindowWillCloseNotification),
+                    None,
+                    None,
+                    &closing,
+                )
+            };
+            std::mem::forget(observer);
         }
     }
 
@@ -1749,11 +1950,22 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         assert!(child.own_preferences && !child.fullscreen, "{child:?}");
     }
 
+    /// Answers each connection on a thread of its own. WebKit opens
+    /// connections it does not use at once; read one after another, such a
+    /// connection held every later request up until its read timed out, and
+    /// with it every page load and report of the probe.
     fn serve(listener: TcpListener, port: u16, reports: Sender<Value>) {
         for stream in listener.incoming() {
-            let Ok(mut stream) = stream else {
+            let Ok(stream) = stream else {
                 continue;
             };
+            let reports = reports.clone();
+            std::thread::spawn(move || answer(stream, port, reports));
+        }
+    }
+
+    fn answer(mut stream: std::net::TcpStream, port: u16, reports: Sender<Value>) {
+        {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut request = Vec::new();
             let complete = loop {
@@ -1777,7 +1989,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 }
             };
             if !complete {
-                continue;
+                return;
             }
             let text = String::from_utf8_lossy(&request).into_owned();
             let path = text
@@ -1809,7 +2021,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                         .as_bytes(),
                     );
                 });
-                continue;
+                return;
             }
             let response = match path {
                 "/slow-window" => page(SLOW_PAGE),

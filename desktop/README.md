@@ -325,6 +325,11 @@ and keys to the window through the application's own event dispatch to check
 that none reaches a card before the interval is over. It compiles the
 module's source file into itself, so the library exports nothing for it, and
 enters one step below the signature check, which no test executable can pass.
+When it fails it prints the last requests for a window and every sandbox
+window that closed, with the rule that closed it. Its reserve deadline is 15
+seconds (the shell's is 60), so that a slow moment on a runner does not close
+a window a case is still waiting for; the cases that test the deadline wait
+that long.
 It has three runs: with the app active (windows appear); with the app not
 active (a sandbox window is closed instead, and nothing takes the keyboard, so
 this is the run for a desktop in use); and through the shell's own install on
