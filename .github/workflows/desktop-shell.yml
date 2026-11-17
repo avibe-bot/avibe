@@ -140,6 +140,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked -p avibe-desktop --example vault_window_probe --all-features
+          # The probe compiles macos_vault_window.rs into itself. If it also
+          # links the library, the process holds two copies of the module and
+          # of its Objective-C classes, and what it then shows is not the
+          # module's behavior. Nothing of the library may be in the binary.
+          nm target/debug/examples/vault_window_probe > "$RUNNER_TEMP/vault-window-probe-symbols.txt"
+          library_symbols="$(grep -c 'avibe_desktop_lib' "$RUNNER_TEMP/vault-window-probe-symbols.txt" || true)"
+          if [ "$library_symbols" != "0" ]; then
+            echo "::error::vault_window_probe links avibe_desktop_lib next to its own copy of macos_vault_window.rs ($library_symbols symbols)"
+            exit 1
+          fi
           probe() {
             python src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_probe \
               --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log "$RUNNER_TEMP/vault-window-probe-$1.log" "${@:2}"

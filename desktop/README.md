@@ -336,6 +336,9 @@ and keys to the window through the application's own event dispatch to check
 that none reaches a card before the interval is over. It compiles the
 module's source file into itself, so the library exports nothing for it, and
 enters one step below the signature check, which no test executable can pass.
+For the same reason it must not use anything of the library: that would put a
+second copy of the module and of its Objective-C classes into the process.
+CI fails if the probe's binary contains any symbol of the library.
 It has three runs: with the app active (windows appear); with the app not
 active (a sandbox window is closed instead, and nothing takes the keyboard, so
 this is the run for a desktop in use); and through the shell's own install on
