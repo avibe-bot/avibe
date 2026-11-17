@@ -220,7 +220,10 @@ export const ApiKeySourceForm: React.FC<{
   const showFormats = formatOpen || formatsForced;
   const formatsId = React.useId();
   // The name is optional and defaults to the address, so it waits behind 「更多设置」.
-  const [moreOpen, setMoreOpen] = React.useState(() => draft.displayName.trim() !== '');
+  // Opens on its own when it already holds something the person changed: a name, or
+  // a preset address edited away from the official one (setup remounts this form).
+  const [moreOpen, setMoreOpen] = React.useState(() => draft.displayName.trim() !== ''
+    || (vendorPreset !== null && draft.baseUrl !== vendorPreset.official_base_url));
   // An invalid name keeps its field in view: it is why Save is disabled.
   // An emptied preset address also keeps the section open: Save needs it.
   const moreShown = moreOpen || !nameValid || (Boolean(vendorPreset) && draft.baseUrl.trim() === '');

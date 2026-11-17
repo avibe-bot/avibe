@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { ApiKeySourceForm } from './ApiKeySourceForm';
+import { EMPTY_API_KEY_DRAFT } from './apiKeySourceDraft';
 import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
@@ -342,6 +344,13 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     expect(screen.queryByRole('textbox', { name: /^Base URL$/i })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'More settings' }));
     expect((screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement).value).toBe(API_KEY_VENDOR_PRESETS[0].official_base_url);
+  });
+
+  it('opens 更多设置 on its own when a preset address was edited before the form mounted', async () => {
+    const entry = API_KEY_VENDOR_PRESETS[0];
+    render(<I18nextProvider i18n={i18n}><ApiKeySourceForm draft={{ ...EMPTY_API_KEY_DRAFT, vendor: entry.id, baseUrl: 'https://edited.example/v1' }} disabled={false} revealed={false} onChange={vi.fn()} onToggleReveal={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByRole('textbox', { name: /^Base URL$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'More settings' }).getAttribute('aria-expanded')).toBe('true');
   });
 
   it('keeps the address in view for a custom provider', async () => {
