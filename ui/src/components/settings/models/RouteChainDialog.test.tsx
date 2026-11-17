@@ -546,7 +546,7 @@ describe("RouteChainDialog", () => {
       await user.click(screen.getByRole('button', { name: 'Retry' }));
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
       await act(async () => pending.resolve({ ...inherited, route_origin: 'passthrough' }));
-      await screen.findByText('After restore: original-name passthrough');
+      await screen.findByText('After restore: forwarded as is');
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
       expect(restore).not.toHaveBeenCalled();
       await user.click(pendingUndo());
@@ -693,7 +693,7 @@ describe("RouteChainDialog", () => {
     await screen.findAllByRole('button', { name: 'Remove hop' });
     await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
     await user.click(mode('Follow defaults'));
-    await screen.findByText('After restore: original-name passthrough');
+    await screen.findByText('After restore: forwarded as is');
     expect(preview).toHaveBeenCalledWith('claude', 'opus-5', { manual_override: null });
     expect(document.querySelectorAll('.model-hub-route-hop-model')).toHaveLength(2);
     await user.click(pendingUndo());

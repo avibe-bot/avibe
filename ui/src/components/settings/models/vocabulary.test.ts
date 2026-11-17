@@ -20,12 +20,15 @@ describe('Models page vocabulary', () => {
     const copy = leaves(zh.settings.models).join('\n');
     expect(copy).not.toMatch(/菜单固定|跟随推荐|中枢 Hub|按量\s*\$|映射|供给|来源|型号|自定义顺序|已改为手动|恢复默认/);
     expect(copy).not.toMatch(/按量(?!付费)/);
+    // 「透传」 is jargon; the page says 「原样转发」.
+    expect(copy).not.toMatch(/透传/);
+    expect(leaves(en.settings.models).join('\n')).not.toMatch(/passthrough|pass through/i);
     expect(zh.settings.models.billing.monthly).toBe('订阅');
     expect(zh.settings.models.billing.metered).toBe('按量付费');
     expect(en.settings.models.billing.monthly).toBe('Subscription');
     expect(en.settings.models.billing.metered).toBe('Pay as you go');
-    expect(zh.settings.models.order.subtitle).toBe('作用于自动和透传路由，已保存的手动路由保持不变。');
-    expect(en.settings.models.order.subtitle).toBe('Applies to automatic and passthrough routes. Saved manual routes stay unchanged.');
+    expect(zh.settings.models.order.subtitle).toBe('作用于自动和原样转发的路由，已保存的手动路由保持不变。');
+    expect(en.settings.models.order.subtitle).toBe('Applies to automatic and forwarded-as-is routes. Saved manual routes stay unchanged.');
     expect(zh.settings.models.order.section['heldOut.note']).toBe('可用于手动路由。');
     expect(en.settings.models.order.section['heldOut.note']).toBe('Available for manual routes.');
     expect(zh.settings.models.supplyMode.fixHint).toBe('去「模型」页添加或启用供应商即可恢复。');

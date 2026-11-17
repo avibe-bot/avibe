@@ -40,7 +40,6 @@ describe('SourceRow', () => {
     await userEvent.click(opener);
     expect(onOpen).toHaveBeenCalledWith(source, opener);
     expect(screen.queryByText(/latency/i)).toBeNull();
-    expect(screen.getByText('Anthropic Messages')).toBeTruthy();
   });
 
   it('explains that a healthy source is not currently supplying a route', () => {
@@ -56,14 +55,13 @@ describe('SourceRow', () => {
     expect(screen.getByRole('button', { name: (name) => [
       'Production',
       locale.t('settings.models.upstream.kind.apiKey'),
-      'Anthropic Messages',
       'relay.example/v1',
       'sk-ant-…1234',
       locale.t('settings.models.upstream.state.standby'),
     ].every((part) => name.includes(part)) })).toBeTruthy();
   });
 
-  it('puts the highlighted API key badge before the neutral protocol without a host prefix', () => {
+  it('shows the highlighted API key badge and no API format on the card', () => {
     const { container } = render(
       <I18nextProvider i18n={i18n}>
         <SourceRow
@@ -73,11 +71,11 @@ describe('SourceRow', () => {
       </I18nextProvider>,
     );
     const pills = container.querySelectorAll('.model-hub-pill');
-    expect(pills).toHaveLength(2);
+    expect(pills).toHaveLength(1);
     expect(pills[0].textContent).toMatch(/API key|API Key/);
     expect(pills[0].classList.contains('model-hub-accent-pill--cyan')).toBe(true);
-    expect(pills[1].textContent).toBe('Anthropic Messages');
-    expect(pills[1].getAttribute('title')).toBe('Anthropic Messages');
+    // The format is for people who need it, in the provider's details.
+    expect(container.textContent).not.toContain('Anthropic Messages');
     // The endpoint remains in the independent connection-detail line.
     expect(screen.getByText('relay.example/v1 · sk-ant-…1234')).toBeTruthy();
   });

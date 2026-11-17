@@ -1293,7 +1293,7 @@
       "gateway": {
         "heading": "路由",
         "infoLabel": "什么是路由",
-        "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
+        "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用列出这个模型的供应商；都没列出时，原样转发给符合条件的 API Key 供应商试试。",
         "address": "本机地址：{{address}}（把其他工具接到网关时使用）",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
@@ -1500,7 +1500,7 @@
       "legend": {
         "native": "Agent 管理",
         "viaGateway": "模型网关管理",
-        "passthrough": "透传",
+        "passthrough": "原样转发",
         "connectedUnused": "已启用 · 当前未被使用",
         "takeover": "已自动切换 · 临时使用备用供应商",
         "unavailable": "当前不可用",
@@ -1616,13 +1616,13 @@
         "origin": {
           "automatic": "自动",
           "manual": "手动",
-          "passthrough": "透传",
+          "passthrough": "原样转发",
           "unconfigured": "未配置"
         },
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
-          "passthrough": "未在供应商列表中匹配到此模型。\n按默认顺序向符合条件的 API Key 供应商透传原模型名，由上游处理。",
+          "passthrough": "供应商的模型列表里都没有这个模型。\n会按默认顺序，把这个模型名原样转发给符合条件的 API Key 供应商试试。",
           "unconfigured": "此模型暂无路由。可在路由设置中配置默认路由或恢复自动。"
         },
         "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
@@ -1640,7 +1640,7 @@
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "preview": {
           "automatic": "恢复后：自动匹配",
-          "passthrough": "恢复后：原名透传",
+          "passthrough": "恢复后：原样转发",
           "unconfigured": "恢复后：未配置"
         },
         "previewLoading": "正在读取继承路由…",
@@ -1660,12 +1660,12 @@
       },
       "order": {
         "title": "{{backend}} · 默认路由",
-        "subtitle": "作用于自动和透传路由，已保存的手动路由保持不变。",
+        "subtitle": "作用于自动和原样转发的路由，已保存的手动路由保持不变。",
         "infoLabel": "关于默认路由",
         "reorder": "调整供应商顺序",
         "section": {
           "ordered": "供应商优先级",
-          "ordered.note": "先匹配同名模型；无匹配时按此顺序向符合条件的 API Key 供应商透传。",
+          "ordered.note": "先找列出这个模型的供应商；都没有时，按这个顺序原样转发给符合条件的 API Key 供应商。",
           "heldOut": "未加入默认路由",
           "heldOut.note": "可用于手动路由。"
         },

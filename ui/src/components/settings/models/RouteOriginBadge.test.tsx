@@ -29,7 +29,7 @@ describe('route origin help', () => {
     expect(await screen.findByText(/eligible API-key providers/)).toBeTruthy();
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByText(/eligible API-key providers/)).toBeNull());
-    fireEvent.click(screen.getByRole('button', { name: 'Passthrough' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Forwarded as is' }));
     expect(await screen.findByText(/eligible API-key providers/)).toBeTruthy();
     expect(route).not.toHaveBeenCalled();
   });

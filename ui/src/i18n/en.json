@@ -1293,7 +1293,7 @@
       "gateway": {
         "heading": "Routes",
         "infoLabel": "What routes are",
-        "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
+        "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; a model no provider lists is forwarded as is to eligible API-key providers.",
         "address": "Local address: {{address}} (for connecting other tools to the gateway)",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
@@ -1500,7 +1500,7 @@
       "legend": {
         "native": "Own login",
         "viaGateway": "Managed by Model Hub",
-        "passthrough": "Passthrough",
+        "passthrough": "Forwarded as is",
         "connectedUnused": "Enabled · not currently used",
         "takeover": "Taken over · temporarily rerouted",
         "unavailable": "Supply paused",
@@ -1616,13 +1616,13 @@
         "origin": {
           "automatic": "Automatic",
           "manual": "Manual",
-          "passthrough": "Passthrough",
+          "passthrough": "Forwarded as is",
           "unconfigured": "Unconfigured"
         },
         "help": {
           "automatic": "Matched by model name.\nProvider order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
-          "passthrough": "No matching model was found in the provider lists.\nThe original model name is sent to eligible API-key providers in default order for the provider to handle.",
+          "passthrough": "No provider lists this model.\nIts name is forwarded as is to eligible API-key providers, which try it in default order.",
           "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
         },
         "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
@@ -1640,7 +1640,7 @@
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
           "automatic": "After restore: automatic matching",
-          "passthrough": "After restore: original-name passthrough",
+          "passthrough": "After restore: forwarded as is",
           "unconfigured": "After restore: unconfigured"
         },
         "previewLoading": "Reading inherited routing...",
@@ -1660,12 +1660,12 @@
       },
       "order": {
         "title": "{{backend}} · Default routing",
-        "subtitle": "Applies to automatic and passthrough routes. Saved manual routes stay unchanged.",
+        "subtitle": "Applies to automatic and forwarded-as-is routes. Saved manual routes stay unchanged.",
         "infoLabel": "About default routing",
         "reorder": "Reorder provider",
         "section": {
           "ordered": "Provider priority",
-          "ordered.note": "Match model names first; otherwise pass through to eligible API-key providers in this order.",
+          "ordered.note": "Match model names first; otherwise forward the name as is to eligible API-key providers in this order.",
           "heldOut": "Not in default routing",
           "heldOut.note": "Available for manual routes."
         },
