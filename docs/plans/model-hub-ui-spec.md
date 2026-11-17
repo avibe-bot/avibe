@@ -3237,7 +3237,9 @@ footer offers 「添加订阅」 and 「添加 API Key」, and search services a
 Tools tab. The routes card no longer shows the gateway's local address as a chip; it is a
 line in the 路由 info hint. Before any model provider exists (search services do not
 count), routes cards offer no 添加模型 and no Agent attention footer; an empty catalog says
-providers come first (`gateway.group.emptyNoProviders`).
+providers come first (`gateway.group.emptyNoProviders`). The same state hides 默认路由 on every card and 管理模型 on a card whose catalog is
+empty. A preset vendor's Base URL, already filled in, waits under 更多设置 with the name;
+a custom provider keeps it in view.
 
 **2026-11-17 amendment — plain words on Providers** (Product, first-time-user review).
 A provider card names its kind only; the API format stays in the provider's details. The route

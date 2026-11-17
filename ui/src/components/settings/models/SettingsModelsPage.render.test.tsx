@@ -909,8 +909,9 @@ describe('SettingsModelsPage surface branches', () => {
     expect(within(document.querySelector('.model-hub-shell-head') as HTMLElement).queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
   });
 
-  // The in-process catalog remains configurable with or without models.
-  it.each([false, true])('MH-VIBEY-003 keeps Avibe catalog management available: %s', async (configured) => {
+  // Before any provider, Vibey offers 管理模型 only when its catalog already lists a
+  // model; an empty catalog stays manageable once a provider exists (AgentCard.test).
+  it.each([false, true])('MH-VIBEY-003 before any provider, Vibey offers 管理模型 only with a listed model: %s', async (configured) => {
     const catalogModel: BackendModel = {
       id: 'menu-alias', display_name: null, origin: 'manual', models_dev_id: null,
       context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
@@ -921,7 +922,8 @@ describe('SettingsModelsPage surface branches', () => {
       { ...emptyVibeyAgent, catalog_models: configured ? [catalogModel] : [] },
     ]);
     const vibeyCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
-    expect(within(vibeyCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
+    // Before any provider, an empty catalog offers nothing to manage; a listed model can still be managed.
+    expect(within(vibeyCard).queryAllByRole('button', { name: /^Manage models$|^管理模型$/i })).toHaveLength(configured ? 1 : 0);
     await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
     expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为 Agent 管理/i })).toBeNull();

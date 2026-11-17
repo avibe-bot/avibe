@@ -2192,7 +2192,7 @@
         "field": {
           "vendor": "Provider",
           "vendor.custom": "Other provider · enter its address",
-          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address and API format are filled in for you",
+          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address is filled in for you",
           "vendor.search": "Search providers",
           "vendor.empty": "No provider by that name",
           "name": "Name (optional)",
@@ -7160,6 +7160,7 @@
       "addDescription": "Add one provider to get started. Model Hub handles routing.",
       "addDescriptionMore": "Review detected configurations and confirm migration without retyping",
       "addDescriptionKey": "Enter the provider's address and API key.",
+      "addDescriptionKeyPreset": "Choose the provider and enter its API key.",
       "addMethodsLabel": "Add method",
       "addMethodDetected": "Detected",
       "addMethodSubscription": "Subscription",

@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/context/ToastContext';
 import { ApiKeyField, ApiKeySourceForm } from './ApiKeySourceForm';
-import { apiKeyVendorPreset } from './apiKeyVendors';
+import { apiKeyVendorPreset, modelApiKeyVendorPreset } from './apiKeyVendors';
 import { SearchServiceNotes, SearchServicePrice, SearchVendorFacts } from './SearchServiceParts';
 import {
   apiKeySourceCreate,
@@ -346,7 +346,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           <DialogPrimitive.Description className="model-hub-add-key-subtitle model-hub-ink-muted-b3">
             {replaceMode
               ? t('settings.models.repair.replaceBody')
-              : serviceVendor ? t(serviceVendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.createModelSource', { vendor: serviceVendor.name }) : t('onboarding.providers.addDescriptionKey')}
+              : serviceVendor ? t(serviceVendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.createModelSource', { vendor: serviceVendor.name }) : t(modelApiKeyVendorPreset(draft.vendor) ? 'onboarding.providers.addDescriptionKeyPreset' : 'onboarding.providers.addDescriptionKey')}
           </DialogPrimitive.Description>
         </header>
 
