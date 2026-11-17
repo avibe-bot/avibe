@@ -269,6 +269,8 @@ class FakeAdapter:
             models = await asyncio.wait_for(
                 self.discover_models(vendor, protocol, base_url, credential_ref), timeout=timeout,
             )
+        except ModelDiscoveryError as exc:
+            return ApiKeyModelsCheck(authenticated=False if exc.rejected_status is not None else None)
         except asyncio.TimeoutError:
             return ApiKeyModelsCheck(authenticated=None)
         return ApiKeyModelsCheck(authenticated=None, models=tuple(models))
@@ -2416,10 +2418,11 @@ def test_refresh_source_uses_guarded_success_shape(tmp_path):
         ("normal", ("claude-opus-4-6", "new-model")),
         ("empty", ()),
         ("failure", None),
+        ("rejected", None),
     ],
 )
 @pytest.mark.parametrize("operation", ["refresh", "base_url", "credential"])
-def test_inventory_mutations_share_the_successful_discovery_finalizer(
+def test_inventory_mutations_keep_refresh_and_save_failure_contracts(
     tmp_path,
     operation,
     inventory_case,
@@ -2431,14 +2434,18 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
         vendor="custom",
     )
     source.base_url = "https://old-relay.example/v1"
+    source.last_discovered_at = "2026-07-22T03:00:00+00:00"
     source.state = ModelHubSourceStateConfig(
         status="error",
         detail_key="models.source.error.unclassified",
     )
     config = _config([source])
     adapter = FakeAdapter(discovered=discovered or ())
-    if inventory_case == "failure":
-        adapter.discovery_error = ModelDiscoveryError("injected discovery failure")
+    if inventory_case in {"failure", "rejected"}:
+        adapter.discovery_error = ModelDiscoveryError(
+            "injected discovery failure",
+            rejected_status=401 if inventory_case == "rejected" else None,
+        )
     service, store, _ = _service(tmp_path, config, adapter)
     before = store.load().to_payload()
 
@@ -2459,15 +2466,32 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
             {"key": "replacement-key", **confirmation},
         )
 
-    if inventory_case == "failure":
+    if inventory_case == "rejected" or (inventory_case == "failure" and operation == "refresh"):
         with pytest.raises(ModelHubError) as exc:
             asyncio.run(mutation())
         assert exc.value.code == "discovery_failed"
+        if operation != "refresh":
+            assert exc.value.status == 422
+            assert exc.value.detail == "modelHub.errors.authentication_failed"
         assert store.load().to_payload() == before
         return
 
     result = asyncio.run(mutation())
     persisted = store.load().sources[0]
+    if inventory_case == "failure":
+        # Inventory loss is not a key rejection: save the change pending, with
+        # the exact prior inventory, its timestamp and all configured routes.
+        assert persisted.verification_pending == persisted.credential_generation
+        assert persisted.verification_pending is not None
+        assert persisted.credential_ref != source.credential_ref
+        assert persisted.models == source.models
+        assert persisted.last_discovered_at == source.last_discovered_at
+        assert persisted.base_url == (
+            "https://new-relay.example/v1" if operation == "base_url" else source.base_url
+        )
+        assert store.load().to_payload()["agents"] == before["agents"]
+        assert result["removed_hops"] == result["interrupted"] == []
+        return
     response_source = result["source"]
     assert [model["retired"] for model in response_source["models"]] == [
         False

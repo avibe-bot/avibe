@@ -324,6 +324,8 @@ class FakeAdapter:
             models = await asyncio.wait_for(
                 self.discover_models(vendor, protocol, base_url, credential_ref), timeout=timeout,
             )
+        except ModelDiscoveryError as exc:
+            return ApiKeyModelsCheck(authenticated=False if exc.rejected_status is not None else None)
         except (ModelHubError, asyncio.TimeoutError):
             return ApiKeyModelsCheck(authenticated=None)
         return ApiKeyModelsCheck(authenticated=None, models=tuple(models))
