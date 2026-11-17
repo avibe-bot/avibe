@@ -292,13 +292,13 @@ struct Views {
 }
 impl Views {
     /// The role on screen in the main window. An account document is on
-    /// screen once loaded, and stays there while it reloads after being shown
-    /// (`loaded` is false from commit to finish). Until it is first shown, the
-    /// Runtime it will cover is still the visible one.
-    fn displayed(&self, account_shown: bool) -> Option<&str> {
+    /// screen from the moment `open_account` shows it, including while it
+    /// reloads (`loaded` is false from commit to finish). Until then, even when
+    /// it replaces a shown account document, the Runtime is the visible role.
+    fn displayed(&self) -> Option<&str> {
         self.account
             .as_ref()
-            .filter(|account| account.loaded || account_shown)
+            .filter(|account| account.shown)
             .map(|account| account.label.as_str())
             .or(self.runtime.as_ref().map(|runtime| runtime.label.as_str()))
     }
@@ -328,6 +328,8 @@ struct AccountDocument {
     document: u64,
     admitted: bool,
     loaded: bool,
+    /// Set once `open_account` has shown this document; never cleared.
+    shown: bool,
     token: Option<String>,
     returning: Option<(String, u64)>,
     owner: u64,
@@ -774,9 +776,8 @@ pub(crate) fn displayed_webview(app: &AppHandle) -> Option<Webview> {
     let Some(client) = app.try_state::<Client>() else {
         return app.get_webview(MAIN_WINDOW);
     };
-    let shown = client.view.presentation.lock().expect("presentation").account;
     let views = client.view.views.lock().expect("views");
-    let label = views.displayed(shown)?;
+    let label = views.displayed()?;
     app.get_webview(label)
 }
 pub(crate) fn runtime_webview(app: &AppHandle) -> Option<Webview> {
@@ -1681,6 +1682,7 @@ impl NativeView {
                 document: 0,
                 admitted: false,
                 loaded: false,
+                shown: false,
                 token: None,
                 returning,
                 owner: epoch.value,
@@ -1784,6 +1786,16 @@ impl NativeView {
                 runtime.hide().map_err(failure)?;
             }
             view.show().map_err(failure)?;
+            if let Some(account) = self
+                .views
+                .lock()
+                .expect("views")
+                .account
+                .as_mut()
+                .filter(|account| account.label == label)
+            {
+                account.shown = true;
+            }
             view.set_focus().map_err(failure)?;
             let mut state = self.presentation.lock().expect("presentation");
             state.account = true;
@@ -2385,7 +2397,7 @@ mod tests {
     #[test]
     fn a_reloading_account_page_stays_the_displayed_view() {
         let url = Url::parse("tauri://localhost/account/index.html?view=account").unwrap();
-        let views = |account: Option<bool>| Views {
+        let views = |account: Option<(bool, bool)>| Views {
             runtime: Some(RuntimeDocument {
                 label: "main-runtime-1".into(),
                 window: 1,
@@ -2395,29 +2407,33 @@ mod tests {
                 owner: 1,
                 document: 1,
             }),
-            account: account.map(|loaded| AccountDocument {
+            account: account.map(|(loaded, shown)| AccountDocument {
                 label: "main-account-2".into(),
                 window: 1,
                 destination: url.clone(),
                 document: 2,
                 admitted: false,
                 loaded,
+                shown,
                 token: None,
                 returning: None,
                 owner: 1,
             }),
             ..Views::default()
         };
-        // (account loaded?, account shown?, displayed)
-        for (account, shown, displayed) in [
-            (None, false, "main-runtime-1"),
-            // First load, still hidden: the Runtime is what is on screen.
-            (Some(false), false, "main-runtime-1"),
-            (Some(true), true, "main-account-2"),
+        // (account document (loaded, shown), displayed)
+        for (account, displayed) in [
+            (None, "main-runtime-1"),
+            // A new document loading hidden, including one that replaces a
+            // shown account page while the presentation still says account.
+            (Some((false, false)), "main-runtime-1"),
+            // Loaded but not yet shown by `open_account`.
+            (Some((true, false)), "main-runtime-1"),
+            (Some((true, true)), "main-account-2"),
             // Shown, then reloading: it still covers the Runtime.
-            (Some(false), true, "main-account-2"),
+            (Some((false, true)), "main-account-2"),
         ] {
-            assert_eq!(views(account).displayed(shown), Some(displayed), "{account:?} {shown}");
+            assert_eq!(views(account).displayed(), Some(displayed), "{account:?}");
         }
     }
 
