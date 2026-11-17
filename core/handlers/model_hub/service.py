@@ -81,6 +81,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
 )
 
 from .adapter import (
+    ApiKeyModelsCheck,
     ENGINE_TRANSPORT_TIMEOUT_SECONDS,
     DiscoveredModel,
     EngineAdapter,
@@ -821,6 +822,11 @@ class UnavailableEngineAdapter:
         *,
         start_engine: bool = True,
     ):
+        raise EngineUnavailableError
+
+    async def check_api_key_models(
+        self, vendor, protocol, base_url, *, secret=None, credential_ref=None, timeout,
+    ) -> ApiKeyModelsCheck:
         raise EngineUnavailableError
 
     async def observe_source(
@@ -2707,6 +2713,27 @@ class ModelHubService:
             )
         )
 
+    async def _check_api_key_models(
+        self, source: ModelHubSourceConfig, *, secret: str | None = None,
+    ) -> list[DiscoveredModel] | None:
+        """Only a gated listing accepts a key; failed inventory is not rejection."""
+        result = await self._engine_call(self.adapter.check_api_key_models(
+            source.vendor,
+            source.protocol,
+            source.base_url,
+            secret=secret,
+            credential_ref=source.credential_ref if secret is None else None,
+            timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+        ))
+        if result.authenticated is False:
+            raise ModelHubError(
+                "discovery_failed", status=422,
+                detail="modelHub.errors.authentication_failed",
+            )
+        if result.authenticated is True:
+            source.verification_pending = None
+        return list(result.models) if result.models is not None else None
+
     @staticmethod
     def _observation_protocols(
         vendor: str,
@@ -3233,26 +3260,28 @@ class ModelHubService:
                 now=self.now(),
             )
 
-    async def _finalize_successful_discovery(
+    async def _finalize_source_discovery(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
         source: ModelHubSourceConfig,
-        discovered: list[DiscoveredModel],
+        discovered: list[DiscoveredModel] | None,
         *,
         force: bool,
         confirmed_remove_hops: object,
         confirmed_interruptions: object,
     ) -> tuple[list[dict], list[dict]]:
-        """Apply one successful inventory observation and commit it atomically."""
+        """Commit inventory atomically, preserving it when a key check cannot list."""
 
-        manual = [model for model in source.models if model.provenance == "manual"]
-        overrides = self._apply_discovered_models(
-            source,
-            manual,
-            discovered,
-            allow_empty=True,
-        )
+        overrides = []
+        if discovered is not None:
+            manual = [model for model in source.models if model.provenance == "manual"]
+            overrides = self._apply_discovered_models(
+                source,
+                manual,
+                discovered,
+                allow_empty=True,
+            )
         source.state = ModelHubSourceStateConfig(status="standby")
         removed_hops, interrupted = self._guard_inventory_mutation(
             previous,
@@ -4600,6 +4629,23 @@ class ModelHubService:
                         detail_key="models.source.error.unclassified",
                     )
 
+            if save_unverified and source.protocol != "search":
+                # Reject before provisioning permanent custody. Public or failed
+                # listings remain saveable; only the gated witness clears pending.
+                discovered = await self._check_api_key_models(
+                    source, secret=cast(str, credential_value),
+                )
+                if discovered is not None:
+                    candidate = ModelHubSourceConfig.from_payload(source.to_payload())
+                    try:
+                        self._apply_discovered_models(
+                            candidate, candidate.models, discovered, allow_empty=True,
+                        )
+                    except ModelHubError:
+                        pass
+                    else:
+                        source = candidate
+
             # AC-29 requires the canonical Source validator to run before any
             # permanent credential is provisioned. The placeholder is never saved.
             try:
@@ -4646,10 +4692,8 @@ class ModelHubService:
                     elif outcome == "unknown" and source.protocol == "search":
                         self._mark_source_unverified(source)
                 source = ModelHubSourceConfig.from_payload(source.to_payload())
-                if save_unverified:
-                    # Inventory is useful, not admission evidence. Work on a
-                    # clone so a failed listing cannot partly replace manual
-                    # entries. The new Source still has one commit/nonce owner.
+                if save_unverified and source.protocol == "search":
+                    # Search admission is separate from model-list witnessing.
                     candidate = ModelHubSourceConfig.from_payload(source.to_payload())
                     try:
                         discovered = await asyncio.wait_for(
@@ -4872,7 +4916,7 @@ class ModelHubService:
                 discovered = (
                     [DiscoveredModel(id=model.id) for model in source.models if not model.retired]
                     if search_balance
-                    else await self._discover(source)
+                    else await self._check_api_key_models(source)
                 )
                 if old_credential_ref != replacement_ref:
                     if any(
@@ -4901,7 +4945,7 @@ class ModelHubService:
                     )
                     await self._commit_synced(previous, config)
                 else:
-                    removed_hops, interrupted = await self._finalize_successful_discovery(
+                    removed_hops, interrupted = await self._finalize_source_discovery(
                         previous,
                         config,
                         source,
@@ -5008,10 +5052,10 @@ class ModelHubService:
                     source.credential_ref = replacement_ref
                     self._mark_source_unverified(source)
                     source.base_url = base_url
-                    discovered = await self._discover(source)
+                    discovered = await self._check_api_key_models(source)
                     self.revocations.add(source.id, old_credential_ref)
                     old_revocation_recorded = True
-                    removed_hops, interrupted = await self._finalize_successful_discovery(
+                    removed_hops, interrupted = await self._finalize_source_discovery(
                         previous,
                         config,
                         source,
@@ -5600,7 +5644,7 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
             try:
                 model_ids = await self._discover(source)
-                removed_hops, would_interrupt = await self._finalize_successful_discovery(
+                removed_hops, would_interrupt = await self._finalize_source_discovery(
                     previous,
                     config,
                     source,
