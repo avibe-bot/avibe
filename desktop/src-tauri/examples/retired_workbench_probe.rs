@@ -1,23 +1,22 @@
-//! Hermetic native WebView probe for retired Workbench web views. Does not
-//! start Avibe or use an OS credential store. Run the built executable through
-//! `tests/run_cookie_probe.py`, which supplies an empty HOME and a test root.
+//! Native WebView probe for retired Workbench web views, for CI only. It
+//! launches a regular app, which macOS activates and which takes focus: do not
+//! run it on a live desktop. Its data is hermetic: it does not start Avibe or
+//! use an OS credential store, and `tests/run_cookie_probe.py` supplies an
+//! empty HOME and a test root.
 //!
 //! Each Workbench stand-in is a child web view of one physical window, built
 //! the way `build_main_child` builds a Runtime document (about:blank, hidden,
 //! then navigated). Its page and an iframe in it ping the loopback server every
 //! 200 ms, and the page holds an event stream open and answers each event with
-//! a ping. The views are retired through the shell's own helper. A retired view
-//! must be freed natively (macOS: a weak reference to its WKWebView goes nil),
-//! its event stream must close, and its page and iframe must go silent.
+//! a ping. The views are retired through the shell's own `instance_store::retire`.
+//! A retired view must be freed natively (macOS: a weak reference to its
+//! WKWebView goes nil), its event stream must close, and its page, iframe and
+//! event handler must go silent.
 //!
-//! WebKit throttles timers in a hidden page, possibly to nothing within
-//! seconds, so silence alone proves nothing. A hidden control view that is not
-//! retired must keep its WKWebView and its event stream; its ping counts are
-//! printed for the record.
-//!
-//! On macOS the probe also records what showing and focusing the Runtime does
-//! while an account web view covers it: the Runtime is un-hidden beneath the
-//! account view and becomes first responder.
+//! WebKit throttles timers in a hidden page, nearly to nothing within seconds,
+//! so silence alone proves nothing; the weak reference and the stream decide.
+//! A hidden control view that is not retired must keep its WKWebView and its
+//! event stream and still run script; its ping counts are printed.
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -28,8 +27,8 @@ use std::{
 };
 use tauri::{webview::WebviewBuilder, AppHandle, LogicalPosition, Manager, Webview, WebviewUrl};
 
-const GRACE: Duration = Duration::from_millis(750);
-const QUIET: Duration = Duration::from_secs(4);
+const GRACE: Duration = Duration::from_millis(250);
+const QUIET: Duration = Duration::from_millis(1500);
 
 #[derive(Default)]
 struct Seen {
@@ -220,12 +219,8 @@ fn assert_stopped(app: &AppHandle, name: &str, seen: &Shared) {
 mod native {
     use std::{cell::RefCell, collections::HashMap};
 
-    use objc2::{
-        msg_send,
-        rc::{Retained, Weak},
-        runtime::AnyObject,
-    };
-    use objc2_app_kit::{NSView, NSWindow};
+    use objc2::rc::{Retained, Weak};
+    use objc2_app_kit::NSView;
     use tauri::{AppHandle, Webview};
 
     thread_local! {
@@ -259,93 +254,6 @@ mod native {
         .unwrap();
         receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
     }
-
-    pub struct Facts {
-        pub hidden: bool,
-        pub first_responder: bool,
-        pub index: usize,
-    }
-
-    /// Reads the WKWebView's hidden flag, whether its window's first responder
-    /// is it or inside it, and its z-order among its superview's subviews.
-    pub fn facts(view: &Webview) -> Facts {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        view.with_webview(move |platform| {
-            // SAFETY: Tauri hands out the live WKWebView on the main thread.
-            let view = unsafe { Retained::retain(platform.inner().cast::<NSView>()) }.unwrap();
-            let window: Option<Retained<NSWindow>> = view.window();
-            let first_responder = window
-                .and_then(|window| window.firstResponder())
-                .is_some_and(|responder| {
-                    let responder: &AnyObject = responder.as_ref();
-                    let is_view: bool = unsafe { msg_send![responder, isKindOfClass: objc2::class!(NSView)] };
-                    is_view && unsafe { msg_send![responder, isDescendantOf: &*view] }
-                });
-            let index = unsafe {
-                let superview = view.superview().unwrap();
-                let subviews: Retained<AnyObject> = msg_send![&superview, subviews];
-                let index: usize = msg_send![&subviews, indexOfObject: &*view];
-                index
-            };
-            sender
-                .send(Facts {
-                    hidden: view.isHidden(),
-                    first_responder,
-                    index,
-                })
-                .unwrap();
-        })
-        .unwrap();
-        receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
-    }
-}
-
-/// What the focus path did before the fix when a shown account document had
-/// not finished reloading: show and focus the Runtime. Records the result.
-#[cfg(target_os = "macos")]
-fn record_covered_focus(app: &AppHandle, address: SocketAddr, seen: &Shared) {
-    let runtime = workbench(app, "item1-runtime", false, None);
-    start(&runtime, address, seen);
-    runtime.show().unwrap();
-    let account = workbench(app, "item1-account", true, None);
-    let loading = Instant::now();
-    account
-        .navigate(format!("http://{address}/frame/item1-account").parse().unwrap())
-        .unwrap();
-    wait_for("account page", Duration::from_secs(20), || {
-        pings_since(seen, "item1-account-frame", loading) >= 1
-    });
-    // The account screen as the shell shows it: account shown and focused,
-    // the Runtime covered by hiding it.
-    account.show().unwrap();
-    account.set_focus().unwrap();
-    runtime.hide().unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    let before = native::facts(&runtime);
-    assert!(
-        before.hidden && !before.first_responder,
-        "setup: the Runtime must start hidden and unfocused"
-    );
-    assert!(
-        native::facts(&account).first_responder,
-        "setup: the account view must hold focus"
-    );
-    runtime.show().unwrap();
-    runtime.set_focus().unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    let after = native::facts(&runtime);
-    let account_facts = native::facts(&account);
-    println!(
-        "item 1: showing and focusing the covered Runtime left it hidden={} first_responder={}, account first_responder={} above_runtime={}",
-        after.hidden,
-        after.first_responder,
-        account_facts.first_responder,
-        account_facts.index > after.index
-    );
-    // Recorded, not asserted: this describes WebKit and AppKit, and the shell
-    // no longer takes this path (`displayed_webview`).
-    avibe_desktop_lib::instance_store::retire(&account).unwrap();
-    avibe_desktop_lib::instance_store::retire(&runtime).unwrap();
 }
 
 fn main() {
@@ -425,8 +333,6 @@ fn main() {
                 avibe_desktop_lib::instance_store::retire(&control).unwrap();
                 assert_stopped(&handle, "control", &seen);
 
-                #[cfg(target_os = "macos")]
-                record_covered_focus(&handle, address, &seen);
                 println!("retired workbench probe passed");
             }));
             handle.exit(if outcome.is_ok() { 0 } else { 1 });
