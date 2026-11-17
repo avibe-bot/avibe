@@ -323,8 +323,10 @@
       "switch": "Switch instance",
       "choose": "Choose an instance",
       "privacy": "Privacy policy",
-      "delete": "Delete account",
-      "deleteHint": "Continue to avibe.bot to review the impact and confirm deletion."
+      "delete": "Delete account"
+    },
+    "accountData": {
+      "title": "Account and data"
     },
     "twoFactor": {
       "title": "Confirm it’s you.",

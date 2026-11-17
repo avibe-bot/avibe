@@ -483,8 +483,10 @@ windows, Show Pages, and iframes do not receive these handlers.
 
 ### avibe.bot pages in the App
 
-Account's 隐私政策 / Privacy policy and 删除账号 / Delete account
-(App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
+账号与数据 / Account and data, one page below Account, holds 隐私政策 /
+Privacy policy and, as one plain red line at its very bottom, 删除账号 /
+Delete account, so deletion is never on Account itself (owner, 2026-11-17).
+Both (App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
 is `privacyPolicy` or `accountDeletion` and nothing else; any other value or
 an extra parameter is `invalid_argument`. Native code owns the addresses:
 `/privacy` and `/account/delete` on the control-plane origin

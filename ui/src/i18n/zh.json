@@ -323,8 +323,10 @@
       "switch": "切换实例",
       "choose": "选择实例",
       "privacy": "隐私政策",
-      "delete": "删除账号",
-      "deleteHint": "前往 avibe.bot，查看影响并确认删除。"
+      "delete": "删除账号"
+    },
+    "accountData": {
+      "title": "账号与数据"
     },
     "twoFactor": {
       "title": "确认是你本人。",
