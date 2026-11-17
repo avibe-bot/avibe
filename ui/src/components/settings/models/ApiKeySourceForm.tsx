@@ -200,7 +200,9 @@ export const ApiKeySourceForm: React.FC<{
   onChange: (next: ApiKeySourceDraft, field: keyof ApiKeySourceDraft) => void;
   onToggleReveal: () => void;
   onSubmit?: () => void;
-}> = ({ draft, disabled, revealed, autoFocusKey, keyLabel, onChange, onToggleReveal, onSubmit }) => {
+  /** A save already said the key was refused, so detection's own hint stays quiet. */
+  keyRefusalNamed?: boolean;
+}> = ({ draft, disabled, revealed, autoFocusKey, keyLabel, onChange, onToggleReveal, onSubmit, keyRefusalNamed = false }) => {
   const { t } = useTranslation();
   const vendorOptions = useVendorOptions();
   const vendorPreset = modelApiKeyVendorPreset(draft.vendor);
@@ -212,8 +214,9 @@ export const ApiKeySourceForm: React.FC<{
   const [formatOpen, setFormatOpen] = React.useState(false);
   // Detection failing or a choice already made opens the formats by themselves;
   // otherwise one toggle opens them, and stays where it is so focus does too.
-  // A refused key is not a format question: saving says so in one red line (the
-  // server checks the key), so detection neither speaks nor opens the formats.
+  // A refused key is not a format question: detection says the key was refused, in one
+  // line, and leaves the formats closed. Once a save has named the refusal, that line
+  // is the only one (the server's check is the verdict; detection only hinted).
   const keyRefused = detection.kind === 'unrecognised' && detection.rejected;
   const formatsForced = draft.protocolChosen || (detection.kind === 'unrecognised' && !keyRefused);
   const showFormats = formatOpen || formatsForced;
@@ -304,7 +307,9 @@ export const ApiKeySourceForm: React.FC<{
               />
             )}
           </div>
-          {draft.protocolChosen || keyRefused ? null : <DetectionNote detection={detection} />}
+          {keyRefused
+            ? (keyRefusalNamed ? null : <p className="model-hub-add-key-hint model-hub-add-key-protocol-note" role="status" aria-live="polite" data-detection="refused">{t('settings.models.addKey.protocol.keyRefused')}</p>)
+            : draft.protocolChosen ? null : <DetectionNote detection={detection} />}
           {!formatsForced && (
             <button
               type="button"

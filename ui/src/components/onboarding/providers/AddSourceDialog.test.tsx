@@ -489,6 +489,20 @@ describe('AddSourceDialog — the one write it owns', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
+  it('names a refused key instead of asking to retry the connection', async () => {
+    vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValue(new ApiCallError('discovery_failed', 'modelHub.errors.authentication_failed', true, [], [], [], 422));
+    renderDialog();
+    const user = userEvent.setup();
+    await fill(user);
+
+    await user.click(primary());
+
+    expect(await screen.findByText('API key invalid or lacks permission. Check or replace it.')).toBeTruthy();
+    expect(screen.queryByText(/Your entries are preserved/)).toBeNull();
+    expect((within(body()).getByLabelText('API key') as HTMLInputElement).value).toBe('sk-live-1');
+  });
+
   it('keeps the entries when the server refuses, and sends again on retry', async () => {
     const create = vi.spyOn(modelsApi, 'createApiKeySource')
       .mockRejectedValueOnce(new ApiCallError('source_invalid', 'bad key', true, [], [], [], 400))

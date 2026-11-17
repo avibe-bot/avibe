@@ -2257,6 +2257,7 @@
           "catalogPinned.hint": "Interface supplied by the built-in catalog; credential verification is separate",
           "declared": "Manually specified",
           "detected": "Recognised as {{format}}",
+          "keyRefused": "This address refused the key. Check or replace it.",
           "unrecognised": "Couldn't recognise the format, so {{format}} is used. Pick another if it's wrong."
         },
         "inventory": {
