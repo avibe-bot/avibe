@@ -291,7 +291,9 @@ Unlisted API-key forwarding requires an explicit manual hop (2026-11-17 amendmen
 The `passthrough` enum is retained for compatibility but no longer produced.
 Subscriptions continue automatic matching and known-model manual routes; every unmatched
 automatic model is Unconfigured. Opaque request-level 4xx (except 401/403/429) never
-poison Source health; §4.3 defines machine-code and transport precedence.
+poison Source health, and neither does an unlisted target's `server_error` 5xx, which
+ends that request without fallback or retry; §4.3 defines machine-code and transport
+precedence.
 No underlying engine expansion or OAuth alias substitution is part of this change.
 
 ## Invariants

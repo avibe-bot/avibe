@@ -362,8 +362,9 @@ def classify_outcome(
     outcome: RawCallOutcome,
     *,
     refresh_attempted: bool = False,
+    inventory_member: bool = True,
 ) -> ResolutionDecision:
-    """Apply the signed taxonomy without persisting or exposing raw errors."""
+    """Apply the signed taxonomy using the hop's admission-time inventory fact."""
 
     if outcome.kind == RawOutcomeKind.SUCCESS:
         return ResolutionDecision("return")
@@ -372,6 +373,17 @@ def classify_outcome(
         outcome,
         refresh_attempted=refresh_attempted,
     )
+    if (
+        not inventory_member
+        and outcome.kind is RawOutcomeKind.HTTP_ERROR
+        and outcome.http_status is not None and 500 <= outcome.http_status <= 599
+        and decision.reason == "server_error"
+    ):
+        # An explicit unknown target has no supply evidence to retry against.
+        # Its refusal cannot establish a provider-wide outage, even when a
+        # relay encodes a model refusal as a server error. Named auth/quota
+        # failures retain their taxonomy; actual transport failures do too.
+        return ResolutionDecision("surface", error_code="upstream_request_invalid", downstream_status=400)
     if decision.reason == "rate_limited":
         retry_at = claude_subscription_reset(outcome)
         if retry_at is not None:

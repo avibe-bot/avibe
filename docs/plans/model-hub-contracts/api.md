@@ -791,11 +791,19 @@ does not. Raw HTML/text is not promoted into a code, detail key or log.
 
 Recognized machine codes retain precedence (including a named billing error and the
 existing 408 plus recognized request-code timeout rule). 401/403 retain credential
-handling; 429, 5xx, and actual network failures retain their existing recovery policy.
+handling; 429, 5xx, and actual network failures retain their existing recovery policy,
+except the unlisted-target server refusal below.
 `unclassified_error` remains for residual Source-level unknown failures outside this
 request-status rule. Unrecognized error frames inside 2xx still follow the existing
 turn-only rule. A request refusal alone is not evidence that every model supplied by
 the credential is broken, regardless of whether this particular target is listed.
+
+An HTTP 5xx classified as `server_error` on a hop whose actual target was absent from
+its Source's listed inventory at admission ends the same way: `upstream_request_invalid`,
+downstream 400, terminal `request_nonfallback`, with no fallback to another hop of the
+Route, no retry or recovery wait, and no Source health, cooldown, backoff or event
+(2026-11-17 amendment; supersedes the 2026-11-12 request-private 503 wait). Named
+auth, quota and rate-limit codes and transport failures keep their existing policy.
 
 ## Source creation outcome
 

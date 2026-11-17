@@ -242,7 +242,12 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
 async def test_upstream_refusal_text_reaches_reply_record_and_log(
     tmp_path, caplog, backend, endpoint, status, language, last_said, unlisted,
 ):
-    """MH-UPSTREAM-DETAIL-001: upstream facts survive short copy in the record and log."""
+    """MH-UPSTREAM-DETAIL-001: upstream facts survive short copy in the record and log.
+
+    An unlisted target's server error is a request refusal: one attempt, no fallback or
+    wait, answered with a status the native client does not retry. A connection failure
+    keeps the recovery walk whether or not the target is listed.
+    """
     detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
     if last_said == "connection":
         # The engine's own transport envelope: no upstream answered at all.
@@ -291,9 +296,10 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
                 },
                 json={"model": launch.runtime_model, "stream": False},
             ) as response:
-                assert response.status == status
+                refused = unlisted and last_said != "connection"
+                assert response.status == (400 if refused else status)
         attempts = len(service.adapter.invocations)
-        assert attempts >= 2
+        assert attempts == 1 if refused else attempts >= 2
         diagnostic = f"Native error {status}"
         assert await router.record_native_failure(context, diagnostic) is False
         await emit_backend_failure(controller, context, backend, diagnostic)
@@ -315,7 +321,15 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
             )
         gateway.correlation.settle("turn-detail", settled_by=SETTLED_BY_TERMINAL_RESULT)
         record = service.provenance.get("turn-detail")
-        assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == texts[:attempts]
+        if refused:
+            # The refusal ends the request, so it is the terminal error, not a failed attempt.
+            assert record["failed_attempts"] == []
+            assert record["terminal_error"]["source_id"] == "src_recovery01"
+            assert record["terminal_error"]["configured_model_id"] == models[backend]
+            assert record["terminal_error"]["http_status"] == 500
+            assert record["terminal_error"]["upstream_detail"] == texts[0]
+        else:
+            assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == texts[:attempts]
         assert all(attempt["source_id"] == "src_recovery01" for attempt in record["failed_attempts"])
         assert all(
             attempt.get("http_status") == (None if last_said == "connection" else 500)
@@ -323,7 +337,7 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
         )
         if unlisted:
             assert all(attempt["configured_model_id"] == models[backend] for attempt in record["failed_attempts"])
-        assert record["outcome"] == "exhausted"
+        assert record["outcome"] == ("failed_terminal" if refused else "exhausted")
         logged = [entry.getMessage() for entry in caplog.records if "Model Hub attempt failed" in entry.getMessage()]
         status_text = "http_status=None" if last_said == "connection" else "http_status=500"
         assert len(logged) == attempts and all(status_text in line for line in logged)

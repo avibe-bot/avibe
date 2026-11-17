@@ -736,7 +736,8 @@ applies whether the attempted model is listed or manually forwarded. HTML, plain
 text, empty bodies and unknown JSON codes do not justify disabling the entire relay.
 Recognized machine-code decisions keep their existing precedence, including the
 408 plus recognized request-family timeout rule. 401/403 credential handling,
-429 limits, 5xx and actual transport errors are unchanged. `unclassified_error`
+429 limits, 5xx and actual transport errors are unchanged, except an unlisted
+target's `server_error` 5xx (2026-11-17 amendment below). `unclassified_error`
 remains the residual Source-level classification outside these request/status rules;
 raw upstream bodies never become persisted detail keys or log content.
 
@@ -833,15 +834,21 @@ start the model-output stream.
 | `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after model output began | `stream_started: true`; after first user-visible model output | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
 | `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
-**Request-private unlisted-model 503 ruling (owner 2026-11-12, Part 3).** A literal
-HTTP 503 classified as `server_error` for the actual upstream model sent after
-Hub admission, when that model is absent from the admitted Hub Source inventory,
-does not write shared Source health or cooldown. The same request carries the
-existing server-error recovery window, backoff, and validated `Retry-After`
-advice in private Source-id state. Inventory membership is frozen at admission.
-Listed-model 503s, other statuses, global blockers, and exact HTTP 200 buffered
-overload retain the shared behavior above and below; no model-keyed or persisted
-state is added.
+**Unlisted-target server refusal (2026-11-17 amendment).** This supersedes the
+2026-11-12 Part 3 ruling, which kept a request-private 503 wait; that wait, its
+private Source-id deadlines and its `Retry-After` handling are removed. When the
+actual upstream model a Hub hop sent was absent from that Source's listed inventory
+at transport admission, an HTTP 5xx that the taxonomy classifies as `server_error`
+is a request refusal, not evidence about the Source: surface `upstream_request_invalid`
+(downstream 400, `request_nonfallback`). The request ends on that hop, with no fallback
+to a later hop of the same Route, no retry, no recovery wait, and no Source health,
+cooldown, live backoff or Source event. Membership is frozen at admission and judged
+by the id actually sent, so a mapped manual target counts as unlisted when its Source
+does not list the mapped id; the same membership applies to the credential-refresh
+retry, to probes and to consumed-stream settlement. Named auth, quota and rate-limit
+codes, transport failures (including the engine's own connection labels below),
+listed targets, exact HTTP 200 buffered overload, and every shared blocker keep the
+behavior above and below. No model-keyed or persisted state exists.
 
 The engine answers its own failed upstream connection or read, before any upstream
 response, with one of exactly two JSON error bodies, both produced by the pinned
@@ -1458,8 +1465,12 @@ Their registered `passthrough_model_key` selects
 upstream suffix: “The provider doesn't list {model}; try another model.” Source
 names, each attempted status, and safe upstream text remain in the existing
 collapsed failure details. This is inventory context, not proof of why the
-provider rejected the request. It changes no outcome, wire marker, retry,
-recovery window, Source state, or input holding.
+provider rejected the request. The summary itself changes no outcome, wire marker,
+retry, recovery window, Source state, or input holding. Under the §4.3 unlisted-target
+amendment, a 5xx `server_error` on such a hop already ends as
+`turn.request_nonfallback`, so that is the row where this summary normally appears;
+the other rows carry it only when the last failing unlisted hop fell back for another
+classified reason, such as a rate limit.
 
 `upstream_detail` is display-only text. It is never read by classification and
 never written to resolution events or probes. Owner decision (2026-10-07): an upstream
