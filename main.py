@@ -25,10 +25,14 @@ from vibe.shutdown_diagnostics import ShutdownDiagnostics
 from vibe.macos_session_diagnostics import start_macos_session_diagnostics
 from vibe.process_limits import raise_open_file_limit
 from vibe.runtime import (
+    SERVICE_START_FAILURE_DATABASE_DISK_FULL,
     ServiceAlreadyRunningError,
     acquire_service_instance_lock,
+    clear_service_start_failure,
     consume_shutdown_intent,
+    record_service_start_failure,
     release_service_instance_lock,
+    service_start_failure,
     shutdown_intent_required,
 )
 
@@ -107,6 +111,25 @@ def prepare_sqlite_state(config: Any):
 
     with service_database_preparation():
         return repair_sqlite_state(primary_platform=config.platform, include_counts=False)
+
+
+def _record_database_disk_full(exc: BaseException, logger: logging.Logger) -> None:
+    """Leave the user-facing reason behind when the database update ran out of disk."""
+
+    try:
+        from storage.migrations import DatabaseDiskFullError
+
+        if not isinstance(exc, DatabaseDiskFullError):
+            return
+        record_service_start_failure(
+            SERVICE_START_FAILURE_DATABASE_DISK_FULL,
+            rollback_confirmed=exc.rollback_confirmed is True,
+        )
+        failure = service_start_failure(os.getpid())
+        if failure:
+            logger.error(failure["detail"])
+    except Exception:
+        logger.warning("Could not record the database disk-full startup failure", exc_info=True)
 
 
 def _log_shutdown_signal(logger: logging.Logger, signum: int) -> None:
@@ -192,6 +215,8 @@ def main():
         raise_open_file_limit()
         acquire_service_instance_lock()
         lock_acquired = True
+        # Only this start's own failure may be reported for it.
+        clear_service_start_failure()
 
         # Load configuration
         config = load_config()
@@ -228,7 +253,11 @@ def main():
 
             log_process_snapshot(logger, "service-start")
         sqlite_started_at = time.monotonic()
-        report = prepare_sqlite_state(config)
+        try:
+            report = prepare_sqlite_state(config)
+        except Exception as exc:
+            _record_database_disk_full(exc, logger)
+            raise
         logger.info(
             "SQLite state ready: imported=%s db_path=%s backup_path=%s",
             report.imported,

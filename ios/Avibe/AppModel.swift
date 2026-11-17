@@ -1,6 +1,138 @@
 import SwiftUI
 import WebKit
 
+@MainActor
+protocol RuntimeOpenTimer: AnyObject {
+    func cancel()
+}
+
+@MainActor
+protocol RuntimeOpenTiming: AnyObject {
+    var now: Duration { get }
+
+    func schedule(
+        after delay: Duration,
+        _ action: @escaping @MainActor () -> Void
+    ) -> any RuntimeOpenTimer
+}
+
+@MainActor
+final class ContinuousRuntimeOpenTiming: RuntimeOpenTiming {
+    private final class TaskTimer: RuntimeOpenTimer {
+        private let task: Task<Void, Never>
+
+        init(task: Task<Void, Never>) {
+            self.task = task
+        }
+
+        deinit {
+            task.cancel()
+        }
+
+        func cancel() {
+            task.cancel()
+        }
+    }
+
+    private let clock = ContinuousClock()
+    private let origin: ContinuousClock.Instant
+
+    init() {
+        origin = clock.now
+    }
+
+    var now: Duration {
+        origin.duration(to: clock.now)
+    }
+
+    func schedule(
+        after delay: Duration,
+        _ action: @escaping @MainActor () -> Void
+    ) -> any RuntimeOpenTimer {
+        let boundedDelay = max(.zero, delay)
+        let deadline = clock.now.advanced(by: boundedDelay)
+        return TaskTimer(
+            task: Task { @MainActor in
+                do {
+                    try await Task.sleep(until: deadline, clock: clock)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else {
+                    return
+                }
+                action()
+            }
+        )
+    }
+}
+
+enum RuntimeNavigationStage: Equatable {
+    case started
+    case committed
+    case finished
+    case handedOff
+    case cancelled
+    case restarting
+    case failed
+}
+
+struct RuntimeNavigationEvent: Equatable {
+    let stage: RuntimeNavigationStage
+    let destination: NavigationDestination?
+}
+
+enum RuntimeOpenPhase: Equatable {
+    case preparingRoute
+    case connecting
+    case authenticating
+    case loadingPage
+    case awaitingUser
+    /// A legacy document finished without a product-ready contract. The page
+    /// is handed to the user, but Native does not claim the Runtime is ready.
+    case documentLoaded
+    case failed
+}
+
+struct RuntimeOpenAttempt: Equatable {
+    let id: Int
+    let runtime: MobileRuntimeContext
+    let startedAt: Duration
+    var phase: RuntimeOpenPhase
+    var remainingAutomaticBudget: Duration
+    var automaticStartedAt: Duration?
+    var deadline: Duration?
+    /// A paused authentication/restart budget may resume. A handoff or
+    /// terminal outcome has ended automatic timing even if its loading layer
+    /// remains visible until the user cancels or a later document arrives.
+    var canResumeAutomaticBudget: Bool
+    var isTakingLong: Bool
+
+    /// Native-only v1 has no product-ready signal. `documentLoaded` therefore
+    /// remains explicitly readiness-unknown.
+    var isVerifiedReady: Bool { false }
+}
+
+enum RuntimeOpenTerminationReason: Equatable {
+    case timedOut
+    case cancelled
+    case replaced
+    case accountTransition
+}
+
+struct RuntimeOpenTermination: Equatable {
+    let attemptID: Int
+    let instanceName: String
+    let lastPhase: RuntimeOpenPhase
+    let reason: RuntimeOpenTerminationReason
+}
+
+struct RuntimeOpenNotice: Equatable {
+    let instanceID: String
+    let instanceName: String
+    let lastPhase: RuntimeOpenPhase
+}
+
 enum AppRoute: Equatable {
     case loading
     case onboarding(MobileOnboardingStartScreen)
@@ -38,6 +170,13 @@ enum AppRoute: Equatable {
     }
 }
 
+/// A request to open an instance page that arrived before the bootstrap
+/// settled. Only the latest waits: a newer one replaces it.
+private enum PendingInstanceOpen {
+    case pushTap(PushNotificationTap)
+    case selectedInstance(path: String)
+}
+
 private struct PendingPushOpened {
     let id: String
     let accountID: String
@@ -49,6 +188,14 @@ private struct PendingPushOpened {
 
 @MainActor
 final class AppModel: ObservableObject {
+    /// The total automatic budget of one opening attempt, measured in
+    /// foreground time. It equals WebKit's own request timeout: the
+    /// runtime's first load is a `URLRequest(url:)`, whose default
+    /// `timeoutInterval` is 60 seconds, so a slow but healthy first load (a
+    /// cold cache on a cellular network) is never cut off before WebKit
+    /// itself would give up on it.
+    static let runtimeOpenAutomaticBudget: Duration = .seconds(60)
+
     @Published private(set) var route: AppRoute = .loading
     /// Chosen once when the one runtime-preserving sheet opens. Repeated
     /// presentation requests never replace its document or change its mode.
@@ -59,11 +206,34 @@ final class AppModel: ObservableObject {
     /// The direct listener faulted in this process. One-way: only a new
     /// launch clears it.
     @Published private(set) var directListenerFault = false
+    /// The one Native-owned opening attempt. It outlives `didFinish` as
+    /// `documentLoaded` so callbacks keep their generation fence, but its
+    /// automatic budget ends there because legacy pages have no ready signal.
+    @Published private(set) var runtimeOpenAttempt: RuntimeOpenAttempt?
+    /// Recovery shown over the instance list after an automatic timeout.
+    @Published private(set) var runtimeOpenNotice: RuntimeOpenNotice?
+    @Published private(set) var lastRuntimeOpenTermination: RuntimeOpenTermination?
 
     let websiteDataStore: AccountWebsiteDataStore
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
+    private let runtimeOpenTiming: any RuntimeOpenTiming
+    private let runtimeOpenBudget: Duration
+    private let runtimeOpenLongWait: Duration
+    private let runtimeOpenNotificationCenter: NotificationCenter
+    private var runtimeOpenLifecycleObservers: [NSObjectProtocol] = []
+    private var runtimeOpenDeadlineTimer: (any RuntimeOpenTimer)?
+    private var runtimeOpenLongWaitTimer: (any RuntimeOpenTimer)?
+    /// When the App went to the background, on `runtimeOpenTiming`'s clock;
+    /// `nil` in the foreground. WebKit is suspended there, so the opening
+    /// budget is not charged for that time. It starts `nil`: the App declares
+    /// no background modes, and a scene-based launch can still report
+    /// `.background` before its scene is active, which would stop the clock
+    /// for the whole first session.
+    private var runtimeOpenBackgroundedAt: Duration?
+    /// The background time already excluded from the opening budget.
+    private var runtimeOpenBackgroundTime: Duration = .zero
     /// The direct transport, when this build has one. Without it there is no
     /// path controller: no `direct` capability, no listener, no route write,
     /// no event, and runtimes open exactly as they did before.
@@ -101,7 +271,11 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] = []
     private var hasCompletedBootstrap = false
-    private var pendingPushTap: PushNotificationTap?
+    private var pendingInstanceOpen: PendingInstanceOpen?
+    /// Advances with each open request after the bootstrap, so a shortcut
+    /// that waited for a selection-keeping operation does not open after a
+    /// newer request.
+    private var instanceOpenRequest = 0
     private var pendingPushOpened: PendingPushOpened?
     private var pendingPushOpenedExpiryTask: Task<Void, Never>?
 
@@ -110,7 +284,7 @@ final class AppModel: ObservableObject {
         controlPlane: controlPlane,
         websiteDataStore: websiteDataStore,
         onOpenRuntime: { [weak self] runtime in
-            self?.openRuntime(runtime)
+            _ = self?.openRuntime(runtime)
         },
         onPrepareAccountTransition: { [weak self] in
             self?.prepareForAccountTransition() ?? []
@@ -208,6 +382,10 @@ final class AppModel: ObservableObject {
         pushNotificationCenter: PushNotificationCentering? = nil,
         pushOpenedNow: @escaping () -> Date = Date.init,
         pushOpenedLifetime: TimeInterval = 120,
+        runtimeOpenTiming: (any RuntimeOpenTiming)? = nil,
+        runtimeOpenBudget: Duration = AppModel.runtimeOpenAutomaticBudget,
+        runtimeOpenLongWait: Duration = .seconds(8),
+        runtimeOpenNotificationCenter: NotificationCenter = .default,
         badgeCenter: AppBadgeCentering? = nil
     ) {
         self.defaults = defaults
@@ -231,6 +409,10 @@ final class AppModel: ObservableObject {
         self.pushNotificationCenter = pushNotificationCenter
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
+        self.runtimeOpenTiming = runtimeOpenTiming ?? ContinuousRuntimeOpenTiming()
+        self.runtimeOpenBudget = runtimeOpenBudget
+        self.runtimeOpenLongWait = runtimeOpenLongWait
+        self.runtimeOpenNotificationCenter = runtimeOpenNotificationCenter
         nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
         sessionNotifications = SessionNotificationCleaner(
             center: pushNotificationCenter ?? SystemPushNotificationCenter()
@@ -238,31 +420,65 @@ final class AppModel: ObservableObject {
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
         _ = directPathController
+        runtimeOpenLifecycleObservers = [
+            runtimeOpenNotificationCenter.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.runtimeOpenDidEnterBackground()
+                }
+            },
+            runtimeOpenNotificationCenter.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.runtimeOpenWillEnterForeground()
+                }
+            }
+        ]
 
         Task { [weak self] in
             await self?.bootstrap()
         }
     }
 
+    deinit {
+        for observer in runtimeOpenLifecycleObservers {
+            runtimeOpenNotificationCenter.removeObserver(observer)
+        }
+    }
+
     func registerRuntimeController(
         _ controller: WebViewController,
-        for runtime: MobileRuntimeContext
+        for runtime: MobileRuntimeContext,
+        attemptID: Int? = nil
     ) {
+        let attemptID = attemptID ?? runtimeIdentity
         // The view makes its WebView right after the open, while the push
         // update that open started may already be running: that request
         // keeps the selection, so it does not abandon the browser.
         guard
+            attemptID == runtimeIdentity,
+            runtimeOpenAttempt?.id == attemptID,
+            runtimeOpenAttempt?.runtime == runtime,
             route == .browser(runtime),
             sessionCoordinator.keepsSelectedRuntime(runtime)
         else {
             recordRuntimeReleaseBarrier(
                 controller.invalidateForAccountTransition()
             )
-            if route == .browser(runtime) {
+            if runtimeOpenAttempt?.id == attemptID,
+               route == .browser(runtime)
+            {
                 // This browser is abandoned without `stopRuntime()`, so the
                 // direct selection made for it ends here. A WebView that
                 // arrives late for an older runtime does not reach this
                 // branch and leaves the newer runtime's selection alone.
+                retireRuntimeOpenForAccountTransition()
                 directPathController?.runtimeDidStop()
                 route = .onboarding(.instances)
             }
@@ -320,6 +536,7 @@ final class AppModel: ObservableObject {
             accountSheetStartScreen = startScreen
             route = .accountOverBrowser(runtime)
         default:
+            retireRuntimeOpenForAccountTransition()
             stopRuntime()
             route = .onboarding(fallback)
         }
@@ -350,6 +567,7 @@ final class AppModel: ObservableObject {
         if case .accountOverBrowser = route {
             return
         }
+        retireRuntimeOpenForAccountTransition()
         stopRuntime()
         route = .onboarding(.instances)
     }
@@ -369,9 +587,14 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         hasCompletedBootstrap = true
-        if let pendingPushTap {
-            self.pendingPushTap = nil
-            handlePushTap(pendingPushTap)
+        if let pendingInstanceOpen {
+            self.pendingInstanceOpen = nil
+            switch pendingInstanceOpen {
+            case .pushTap(let tap):
+                handlePushTap(tap)
+            case .selectedInstance(let path):
+                openSelectedInstance(path: path)
+            }
         }
     }
 
@@ -386,9 +609,439 @@ final class AppModel: ObservableObject {
         runtimeController = nil
     }
 
-    private func openRuntime(_ runtime: MobileRuntimeContext) {
-        guard sessionCoordinator.isCurrentRuntime(runtime) else {
+    private func retireRuntimeOpenForAccountTransition() {
+        runtimeOpenNotice = nil
+        guard let attempt = runtimeOpenAttempt else {
             return
+        }
+        lastRuntimeOpenTermination = RuntimeOpenTermination(
+            attemptID: attempt.id,
+            instanceName: attempt.runtime.instance.name,
+            lastPhase: attempt.phase,
+            reason: .accountTransition
+        )
+        runtimeOpenAttempt = nil
+        cancelRuntimeOpenTimers()
+        runtimeIdentity += 1
+    }
+
+    private func cancelRuntimeOpenTimers() {
+        runtimeOpenDeadlineTimer?.cancel()
+        runtimeOpenDeadlineTimer = nil
+        runtimeOpenLongWaitTimer?.cancel()
+        runtimeOpenLongWaitTimer = nil
+    }
+
+    /// The clock every opening budget is measured on: `runtimeOpenTiming`'s
+    /// time with the App's background intervals left out, so it stands
+    /// still while the App is in the background. An attempt's
+    /// `automaticStartedAt` and `deadline` are on this clock.
+    private var runtimeOpenNow: Duration {
+        (runtimeOpenBackgroundedAt ?? runtimeOpenTiming.now)
+            - runtimeOpenBackgroundTime
+    }
+
+    private func automaticRemaining(
+        for attempt: RuntimeOpenAttempt,
+        at now: Duration
+    ) -> Duration {
+        guard let automaticStartedAt = attempt.automaticStartedAt else {
+            return attempt.remainingAutomaticBudget
+        }
+        return max(
+            .zero,
+            attempt.remainingAutomaticBudget - (now - automaticStartedAt)
+        )
+    }
+
+    private func scheduleRuntimeOpenTimers(attemptID: Int) {
+        cancelRuntimeOpenTimers()
+        guard
+            // The budget clock stands still in the background; the return
+            // to the foreground schedules the remainder.
+            runtimeOpenBackgroundedAt == nil,
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.automaticStartedAt != nil
+        else {
+            return
+        }
+        let remaining = automaticRemaining(
+            for: attempt,
+            at: runtimeOpenNow
+        )
+        guard remaining > .zero else {
+            terminateRuntimeOpen(
+                attemptID: attemptID,
+                reason: .timedOut,
+                showsNotice: true
+            )
+            return
+        }
+        runtimeOpenDeadlineTimer = runtimeOpenTiming.schedule(after: remaining) {
+            [weak self] in
+            self?.expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
+        }
+
+        guard !attempt.isTakingLong else {
+            return
+        }
+        let elapsed = runtimeOpenBudget - remaining
+        let untilLongWait = runtimeOpenLongWait - elapsed
+        if untilLongWait <= .zero {
+            markRuntimeOpenAsTakingLong(attemptID: attemptID)
+        } else if untilLongWait < remaining {
+            runtimeOpenLongWaitTimer = runtimeOpenTiming.schedule(
+                after: untilLongWait
+            ) { [weak self] in
+                self?.markRuntimeOpenAsTakingLong(attemptID: attemptID)
+            }
+        }
+    }
+
+    private func markRuntimeOpenAsTakingLong(attemptID: Int) {
+        guard
+            !expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID),
+            var attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.automaticStartedAt != nil,
+            !attempt.isTakingLong
+        else {
+            return
+        }
+        attempt.isTakingLong = true
+        runtimeOpenAttempt = attempt
+    }
+
+    @discardableResult
+    private func expireRuntimeOpenAttemptIfNeeded(attemptID: Int) -> Bool {
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.automaticStartedAt != nil
+        else {
+            return false
+        }
+        guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
+            return false
+        }
+        terminateRuntimeOpen(
+            attemptID: attemptID,
+            reason: .timedOut,
+            showsNotice: true
+        )
+        return true
+    }
+
+    private func beginRuntimeOpenAttempt(
+        for runtime: MobileRuntimeContext,
+        phase: RuntimeOpenPhase
+    ) -> Int {
+        cancelRuntimeOpenTimers()
+        runtimeOpenNotice = nil
+        runtimeIdentity += 1
+        let now = runtimeOpenNow
+        let attempt = RuntimeOpenAttempt(
+            id: runtimeIdentity,
+            runtime: runtime,
+            startedAt: now,
+            phase: phase,
+            remainingAutomaticBudget: runtimeOpenBudget,
+            automaticStartedAt: now,
+            deadline: now + runtimeOpenBudget,
+            canResumeAutomaticBudget: true,
+            isTakingLong: false
+        )
+        runtimeOpenAttempt = attempt
+        scheduleRuntimeOpenTimers(attemptID: attempt.id)
+        return attempt.id
+    }
+
+    private func setRuntimeOpenPhase(
+        _ phase: RuntimeOpenPhase,
+        attemptID: Int
+    ) {
+        guard var attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return
+        }
+        attempt.phase = phase
+        runtimeOpenAttempt = attempt
+    }
+
+    private func pauseRuntimeOpenBudget(
+        phase: RuntimeOpenPhase,
+        canResume: Bool,
+        attemptID: Int
+    ) {
+        guard var attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return
+        }
+        attempt.remainingAutomaticBudget = automaticRemaining(
+            for: attempt,
+            at: runtimeOpenNow
+        )
+        attempt.automaticStartedAt = nil
+        attempt.deadline = nil
+        attempt.canResumeAutomaticBudget = canResume
+        attempt.phase = phase
+        runtimeOpenAttempt = attempt
+        cancelRuntimeOpenTimers()
+    }
+
+    @discardableResult
+    private func resumeRuntimeOpenBudget(attemptID: Int) -> Bool {
+        guard var attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return false
+        }
+        guard attempt.canResumeAutomaticBudget else {
+            return false
+        }
+        guard attempt.automaticStartedAt == nil else {
+            return true
+        }
+        guard attempt.remainingAutomaticBudget > .zero else {
+            terminateRuntimeOpen(
+                attemptID: attemptID,
+                reason: .timedOut,
+                showsNotice: true
+            )
+            return false
+        }
+        let now = runtimeOpenNow
+        attempt.automaticStartedAt = now
+        attempt.deadline = now + attempt.remainingAutomaticBudget
+        runtimeOpenAttempt = attempt
+        scheduleRuntimeOpenTimers(attemptID: attemptID)
+        return true
+    }
+
+    private func finishRuntimeOpenAutomaticBudget(
+        phase: RuntimeOpenPhase,
+        attemptID: Int
+    ) {
+        pauseRuntimeOpenBudget(
+            phase: phase,
+            canResume: false,
+            attemptID: attemptID
+        )
+    }
+
+    private func terminateRuntimeOpen(
+        attemptID: Int,
+        reason: RuntimeOpenTerminationReason,
+        showsNotice: Bool
+    ) {
+        guard let attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return
+        }
+        let termination = RuntimeOpenTermination(
+            attemptID: attempt.id,
+            instanceName: attempt.runtime.instance.name,
+            lastPhase: attempt.phase,
+            reason: reason
+        )
+        lastRuntimeOpenTermination = termination
+        if showsNotice {
+            runtimeOpenNotice = RuntimeOpenNotice(
+                instanceID: attempt.runtime.instance.id,
+                instanceName: attempt.runtime.instance.name,
+                lastPhase: attempt.phase
+            )
+        }
+        runtimeOpenAttempt = nil
+        cancelRuntimeOpenTimers()
+        // Retire the generation before controller teardown, so a callback
+        // already queued on the main actor cannot regain authority.
+        runtimeIdentity += 1
+        clearPendingPushOpened()
+        stopRuntime()
+        route = .onboarding(.instances)
+    }
+
+    func cancelRuntimeOpen(attemptID: Int) {
+        terminateRuntimeOpen(
+            attemptID: attemptID,
+            reason: .cancelled,
+            showsNotice: false
+        )
+    }
+
+    @discardableResult
+    func retryRuntimeOpen(attemptID: Int) -> Bool {
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.phase == .failed,
+            route.runtime == attempt.runtime,
+            sessionCoordinator.isSelectedRuntime(attempt.runtime),
+            authorizeReload(of: attempt.runtime)
+        else {
+            return false
+        }
+        return openRuntime(attempt.runtime)
+    }
+
+    func dismissRuntimeOpenNotice() {
+        runtimeOpenNotice = nil
+    }
+
+    func handleRuntimeNavigation(
+        _ event: RuntimeNavigationEvent,
+        attemptID: Int,
+        runtime: MobileRuntimeContext
+    ) {
+        guard
+            runtimeIdentity == attemptID,
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.runtime == runtime,
+            route.runtime == runtime,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            !expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
+        else {
+            return
+        }
+
+        switch event.stage {
+        case .started:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            if attempt.automaticStartedAt == nil,
+               attempt.canResumeAutomaticBudget,
+               !resumeRuntimeOpenBudget(attemptID: attemptID)
+            {
+                return
+            }
+            setRuntimeOpenPhase(
+                isAuthenticationDestination(event.destination)
+                    ? .authenticating
+                    : .connecting,
+                attemptID: attemptID
+            )
+        case .committed:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            setRuntimeOpenPhase(
+                isAuthenticationDestination(event.destination)
+                    ? .authenticating
+                    : .loadingPage,
+                attemptID: attemptID
+            )
+        case .finished:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            if isAuthenticationDestination(event.destination) {
+                pauseRuntimeOpenBudget(
+                    phase: .awaitingUser,
+                    canResume: attempt.canResumeAutomaticBudget,
+                    attemptID: attemptID
+                )
+            } else {
+                finishRuntimeOpenAutomaticBudget(
+                    phase: .documentLoaded,
+                    attemptID: attemptID
+                )
+                didFinishRuntimeLoading()
+            }
+        case .handedOff:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            pauseRuntimeOpenBudget(
+                phase: attempt.phase,
+                canResume: false,
+                attemptID: attemptID
+            )
+        case .cancelled:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            finishRuntimeOpenAutomaticBudget(
+                phase: .failed,
+                attemptID: attemptID
+            )
+        case .restarting:
+            guard attempt.phase != .documentLoaded,
+                  attempt.phase != .failed
+            else {
+                return
+            }
+            if attempt.automaticStartedAt == nil,
+               attempt.canResumeAutomaticBudget,
+               !resumeRuntimeOpenBudget(attemptID: attemptID)
+            {
+                return
+            }
+            setRuntimeOpenPhase(.connecting, attemptID: attemptID)
+        case .failed:
+            guard attempt.phase != .failed else {
+                return
+            }
+            if attempt.phase == .documentLoaded {
+                setRuntimeOpenPhase(.failed, attemptID: attemptID)
+            } else {
+                finishRuntimeOpenAutomaticBudget(
+                    phase: .failed,
+                    attemptID: attemptID
+                )
+            }
+        }
+    }
+
+    private func isAuthenticationDestination(
+        _ destination: NavigationDestination?
+    ) -> Bool {
+        switch destination {
+        case .authentication, .thirdPartySignIn:
+            return true
+        case .instance, .external, .browserInternal, nil:
+            return false
+        }
+    }
+
+    /// WebKit is suspended in the background, so a slow open there is
+    /// paused, not failing: the budget clock stops here and its timers are
+    /// cancelled. Resigning active alone (Control Center, an alert) keeps
+    /// WebKit running and keeps charging the budget.
+    private func runtimeOpenDidEnterBackground() {
+        guard runtimeOpenBackgroundedAt == nil else {
+            return
+        }
+        runtimeOpenBackgroundedAt = runtimeOpenTiming.now
+        cancelRuntimeOpenTimers()
+    }
+
+    /// Restarts the budget clock and schedules only the running attempt's
+    /// remainder. A timer that could not fire on time (no background
+    /// interval was reported) ends its attempt here.
+    private func runtimeOpenWillEnterForeground() {
+        if let backgroundedAt = runtimeOpenBackgroundedAt {
+            runtimeOpenBackgroundTime += runtimeOpenTiming.now - backgroundedAt
+            runtimeOpenBackgroundedAt = nil
+        }
+        guard let attemptID = runtimeOpenAttempt?.id else {
+            return
+        }
+        scheduleRuntimeOpenTimers(attemptID: attemptID)
+    }
+
+    @discardableResult
+    private func openRuntime(_ runtime: MobileRuntimeContext) -> Bool {
+        guard sessionCoordinator.isSelectedRuntime(runtime) else {
+            return false
         }
         if let pendingPushOpened,
            pendingPushOpened.instanceOrigin
@@ -397,43 +1050,63 @@ final class AppModel: ObservableObject {
             clearPendingPushOpened()
         }
         nativePushCoordinator.resumeAfterAccountActivation()
+        if let previous = runtimeOpenAttempt {
+            lastRuntimeOpenTermination = RuntimeOpenTermination(
+                attemptID: previous.id,
+                instanceName: previous.runtime.instance.name,
+                lastPhase: previous.phase,
+                reason: .replaced
+            )
+        }
+        runtimeOpenAttempt = nil
+        cancelRuntimeOpenTimers()
         stopRuntime()
-        runtimeIdentity += 1
+        let identity = beginRuntimeOpenAttempt(
+            for: runtime,
+            phase: directPathController == nil ? .connecting : .preparingRoute
+        )
         guard let directPathController else {
             route = .browser(runtime)
-            return
+            return true
         }
         // The route for the instance's host must be in place before the
         // runtime's first load (docs/plans/remote-direct-ios.md section 5).
-        // Preparing it waits at most the listener bound; an open that
-        // something newer replaced while it waited loads nothing. Whether
-        // the WebView may be made then is the load gate's decision.
-        let identity = runtimeIdentity
+        // Its wait consumes the same fixed attempt budget as Web navigation.
         route = .loading
         let stillWanted = { [weak self] () -> Bool in
             guard let self else {
                 return false
             }
             return self.runtimeIdentity == identity
+                && self.runtimeOpenAttempt?.id == identity
                 && self.route == .loading
-                && self.sessionCoordinator.isCurrentRuntime(runtime)
+                && self.sessionCoordinator.isSelectedRuntime(runtime)
         }
         Task { [weak self] in
             await directPathController.prepareRoute(
                 for: runtime,
                 stillWanted: stillWanted
             )
-            guard let self, self.runtimeIdentity == identity, self.route == .loading else {
-                // Something newer took the route while this one waited.
+            guard let self,
+                  self.runtimeIdentity == identity,
+                  self.runtimeOpenAttempt?.id == identity,
+                  self.route == .loading,
+                  !self.expireRuntimeOpenAttemptIfNeeded(attemptID: identity)
+            else {
+                // Something newer took the route, or the total budget ended.
                 return
             }
-            guard self.sessionCoordinator.isCurrentRuntime(runtime) else {
-                // The selection ended underneath; do not leave the spinner.
-                self.route = .onboarding(.instances)
+            guard self.sessionCoordinator.isSelectedRuntime(runtime) else {
+                self.terminateRuntimeOpen(
+                    attemptID: identity,
+                    reason: .accountTransition,
+                    showsNotice: false
+                )
                 return
             }
             self.settleOpen(of: runtime, identity: identity)
         }
+        return true
     }
 
     /// The creation boundary of a runtime's WebView, decided synchronously
@@ -451,11 +1124,19 @@ final class AppModel: ObservableObject {
         switch directPathController.loadGate(for: runtime) {
         case .open:
             deferredOpen = nil
+            setRuntimeOpenPhase(.connecting, attemptID: identity)
             route = .browser(runtime)
             directPathController.runtimeDidOpen(runtime)
         case .held:
             deferredOpen = (runtime, identity)
         case .fault:
+            // The fault is already terminal for this process. There will be
+            // no new listener callback to end an attempt started after it,
+            // so retire the automatic budget at the gate decision itself.
+            finishRuntimeOpenAutomaticBudget(
+                phase: .failed,
+                attemptID: identity
+            )
             deferredOpen = nil
             directFaultOnlyIdentity = identity
             route = .browser(runtime)
@@ -470,11 +1151,21 @@ final class AppModel: ObservableObject {
     private func directAvailabilityDidChange() {
         objectWillChange.send()
         if let deferred = deferredOpen {
-            if runtimeIdentity != deferred.identity || route != .loading {
+            if runtimeIdentity != deferred.identity
+                || runtimeOpenAttempt?.id != deferred.identity
+                || route != .loading
+            {
                 deferredOpen = nil
-            } else if !sessionCoordinator.isCurrentRuntime(deferred.runtime) {
-                // The selection ended underneath; do not leave the spinner.
+            } else if expireRuntimeOpenAttemptIfNeeded(
+                attemptID: deferred.identity
+            ) {
                 deferredOpen = nil
+            } else if !sessionCoordinator.isSelectedRuntime(deferred.runtime) {
+                // The selection ended underneath; do not leave the spinner
+                // or its attempt alive.
+                deferredOpen = nil
+                retireRuntimeOpenForAccountTransition()
+                stopRuntime()
                 route = .onboarding(.instances)
             } else {
                 settleOpen(of: deferred.runtime, identity: deferred.identity)
@@ -568,6 +1259,16 @@ final class AppModel: ObservableObject {
             return
         }
         directListenerFault = true
+        if let attempt = runtimeOpenAttempt,
+           attempt.phase != .documentLoaded,
+           attempt.phase != .failed,
+           directFaultCovers(attempt.runtime)
+        {
+            finishRuntimeOpenAutomaticBudget(
+                phase: .failed,
+                attemptID: attempt.id
+            )
+        }
         // A child window is presented above the runtime's own view, which
         // the reopen message covers; it goes, when the message covers it.
         if let runtime = route.runtime, directFaultCovers(runtime) {
@@ -697,27 +1398,113 @@ final class AppModel: ObservableObject {
 
     private func handlePushTap(_ tap: PushNotificationTap) {
         guard hasCompletedBootstrap else {
-            pendingPushTap = tap
+            pendingInstanceOpen = .pushTap(tap)
             return
         }
-        guard
-            let account = sessionCoordinator.currentAccount,
-            account.id == tap.accountID,
-            let instance = sessionCoordinator.currentInstances.first(where: {
-                $0.available
-                    && WebOrigin(url: $0.url)?.serialized == tap.instanceOrigin
-            }),
-            Self.isSafeInstancePath(tap.url)
-        else {
-            clearPendingPushOpened()
+        instanceOpenRequest += 1
+        guard openInstance(
+            accountID: tap.accountID,
+            instanceOrigin: tap.instanceOrigin,
+            path: tap.url
+        ) else {
             showInstancePicker()
             return
         }
+    }
+
+    /// Opens the selected instance at `path` (a same-origin path, query,
+    /// and fragment) the way a notification tap opens a chat: the instance
+    /// opens again and its page receives `push.opened` once it has loaded.
+    /// App Shortcuts use it. Signed out, with no instance selected, with the
+    /// selected instance unavailable, or while the account may not leave the
+    /// account page (account deletion), nothing changes: the App keeps the
+    /// screen it shows, with no prompt.
+    ///
+    /// A refresh or push-management request the App runs on its own (as on
+    /// a return to the foreground, which is when a shortcut arrives) keeps
+    /// the selection but holds the account. The open waits for it, up to
+    /// `selectionKeepingWait`, then opens once, unless meanwhile a newer
+    /// open was requested or the screen, the runtime, the account, or the
+    /// selection changed: the user has moved on.
+    func openSelectedInstance(path: String) {
+        guard hasCompletedBootstrap else {
+            pendingInstanceOpen = .selectedInstance(path: path)
+            return
+        }
+        instanceOpenRequest += 1
+        guard sessionCoordinator.isHeldBySelectionKeepingOperation else {
+            openSelectedInstanceNow(path: path)
+            return
+        }
+        let request = instanceOpenRequest
+        let route = route
+        let identity = runtimeIdentity
+        let accountID = sessionCoordinator.currentAccount?.id
+        let selected = sessionCoordinator.selectedInstance
+        Task { [weak self] in
+            await self?.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            guard
+                let self,
+                self.instanceOpenRequest == request,
+                self.route == route,
+                self.runtimeIdentity == identity,
+                self.sessionCoordinator.currentAccount?.id == accountID,
+                self.sessionCoordinator.selectedInstance == selected
+            else {
+                return
+            }
+            self.openSelectedInstanceNow(path: path)
+        }
+    }
+
+    /// How long a shortcut waits for a selection-keeping operation. Someone
+    /// who pressed a button expects it to act within a few seconds; a
+    /// session read or push update normally ends well within this.
+    static let selectionKeepingWait: Duration = .seconds(5)
+
+    private func openSelectedInstanceNow(path: String) {
+        guard
+            let account = sessionCoordinator.currentAccount,
+            let instance = sessionCoordinator.selectedInstance,
+            let origin = WebOrigin(url: instance.url)
+        else {
+            return
+        }
+        openInstance(
+            accountID: account.id,
+            instanceOrigin: origin.serialized,
+            path: path
+        )
+    }
+
+    /// Selects the instance at `instanceOrigin` for `accountID` and keeps
+    /// `path` for its page. `false` when it is not this account's available
+    /// instance, the path is not a same-origin path, or the selection is
+    /// refused; the screen is then unchanged.
+    @discardableResult
+    private func openInstance(
+        accountID: String,
+        instanceOrigin: String,
+        path: String
+    ) -> Bool {
+        guard
+            let account = sessionCoordinator.currentAccount,
+            account.id == accountID,
+            let instance = sessionCoordinator.currentInstances.first(where: {
+                $0.available
+                    && WebOrigin(url: $0.url)?.serialized == instanceOrigin
+            }),
+            Self.isSafeInstancePath(path)
+        else {
+            return false
+        }
         let pending = PendingPushOpened(
             id: UUID().uuidString,
-            accountID: tap.accountID,
-            instanceOrigin: tap.instanceOrigin,
-            url: tap.url,
+            accountID: accountID,
+            instanceOrigin: instanceOrigin,
+            url: path,
             runtimeIdentity: runtimeIdentity + 1,
             createdAt: pushOpenedNow()
         )
@@ -735,8 +1522,9 @@ final class AppModel: ObservableObject {
             _ = try sessionCoordinator.selectInstance(id: instance.id)
         } catch {
             clearPendingPushOpened()
-            showInstancePicker()
+            return false
         }
+        return true
     }
 
     private func expirePendingPushOpened(id: String) {
@@ -773,9 +1561,9 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] {
         clearPendingPushOpened()
-        // A held open is ended here, with nothing left to settle it: its
-        // loading route must not stay.
-        let endsHeldOpen = deferredOpen != nil
+        // Any account invalidation ends a route-prepare or held open; neither
+        // may leave the Native loading surface behind without an attempt.
+        retireRuntimeOpenForAccountTransition()
         stopRuntime()
         switch route {
         case .browser:
@@ -784,9 +1572,7 @@ final class AppModel: ObservableObject {
             // The account page stays where it is; only the runtime goes.
             route = .onboarding(.account)
         case .loading:
-            if endsHeldOpen {
-                route = .onboarding(.instances)
-            }
+            route = .onboarding(.instances)
         case .onboarding:
             break
         }

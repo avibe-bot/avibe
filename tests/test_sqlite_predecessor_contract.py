@@ -57,7 +57,7 @@ def test_activation_only_fills_the_build_literal_and_can_disable_it(tmp_path, mo
     path.parent.mkdir()
     path.write_text("VERIFIED_PREDECESSOR_EPOCH: int | None = None\nother = 7\n")
     monkeypatch.setattr(contract, "ROOT", tmp_path)
-    for epoch in (1, 2, None):
+    for epoch in (1, 2, 3, None):
         contract.activate_build(epoch)
         loaded = runpy.run_path(str(path))
         assert loaded["VERIFIED_PREDECESSOR_EPOCH"] == epoch
@@ -90,11 +90,19 @@ def test_wrong_previous_binary_is_rejected_before_any_store_write(tmp_path, monk
     assert not (tmp_path / "state").exists()
 
 
-@pytest.mark.parametrize("loss", [None, "replacement", "json", "projection"])
+@pytest.mark.parametrize("loss", [None, "replacement", "json", "projection", "cache", "vault", "catalog"])
 def test_source_fixture_exercises_probe_and_detects_reader_write_loss(tmp_path, monkeypatch, loss):
     real_probe = contract.run_probe
 
     def source_fixture(python, action, home, *, current=False):
+        if not current and action == "epoch3-read" and loss in {"cache", "vault", "catalog"}:
+            with sqlite3.connect(home / "state/vibe.sqlite") as conn:
+                if loss == "cache":
+                    conn.execute("DELETE FROM session_cache_state")
+                elif loss == "vault":
+                    conn.execute("DELETE FROM vault_audit_access_snapshots")
+                else:
+                    conn.execute("DELETE FROM skill_catalogs")
         if not current and action == "projection-read" and loss == "projection":
             with sqlite3.connect(home / "state/vibe.sqlite") as conn:
                 conn.execute("UPDATE messages SET metadata_json=json_set(metadata_json, '$.tool_projection.version', 99) "
@@ -123,9 +131,9 @@ def test_source_fixture_exercises_probe_and_detects_reader_write_loss(tmp_path, 
     # wheel/version is impersonated, and activate_build is never invoked.
     fixture_python = contract.ROOT / "bin/python"
     if loss is None:
-        assert contract.verify_predecessor(fixture_python, tmp_path, expected_version="source-fixture") == 2
+        assert contract.verify_predecessor(fixture_python, tmp_path, expected_version="source-fixture") == 3
     else:
-        with pytest.raises((AssertionError, RuntimeError), match="lost new values|verify probe failed|projection-read probe failed"):
+        with pytest.raises((AssertionError, RuntimeError), match="lost new values|verify probe failed|projection-read probe failed|epoch3-read probe failed"):
             contract.verify_predecessor(fixture_python, tmp_path, expected_version="source-fixture")
 
 

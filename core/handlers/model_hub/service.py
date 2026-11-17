@@ -1594,6 +1594,7 @@ class ModelHubService:
             Callable[[], list[tuple[BackendName, str]]]
         ] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
+        backend_enabled_override: Optional[Callable[[BackendName], bool]] = None,
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
         ] = None,
@@ -1672,6 +1673,9 @@ class ModelHubService:
         # controller owns those Agent rows.
         self.builtin_agent_models_override = builtin_agent_models_override
         self.cli_present_override = cli_present_override
+        # Whether the backend is switched on in Settings · Backends. The controller
+        # owns that runtime fact; without it every backend reads as on.
+        self.backend_enabled_override = backend_enabled_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
         self.repair_model_selections = repair_model_selections
@@ -6427,6 +6431,10 @@ class ModelHubService:
             # The UI must distinguish an installed backend CLI from a configured
             # Model Hub route. Keep this host fact at the controller boundary.
             "cli_present": self._cli_present(backend),
+            # Switched on in Settings · Backends. Orthogonal to cli_present: an
+            # installed CLI can be off, and the Models page draws an off backend
+            # as off rather than as a live route.
+            "backend_enabled": self._backend_enabled(backend),
             "sources": sources,
             "supply_status": (
                 resolution.supply_status
@@ -6738,6 +6746,17 @@ class ModelHubService:
             self.cli_presence_refresh(include_npm_global, backends)
         except Exception:
             logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
+
+    def _backend_enabled(self, backend: BackendName) -> bool:
+        # Vibey is built in and cannot be switched off. An unknown answer reads
+        # as on, so a failed probe never hides a backend that may be running.
+        if backend == "vibey" or self.backend_enabled_override is None:
+            return True
+        try:
+            return bool(self.backend_enabled_override(backend))
+        except Exception:
+            logger.warning("Model Hub backend enablement probe failed for %s", backend, exc_info=True)
+            return True
 
     def _cli_present(self, backend: BackendName) -> bool:
         if backend == "vibey":
@@ -12216,6 +12235,7 @@ def create_default_service(
         Callable[[], list[tuple[BackendName, str]]]
     ] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
+    backend_enabled_override: Optional[Callable[[BackendName], bool]] = None,
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
     ] = None,
@@ -12277,6 +12297,7 @@ def create_default_service(
         named_agents_override=named_agents_override,
         builtin_agent_models_override=builtin_agent_models_override,
         cli_present_override=cli_present_override,
+        backend_enabled_override=backend_enabled_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
         repair_model_selections=repair_model_selections,

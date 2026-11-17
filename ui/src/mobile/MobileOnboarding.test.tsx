@@ -16,6 +16,7 @@ const mobile = vi.hoisted(() => ({
   dismiss: vi.fn<() => Promise<null>>(),
   logout: vi.fn<() => Promise<MobileSessionState>>(),
   openExternal: vi.fn(),
+  openPage: vi.fn<(page: string) => Promise<{ completed: boolean }>>(),
   refresh: vi.fn<() => Promise<MobileSessionState>>(),
   requestOtp: vi.fn(),
   returnToInstance: vi.fn<() => Promise<null>>(),
@@ -36,6 +37,7 @@ vi.mock('./bridge', async (importOriginal) => ({
   dismissMobileSheet: mobile.dismiss,
   logoutMobileSession: mobile.logout,
   openMobileExternal: mobile.openExternal,
+  openMobilePage: mobile.openPage,
   refreshMobileSession: mobile.refresh,
   requestMobileOtp: mobile.requestOtp,
   returnToMobileInstance: mobile.returnToInstance,
@@ -130,6 +132,8 @@ const resetMobileMocks = () => {
   mobile.dismiss.mockResolvedValue(null);
   mobile.logout.mockReset();
   mobile.openExternal.mockReset();
+  mobile.openPage.mockReset();
+  mobile.openPage.mockResolvedValue({ completed: false });
   mobile.refresh.mockReset();
   mobile.requestOtp.mockReset();
   mobile.returnToInstance.mockReset();
@@ -926,6 +930,87 @@ describe('mobile onboarding', () => {
 
     expect(await screen.findByRole('heading', { name: 'mobileApp.account.title' })).toBeTruthy();
     expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
+  });
+
+  describe('account deletion and privacy policy', () => {
+    it('opens the privacy policy in the App without touching the session', async () => {
+      await openAccount('#account');
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.privacy' }));
+      expect(mobile.openPage).toHaveBeenCalledWith('privacyPolicy');
+      expect(mobile.refresh).not.toHaveBeenCalled();
+    });
+
+    it('locks Account while the deletion page is open, then goes to Welcome once the session reads signed out', async () => {
+      await openAccount('#runtime-account');
+      const page = deferred<{ completed: boolean }>();
+      mobile.openPage.mockReturnValueOnce(page.promise);
+      mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+
+      await waitFor(() => expect(mobile.openPage).toHaveBeenCalledWith('accountDeletion'));
+      await waitFor(() => {
+        expect(
+          (screen.getByRole('button', { name: 'mobileApp.account.signOut' }) as HTMLButtonElement).disabled,
+        ).toBe(true);
+        expect(
+          (screen.getByRole('button', { name: 'mobileApp.account.privacy' }) as HTMLButtonElement).disabled,
+        ).toBe(true);
+      });
+      expect(mobile.refresh).not.toHaveBeenCalled();
+
+      page.resolve({ completed: true });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
+      expect(mobile.refresh).toHaveBeenCalledTimes(1);
+      expect(mobile.logout).not.toHaveBeenCalled();
+    });
+
+    it('reads the session after any close, and stays on Account while the account is still there', async () => {
+      await openAccount('#account');
+      mobile.openPage.mockResolvedValueOnce({ completed: false });
+      mobile.refresh.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' });
+      fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+
+      await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+      await waitFor(() => {
+        expect(
+          (screen.getByRole('button', { name: 'mobileApp.account.signOut' }) as HTMLButtonElement).disabled,
+        ).toBe(false);
+      });
+      expect(screen.getByRole('heading', { name: 'mobileApp.account.title' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.action' })).toBeNull();
+    });
+
+    it('signs this device out when the page reported the deletion but the read-back did not', async () => {
+      for (const readBack of [
+        () => mobile.refresh.mockRejectedValueOnce({ code: 'busy', message: 'busy' }),
+        () => mobile.refresh.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' }),
+      ]) {
+        await openAccount('#account');
+        mobile.openPage.mockResolvedValueOnce({ completed: true });
+        readBack();
+        mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+        fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+
+        await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
+        expect(mobile.logout).toHaveBeenCalledTimes(1);
+        cleanup();
+        resetMobileMocks();
+      }
+    });
+
+    it('keeps Account as it was when the deletion page cannot open', async () => {
+      await openAccount('#account');
+      mobile.openPage.mockRejectedValueOnce({ code: 'busy', message: 'busy' });
+      fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+
+      await waitFor(() => {
+        expect(
+          (screen.getByRole('button', { name: 'mobileApp.account.signOut' }) as HTMLButtonElement).disabled,
+        ).toBe(false);
+      });
+      expect(mobile.refresh).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
   });
 
   it('disables account navigation while logout is pending', async () => {

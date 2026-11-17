@@ -20,6 +20,30 @@ afterEach(() => {
 });
 
 describe('avibeFetch', () => {
+  // ui/design: composer/voice-consent/*
+  it('drops the voice token once this account takes back its yes, and mints none after', async () => {
+    const { apiFetch, avibeFetch, primeCloudToken, CloudUnavailableError } = await loadModules();
+    const { noteVoiceStatus } = await import('./voiceConsent');
+    noteVoiceStatus({ available: true, consent: 'granted' });
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(Response.json({
+      token: 'held',
+      base_url: 'https://example.test',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    }));
+    const send = vi.fn().mockResolvedValue(Response.json({ text: 'ok' }));
+    vi.stubGlobal('fetch', send);
+    await avibeFetch('/api/cloud/audio/transcriptions');
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // Said no here, or on another device (the event stream re-reads the answer).
+    noteVoiceStatus({ available: true, consent: 'declined' });
+    primeCloudToken();
+    await expect(avibeFetch('/api/cloud/audio/transcriptions')).rejects.toBeInstanceOf(CloudUnavailableError);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('honors the caller deadline while a shared token request is pending', async () => {
     const { apiFetch, avibeFetch } = await loadModules();
     apiFetch.mockReset();

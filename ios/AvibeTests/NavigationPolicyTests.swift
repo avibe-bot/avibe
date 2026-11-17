@@ -41,7 +41,6 @@ final class NavigationPolicyTests: XCTestCase {
             policy.destination(for: URL(string: "https://auth.avibe.bot/auth/v1/callback?code=1")!),
             .authentication
         )
-        XCTAssertEqual(policy.destination(for: URL(string: "https://github.com/login/oauth/authorize")!), .authentication)
         XCTAssertEqual(policy.destination(for: URL(string: "https://evil.avibe.bot/login")!), .external)
     }
 
@@ -187,11 +186,66 @@ final class NavigationPolicyTests: XCTestCase {
 
     func testGoogleAuthorizationOriginIsIntercepted() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
+        let url = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
 
+        XCTAssertEqual(policy.destination(for: url), .thirdPartySignIn(.google))
         XCTAssertEqual(
-            policy.destination(for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!),
-            .googleAuthentication
+            policy.disposition(for: url, context: .primaryMainFrame),
+            .thirdPartySignIn(.google)
         )
+        XCTAssertEqual(
+            policy.disposition(for: url, context: .popupMainFrame),
+            .thirdPartySignIn(.google)
+        )
+    }
+
+    // The App signs in only with avibe.bot's own accounts (App Review 4.8),
+    // so GitHub authorization for avibe.bot's sign-in is intercepted in every
+    // browsing context, as Google's is. GitHub sign-in for anything else and
+    // the rest of github.com are an ordinary site.
+    func testGitHubAuthorizationIsInterceptedAndTheRestOfGitHubIsExternal() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+
+        for raw in [
+            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback&scope=user%3Aemail",
+            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fmctppyrqmrjotgkrwdse.supabase.co%2Fauth%2Fv1%2Fcallback",
+            "https://github.com/login/oauth/select_account?redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
+            "https://GitHub.com/Login/OAuth/authorize?redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .thirdPartySignIn(.github), raw)
+            XCTAssertEqual(
+                policy.disposition(for: url, context: .primaryMainFrame),
+                .thirdPartySignIn(.github),
+                raw
+            )
+            XCTAssertEqual(
+                policy.disposition(for: url, context: .popupMainFrame),
+                .thirdPartySignIn(.github),
+                raw
+            )
+        }
+
+        for raw in [
+            // The device-code page an instance's Copilot sign-in opens.
+            "https://github.com/login/device",
+            // GitHub sign-in for something else, such as an MCP server an
+            // instance connects to, or one that names no callback.
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Fmcp.example.com%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Falice-app.avibe.bot%2Foauth%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Fevil.avibe.bot%2Fauth%2Fv1%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=abc",
+            "https://github.com/login",
+            "https://github.com/login/oauthx",
+            "https://github.com/avibe-bot/avibe",
+            "https://gist.github.com/login/oauth/authorize",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .external, raw)
+            XCTAssertEqual(policy.disposition(for: url, context: .primaryMainFrame), .external, raw)
+            XCTAssertEqual(policy.disposition(for: url, context: .popupMainFrame), .allow, raw)
+            XCTAssertEqual(policy.newWindowDisposition(for: url), .childWebView, raw)
+        }
     }
 
     func testOtherWebOriginsOpenExternallyAndApplicationSchemesLeaveWebKit() {
@@ -260,7 +314,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         for url in [
             URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
-            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://github.com/login/device")!,
             URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!,
             URL(string: "https://example.com/docs")!,
         ] {
@@ -283,7 +337,13 @@ final class NavigationPolicyTests: XCTestCase {
             policy.newWindowDisposition(
                 for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
             ),
-            .googleAuthentication
+            .thirdPartySignIn(.google)
+        )
+        XCTAssertEqual(
+            policy.newWindowDisposition(
+                for: URL(string: "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback")!
+            ),
+            .thirdPartySignIn(.github)
         )
     }
 
@@ -292,7 +352,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         for url in [
             URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
-            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://github.com/login/device")!,
             URL(string: "about:blank")!,
             URL(string: "https://example.com/docs")!,
         ] {
@@ -879,6 +939,312 @@ final class NavigationPolicyTests: XCTestCase {
         appModel.didFinishRuntimeLoading()
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(ackCount, 0)
+    }
+
+    /// Settings > Action Button > Shortcut > Avibe runs `OpenMainBotIntent`.
+    /// Launched by it, the App gets the request before its bootstrap
+    /// restores the selected instance; that instance then opens again, and
+    /// its page receives the main Bot's conversation through `push.opened`.
+    @MainActor
+    func testMainBotShortcutOpensTheSelectedInstanceAtTheMainBotConversation()
+        async throws
+    {
+        let (appModel, _) = try await makeFixtureAppModel(
+            storedSelection: Self.instanceOneSelection
+        ) { appModel in
+            // What `AvibeApp` attaches for its own model. This replaces the
+            // test host's handler for the rest of the process; no other test
+            // runs a shortcut.
+            InstancePathRequests.shared.attach { [weak appModel] path in
+                appModel?.openSelectedInstance(path: path)
+            }
+            _ = try await OpenMainBotIntent().perform()
+        }
+        // The restored open, then the shortcut's.
+        try await waitUntil("The shortcut's open") {
+            appModel.runtimeIdentity == 2
+        }
+        let runtime = try await waitForPushRuntime(
+            appModel,
+            instanceID: "instance-1"
+        )
+        var acknowledgements: [Bool] = []
+        let (controller, webView, window) = try makePushRuntimeController(
+            appModel: appModel,
+            runtime: runtime,
+            origin: WebOrigin.parseConfigured(
+                "https://instance-one.example"
+            )!
+        ) { id, origin in
+            let accepted = appModel.acknowledgePushOpened(
+                id: id,
+                origin: origin
+            )
+            acknowledgements.append(accepted)
+            return accepted
+        }
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.receivedPushOpened = [];
+              window.avibeNative.on("push.opened", (payload) => {
+                window.receivedPushOpened.push(payload.url);
+              });
+            </script>
+            """,
+            baseURL: runtime.instance.url,
+            in: webView
+        )
+        appModel.didFinishRuntimeLoading()
+        try await waitUntil { acknowledgements == [true] }
+        let received = try await webView.evaluateJavaScript(
+            "window.receivedPushOpened"
+        )
+        // `from=notification`: a reader who is not the instance Owner has
+        // no Bots, and the Web UI sends that 404 to the Inbox.
+        XCTAssertEqual(
+            received as? [String],
+            ["/chat/ses_main?from=notification"]
+        )
+        XCTAssertTrue(OpenMainBotIntent.openAppWhenRun)
+        _ = controller
+    }
+
+    /// Signed out, with no instance selected, or with the selected instance
+    /// unavailable, the shortcut leaves the App on the screen it shows
+    /// anyway: no runtime opens and nothing is presented, whether the
+    /// request arrives before the bootstrap settles or after.
+    @MainActor
+    func testMainBotShortcutKeepsTheCurrentScreenWhenNothingCanOpen()
+        async throws
+    {
+        let cases: [(
+            name: String,
+            session: LocalHTTPResponse?,
+            instanceOneAvailable: Bool,
+            selection: String?
+        )] = [
+            ("signed out", .status(401), true, nil),
+            ("no instance selected", nil, true, nil),
+            ("selected instance offline", nil, false, Self.instanceOneSelection),
+        ]
+        for item in cases {
+            var launchStore: UUID?
+            let (appModel, _) = try await makeFixtureAppModel(
+                sessionResponse: item.session,
+                instanceOneAvailable: item.instanceOneAvailable,
+                storedSelection: item.selection
+            ) { appModel in
+                launchStore = appModel.websiteDataStore.identifier
+                appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+            }
+            try await waitUntil("\(item.name): bootstrap settles") {
+                appModel.route != .loading
+            }
+            // A signed-out launch moves to a fresh store; remove that one
+            // too, once the account transport has let it go.
+            let currentStore = appModel.websiteDataStore.identifier
+            if currentStore != launchStore {
+                let cleanup = NamedDataStoreCleanup()
+                cleanup.identifier = currentStore
+                // Weak: the App holds its current store, so the store can
+                // go only once the App has.
+                addTeardownBlock { @MainActor [weak appModel] in
+                    appModel?.mobileSessionCoordinator.deactivateAccountSurface()
+                    let error = await cleanup.remove()
+                    XCTAssertNil(error, "Signed-out store cleanup failed")
+                }
+            }
+            XCTAssertEqual(
+                appModel.mobileSessionCoordinator.currentAccount == nil,
+                item.name == "signed out",
+                item.name
+            )
+
+            appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+            try await Task.sleep(for: .milliseconds(100))
+
+            XCTAssertEqual(appModel.route, .onboarding(.instances), item.name)
+            XCTAssertEqual(appModel.runtimeIdentity, 0, item.name)
+            XCTAssertNil(appModel.runtimeOpenAttempt, item.name)
+            if item.selection != nil {
+                // Still selected, and unavailable: the reason nothing opened.
+                XCTAssertEqual(
+                    appModel.mobileSessionCoordinator.selectedInstance?.available,
+                    false,
+                    item.name
+                )
+            }
+        }
+    }
+
+    /// On a cold launch the intent can run before the scene attaches the
+    /// App's model: the request waits, is delivered once on attach, and a
+    /// request after that goes straight through.
+    @MainActor
+    func testShortcutRequestsWaitForTheAppToAttach() {
+        let requests = InstancePathRequests()
+        var delivered: [String] = []
+        requests.open(path: "/chat/early")
+        XCTAssertEqual(delivered, [])
+
+        requests.attach { delivered.append($0) }
+        XCTAssertEqual(delivered, ["/chat/early"])
+
+        var reattached: [String] = []
+        requests.attach { reattached.append($0) }
+        XCTAssertEqual(reattached, [], "A delivered request came back.")
+
+        requests.open(path: "/chat/later")
+        XCTAssertEqual(delivered, ["/chat/early"])
+        XCTAssertEqual(reattached, ["/chat/later"])
+    }
+
+    /// A shortcut usually arrives as the App returns to the foreground, when
+    /// the App may be refreshing the account or updating push on its own.
+    /// Those keep the selection, so the open waits for them and then opens
+    /// the main Bot's conversation instead of being dropped as busy, unless
+    /// the user moved on meanwhile (here: opened Account).
+    @MainActor
+    func testMainBotShortcutWaitsForASelectionKeepingRefresh() async throws {
+        for userMovesOn in [false, true] {
+            let held = HeldSessionReads()
+            addTeardownBlock { held.release.signal() }
+            let (appModel, _) = try await makeFixtureAppModel(
+                storedSelection: Self.instanceOneSelection,
+                heldSessionReads: held
+            )
+            try await waitUntil("The restored open") {
+                appModel.runtimeIdentity == 1
+            }
+            let refresh = Task { @MainActor in
+                try await appModel.mobileSessionCoordinator.refresh()
+            }
+            try await waitUntil("The refresh's session read") {
+                held.count.current == 2
+            }
+            XCTAssertTrue(
+                appModel.mobileSessionCoordinator.isHeldBySelectionKeepingOperation
+            )
+
+            appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(
+                appModel.runtimeIdentity, 1, "It opened during the refresh."
+            )
+            if userMovesOn {
+                appModel.showAccount()
+                guard case .accountOverBrowser = appModel.route else {
+                    XCTFail("Account did not cover the runtime")
+                    return
+                }
+            }
+
+            held.release.signal()
+            _ = try await refresh.value
+            if userMovesOn {
+                try await Task.sleep(for: .milliseconds(200))
+                XCTAssertEqual(appModel.runtimeIdentity, 1)
+                guard case .accountOverBrowser = appModel.route else {
+                    XCTFail("The waited open replaced Account")
+                    return
+                }
+            } else {
+                try await waitUntil("The shortcut's open after the refresh") {
+                    appModel.runtimeIdentity == 2
+                }
+                _ = try await waitForPushRuntime(
+                    appModel,
+                    instanceID: "instance-1"
+                )
+            }
+        }
+    }
+
+    /// The shortcut reaches Settings > Action Button only through the App
+    /// Intents metadata Xcode extracts into the App bundle, with its
+    /// localized title and Siri phrases beside it.
+    @MainActor
+    func testMainBotShortcutIsInTheAppIntentsMetadata() throws {
+        let metadataURL = try XCTUnwrap(
+            Bundle.main.url(
+                forResource: "Metadata",
+                withExtension: "appintents"
+            ),
+            "The App bundle has no Metadata.appintents"
+        ).appendingPathComponent("extract.actionsdata")
+        let metadata = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL)
+            ) as? [String: Any]
+        )
+        let actions = try XCTUnwrap(metadata["actions"] as? [String: Any])
+        let action = try XCTUnwrap(
+            actions["OpenMainBotIntent"] as? [String: Any]
+        )
+        XCTAssertEqual(action["openAppWhenRun"] as? Bool, true)
+        XCTAssertEqual(
+            (action["title"] as? [String: Any])?["key"] as? String,
+            "Talk to Main Bot"
+        )
+        let shortcuts = try XCTUnwrap(
+            metadata["autoShortcuts"] as? [[String: Any]]
+        )
+        let shortcut = try XCTUnwrap(
+            shortcuts.first {
+                $0["actionIdentifier"] as? String == "OpenMainBotIntent"
+            }
+        )
+        XCTAssertEqual(
+            (shortcut["shortTitle"] as? [String: Any])?["key"] as? String,
+            "Talk to Main Bot"
+        )
+        XCTAssertEqual(
+            shortcut["systemImageName"] as? String,
+            "bubble.left.and.bubble.right"
+        )
+        let phrases = Set(
+            (shortcut["phraseTemplates"] as? [[String: Any]] ?? []).compactMap {
+                $0["key"] as? String
+            }
+        )
+        XCTAssertEqual(
+            phrases,
+            [
+                "Talk to Main Bot in ${applicationName}",
+                "Open Main Bot in ${applicationName}",
+            ]
+        )
+
+        let chinese = try XCTUnwrap(
+            Bundle.main.path(forResource: "zh-Hans", ofType: "lproj")
+                .flatMap(Bundle.init(path:))
+        )
+        XCTAssertEqual(
+            chinese.localizedString(
+                forKey: "Talk to Main Bot",
+                value: nil,
+                table: nil
+            ),
+            "和主伙伴说话"
+        )
+        for phrase in phrases {
+            let localized = chinese.localizedString(
+                forKey: phrase,
+                value: nil,
+                table: "AppShortcuts"
+            )
+            XCTAssertNotEqual(localized, phrase)
+            XCTAssertTrue(localized.contains("${applicationName}"), localized)
+            XCTAssertTrue(localized.contains("主伙伴"), localized)
+        }
     }
 
     @MainActor
@@ -3305,12 +3671,38 @@ final class NavigationPolicyTests: XCTestCase {
         pushOpenedNow: @escaping () -> Date = Date.init,
         sessionResponse: LocalHTTPResponse? = nil
     ) async throws -> AppModel {
+        let (appModel, requests) = try await makeFixtureAppModel(
+            pushOpenedNow: pushOpenedNow,
+            sessionResponse: sessionResponse
+        )
+        try await waitForSignedInInstances(appModel, requests: requests)
+        return appModel
+    }
+
+    /// The selection the App keeps for instance-1 of `account-1`.
+    private static let instanceOneSelection =
+        #"{"accountID":"account-1","instanceID":"instance-1","url":"https://instance-one.example"}"#
+
+    /// An `AppModel` on a local control plane whose session lists
+    /// `account-1` with instances one and two, returned before its
+    /// bootstrap settles. `storedSelection` launches it with that stored
+    /// selection; `whenTheAppExists` runs right after it is made.
+    @MainActor
+    private func makeFixtureAppModel(
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        sessionResponse: LocalHTTPResponse? = nil,
+        instanceOneAvailable: Bool = true,
+        storedSelection: String? = nil,
+        heldSessionReads: HeldSessionReads? = nil,
+        whenTheAppExists: @MainActor (AppModel) async throws -> Void = { _ in }
+    ) async throws -> (AppModel, FixtureRequestLog) {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
-                return sessionResponse ?? .json(
+                let read = heldSessionReads?.count.next() ?? 1
+                let response = sessionResponse ?? .json(
                     """
                     {
                       "account": {
@@ -3325,7 +3717,7 @@ final class NavigationPolicyTests: XCTestCase {
                           "url": "https://instance-one.example",
                           "relationship": "owner",
                           "owner_email": "max@example.com",
-                          "available": true
+                          "available": \(instanceOneAvailable)
                         },
                         {
                           "id": "instance-2",
@@ -3340,6 +3732,19 @@ final class NavigationPolicyTests: XCTestCase {
                     }
                     """
                 )
+                guard let heldSessionReads, read > 1 else {
+                    return response
+                }
+                // The server sends the first 64 KiB at once and holds the
+                // rest: pad the JSON past that so the read really waits.
+                var body = response.body
+                body.append(Data(repeating: UInt8(ascii: " "), count: 70_000))
+                return LocalHTTPResponse(
+                    status: response.status,
+                    headers: response.headers,
+                    body: body,
+                    bodyRelease: heldSessionReads.release
+                )
             default:
                 return .status(404)
             }
@@ -3352,6 +3757,12 @@ final class NavigationPolicyTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
+        }
+        if let storedSelection {
+            defaults.set(
+                Data(storedSelection.utf8),
+                forKey: "avibe.mobile.selection"
+            )
         }
         let appModel = makeTestAppModel(
             defaults: defaults,
@@ -3370,8 +3781,8 @@ final class NavigationPolicyTests: XCTestCase {
             XCTAssertNil(error, "Push fixture named-store cleanup failed")
             server.requests.attach(to: self, name: "push App bootstrap requests")
         }
-        try await waitForSignedInInstances(appModel, requests: server.requests)
-        return appModel
+        try await whenTheAppExists(appModel)
+        return (appModel, server.requests)
     }
 
     /// A settled picker is not enough: bootstrap errors also land there.
@@ -3985,6 +4396,31 @@ private enum TestWaitError: Error {
     case timedOut
 }
 
+/// Holds the body of every account session read after the bootstrap's
+/// until `release` is signalled, counting the reads.
+private final class HeldSessionReads: @unchecked Sendable {
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            value += 1
+            return value
+        }
+
+        var current: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    let count = Counter()
+    let release = DispatchSemaphore(value: 0)
+}
+
 @MainActor
 private final class NamedDataStoreCleanup {
     var identifier: UUID?
@@ -4185,5 +4621,33 @@ final class FormAccessoryBarTests: XCTestCase {
         XCTAssertFalse(
             NSStringFromClass(type(of: content)).hasSuffix(FormAccessoryBar.subclassSuffix)
         )
+    }
+
+    // App Store 5.1.2(i): a Workbench that asks before voice goes to a third-party
+    // AI service carries the marker and gets the microphone with no second
+    // question; an older Workbench is told to update; any other page is denied
+    // without that message.
+    @MainActor
+    func testVoiceConsentMarkerIsReadFromTheInstancePage() async throws {
+        let workbench = #"<link rel="manifest" href="/manifest.webmanifest">"#
+        let cases: [(String, String, String, VoiceConsentMarker)] = [
+            ("/chat", #"<meta name="avibe-voice-consent" content="1">"# + workbench, "<div id=\"root\"></div>", .marked),
+            ("/chat", workbench, "<div id=\"root\"></div>", .unmarkedWorkbench),
+            ("/chat", #"<meta name="avibe-voice-consent" content="0">"# + workbench, "<div id=\"root\"></div>", .unmarkedWorkbench),
+            ("/show/ses_1/", workbench, "<div id=\"root\"></div>", .other),
+            ("/chat", "", "<div id=\"root\"></div>", .other),
+        ]
+        for (path, head, body, expected) in cases {
+            let webView = WKWebView(frame: .zero)
+            webView.loadHTMLString(
+                "<!doctype html><html><head>\(head)</head><body>\(body)</body></html>",
+                baseURL: URL(string: "https://alice-app.avibe.bot\(path)")
+            )
+            try await WebKitReadiness.waitForDocument(in: webView)
+            let result = try? await webView.evaluateJavaScript(VoiceConsentMarker.script)
+            XCTAssertEqual(VoiceConsentMarker(result: result), expected, "\(path) \(head)")
+        }
+        XCTAssertEqual(VoiceConsentMarker(result: nil), .other)
+        XCTAssertEqual(VoiceConsentMarker(result: true), .other)
     }
 }

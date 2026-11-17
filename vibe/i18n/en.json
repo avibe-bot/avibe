@@ -1,4 +1,9 @@
 {
+  "storage": {
+    "notice": {
+      "epoch3BackupSkipped": "The disk is nearly full, so Avibe updated its database without keeping a backup copy. You can still go back to 3.2.6; 3.2.5 and older can no longer open this database. Freeing some disk space is recommended."
+    }
+  },
   "mcp": {
     "configure_owned_only": "Configure applies only to Avibe-owned servers.",
     "discovery_failed": "MCP discovery failed; check the server configuration and retry."

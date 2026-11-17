@@ -120,9 +120,6 @@
     "src/components/settings/models/BackendSupplyModeCard.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
-    "src/components/settings/models/GatewayModule.tsx": {
-      "avibe/localized-user-text": 1
-    },
     "src/components/settings/models/GuardImpact.tsx": {
       "avibe/localized-user-text": 2
     },
@@ -244,9 +241,6 @@
     "src/components/steps/LogsPanel.tsx": {
       "avibe/localized-user-text": 11,
       "react-hooks/set-state-in-effect": 1
-    },
-    "src/components/steps/ModeSelection.tsx": {
-      "@typescript-eslint/no-explicit-any": 2
     },
     "src/components/steps/PlatformSelection.tsx": {
       "@typescript-eslint/no-explicit-any": 10,

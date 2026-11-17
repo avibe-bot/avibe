@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { closeVoiceConsent, voiceConsentAsking } from '../../lib/voiceConsent';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 import { MobileBotCenter } from '../MobileChrome';
 import { useHoldToTalk, type HoldToTalkOptions } from './useHoldToTalk';
@@ -37,7 +38,7 @@ type Fake = {
 
 const pipeline = vi.hoisted(() => ({
   takes: [] as Fake[],
-  asr: { available: true },
+  asr: { available: true, consent: 'granted' as 'granted' | 'declined' | null },
   permission: 'granted' as PermissionState,
   captureActive: false,
   /** How long the microphone and audio graph take to open. */
@@ -102,7 +103,7 @@ vi.mock('../../lib/voiceTelemetry', async (importOriginal) => ({
   emitVoiceTelemetry: telemetry.emit,
 }));
 vi.mock('../../lib/apiFetch', () => ({
-  apiFetch: vi.fn(async () => ({ ok: true, json: async () => ({ available: pipeline.asr.available }) })),
+  apiFetch: vi.fn(async () => ({ ok: true, json: async () => ({ available: pipeline.asr.available, consent: pipeline.asr.consent }) })),
 }));
 vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/avibeFetch')>()),
@@ -181,6 +182,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   pipeline.takes = [];
   pipeline.asr.available = true;
+  pipeline.asr.consent = 'granted';
+  closeVoiceConsent();
   pipeline.permission = 'granted';
   pipeline.captureActive = false;
   pipeline.startMs = 0;
@@ -724,6 +727,27 @@ describe('useHoldToTalk', () => {
     const el = await mount();
     await holdFor(el);
     expect(hold.outcome).toBe('unavailable');
+    expect(pipeline.takes).toHaveLength(0);
+  });
+
+  // ui/design: composer/voice-consent/*
+  it('asks before the first take and opens no microphone until the reader said yes', async () => {
+    pipeline.asr.consent = null;
+    const el = await mount();
+    await holdFor(el);
+    expect(voiceConsentAsking()).toBe(true);
+    expect(native.permission).not.toHaveBeenCalled();
+    expect(pipeline.takes).toHaveLength(0);
+    expect(hold.outcome).toBeNull();
+  });
+
+  it('says voice input is off, without recording, once the reader said no', async () => {
+    pipeline.asr.consent = 'declined';
+    const el = await mount();
+    await holdFor(el);
+    expect(hold.outcome).toBe('voice-off');
+    expect(voiceConsentAsking()).toBe(false);
+    expect(native.permission).not.toHaveBeenCalled();
     expect(pipeline.takes).toHaveLength(0);
   });
 

@@ -32,7 +32,9 @@ mod notifications;
 mod pet;
 mod pet_native;
 mod update_install;
+mod update_popover;
 pub mod updater;
+mod window_return;
 
 #[cfg(target_os = "macos")]
 mod computer_use;
@@ -64,7 +66,7 @@ use serde::Deserialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 use tauri::plugin::Builder as PluginBuilder;
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, Runtime, Webview, WebviewWindow, WebviewWindowBuilder};
 use tauri::{RunEvent, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
@@ -676,8 +678,7 @@ fn open_workbench_settings(app: &AppHandle) {
     if !settings_is_available(shell.activity.load(Ordering::SeqCst), true) {
         return;
     }
-    let shown = app
-        .get_webview_window(MAIN_WINDOW)
+    let shown = instance_client::active_webview(app)
         .filter(|window| window.url().is_ok_and(|url| origin.matches_url_origin(&url)));
     if let Some(window) = shown {
         focus_or_restore_main_window(app);
@@ -698,8 +699,7 @@ fn open_workbench_shortcut_settings(app: &AppHandle) {
     if !settings_is_available(shell.activity.load(Ordering::SeqCst), true) {
         return;
     }
-    let shown = app
-        .get_webview_window(MAIN_WINDOW)
+    let shown = instance_client::active_webview(app)
         .filter(|window| window.url().is_ok_and(|url| origin.matches_url_origin(&url)));
     if let Some(window) = shown {
         focus_or_restore_main_window(app);
@@ -749,7 +749,7 @@ fn present_pending_desktop_updates(app: &AppHandle) -> bool {
     let Some(id) = pending.current() else {
         return true;
     };
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+    let Some(window) = instance_client::active_webview(app) else {
         return false;
     };
     if !pet::is_workbench(&window) {
@@ -768,7 +768,7 @@ fn present_pending_desktop_updates(app: &AppHandle) -> bool {
 
 /// Submission is not consumption. Only the listener's synchronous receipt can
 /// complete the matching request; failures await another real readiness signal.
-fn deliver_desktop_update_request(window: &WebviewWindow, legacy_fallback: bool) -> bool {
+fn deliver_desktop_update_request(window: &Webview, legacy_fallback: bool) -> bool {
     let app = window.app_handle();
     let Some(id) = app.state::<PendingDesktopUpdateOpen>().current() else {
         return true;
@@ -786,7 +786,7 @@ fn deliver_desktop_update_request(window: &WebviewWindow, legacy_fallback: bool)
 /// A local Workbench calls this only after its update listener and native state
 /// are usable. It grants no navigation, installation, or window-focus authority.
 #[tauri::command]
-fn desktop_update_panel_ready(window: WebviewWindow) -> Result<(), String> {
+fn desktop_update_panel_ready(window: Webview) -> Result<(), String> {
     if !pet::is_workbench(&window) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
     }
@@ -1361,9 +1361,9 @@ impl StatusSink for WindowSink {
 /// The capability file is the enforcing boundary. This is the second layer, so
 /// that widening a capability by mistake cannot alone expose the shell to a page
 /// served by the Runtime.
-fn ensure_shell_ui<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+fn ensure_shell_ui<R: Runtime>(window: &Webview<R>) -> Result<(), String> {
     match window.url() {
-        Ok(url) if window.label() == MAIN_WINDOW && is_bootstrap_page_url(&url) => Ok(()),
+        Ok(url) if instance_client::is_current_runtime(window) && is_bootstrap_page_url(&url) => Ok(()),
         _ => Err("This command is only available to the Avibe desktop shell.".to_owned()),
     }
 }
@@ -1406,7 +1406,7 @@ struct OpenAppWindowRequest {
 }
 
 #[tauri::command]
-async fn open_app_window(window: WebviewWindow, app: AppHandle, request: OpenAppWindowRequest) -> Result<(), String> {
+async fn open_app_window(window: Webview, app: AppHandle, request: OpenAppWindowRequest) -> Result<(), String> {
     let _launch = app_windows::LAUNCH_LOCK.lock().await;
     if !pet::is_workbench(&window) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
@@ -1457,7 +1457,7 @@ fn set_active_origin(app: &AppHandle, origin: Option<LoopbackOrigin>) -> bool {
 
 /// The current bootstrap status, or `null` before the first one is published.
 #[tauri::command]
-fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<BootstrapStatus>, String> {
+fn bootstrap_status(window: Webview, app: AppHandle) -> Result<Option<BootstrapStatus>, String> {
     ensure_shell_ui(&window)?;
     let latest = app.state::<Shell>().latest.clone();
     let status = latest
@@ -1469,7 +1469,7 @@ fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<Boot
 /// Starts another bootstrap run after a failure. Returns as soon as the run is
 /// scheduled; progress arrives through [`STATUS_EVENT`].
 #[tauri::command]
-fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {
+fn bootstrap_retry(window: Webview, app: AppHandle) -> Result<bool, String> {
     ensure_shell_ui(&window)?;
     Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))
 }
@@ -1479,7 +1479,7 @@ fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String
 /// The URL is deliberately not an argument: even the privileged bootstrap page
 /// cannot turn this into an arbitrary protocol or URL opener.
 #[tauri::command]
-fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
+fn open_install_docs(window: Webview) -> Result<(), String> {
     ensure_shell_ui(&window)?;
     tauri_plugin_opener::open_url(INSTALL_DOCS_URL, None::<&str>)
         .map_err(|_| "Installation help could not be opened.".to_owned())
@@ -1487,7 +1487,7 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
 
 /// The Computer Use guide's "Turn on": the tray toggle's on half.
 #[tauri::command]
-fn computer_use_enable(window: WebviewWindow) -> Result<(), String> {
+fn computer_use_enable(window: Webview) -> Result<(), String> {
     #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
         computer_use_guide_controller(&window)?.turn_on()
@@ -1502,7 +1502,7 @@ fn computer_use_enable(window: WebviewWindow) -> Result<(), String> {
 /// Turns Computer Use off through the tray's lifecycle owner. Unlike Enable,
 /// completion acknowledges state publication AND owned-process teardown.
 #[tauri::command]
-async fn computer_use_disable(window: WebviewWindow) -> Result<(), String> {
+async fn computer_use_disable(window: Webview) -> Result<(), String> {
     #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
         computer_use_guide_controller(&window)?.disable().await
@@ -1518,7 +1518,7 @@ async fn computer_use_disable(window: WebviewWindow) -> Result<(), String> {
 /// `pane` (`accessibility` or `screen_recording`). The page never supplies a
 /// URL, so this cannot become a general System Settings opener.
 #[tauri::command]
-fn computer_use_open_permission(window: WebviewWindow, pane: String) -> Result<(), String> {
+fn computer_use_open_permission(window: Webview, pane: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let pane = computer_use::PermissionPane::parse(&pane).ok_or_else(|| "Not a permission pane.".to_owned())?;
@@ -1538,7 +1538,7 @@ const COMPUTER_USE_UNSUPPORTED: &str = "This Computer Use action is unavailable 
 /// window on a loopback page; this also requires the Runtime the shell adopted,
 /// so a same-window page on another loopback port cannot drive them.
 #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
-fn computer_use_guide_controller(window: &WebviewWindow) -> Result<tauri::State<'_, computer_use::Controller>, String> {
+fn computer_use_guide_controller(window: &Webview) -> Result<tauri::State<'_, computer_use::Controller>, String> {
     if !pet::is_workbench(window) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
     }
@@ -1649,9 +1649,9 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
     let window_generation = app.state::<Shell>().window_generation.clone();
     loop {
         let observed_generation = window_generation.load(Ordering::SeqCst);
-        let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        let Some(window) = instance_client::active_webview(app) else {
             let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
-            if app.get_webview_window(MAIN_WINDOW).is_some() {
+            if instance_client::active_webview(app).is_some() {
                 let _ = spawn_bootstrap(app.clone(), BootstrapTrigger::Recovery);
             }
             return;
@@ -1840,7 +1840,7 @@ fn restore_bootstrap_view(app: &AppHandle) -> bool {
     if !is_shell_ui_url(&bootstrap_url) {
         return false;
     }
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+    let Some(window) = instance_client::active_webview(app) else {
         return false;
     };
     if let Ok(mut latest) = latest.lock() {
@@ -1881,11 +1881,11 @@ fn rediscover_after_runtime_rebind(app: AppHandle, origin: LoopbackOrigin) {
 /// Returns the shell's window, building it when there is none. Its
 /// `tauri.conf.json` entry is `create: false`; startup and client selection share
 /// the builder below so every replacement keeps the same native boundaries.
-fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
-        return Some(window);
+fn ensure_main_window(app: &AppHandle) -> Option<Webview> {
+    if app.get_window(MAIN_WINDOW).is_some() {
+        return instance_client::active_webview(app);
     }
-    build_main_window(app, None, false, None)
+    build_main_window(app, None, false, None).map(|window| window.as_ref().clone())
 }
 
 fn build_main_window(
@@ -1913,16 +1913,23 @@ fn build_main_window(
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+        .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
         ))
         .on_new_window(|url, _features| handle_new_window_request(url));
+    let document_window = instance_client::window_created(app);
     let generation = instance_client::epoch(app);
     let builder = builder.on_page_load(move |webview, payload| {
+        if payload.event() == tauri::webview::PageLoadEvent::Started {
+            if let Some(window) = document_window {
+                instance_client::document_started(webview.app_handle(), window, payload.url());
+            }
+        }
         if payload.event() == tauri::webview::PageLoadEvent::Finished {
             if let Some(generation) = generation {
-                instance_client::navigation_loaded(webview.app_handle(), generation, payload.url());
+                instance_client::navigation_loaded(webview.app_handle(), webview.label(), generation, payload.url());
             }
         }
     });
@@ -1943,20 +1950,93 @@ fn build_main_window(
     let builder = builder.initialization_script(DESKTOP_COMPUTER_USE_MARKER);
     let window = builder.build().ok()?;
     #[cfg(windows)]
-    if instance_downloads::install(&window).is_err() {
+    if instance_downloads::install(window.as_ref()).is_err() {
         let _ = window.destroy();
         return None;
     }
     #[cfg(target_os = "macos")]
     {
-        macos_new_context::install(&window);
+        macos_new_context::install(window.as_ref());
     }
     Some(window)
 }
 
+/// A Runtime replacement owns a WebView, never another physical main window.
+/// Its native role is assigned by the instance owner only after publication.
+fn build_main_child(
+    app: &AppHandle,
+    label: &str,
+    disposable: bool,
+    directory: Option<std::path::PathBuf>,
+    generation: u64,
+) -> Option<tauri::Webview> {
+    let physical = app.get_window(MAIN_WINDOW)?;
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == MAIN_WINDOW)?;
+    let mut builder =
+        tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External("about:blank".parse().ok()?))
+            .incognito(disposable)
+            .auto_resize()
+            .initialization_script(DESKTOP_SHELL_MARKER)
+            .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
+            .initialization_script(pet::DESKTOP_PET_MARKER)
+            .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
+            .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+            .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
+            .initialization_script(format!(
+        "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
+        serde_json::to_string(&app.package_info().version.to_string()).ok()?
+    ))
+            .on_new_window(|url, _features| handle_new_window_request(url))
+            .on_page_load(move |view, payload| {
+                if payload.event() == tauri::webview::PageLoadEvent::Started {
+                    instance_client::runtime_document_started(view.app_handle(), view.label(), payload.url());
+                } else {
+                    instance_client::navigation_loaded(view.app_handle(), view.label(), generation, payload.url());
+                }
+            });
+    if let Some(directory) = directory {
+        builder = builder.data_directory(directory);
+    }
+    if let Some(proxy) = &config.proxy_url {
+        builder = builder.proxy_url(proxy.clone());
+    }
+    if let Some(script) = instance_client::initial_script(app) {
+        builder = builder.initialization_script(script);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.initialization_script(macos_title_bar::inset_script());
+    }
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
+    {
+        builder = builder.initialization_script(DESKTOP_COMPUTER_USE_MARKER);
+    }
+    let size = physical
+        .inner_size()
+        .ok()?
+        .to_logical::<f64>(physical.scale_factor().ok()?);
+    let view = physical
+        .add_child(builder, tauri::LogicalPosition::new(0., 0.), size)
+        .ok()?;
+    let _ = view.hide();
+    #[cfg(windows)]
+    if instance_downloads::install(&view).is_err() {
+        let _ = view.close();
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    macos_new_context::install(&view);
+    Some(view)
+}
+
 fn start_bootstrap_when_shell_url_ready(
     app: AppHandle,
-    window: WebviewWindow,
+    window: Webview,
     #[cfg(feature = "bundled-runtime")] bootstrap_log: BootstrapLog,
 ) {
     tauri::async_runtime::spawn_blocking(move || {
@@ -2031,7 +2111,7 @@ fn new_window_decision(url: &Url) -> NewWindowDecision {
 /// scripts and IPC handler on that shared content controller: every such window
 /// would add a copy of the scripts to this one and, when dropped, remove this
 /// window's IPC handler, leaving the bootstrap page unable to reach the shell.
-fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+pub(crate) fn handle_new_window_request(url: Url) -> tauri::webview::NewWindowResponse<tauri::Wry> {
     if new_window_decision(&url) == NewWindowDecision::OpenInSystemBrowser {
         // Off the main thread: this runs inside the webview's own delegate callback.
         tauri::async_runtime::spawn_blocking(move || {
@@ -2065,12 +2145,13 @@ fn claim_recreated_window_bootstrap(activity: &AtomicU8) -> bool {
 
 /// Brings the existing window forward, or recreates it and re-enters bootstrap.
 fn focus_or_restore_main_window(app: &AppHandle) {
-    let created = app.get_webview_window(MAIN_WINDOW).is_none();
+    let created = app.get_window(MAIN_WINDOW).is_none();
     let Some(window) = ensure_main_window(app) else {
         return;
     };
-    let _ = window.unminimize();
-    let _ = native_frame::clamp(&window.as_ref().window());
+    let _ = window.window().unminimize();
+    let _ = native_frame::clamp(&window.window());
+    let _ = window.window().show();
     let _ = window.show();
     let _ = window.set_focus();
     let stopped = app
@@ -2127,16 +2208,19 @@ fn main_document_finished(webview: &tauri::Webview) {
     #[cfg(target_os = "macos")]
     macos_title_bar::sync(webview);
     instance_client::page_loaded(webview.app_handle());
+    if instance_client::enabled(webview.app_handle())
+        && !webview
+            .url()
+            .is_ok_and(|url| instance_client::caller_can_present(webview.app_handle(), webview.label(), &url))
+    {
+        return;
+    }
     apply_pending_deep_link(webview.app_handle());
     // Document completion is not update-panel readiness. VersionBadge reports
     // readiness after its listener and updater state are both available.
     // Preserve the existing guarded account/remote route, whose native owner
     // handles its own admission; never replay into a loading local Workbench.
-    if webview
-        .app_handle()
-        .get_webview_window(MAIN_WINDOW)
-        .is_some_and(|window| !pet::is_workbench(&window))
-    {
+    if instance_client::active_webview(webview.app_handle()).is_some_and(|window| !pet::is_workbench(&window)) {
         let _ = present_pending_desktop_updates(webview.app_handle());
     }
     // Settings become available the moment a Workbench is on
@@ -2203,7 +2287,7 @@ fn apply_pending_deep_link_on_main(app: &AppHandle) {
         return;
     }
     let observed_generation = shell.window_generation.load(Ordering::SeqCst);
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+    let Some(window) = instance_client::active_webview(app) else {
         return;
     };
     let Some(origin) = shell.active_origin.lock().ok().and_then(|origin| origin.clone()) else {
@@ -2608,7 +2692,7 @@ pub fn run() {
                     if webview.label() == pet::PET_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Started {
                         pet::page_loading(webview.app_handle());
                     }
-                    if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
+                    if instance_client::is_main_view(webview.app_handle(), webview.label()) && payload.event() == tauri::webview::PageLoadEvent::Finished {
                         main_document_finished(webview);
                     }
                 })
@@ -2616,7 +2700,11 @@ pub fn run() {
                     if webview.label() == pet::PET_WINDOW {
                         return pet::navigation_allowed(webview.app_handle(), url);
                     }
-                    if instance_client::enabled(webview.app_handle()) && webview.label() == MAIN_WINDOW {
+                    if webview.label() == update_popover::UPDATE_POPOVER {
+                        return instance_client::bundle(webview.app_handle())
+                            .is_some_and(|bundle| update_popover::navigation_allowed(url, &bundle));
+                    }
+                    if instance_client::enabled(webview.app_handle()) && instance_client::is_main_view(webview.app_handle(), webview.label()) {
                         if instance_client::presentation_request(
                             webview.app_handle(),
                             webview.label(),
@@ -2629,11 +2717,11 @@ pub fn run() {
                             return allowed;
                         }
                     }
-                    if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
+                    if instance_client::is_current_runtime(webview) && url.as_str() == updater::OPEN_URL {
                         let _ = open_desktop_updates(webview.app_handle());
                         return false;
                     }
-                    if webview.label() == MAIN_WINDOW && url.as_str() == OPEN_UPDATES_FALLBACK_URL {
+                    if instance_client::is_current_runtime(webview) && url.as_str() == OPEN_UPDATES_FALLBACK_URL {
                         updater::check(webview.app_handle().clone(), true);
                         return false;
                     }
@@ -2646,7 +2734,7 @@ pub fn run() {
                     if navigation_is_allowed(url, active_origin.as_ref()) {
                         return true;
                     }
-                    if is_runtime_rebind_target(url) {
+                    if instance_client::is_current_runtime(webview) && is_runtime_rebind_target(url) {
                         if let Some(origin) = active_origin {
                             rediscover_after_runtime_rebind(webview.app_handle().clone(), origin);
                         }
@@ -2654,6 +2742,15 @@ pub fn run() {
                     false
                 })
                 .on_event(|app, event| {
+                    #[cfg(target_os = "macos")]
+                    if let RunEvent::WindowEvent { label, event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Focused(true), .. } = event {
+                        if label == MAIN_WINDOW {
+                            if let Some(window) = app.get_window(MAIN_WINDOW) { macos_title_bar::sync_window(&window); }
+                        }
+                    }
+                    if let RunEvent::WindowEvent { label, event: WindowEvent::Destroyed, .. } = event {
+                        if label == MAIN_WINDOW { instance_client::window_destroyed(app); }
+                    }
                     if let RunEvent::WindowEvent {
                         label,
                         event: WindowEvent::CloseRequested { api, .. },
@@ -2662,7 +2759,7 @@ pub fn run() {
                     {
                         if label == MAIN_WINDOW {
                             api.prevent_close();
-                            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                            if let Some(window) = app.get_window(MAIN_WINDOW) {
                                 let _ = window.hide();
                             }
                         }
@@ -2697,7 +2794,7 @@ pub fn run() {
                     #[cfg(target_os = "macos")]
                     if let RunEvent::Reopen { .. } = event {
                         let main_visible = app
-                            .get_webview_window(MAIN_WINDOW)
+                            .get_window(MAIN_WINDOW)
                             .is_some_and(|window| window.is_visible().unwrap_or(false));
                         if !main_visible {
                             focus_or_restore_main_window(app);
@@ -2740,7 +2837,8 @@ pub fn run() {
             pet::pet_reset_voice_shortcut,
             pet::pet_bind,
             pet::pet_unbind,
-            pet::pet_open
+            pet::pet_open,
+            window_return::focus_main_window
         ])
         .setup(|app| {
             #[cfg(feature = "bundled-runtime")]
@@ -4007,7 +4105,8 @@ mod tests {
         let window = |label: &str, raw: &str| {
             WebviewWindowBuilder::new(&app, label, WebviewUrl::External(Url::parse(raw).expect("test URL")))
                 .build()
-                .expect("mock window")
+                .expect("mock window");
+            app.get_webview(label).expect("mock webview")
         };
         let main = window(MAIN_WINDOW, "tauri://localhost");
         assert_eq!(ensure_shell_ui(&main), Ok(()));

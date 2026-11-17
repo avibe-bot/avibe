@@ -26,7 +26,8 @@ import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
-import { agentUsesHubRuntime, modelsSurfaceKindFromReads } from './modelHubSurfaceState';
+import { agentUsesHubRuntime } from './modelHubSurfaceState';
+import { attributableBackends } from './sourceStatePresentation';
 import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
 import { MODEL_HUB_SOURCE_PARAM } from './modelHubRoutes';
 import { buildSupplyRelations } from './supplyRelations';
@@ -77,7 +78,7 @@ import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
-import { backendDisplayOrder, getBackendUiMeta, isNativeCliBackend, type NativeCliBackend } from '@/lib/agentBackends';
+import { AGENT_BACKENDS, getBackendUiMeta } from '@/lib/agentBackends';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -191,24 +192,21 @@ type AuthorizedSurfaceLanding = {
 export const RuntimePill: React.FC<{
   read: RegionRead<RuntimeDependency>;
   starting: boolean;
-  directCount?: number;
-}> = ({ read, starting, directCount }) => {
+}> = ({ read, starting }) => {
   const { t } = useModelsTranslation();
-  const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
+  const runtime = foldRegionRead<RuntimeDependency, RuntimeDependency | null>(read, {
     loading: () => null,
-    ready: (runtime) => ({ runtime, authoritative: true }),
+    ready: (value) => value,
     unread: () => null,
-    degraded: (runtime) => ({ runtime, authoritative: false }),
+    degraded: (value) => value,
   });
-  if (!projection) {
+  if (!runtime) {
     const key = read.kind === 'loading' ? 'starting' : 'unread';
     return <span className={cn('model-hub-runtime-pill', read.kind !== 'loading' && 'model-hub-runtime-pill--error')}><span className="model-hub-runtime-dot" />{read.kind === 'loading' && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</span>;
   }
-  const { runtime, authoritative } = projection;
   const health = runtime.status.health;
   const unread = read.kind === 'degraded' && read.cause === 'read_failed';
   const canInstall = health === 'not_installed' && runtimeCanAttemptInstall(runtime);
-  const allDirect = authoritative && !starting && health === 'ok' && directCount !== undefined && directCount > 0;
   const key = unread
     ? 'unread'
     : starting
@@ -218,7 +216,7 @@ export const RuntimePill: React.FC<{
     : runtime.enabled && !runtimeIsRunning(runtime)
       ? 'unavailable'
     : health === 'ok'
-      ? allDirect ? 'allDirect' : 'running'
+      ? 'running'
         : health === 'degraded'
           ? 'degraded'
         : health === 'down'
@@ -231,9 +229,8 @@ export const RuntimePill: React.FC<{
   const className = cn(
     'model-hub-runtime-pill',
     (health === 'down' || health === 'degraded' || unread) && 'model-hub-runtime-pill--error',
-    allDirect && 'model-hub-runtime-pill--direct',
   );
-  return <span className={className}><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</span>;
+  return <span className={className}><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</span>;
 };
 
 const RuntimeClosedState: React.FC<{
@@ -375,54 +372,10 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
   );
 };
 
-const DirectHome: React.FC<{
-  agents: (AgentSupply & { backend: NativeCliBackend })[];
-  switchFailures: ReadonlySet<string>;
-  connectingBackend: string | null;
-  onSwitch: (agent: AgentSupply) => void;
-}> = ({ agents, switchFailures, connectingBackend, onSwitch }) => {
-  const { t } = useModelsTranslation();
-  if (agents.length === 0) {
-    return <section className="model-hub-direct-empty"><h2>{t('settings.models.direct.empty.title')}</h2><p>{t('settings.models.direct.empty.body')}</p><span>{t('settings.models.direct.empty.install')}</span></section>;
-  }
-  return (
-    <div className="model-hub-direct">
-      <div className="model-hub-direct-grid grid">
-        <section className="model-hub-direct-card overflow-hidden border border-edge bg-surface shadow-elevation-0">
-          <div className="model-hub-direct-head flex items-center gap-3 border-b border-border px-5 py-3">
-            <div><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.card.current')}</h2><p className="mt-1 text-[11.5px] text-muted">{t('settings.models.direct.card.current.sub')}</p></div>
-          </div>
-          <div className="model-hub-direct-content flex flex-col">
-            {[...agents].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend)).map((agent) => {
-              const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
-              const switchFailed = switchFailures.has(agent.backend);
-              return (
-                <div key={agent.backend} className="model-hub-direct-row model-hub-direct-row--backend flex flex-wrap items-center gap-2.5 bg-background px-3 sm:flex-nowrap">
-                  <span className={cn('flex size-[34px] shrink-0 items-center justify-center rounded-[9px]', tileCls)}><Icon className={cn('size-[17px]', iconCls)} /></span>
-                  <span className="model-hub-direct-backend-copy">
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="model-hub-direct-backend-name truncate text-foreground">{label}</span>
-                      <span className="model-hub-pill model-hub-direct-kind-pill border">{t('settings.models.direct.pill.direct')}</span>
-                    </span>
-                    {switchFailed
-                      ? <span role="status" className="truncate text-[11px] font-semibold leading-normal text-destructive-ink">{t('settings.models.gateway.fail.switchToGateway')}</span>
-                      : <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>}
-                  </span>
-                  <Button variant="secondary" size="sm" className="model-hub-direct-switch h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)} disabled={connectingBackend === agent.backend}>{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.direct.action.switchToGateway')}</Button>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-        <section className="model-hub-direct-card overflow-hidden border border-edge bg-surface shadow-elevation-0">
-          <div className="model-hub-direct-head flex items-center border-b border-border px-5 py-3"><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.benefits.title')}</h2></div>
-          <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex items-start gap-2.5 bg-background px-3 py-[11px]"><span className="model-hub-ink-mint grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold">{key}</span><span className="model-hub-direct-benefit-copy"><span className="model-hub-direct-benefit-title-row flex items-center gap-1.5"><span className="text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span></span><span className="model-hub-direct-benefit-detail">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
-        </section>
-      </div>
-      <p className="model-hub-direct-note flex items-center justify-center border text-center text-[11.5px]">{t('settings.models.direct.note.perBackend')}</p>
-    </div>
-  );
-};
+/** Installed but switched off in Settings · Backends. A payload without the
+ *  fact reads as on, and the built-in Vibey has no switch. */
+const isSwitchedOff = (agent: AgentSupply): boolean =>
+  getBackendUiMeta(agent.backend).capabilities.supports_cli && agent.backend_enabled === false;
 
 const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
   const { t } = useModelsTranslation();
@@ -1148,24 +1101,36 @@ export const SettingsModelsPage: React.FC = () => {
   const supplyDisplayRead = routeCommitStatus?.failed.has('agents')
     ? failRegionRead(supplyRead)
     : supplyRead;
-  const directEmpty = modelsSurfaceKindFromReads(supplyDisplayRead, sourcesDisplayRead) === 'direct_empty';
   const installedAgents = agents.filter(
     (agent) => !getBackendUiMeta(agent.backend).capabilities.supports_cli || agent.cli_present,
   );
-  const installedNativeAgents = installedAgents.filter(
-    (agent): agent is AgentSupply & { backend: NativeCliBackend } => isNativeCliBackend(agent.backend),
+  // Installed but switched off in Settings · Backends: still part of the page,
+  // drawn as a folded off row with no routes, wires or "in use" attribution.
+  const switchedOffAgents = installedAgents.filter(isSwitchedOff);
+  const liveAgents = installedAgents.filter((agent) => !isSwitchedOff(agent));
+  const hubBackends = liveAgents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
+  const activeBackends = attributableBackends(
+    supplyRead.kind === 'ready',
+    hubBackends,
+    new Set(switchedOffAgents.map((agent) => agent.backend)),
+    AGENT_BACKENDS.map((backend) => backend.id),
   );
-  const hubBackends = agents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
-  const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
+  // Before the first model provider (a search service supplies none), the Providers
+  // card's add button is the page's one way forward.
+  const sourcesReady = sourcesRead.kind === 'ready';
+  const noModelProviders = React.useMemo(
+    () => sourcesReady && sources.every((source) => source.protocol === 'search'),
+    [sources, sourcesReady],
+  );
   const canRetryRuntime = runtimeRead.kind === 'ready'
     && !runtimeRunning
     && runtimeHealth !== 'installing'
     && retainedRuntime?.manifest.resolution !== 'unsupported';
   const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyDisplayRead, {
     loading: () => loadingRegion(),
-    ready: () => readyRegion(installedAgents),
+    ready: () => readyRegion(liveAgents),
     unread: (retryable) => unreadRegion(retryable),
-    degraded: (_staleData, cause, retryable) => degradedRegion(installedAgents, cause, retryable),
+    degraded: (_staleData, cause, retryable) => degradedRegion(liveAgents, cause, retryable),
   });
   type SourceDetailSelection = {
     sourceId: string;
@@ -1493,7 +1458,7 @@ export const SettingsModelsPage: React.FC = () => {
       }
     }
   }, [chainsRead, routeCommitted, suspendedRouteAttempts]);
-  const supplyRelations = React.useMemo(() => buildSupplyRelations(installedAgents, sources, chains, runtime), [chains, installedAgents, runtime, sources]);
+  const supplyRelations = React.useMemo(() => buildSupplyRelations(liveAgents, sources, chains, runtime), [chains, liveAgents, runtime, sources]);
   /** The Sources this page has read, by id — for the surfaces that show a hop and
    *  have to name whose it is. Only what was read: an id no Source answers for is
    *  left unnamed rather than rendered raw. */
@@ -1599,7 +1564,7 @@ export const SettingsModelsPage: React.FC = () => {
   return (
     <ModelHubShell
       rootRef={pageRef}
-      status={!landingLoading && <RuntimePill read={runtimeRead} starting={startingRuntime} directCount={directEmpty ? installedNativeAgents.length : undefined} />}
+      status={!landingLoading && <RuntimePill read={runtimeRead} starting={startingRuntime} />}
       actions={!landingLoading && runtimeConfigurationVisible
         ? <div className="model-hub-shell-actions">
               {runtimeConfigurationVisible && migrationAvailable === true && (
@@ -1614,7 +1579,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {t('settings.models.migration.open')}
                 </Button>
               )}
-              {runtimeConfigurationVisible && !directEmpty && <TakeoverPill count={takeoverCount} />}
+              {runtimeConfigurationVisible && <TakeoverPill count={takeoverCount} />}
               {runtimeConfigurationVisible && <Button
                 type="button"
                 variant="ghost"
@@ -1636,8 +1601,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {/* The tab strip belongs to the Hub, not to the source
                       inventory. Usage and switch history both outlive the Sources
                       they name, so deleting the last Source may not remove the only
-                      route to either record. The direct-only body of `sources` is
-                      DirectHome (ui/design: models/page/direct). */}
+                      route to either record. */}
                   <HubTabs tab={tab} onChange={setTab} />
                   {tab === 'quota' ? <QuotaTab
                       quota={quotaRead}
@@ -1659,7 +1623,6 @@ export const SettingsModelsPage: React.FC = () => {
                     : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} onAddService={openSearchServices} onOpenService={openSearchSource} onRetryService={(sourceId) => void hostedTools.retryService(sourceId)} onRetryFetch={(sourceId) => void hostedTools.retryFetch(sourceId)} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
-                    : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
                     : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
@@ -1668,7 +1631,7 @@ export const SettingsModelsPage: React.FC = () => {
                           onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
                         >
                           <PopoverAnchor virtualRef={subscriptionAnchorRef} />
-                          <SourcesCard read={sourcesDisplayRead} searchTool={searchTool} onAddSearchService={openSearchServices} activeBackends={activeBackends} retryRef={sourcesRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <SourcesCard read={sourcesDisplayRead} searchTool={searchTool} activeBackends={activeBackends} retryRef={sourcesRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
                           <PopoverContent
                             role="menu"
                             aria-label={t('settings.models.upstream.addSubscription')}
@@ -1739,7 +1702,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onAddModels={(agent) => setAddBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
+                        <GatewayModule supply={installedSupplyRead} switchedOff={switchedOffAgents} noProviders={noModelProviders} retryRef={supplyRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => { catalogOriginRef.current = null; setCatalogFocus(null); setMenuBackend(agent.backend); }} onAddModels={(agent) => setAddBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} onOpenAgent={openAgentDefinition} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />

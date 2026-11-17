@@ -47,18 +47,15 @@ function compilerContract(t: TFunction, key: TranslationKey) {
   const fallback: string = t('deliberately.absent', { defaultValue: 'Fallback' });
   const parent: string = t('settings.models.addKey.field.vendor');
   const child: string = t('settings.models.addKey.field.vendor.search');
-  const sub: string = t('settings.models.direct.card.current.sub');
   // @ts-expect-error dotted copy is a string, never String.search
   t('settings.models.addKey.field.vendor.search')('query');
   // @ts-expect-error dotted copy must not acquire String.search's callable signature
   const method: (query: string | RegExp) => number = t('settings.models.addKey.field.vendor.search');
-  // @ts-expect-error dotted copy must not acquire String.sub's callable signature
-  const subMethod: () => string = t('settings.models.direct.card.current.sub');
   // @ts-expect-error no phantom string-method descendants
   t('settings.models.addKey.field.vendor.toUpperCase');
   // @ts-expect-error no phantom descendants under a literal dotted key
   t('settings.models.addKey.field.vendor.search.typo');
-  return [proxy, app, state, text, title, plural, fallback, parent, child, sub, method, subMethod];
+  return [proxy, app, state, text, title, plural, fallback, parent, child, method];
 }
 void compilerContract;
 

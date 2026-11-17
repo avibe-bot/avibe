@@ -212,7 +212,13 @@ export const SettingsMessagingPage: React.FC = () => {
           }
           description={
             vibeCloudPaired
-              ? t('dashboard.audioTranscriptionHint')
+              ? (
+                <>
+                  {t('dashboard.audioTranscriptionHint')}
+                  {/* Where chat-app voice messages go (App Store guideline 5.1.2(i)). */}
+                  <span className="block">{t('dashboard.audioTranscriptionDisclosure')}</span>
+                </>
+              )
               : t('dashboard.audioTranscriptionRequiresVibeCloud')
           }
           control={

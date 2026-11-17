@@ -129,11 +129,12 @@ expose internal reason codes, turn the feature on, or issue permission changes. 
 desktop-managed macOS Runtime; a terminal-installed Avibe Runtime does not show
 a native desktop control it cannot own.
 
-## Windows (Preview)
+## Windows
 
-On a Windows x64 host, the Settings page is labelled **Preview**, and its
-Preview card carries one **Computer Use** switch in its header that turns the
-feature on and off, like the tray item. The switch shows the opt-in the server
+On a Windows x64 host, the Settings page shows a Windows card whose description
+notes that display scaling, multiple monitors, and input methods may not work as
+expected. The card carries one **Computer Use** switch in its header that turns
+the feature on and off, like the tray item. The switch shows the opt-in the server
 reports (`enabled`); the status below the card says whether Computer Use is
 ready. A change holds the switch until a status read that began after the
 change reports it, for at most 15 seconds; a failed or unconfirmed change
@@ -163,8 +164,7 @@ The host comes from the server: the status endpoint reports `host_platform`
 describes the Runtime's host, and the desktop app only decides whether the
 page's actions can run. A server without the field is an older macOS-only
 release, and the page keeps the macOS guide. A Windows host that reports
-Computer Use unsupported shows the unsupported notice in Windows terms, still
-labelled Preview. The Home **Getting started** item reads the same field and
+Computer Use unsupported shows the unsupported notice in Windows terms. The Home **Getting started** item reads the same field and
 on Windows asks to turn Computer Use on instead of granting permissions.
 `host_platform` describes the host only; it never turns Computer Use on.
 

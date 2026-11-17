@@ -203,7 +203,7 @@ describe('Getting started reads what the UI already observes (ui/design: home/ho
   });
 
   it.each([
-    ['a Windows host', 'windows', 'Turn on Computer Use (Preview)', 'Turn on'],
+    ['a Windows host', 'windows', 'Turn on Computer Use', 'Turn on'],
     ['a macOS host', 'macos', 'Allow Computer Use', 'Grant'],
   ])('names Computer Use setup for %s, as the server reports it', async (_case, host, title, action) => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });

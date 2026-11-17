@@ -9,7 +9,7 @@ mod windows_native {
     use std::cell::RefCell;
 
     use avibe_runtime_host::instance_client::transport::Epoch;
-    use tauri::{AppHandle, Manager, WebviewWindow};
+    use tauri::{AppHandle, Manager, Webview};
     use webview2_com::{
         take_pwstr, DownloadStartingEventHandler,
         Microsoft::Web::WebView2::Win32::{
@@ -30,8 +30,9 @@ mod windows_native {
         static ACTIVE: RefCell<Vec<Download>> = const { RefCell::new(Vec::new()) };
     }
 
-    pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
+    pub fn install(window: &Webview) -> tauri::Result<()> {
         let app = window.app_handle().clone();
+        let label = window.label().to_owned();
         window.with_webview(move |platform| {
             // SAFETY: Tauri runs this closure and all subscribed callbacks on
             // the WebView2 apartment. The interface owns each event argument.
@@ -44,6 +45,7 @@ mod windows_native {
                         .add_DownloadStarting(
                             &DownloadStartingEventHandler::create(Box::new({
                                 let app = app.clone();
+                                let label = label.clone();
                                 move |sender, args| {
                                     let Some(args) = args else {
                                         return Ok(());
@@ -57,11 +59,11 @@ mod windows_native {
                                     operation.Uri(&mut uri)?;
                                     let uri = take_pwstr(uri);
                                     let epoch = app
-                                        .get_webview_window(crate::MAIN_WINDOW)
+                                        .get_webview(&label)
                                         .and_then(|window| window.url().ok())
                                         .zip(uri.parse().ok())
                                         .and_then(|(current, target)| {
-                                            crate::instance_client::download_epoch(&app, &current, &target)
+                                            crate::instance_client::download_epoch(&app, &label, &current, &target)
                                         });
                                     let Some(epoch) = epoch else {
                                         args.SetCancel(true)?;
@@ -107,8 +109,8 @@ mod windows_native {
             if let Err(error) = result {
                 eprintln!("desktop download guard: {error}");
                 if crate::instance_client::enabled(&app) {
-                    if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW) {
-                        let _ = window.destroy();
+                    if let Some(window) = app.get_webview(&label) {
+                        let _ = window.close();
                     }
                 }
             }

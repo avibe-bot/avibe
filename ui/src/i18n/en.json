@@ -22,7 +22,9 @@
       "runtime_stop_failed": "Avibe could not confirm that the Runtime stopped, so some or all of it may still be running. Choose Try again to reconnect to it, then stop it again if you need to.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
-      "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
+      "workbench_navigation_failed": "Avibe could not open the Workbench in this window.",
+      "database_disk_full": "Avibe couldn't update its database because the disk is full. Nothing was changed. Free some space on the disk that holds your Avibe data, then choose Try again.",
+      "database_disk_full_unconfirmed": "Avibe couldn't update its database because the disk is full. Free some space on the disk that holds your Avibe data, then choose Try again."
     },
     "tray": {
       "open": "Open Avibe",
@@ -319,7 +321,10 @@
       "current": "Current instance",
       "none": "No instance selected",
       "switch": "Switch instance",
-      "choose": "Choose an instance"
+      "choose": "Choose an instance",
+      "privacy": "Privacy policy",
+      "delete": "Delete account",
+      "deleteHint": "Continue to avibe.bot to review the impact and confirm deletion."
     },
     "twoFactor": {
       "title": "Confirm it’s you.",
@@ -803,8 +808,7 @@
       "windows": {
         "subtitle": "Let Avibe agents see and operate this Windows PC.",
         "title": "Computer Use on Windows",
-        "previewBadge": "Preview",
-        "previewDetail": "Computer Use on Windows is in Preview. Display scaling, multiple monitors, and input methods are still being verified.",
+        "limitations": "Display scaling, multiple monitors, and input methods may not work as expected.",
         "apps": "Agents can operate ordinary apps running under your Windows account. No Accessibility or Screen Recording setting is needed.",
         "elevated": "App windows running as administrator are refused. Avibe never raises its own rights; the Agent tells you it cannot control that window. To let it help, reopen the app without “Run as administrator”.",
         "launch": "The Agent starts desktop apps it can reliably locate on this PC. Store apps, and apps it cannot reliably locate, need you to open them first: the Agent asks, then continues in that window.",
@@ -1215,10 +1219,6 @@
     },
     "logsTitle": "Live logs",
     "logsSubtitle": "Inspect the runtime log stream with filters, search, and source selection.",
-    "inProgressTitle": "This settings page is next in the redesign queue",
-    "inProgressBody": "The new route and shell are live, but the feature-specific UI for this section is still being migrated from the old dashboard and wizard flows.",
-    "inProgressHint": "Until this section is rebuilt, the setup wizard still exposes the underlying configuration paths.",
-    "openSetup": "Open setup wizard",
     "models": {
       "title": "Models",
       "subtitle": "See whether each agent model can run now and which provider serves it; set a route for one model when needed.",
@@ -1237,10 +1237,8 @@
         "unread": "Model Hub status unavailable",
         "notStarted": "Model Hub not ready",
         "notInstalled": "Model Hub component not installed",
-        "allDirect_one": "The only backend uses its own login",
-        "allDirect_other": "All {{count}} backends use their own login",
         "starting": "Starting…",
-        "unsupported": "No Model Hub component for this platform yet",
+        "unsupported": "Model Hub isn't available on this platform",
         "closed": {
           "off": {
             "title": "Model Hub is not ready",
@@ -1288,50 +1286,15 @@
         }
       },
       "direct": {
-        "card": {
-          "current": "Currently: own login",
-          "current.sub": "Each agent backend uses its own login and connects to the vendor directly."
-        },
-        "pill": {
-          "direct": "Own login"
-        },
-        "backend": {
-          "claude": {
-            "detail": "Uses its own Claude login"
-          },
-          "codex": {
-            "detail": "Uses its own ChatGPT login"
-          },
-          "opencode": {
-            "detail": "Uses its own model configuration"
-          }
-        },
         "action": {
-          "switchToGateway": "Let Model Hub manage",
           "refreshAgents": "Detect Agent backends again"
-        },
-        "benefits": {
-          "title": "Switch to Model Hub and you gain three things",
-          "1": "Your session survives a quota running out",
-          "1.detail": "When your Claude subscription is exhausted, it moves to the next provider you added and the conversation continues.",
-          "2": "One key supplies several backends",
-          "2.detail": "The same API key can serve Claude Code, Codex and OpenCode at once.",
-          "3": "Mix and match models freely",
-          "3.detail": "Pair any backend with any model from any provider."
-        },
-        "note": {
-          "perBackend": "Switch one backend at a time — the others keep their own login. You can switch back at any time."
-        },
-        "empty": {
-          "title": "No agent backend was found on this machine",
-          "body": "Install Claude Code, Codex or OpenCode, come back to this page, and they will appear here.",
-          "install": "Install a backend CLI, then reload this page."
         }
       },
       "gateway": {
         "heading": "Routes",
         "infoLabel": "What routes are",
         "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
+        "address": "Local address: {{address}} (for connecting other tools to the gateway)",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
         "addModel": "Add model",
@@ -1395,7 +1358,8 @@
             "unconfigured": "No model route configured",
             "unused": "No Agent uses this backend"
           },
-          "emptyModels": "This backend's model list is empty"
+          "emptyModels": "This backend's model list is empty",
+          "emptyNoProviders": "Add a model provider and its models will be listed here."
         },
         "catalog": {
           "title": "{{backend}} models",
@@ -1417,7 +1381,7 @@
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
           "searchAdd": "Search providers and the model catalog for \"{{query}}\"",
-          "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
+          "legacy": "This model engine version can’t edit its model list. These are the models it provides.",
           "baselineUnavailable": "This backend's model list could not be read.",
           "save": "Save",
           "saving": "Saving…",
@@ -1521,6 +1485,11 @@
           "cancel": "Cancel",
           "add": "Add model",
           "apply": "Save model"
+        },
+        "off": {
+          "status": "Turned off",
+          "enable": "Turn on",
+          "enableLabel": "Turn on {{backend}} in Settings › Backends"
         }
       },
       "takeover": {
@@ -2101,7 +2070,6 @@
         "startNow": "Start now",
         "starting": "Starting"
       },
-      "experimental": "Experimental",
       "agents": {
         "title": "Agent",
         "subtitle": "Each agent picks its own providers and order; a failure moves to the next one",
@@ -2264,14 +2232,15 @@
           "title": "Connected, but not fully verified",
           "detail": "The response does not establish both the interface and credential validity"
         },
+        "more": "More settings",
         "protocol": {
-          "saveFirstHint": "Choose the provider's API format. Saving does not require successful detection or a model test.",
           "auto": "Auto detect",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "Search service",
+          "change": "Change format",
           "idleHint": "Detected automatically once Base URL and API key are filled. Saving doesn't wait for it.",
           "detecting": "Detecting the API format… You can save without waiting.",
           "manual": "Choose the API format manually",
@@ -2435,7 +2404,7 @@
         "applyFailed": "Migration failed, please retry",
         "blocked": {
           "config": "The config file is malformed.",
-          "environment": "Keys in environment variables can't be migrated yet.",
+          "environment": "Keys in environment variables can't be migrated. Add them manually.",
           "credential": "This authentication type isn't supported.",
           "dynamic_shell": "The key comes from a command and can't be read.",
           "ambiguous_shell": "The key differs between files.",
@@ -2958,8 +2927,6 @@
         "sharedKey": "Uses the key of provider “{{source}}”. Manage that key under Providers & routing.",
         "manageSource": "Manage provider key",
         "removeNote": "Removing this service stops using it for search. Other providers are unaffected.",
-        "addProvider": "Add provider",
-        "menu": "Search services (Tavily, Exa…)",
         "month": "This month",
         "monthRequests_one": "{{requests}} request",
         "monthRequests_other": "{{requests}} requests",
@@ -3216,6 +3183,7 @@
     "sandbox_browser_unavailable": "Protected Vault needs a secure browser context with Web Crypto. Open Avibe directly in an up-to-date compatible browser, not inside another page or embedded browser.",
     "sandbox_browser_required": "Continue this protected Vault step in your browser, not the desktop app.",
     "sandbox_reset": "This protected Vault attempt was cancelled or reset. Retry from Avibe to verify a fresh sandbox.",
+    "authorization_window_closed": "The secure window closed before this step finished, so nothing was approved, signed or shown. Try again.",
     "sandbox_ready_timeout": "The verified Vault sandbox did not start. Check your connection, update Avibe, and retry.",
     "avault_authorization_required": "avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Choose Authorize avault, then answer the dialog on that Mac.",
     "stale_login_session": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
@@ -3367,7 +3335,6 @@
   },
   "apps": {
     "title": "Apps",
-    "soon": "Soon",
     "editor": {
       "label": "Editor",
       "desc": "A fast code editor for files on this machine.",
@@ -3473,7 +3440,6 @@
     "fileBrowser": {
       "label": "Files",
       "desc": "Browse, view, and edit files on this machine.",
-      "placeholder": "The File Browser is being built. You'll be able to browse the whole machine, open files, and edit and save them right here.",
       "tagline": "Whole machine · view and edit",
       "selectHint": "Select a file to view or edit it.",
       "empty": "This folder is empty.",
@@ -3575,7 +3541,6 @@
     "terminal": {
       "label": "Terminal",
       "desc": "A real shell in your browser.",
-      "placeholder": "The Terminal arrives in Phase 2: a real shell with tmux-backed persistent sessions.",
       "tagline": "A real shell, in your browser.",
       "persistent": "Persistent",
       "tabTitle": "Shell {{n}}",
@@ -3650,8 +3615,6 @@
   },
   "workbench": {
     "eyebrow": "Agent OS",
-    "placeholderTitle": "Your AI workbench is coming together",
-    "placeholderBody": "Agents, Skills, Harness, and Vaults will live here. For now, jump into the control panel to configure platforms and backends.",
     "home": {
       "greeting": {
         "morning": "Good morning. What’s next?",
@@ -3686,7 +3649,7 @@
           "action": "Grant"
         },
         "computer_use_windows": {
-          "title": "Turn on Computer Use (Preview)",
+          "title": "Turn on Computer Use",
           "why": "Let {{name}} operate ordinary apps on this Windows PC.",
           "action": "Turn on"
         },
@@ -3801,7 +3764,7 @@
         "daemonUnreachableDetail": "Avibe cannot reach Computer Use. Turn Computer Use off and on; if it happens again, reopen Avibe.",
         "controllerUnavailableDetail": "The Avibe service is not responding. Computer Use works again when it recovers.",
         "socketPathTooLongDetail": "macOS could not start Computer Use. Update or reinstall Avibe.",
-        "unsupportedArchitectureDetail": "Computer Use on Windows needs an x64 PC. This device is not supported in the Preview.",
+        "unsupportedArchitectureDetail": "Computer Use on Windows needs an x64 PC.",
         "elevatedRuntimeDetail": "The Avibe service is running as administrator, so Computer Use stays unavailable. Quit Avibe and reopen it normally, without “Run as administrator”.",
         "sessionUnavailableDetail": "Computer Use needs a signed-in Windows desktop. Sign in to this PC's desktop, then reopen Avibe.",
         "sessionLockedDetail": "This PC is locked or its remote session is disconnected. Unlock it or reconnect, then check again.",
@@ -3962,12 +3925,10 @@
       "navQuiet": "Inbox, unread with notifications off"
     },
     "modules": {
-      "comingSoonEyebrow": "Coming soon",
-      "comingSoon": "This capability is still on the way — the full surface lands in a later release.",
       "inbox": {
         "eyebrow": "Inbox",
         "title": "Inbox",
-        "description": "Cross-project notifications from every Avibe session. Hover popover + full list view will land in a later commit."
+        "description": "Cross-project notifications from every Avibe session."
       },
       "agents": {
         "eyebrow": "Agents",
@@ -4024,13 +3985,6 @@
     "feature1": "Your data + agents stay on your machine.",
     "feature2": "Slack, Discord, Telegram, Lark, WeChat — one place.",
     "feature3": "Claude, OpenCode, Codex — route per channel."
-  },
-  "modeSelection": {
-    "title": "Choose Mode",
-    "saasMode": "SaaS Mode",
-    "saasDescription": "OAuth install + cloud relay + local execution (coming soon).",
-    "selfHostMode": "Self-host Mode",
-    "selfHostDescription": "Use your own platform credentials and keep execution local."
   },
   "platform": {
     "eyebrow": "03 — Platforms",
@@ -4669,7 +4623,8 @@
     "desktopManagedUpdateMemberHint": "Update this host in the Avibe desktop app on the computer running Avibe.",
     "desktopRemoteUpdateLocalRequest": "An update to {{target}} was requested remotely. Install it now or ignore this request.",
     "desktopRemoteUpdateIgnore": "Ignore this request",
-    "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
+    "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}",
+    "audioTranscriptionDisclosure": "When on, voice messages from chat apps go to a third-party AI speech service to be turned into text. avibe.bot doesn't keep the recordings."
   },
   "doctor": {
     "title": "System Status",
@@ -5459,7 +5414,7 @@
     "createDialog": {
       "title": "Talk to an agent to set up background work",
       "subtitle": "Writing cron is the tool era; describing intent is the colleague era.",
-      "body": "Scheduled tasks, watches, and (soon) webhooks all come from a chat with an agent. The agent translates your intent into vibe task add / vibe watch add arguments so you never have to remember cron syntax.",
+      "body": "Scheduled tasks and watches come from a chat with an agent. The agent turns your intent into vibe task add / vibe watch add arguments, so you never have to remember cron syntax.",
       "example": "Example: \"Every weekday at 9:30am, summarize yesterday's #ops activity and post to #ops.\" The agent picks the cron, builds the prompt, and binds it to this project.",
       "projectLabel": "Create in which project",
       "noProject": "No projects yet — add one from the sidebar + button first.",
@@ -6252,11 +6207,10 @@
       "strictHelp": "Ask for your passkey on every approval and reveal — not just an in-sandbox confirmation. Signing always asks regardless. Turning this on re-locks the vault so it takes effect right away."
     },
     "reveal": {
-      "show": "Show value",
-      "copy": "Copy value",
-      "showInBrowser": "Show in browser",
+      "view": "View secret",
+      "viewInBrowser": "View in browser",
+      "browserFallback": "Showing this secret didn't work in the app, so choose View in browser from its menu.",
       "errors": {
-        "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
         "unavailable": "Reveal isn't available for this secret yet."
       }
@@ -6301,7 +6255,6 @@
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
       "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
       "replacePlaceholder": "Saved · type to replace",
-      "revealField": "Field to reveal",
       "nameRequired": "Enter a field name",
       "nameInvalid": "Use lowercase letters, digits, and underscores, starting with a letter",
       "nameTaken": "There's already a {{field}} field",
@@ -6340,12 +6293,13 @@
       "maybeLater": "Maybe later",
       "unlockWithPasskey": "Unlock with passkey",
       "unlockPasskeyCaption": "Face ID · Touch ID · security key",
-      "factorNote": "Your passkey proof never leaves the browser — the machine alone can't decrypt this",
+      "factorNote": "Only your passkey can unlock this; the machine alone can't decrypt it",
       "cancel": "Cancel",
       "passkeyUnrecoverableWarning": "This passkey is the only key. Lose it and the protected secrets can't be recovered — there is no backup.",
       "passkeyAck": "I understand: if I lose this passkey, these secrets can't be recovered.",
       "unlockUnavailableHere": "Use a compatible browser. On the computer running Avibe, open Vaults from localhost or 127.0.0.1; on other devices, use your HTTPS avibe.bot address. LAN HTTP addresses (such as 192.168.x.x) are not supported.",
-      "browserNote": "Passkeys don't work in the desktop app. Continue in your browser, on this same Avibe, and fill in this secret there.",
+      "browserNote": "This version of the desktop app can't use your passkey directly. Continue in your browser, on this same Avibe, and fill in this secret there.",
+      "browserFallbackNote": "The passkey step didn't work in the app, so continue in your browser, on this same Avibe, and fill in this secret there.",
       "openInBrowser": "Open in browser",
       "errors": {
         "prfUnavailable": "This passkey doesn’t support the encryption Protected needs, so setup didn’t finish. On a Mac, choose iCloud Keychain when your browser asks where to save the passkey. On Windows, you can use Chrome signed in to your Google account and save it to Google Password Manager. Then try again.",
@@ -6461,6 +6415,10 @@
       "createNeedsAvault": "Install or update avault as shown above first.",
       "createNeedsPassphraseAgain": "Enter the passphrase again to create the wallet."
     },
+    "handoff": {
+      "done": "Done. You can close this tab and go back to the desktop app.",
+      "openApp": "Open the desktop app"
+    },
     "requests": {
       "title": "Pending requests",
       "subtitle": "Agents are waiting for your approval.",
@@ -6529,10 +6487,10 @@
       "close": "Close",
       "ttlMinutes": "{{count}} min",
       "ttlHours": "{{count}} h",
-      "accessNote": "Unlocked in your browser — the secret's value is never shown to the AI or the chat.",
-      "signNote": "The private key never leaves your browser — only the signature is returned.",
-      "protectedWarning": "Protected signing happens in the secure browser sandbox. Only the public signature returns to Avibe.",
-      "browserNote": "This needs your passkey, which the desktop app can't use. Review and approve it in your browser.",
+      "accessNote": "Unlocked in the secure window. The value is never shown to the AI or in chat.",
+      "signNote": "The private key is used only inside the secure window. Avibe receives only the signature.",
+      "browserNote": "This version of the desktop app can't use your passkey directly. Review and approve in your browser.",
+      "browserFallbackNote": "The passkey step didn't work in the app, so review and approve this in your browser.",
       "continueInBrowser": "Continue in browser",
       "errors": {
         "failed": "Couldn't complete the approval. Please try again.",
@@ -6544,6 +6502,10 @@
       },
       "account": "Account",
       "path": "Derivation path {{path}}",
+      "btcInput": "Bitcoin input",
+      "btcInputType": "{{type}} {{code}}",
+      "btcInputNetwork": "Network: {{network}} (the requester’s label)",
+      "btcInputReview": "Amount, recipients and fee are shown and checked in the secure window after Sign.",
       "rawDigestNote": "Raw hash: transfer details can’t be shown. Approve only requests you recognise.",
       "solanaBlockhashHint": "Solana transactions are usually valid for only a minute or two. If you approve later, this one may have expired and will need to be requested again. Transactions that use a durable nonce are not affected."
     },
@@ -6661,8 +6623,8 @@
       "back": "Back",
       "wallet": {
         "badge": "Seed phrase · {{count}} accounts",
-        "used": "{{count}} of {{limit}} accounts · numbered as in MetaMask and Phantom",
-        "agentUsage": "Agents pick the chain with --chain and the account with --account",
+        "used": "{{count}} of {{limit}} accounts · EVM and Solana accounts are numbered in the same order as MetaMask and Phantom",
+        "agentUsage": "Agents pick the chain with --chain and the account with --account; for Bitcoin, --address-type picks the address type",
         "ask": "Ask before signing",
         "askLocked": "On. It can’t be turned off here for now.",
         "rename": "Rename",
@@ -6742,7 +6704,8 @@
           "vault_already_initialized": "The protected vault was just set up elsewhere"
         },
         "nameTakenCreate": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold a wallet for the words just shown; don’t send funds to its addresses. Create it again with a different name; you’ll get a new set of words.",
-        "nameTakenImport": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold the wallet you just imported; don’t send funds to its addresses. Import it again with a different name, using the same words."
+        "nameTakenImport": "Another key already uses this name, so the wallet wasn’t saved. Avibe doesn’t hold the wallet you just imported; don’t send funds to its addresses. Import it again with a different name, using the same words.",
+        "windowWhy": "The recovery words appear only in a separate secure window that Avibe can't read or cover, which keeps them safer."
       },
       "nameTakenAfterSave": "Another key already uses this name, so the wallet isn’t saved yet. Change the name and save again; your recovery words stay the same.",
       "standardTierLine": "You're using Standard: the words are entered on this page and stored encrypted on the computer that runs Avibe."
@@ -7289,7 +7252,8 @@
       "stop": "Stop voice input",
       "startFailed": "Couldn't use the microphone. Check microphone access in system settings, or type instead.",
       "empty": "No speech was heard. Try again, or type instead.",
-      "failed": "Couldn't turn that into text. Try again, or type instead."
+      "failed": "Couldn't turn that into text. Try again, or type instead.",
+      "consentOff": "Voice input is off. Turn it on in Settings › General."
     },
     "keyboard": {
       "open": "Type a message",
@@ -7420,6 +7384,21 @@
       "lost": "The recording couldn't be saved on this device.",
       "insert": "Put in the draft",
       "truncated": "The end of the recording wasn't saved on this device; this is the part that was."
+    },
+    "consent": {
+      "title": "Turn on voice input?",
+      "body": "What you say goes to a third-party AI service to be turned into text, with a little of the current conversation for accuracy.",
+      "learnMore": "Learn more",
+      "details": "They pass through avibe.bot to Alibaba Cloud Model Studio (Singapore), which transcribes the recording, and a model on the same platform tidies the text. avibe.bot keeps neither. You can change this anytime in Settings › General.",
+      "privacyPolicy": "Privacy policy",
+      "allow": "Allow",
+      "deny": "Don't allow",
+      "saveFailed": "Couldn't save your choice. Try again.",
+      "offTitle": "Voice input is off",
+      "offBody": "Type instead, or turn it on in Settings › General.",
+      "turnOn": "Turn on",
+      "settingTitle": "Voice input",
+      "settingDescription": "A third-party AI speech service turns what you say into text; avibe.bot doesn't keep your recordings. Applies to your account on this Avibe."
     }
   },
   "mcpHub": {
@@ -7572,8 +7551,8 @@
     "accountService": "avibe.bot",
     "switchInstance": "Switch instance",
     "localRemoteAccess": "Remote access to this Mac",
-    "auxiliaryIncomplete": "Mini and native notifications are unavailable for remote instances in Phase 1. Return to this Mac to use them.",
-    "signOut": "Sign out",
+    "auxiliaryIncomplete": "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them.",
+    "signOut": "Sign out on this device",
     "signOutBody": "Sign out on this Desktop and return to this Mac. Registration, remote access preferences and running tasks are kept.",
     "localVersion": "Local Desktop version {{version}}",
     "continueLocal": "Continue on this Mac",
@@ -7602,13 +7581,13 @@
     "useAuthenticator": "Use an authenticator",
     "loginHero": "Your Avibe,\nconnected from here.",
     "loginHeroBody": "One account for your computers and the instances shared with you.",
-    "checkInbox": "Check your inbox",
-    "loginTitle": "Sign in or create an account",
+    "checkInbox": "Check your inbox.",
+    "loginTitle": "Start with an email.",
     "codeSent": "A code was sent to {{email}}",
-    "loginBody": "Use your avibe.bot account. New emails create an account automatically.",
+    "loginBody": "Sign in or sign up for your avibe.bot account.",
     "emailCode": "6-digit code",
     "email": "Email",
-    "codeHelp": "Enter the code from your email.",
+    "codeHelp": "Enter the 6-digit code from your email. You can paste it here.",
     "verifySignIn": "Verify and sign in",
     "sendCode": "Send verification code",
     "changeEmail": "Change email",
@@ -7623,7 +7602,7 @@
     "allow": "Allow and connect",
     "deny": "Decline",
     "connectingTo": "Connecting to {{name}}",
-    "unreachable": "{{name}} is unreachable",
+    "unreachable": "Can’t reach {{name}} right now",
     "switchBody": "Verifying your account and instance. Tasks on this Mac keep running.",
     "offlineBody": "The remote computer may be offline, or the network was interrupted. Updates are paused.",
     "localStillAvailable": "Avibe on this Mac is still available. Returning will not stop tasks on the remote instance.",
@@ -7637,7 +7616,7 @@
     "transferSteps": "Ask the current owner to sign in to the avibe.bot console and use the existing ownership transfer flow for this instance. After the transfer completes, sign in again here. Desktop does not replace the current owner.",
     "keepLink": "Keep link · use locally",
     "reviewChange": "Review account change",
-    "otherInstances": "View other instances",
+    "otherInstances": "Other instances",
     "signedIn": "Signed in",
     "registeringBody": "Registering this Mac, then enabling remote access…",
     "remoteAccessTitle": "Remote access",
@@ -7668,9 +7647,43 @@
       "bridge": "The Desktop connection is unavailable. Retry or return to your workspace.",
       "request": "This step could not be completed. Check your connection and try again.",
       "code": "Invalid or expired code. Try again or resend.",
-      "upgrade": "This instance needs an Avibe update before Desktop can connect. You can still use this Mac."
+      "upgrade": "This instance needs to upgrade Avibe before you can open it. Upgrade it on that computer, then retry.",
+      "credentials": "The email or password is incorrect. Try again or use an email code.",
+      "rateLimit": "Too many attempts. Wait a moment, then try again."
     },
-    "localStatus": "{{name}} · {{status}}"
+    "localStatus": "{{name}} · {{status}}",
+    "newEmailHelp": "New email addresses are registered automatically. No password needed.",
+    "noCode": "Didn’t receive a code?",
+    "password": "Password",
+    "passwordSignIn": "Sign in",
+    "usePassword": "Use password instead",
+    "useEmailCode": "Use an email code",
+    "forgotPassword": "Forgot password?",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
+    "passwordHelp": "Sign in with an email code, then set or reset your password in Account security at avibe.bot.",
+    "opening": "Opening…",
+    "offlineInstructions": "Open Avibe on that computer and connect it to the internet, then refresh this list.",
+    "signingOut": "Signing out…",
+    "signOutReturn": "Return to Workbench to continue.",
+    "instancesTitle": "Instances",
+    "currentlyUsing": "Currently using",
+    "accountTitle": "Account",
+    "currentAccount": "Currently signed in",
+    "addInstance": "Add instance",
+    "thisDevice": "This computer",
+    "sharedBy": "Shared by {{owner}}",
+    "addGuide": {
+      "body": "Add another computer or server to the same account, then return here to refresh the list.",
+      "computerTitle": "On another computer",
+      "computerBody": "Install Avibe Desktop and sign in with the same account. Complete account verification and local registration on that computer.",
+      "serverTitle": "On a server or command-line installation",
+      "serverBody": "Install Avibe using the installation guide, complete setup, then run this command on that server:",
+      "pairingBody": "Follow the guided pairing flow with the same avibe.bot account. Keep the pairing key on that server; do not enter it here.",
+      "installGuide": "Open installation guide",
+      "done": "Return and refresh",
+      "command": "vibe remote"
+    }
   },
   "update": {
     "row": {

@@ -104,6 +104,14 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.source_sha || github.sha }}
 
+      # Every host-side script in this job runs on one pinned interpreter: the runner image's own
+      # Python moves on (macos-26's `python` is now 3.15; PyYAML 6.0.3 has wheels only up to 3.14),
+      # and a release must not be the first run of signing or packaging on a new one. The Runtime's
+      # own payload Python is pinned separately by build-runtime-bundle.py.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
       - name: Report pinned Apple toolchain
         if: runner.os == 'macOS'
         shell: bash

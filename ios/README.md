@@ -37,12 +37,24 @@ and Web resizing cannot both run.
   Each child shows its current host plus Done and Open in Safari controls; the
   latter opens the current HTTP(S) URL in the Safari app.
 - Ordinary child-main-frame navigation stays in that child regardless of
-  origin. Google authorization remains intercepted, and external application
-  schemes use the system.
+  origin. Google and GitHub authorization remain intercepted, and external
+  application schemes use the system.
 - Microphone capture is granted only to the configured instance main frame.
   Authentication, external, and arbitrary subframes receive neither microphone
   access nor a native bridge.
-- Google authorization is intercepted with an email-code explanation.
+- That main frame gets the microphone only when its page carries
+  `<meta name="avibe-voice-consent" content="1">`: such a page asks each
+  account before voice input sends speech to a third-party AI service, and the
+  App adds no question of its own. A Workbench page without it (an instance
+  older than that question) is refused with a native alert saying to update the
+  instance. Any other page, such as a Show Page opened on its own under
+  `/show/` or `/p/`, is refused without that alert.
+- Google and GitHub authorization are intercepted with an email-code
+  explanation. GitHub's are the `/login/oauth/` pages on `github.com` whose
+  `redirect_uri` returns to an authentication origin, that is avibe.bot's own
+  sign-in. GitHub sign-in for anything else (an MCP server an instance
+  connects to) and the rest of `github.com`, including the device-code page an
+  instance's Copilot sign-in opens, are an ordinary external site.
 - Instance WebViews (primary and child) show no form accessory bar
   (previous / next / Done) above the keyboard: `FormAccessoryBar` gives
   WebKit's content view a runtime subclass whose `inputAccessoryView` is nil.
@@ -156,8 +168,9 @@ The closed deviation list is:
 
 1. Primary-main-frame HTTP(S) navigation outside the configured instance and
    authentication origins opens in `SFSafariViewController`.
-2. Google authorization endpoints are intercepted because Google rejects
-   embedded browsers.
+2. Google and GitHub authorization endpoints are intercepted. The App signs
+   in only with avibe.bot's own accounts (App Review guideline 4.8), and
+   Google also rejects embedded browsers.
 3. Top-level external application schemes use `UIApplication`; subframes
    cancel them.
 4. Microphone capture is automatically granted only to an instance-origin
@@ -262,6 +275,30 @@ Unknown methods never expand the native surface.
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
 origin and its navigation test in the same change.
+
+## App Shortcuts
+
+`AppShortcuts.swift` holds the App's one `AppShortcutsProvider`. It offers
+"Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") to Siri, Spotlight, the
+Shortcuts app, and Settings > Action Button > Shortcut. Its intent,
+`OpenMainBotIntent`, runs in the App's own process with the App in front
+(`openAppWhenRun`, and `supportedModes` `.foreground(.immediate)` from
+iOS 26). It hands `/chat/ses_main?from=notification` to
+`AppModel.openSelectedInstance(path:)`, which opens the selected instance the
+way a notification tap does: the instance opens again, and its page receives
+the path through `push.opened` once it loads. A request that arrives before
+the scene or the bootstrap is ready waits for them, and only the latest
+waits. Signed out, with no instance selected, or with the selected instance
+unavailable, the App stays on the screen it shows anyway, with no prompt.
+
+The main Bot's conversation is the Web UI's `/chat/ses_main`; the Owner's
+Workbench creates `ses_main` on first use. Only the Owner has Bots: for
+anyone else the server answers 404, and `from=notification` makes the Web UI
+open the Inbox instead of an error. The shortcut adds no entitlement,
+capability, extension, or Info.plist key. Its title and Siri phrases are
+localized in `Localizable.xcstrings` and `AppShortcuts.xcstrings`. Xcode
+extracts the metadata the system reads into `Metadata.appintents` in the
+App bundle, and an XCTest checks it there.
 
 ## Remote direct path (inactive)
 
@@ -439,10 +476,51 @@ image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
 `session.refresh`,
-`session.selectInstance`, `session.logout`, `app.returnToInstance`, and the
-closed `app.openExternal` allowlist (the two install guides and avibe.bot's
-Account security page). Instance documents, child windows, Show Pages, and
-iframes do not receive these handlers.
+`session.selectInstance`, `session.logout`, `app.returnToInstance`,
+`app.openPage`, and the closed `app.openExternal` allowlist (the two install
+guides and avibe.bot's Account security page). Instance documents, child
+windows, Show Pages, and iframes do not receive these handlers.
+
+### avibe.bot pages in the App
+
+Account's 隐私政策 / Privacy policy and 删除账号 / Delete account
+(App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
+is `privacyPolicy` or `accountDeletion` and nothing else; any other value or
+an extra parameter is `invalid_argument`. Native code owns the addresses:
+`/privacy` and `/account/delete` on the control-plane origin
+(`https://avibe.bot`). The page opens in a native sheet over the bundled page
+with Done, the current host as its title, and a user agent ending in
+`AvibeiOS/<version>`, so avibe.bot hides its site chrome and Cancel. It
+receives no bridge.
+
+- Account deletion uses the account's WebKit store, so the page is already
+  signed in; only a signed-in account with no account change under way gets
+  it (`signed_out` or `busy` otherwise). The WebView joins the coordinator's
+  release barriers: the sign-out that follows waits for it before rotating
+  the store and leaves the old store to a later sweep while it is alive.
+  While it is open no instance can be selected: a notification tap is set
+  aside (nothing opens and the page stays) rather than opening an instance
+  of an account the page may be deleting. The privacy policy uses a non-persistent store.
+- A page closes with the bundled page that awaits it: if the App changes
+  route underneath, the page is dismissed and answers `{completed: false}`,
+  and a presentation UIKit refuses answers at once.
+- The pages use no JavaScript dialogs and no `window.open` the App must
+  follow; the App implements no dialogs for them.
+- Main-frame navigation stays on the control-plane origin; other web
+  addresses and application schemes open in the system, as do new windows.
+  Subframes load web content but launch nothing.
+- avibe-bot-backend's agreed done signal is a main-frame navigation to
+  exactly `/account/delete/done` on that origin, made only after
+  `/api/mobile/session` answers 401 for the cookie jar. The App cancels it,
+  closes the sheet, and `app.openPage` resolves `{completed: true}`; any other
+  close resolves `{completed: false}`.
+- Either way the bundled page then runs `session.refresh`. A signed-out
+  answer is the existing explicit sign-out: the store rotates and the page
+  shows Welcome (from the sheet, the App replaces it with the full-screen
+  account page as for any account transition). A signed-in answer keeps
+  Account. When the page reported the deletion but the read-back failed or
+  still read signed in, the bundled page signs this device out
+  (`session.logout`) so nothing of the deleted account stays.
 
 A complete six-digit email or authenticator code starts verification as soon
 as an edit completes it, whether typed, pasted, or offered above the keyboard
@@ -735,7 +813,7 @@ pinned to Xcode 26.6.
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
+| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google and GitHub authorization and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
 | `decidePolicyFor navigationAction:preferences:` | Intentionally not implemented because WebKit calls this overload instead of the implemented action-policy method. `defaultWebpagePreferences` remains the single preference owner. | Simulator build verifies the selected overload. |
 | `decidePolicyFor navigationResponse` | Implemented. Attachment and non-displayable responses use the same download admission rule; displayable responses use WebKit. | Simulator XCTest and build cover response conversion to `WKDownload`. |
 | `didStartProvisionalNavigation` | Implemented. Cancels stale JavaScript dialogs and starts primary loading state. | Simulator build; exactly-once dialog cleanup is a manual interaction check. |
@@ -756,7 +834,7 @@ pinned to Xcode 26.6.
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google is intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
+| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google and GitHub authorization are intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, GitHub, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
 | `webViewDidClose` | Implemented and closes the matching child subtree. | Simulator build; `window.close()` is an interactive check. |
 | `runJavaScriptAlertPanelWithMessage` | Implemented with an initiating-WebView `UIAlertController` and exactly-once completion. | Simulator build; interaction and removal cleanup are manual checks. |
 | `runJavaScriptConfirmPanelWithMessage` | Implemented with OK/Cancel and exactly-once completion. | Simulator build; existing Web UI `confirm()` callers are manual checks. |
@@ -786,7 +864,7 @@ pinned to Xcode 26.6.
 
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
-| `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
+| `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. The avibe.bot account deletion page also uses it while open, alongside a covered runtime, as a release barrier: rotation waits for it and defers the old store's removal while it lives. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
 | `websiteDataStore.proxyConfigurations` | Never written by this shell, which has no direct transport. With one, `DirectRouteOwner` is the only writer: one HTTP CONNECT route per account store to the App's loopback proxy, listing exact instance hosts, written before a runtime's first load and never cleared or switched. | XCTest with and without a stand-in transport on real `WKWebsiteDataStore` objects, counting every setter call, including that no listening socket and no route exist without one. No WebKit load through the route is part of this suite. |
 | `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration through the shared WebView factory, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, child discovery, subframe absence, external-origin absence, and unknown-method rejection. |
 | `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
@@ -813,7 +891,7 @@ pinned to Xcode 26.6.
 | Capability | Outcome |
 | --- | --- |
 | New windows and `window.close()` | Supported by `createWebViewWith` and `webViewDidClose`; every ordinary target opens in a child WebView, children recursively use the same delegates, and the toolbar exposes host, Done, and Open in Safari. The Safari action is enabled only for HTTP(S) URLs. |
-| JavaScript `alert`, `confirm`, and `prompt` | Supported with native dialogs and exactly-once completion on every exit path. |
+| JavaScript `alert`, `confirm`, and `prompt` | Supported with native dialogs and exactly-once completion on every exit path, in instance WebViews. avibe.bot pages in the App (`app.openPage`) get none: WebKit's defaults apply (`confirm` is false), and those pages use none. |
 | Instance HTTPS, matching `blob:`, and instance-frame `data:` downloads | Supported through the action/response policies and `WKDownloadDelegate`; non-displayable MIME and attachment responses use the same rule. |
 | File selection, camera, and photo saving | Uses WebKit's Safari-style picker and the system activity sheet. `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription` are localized. |
 | External application schemes | Trusted top-level contexts use `UIApplication.open`; subframes cancel them without leaving the app. |
@@ -1038,11 +1116,26 @@ Actions → ios-testflight → Run workflow) and only from `master`. In one job 
 3. archives the Release configuration with manual signing, using
    `<run number>.<attempt>` as `CFBundleVersion`;
 4. checks the archived app's bundle, build number, encryption declaration, and
-   distribution entitlements (`verify-archive`);
+   distribution entitlements, that the Notification Service extension carries
+   the app's version, and that both bundles carry a privacy manifest
+   (`verify-archive`);
 5. exports and uploads with the App Store Connect API key;
 6. waits for App Store Connect to process the build and adds it to the internal
    group `Avibe Internal` (`distribute`); internal testing needs no App Review;
 7. always removes the keychain, profile, and key (`cleanup`).
+
+`MARKETING_VERSION` is the App Store version (1.0) for the app and its
+extension; App Store Connect files each TestFlight build under it.
+
+The app and the Notification Service extension each carry a
+`PrivacyInfo.xcprivacy`. Both declare their `UserDefaults` use (the bundle's
+own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking;
+the app also declares system boot time (`35F9.1`), which the direct
+transport's deadlines read through `ProcessInfo.systemUptime`.
+The app also declares the data it collects, matching its App Privacy answers:
+the account's email address and user ID, linked to the user, for App
+Functionality only. The extension decrypts and shows notifications on the
+device and collects nothing.
 
 `Info.plist` declares `ITSAppUsesNonExemptEncryption = false`: the app uses
 only the system's HTTPS and passkey cryptography, so builds need no export

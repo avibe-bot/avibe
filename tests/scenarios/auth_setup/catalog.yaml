@@ -1172,7 +1172,11 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Actual backend session and native account producer-consumer evidence is pending.
+    reason: Native password/OTP owner and isolated HTTP/cookie/second-factor consumers exist; live provider and installed acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_auth_completion_returns_retained_document_only_after_paired_success
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_during_actual_finalize_preserves_late_material
   - id: AUTH-SETUP-172
     name: One Desktop installation retains one instance and device across concurrency, lost replies, and restart
     status: partial
@@ -1219,32 +1223,64 @@ scenarios:
     partial_evidence:
       covers: The real session endpoint projects instance_id only with current authorization, never in unavailable or revoked states.
       test: tests/test_remote_authorization_revision.py::test_session_endpoint_only_adds_fields_to_its_released_shape
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_terminal_selection_failure_converges_without_success_or_recency
   - id: AUTH-SETUP-176
     name: Desktop switch, cancel, logout, and restart fence late callbacks while local work continues
     status: gap
     kind: concurrency
     layer: scenario
     backend: desktop
-    reason: Native coordinator and lifecycle integration evidence is pending.
+    reason: Native coordinator and isolated WebView receipt/cleanup consumers exist; these are owning-layer tests, not execution by the canonical Python harness or installed acceptance.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_plain_admitted_signout_returns_native_receipt
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_retries
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_back_preserves_actual_workbench_document
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_held_candidate_never_gets_authority_and_escape_retires_only_its_roles
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_preserves_receiver_and_foregrounds_then_requires_fresh_request
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_approved_before_finalize_cannot_discard_new_material
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_same_url_delivery_retires_only_old_approval
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_lifecycle_returns_through_actual_account_action
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_cannot_reauthorize_a_navigated_return_receipt
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_new_owner_retires_only_the_held_candidate
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_return_receipt_survives_lifecycle_retry_after_retirement
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_remote_update_popup_requires_recovery_acknowledgement_and_fresh_request
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_popup_delayed_native_work_cannot_show_after_source_retirement
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_finalization_retires_an_approved_loading_remote_popup
   - id: AUTH-SETUP-177
     name: Remote and embedded documents gain no Desktop local capability or account credentials
     status: gap
     kind: authorization
     layer: contract
     backend: desktop
-    reason: Native caller admission, store isolation, and bundled UI integration evidence is pending.
+    reason: Isolated native transport and real document admission consumers exist; live account and installed OS credential acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_menu_guard_receipt_keeps_actual_source_and_owner
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_material_stays_in_owned_receiver_until_ack_and_late_full_event_dies_on_reload
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_remote_update_popup_retains_document_and_owns_only_update_actions
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_popup_get_state_reply_cannot_cross_same_label_rebuild
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_candidate_cannot_borrow_a_live_popup_receiver
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retired_version_document_cannot_apply_a_delayed_success_to_remote
   - id: AUTH-SETUP-178
     name: Desktop footer geometry and local updater scope hold across locale, theme, window size, and target
     status: gap
     kind: accessibility
     layer: contract
     backend: desktop
-    reason: Production UI geometry and bundled asset evidence is owned by the Phase 1 UI PR.
+    reason: Real UI geometry and isolated native popup/VersionBadge consumers exist; the narrow component/native loop is not full Workbench, canonical scenario-harness or installed acceptance.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_remote_update_popup_retains_document_and_owns_only_update_actions
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_version_badge_recovers_after_candidate_publication
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovered_version_badge_consumes_only_the_correlated_pending_open
   - id: AUTH-SETUP-179
     name: Remote Phase 1 disables local Mini and notifications visibly and local return restores local sources
     status: gap
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Native auxiliary lifecycle and UI limitation evidence is pending.
+    reason: Isolated native lifecycle and actual retained Settings consumer evidence exists; installed and canonical scenario-harness acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_notifications_page_replays_native_preference_on_reveal
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_remote_document_ignores_local_rebind_and_preference_replay
 next_priority: []

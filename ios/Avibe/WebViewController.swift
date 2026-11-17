@@ -563,10 +563,12 @@ final class WebViewController: UIViewController {
     private let didStartLoading: () -> Void
     private let didFinishLoading: () -> Void
     private let didFailLoading: () -> Void
+    private let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
     private let accountFallbackVisibilityChanged: (Bool) -> Void
     private let pageColorSchemeChanged: (PageColorScheme?) -> Void
     private var reportedPageColorScheme: PageColorScheme?
     private var primaryLoadFailed = false
+    private var primaryNavigationDestination: NavigationDestination?
     /// The scheme of the primary page on screen, or nil while it is unknown
     /// or the load-failure view covers it. It drives the status bar and the
     /// native chrome only; the WebViews keep the system appearance, so a page
@@ -602,6 +604,15 @@ final class WebViewController: UIViewController {
     private var isInvalidatedForAccountTransition = false
     private var accountActionAvailable = false
     private var primaryNavigationInProgress = false
+    /// One Runtime settlement is owed for the current primary main-frame
+    /// navigation or policy action. Every terminal delegate exit claims this
+    /// bit before notifying AppModel, so policy cancellation and its later
+    /// `NSURLErrorCancelled` callback cannot both settle the same attempt.
+    private var primaryNavigationNeedsSettlement = false
+    /// WebKit can report the same dead WebContent process more than once
+    /// before the replacement navigation starts. Only the first report owns
+    /// the restart settlement.
+    private var primaryWebContentTerminationHandled = false
     private var accountFallbackWorkItem: DispatchWorkItem?
     private var primaryURLObservation: NSKeyValueObservation?
     private var primaryBackItemObservation: NSKeyValueObservation?
@@ -687,6 +698,7 @@ final class WebViewController: UIViewController {
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
+        runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -711,6 +723,7 @@ final class WebViewController: UIViewController {
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
+        self.runtimeNavigationChanged = runtimeNavigationChanged
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1201,10 +1214,20 @@ final class WebViewController: UIViewController {
         UIApplication.shared.open(url)
     }
 
-    private func presentGoogleSignInMessage() {
+    private func presentThirdPartySignInMessage(_ provider: ThirdPartySignIn) {
+        let title: String
+        let message: String
+        switch provider {
+        case .google:
+            title = String(localized: "google.title")
+            message = String(localized: "google.body")
+        case .github:
+            title = String(localized: "github.title")
+            message = String(localized: "github.body")
+        }
         let alert = UIAlertController(
-            title: String(localized: "google.title"),
-            message: String(localized: "google.body"),
+            title: title,
+            message: message,
             preferredStyle: .alert
         )
         alert.addAction(
@@ -1228,6 +1251,56 @@ final class WebViewController: UIViewController {
             : .popupMainFrame
     }
 
+    private func runtimeDestination(in webView: WKWebView) -> NavigationDestination? {
+        guard isPrimaryWebView(webView) else {
+            return nil
+        }
+        if let url = webView.url {
+            return navigationPolicy.destination(for: url)
+        }
+        return primaryNavigationDestination
+    }
+
+    private func preparePrimaryNavigationSettlement(
+        for webView: WKWebView,
+        isMainFrame: Bool
+    ) {
+        guard isMainFrame, isPrimaryWebView(webView) else {
+            return
+        }
+        primaryNavigationNeedsSettlement = true
+    }
+
+    private func claimPrimaryNavigationSettlement(
+        in webView: WKWebView,
+        evenWithoutPending: Bool = false
+    ) -> Bool {
+        guard isPrimaryWebView(webView) else {
+            return false
+        }
+        guard primaryNavigationNeedsSettlement || evenWithoutPending else {
+            return false
+        }
+        primaryNavigationNeedsSettlement = false
+        return true
+    }
+
+    @discardableResult
+    private func reportPrimaryNavigationSettlement(
+        _ event: RuntimeNavigationEvent,
+        in webView: WKWebView,
+        evenWithoutPending: Bool = false
+    ) -> Bool {
+        guard claimPrimaryNavigationSettlement(
+            in: webView,
+            evenWithoutPending: evenWithoutPending
+        ) else {
+            return false
+        }
+        runtimeNavigationChanged(event)
+        return true
+    }
+
     private func mainFrameNavigationDecision(
         for url: URL,
         in webView: WKWebView
@@ -1236,25 +1309,47 @@ final class WebViewController: UIViewController {
         switch navigationPolicy.disposition(for: url, context: context) {
         case .allow:
             return .allow
-        case .googleAuthentication:
-            finishPrimaryLoadingIfNeeded(webView)
-            presentGoogleSignInMessage()
+        case .thirdPartySignIn(let provider):
+            finishPrimaryLoadingIfNeeded(
+                webView,
+                event: RuntimeNavigationEvent(
+                    stage: .finished,
+                    destination: .thirdPartySignIn(provider)
+                )
+            )
+            presentThirdPartySignInMessage(provider)
             return .cancel
         case .external:
-            finishPrimaryLoadingIfNeeded(webView)
+            finishPrimaryLoadingIfNeeded(
+                webView,
+                event: RuntimeNavigationEvent(
+                    stage: .handedOff,
+                    destination: .external
+                )
+            )
             presentExternalURL(url)
             return .cancel
         case .externalApplication:
-            finishPrimaryLoadingIfNeeded(webView)
+            finishPrimaryLoadingIfNeeded(
+                webView,
+                event: RuntimeNavigationEvent(
+                    stage: .handedOff,
+                    destination: .external
+                )
+            )
             openExternalApplication(url)
             return .cancel
         }
     }
 
-    private func finishPrimaryLoadingIfNeeded(_ webView: WKWebView) {
-        if isPrimaryWebView(webView) {
-            didFinishLoading()
+    private func finishPrimaryLoadingIfNeeded(
+        _ webView: WKWebView,
+        event: RuntimeNavigationEvent
+    ) {
+        guard reportPrimaryNavigationSettlement(event, in: webView) else {
+            return
         }
+        didFinishLoading()
     }
 
     private func reportLoadFailure(_ error: Error, in webView: WKWebView) {
@@ -1262,14 +1357,21 @@ final class WebViewController: UIViewController {
         guard error.domain != NSURLErrorDomain || error.code != NSURLErrorCancelled else {
             return
         }
-        if isPrimaryWebView(webView) {
-            accountFallbackWorkItem?.cancel()
-            accountFallbackWorkItem = nil
-            accountFallbackVisibilityChanged(false)
-            primaryLoadFailed = true
-            updatePageColorScheme()
-            didFailLoading()
+        guard claimPrimaryNavigationSettlement(in: webView) else {
+            return
         }
+        accountFallbackWorkItem?.cancel()
+        accountFallbackWorkItem = nil
+        accountFallbackVisibilityChanged(false)
+        primaryLoadFailed = true
+        updatePageColorScheme()
+        didFailLoading()
+        runtimeNavigationChanged(
+            RuntimeNavigationEvent(
+                stage: .failed,
+                destination: runtimeDestination(in: webView)
+            )
+        )
     }
 
     private func webOrigin(for origin: WKSecurityOrigin) -> WebOrigin? {
@@ -1768,7 +1870,22 @@ extension WebViewController: WKNavigationDelegate {
             decisionHandler(.cancel)
             return
         }
+        let isPrimaryMainFrame = isPrimaryWebView(webView)
+            && navigationAction.targetFrame?.isMainFrame == true
+        preparePrimaryNavigationSettlement(
+            for: webView,
+            isMainFrame: isPrimaryMainFrame
+        )
         guard let url = navigationAction.request.url else {
+            if isPrimaryMainFrame {
+                reportPrimaryNavigationSettlement(
+                    RuntimeNavigationEvent(
+                        stage: .cancelled,
+                        destination: nil
+                    ),
+                    in: webView
+                )
+            }
             decisionHandler(.cancel)
             return
         }
@@ -1782,11 +1899,38 @@ extension WebViewController: WKNavigationDelegate {
                 trustedMainFrame: context.trustedMainFrame
             ) {
             case .download:
+                if isPrimaryMainFrame {
+                    reportPrimaryNavigationSettlement(
+                        RuntimeNavigationEvent(
+                            stage: .handedOff,
+                            destination: navigationPolicy.destination(for: url)
+                        ),
+                        in: webView
+                    )
+                }
                 decisionHandler(.download)
             case .externalBrowser:
+                if isPrimaryMainFrame {
+                    reportPrimaryNavigationSettlement(
+                        RuntimeNavigationEvent(
+                            stage: .handedOff,
+                            destination: .external
+                        ),
+                        in: webView
+                    )
+                }
                 decisionHandler(.cancel)
                 presentExternalURL(url)
             case .blocked:
+                if isPrimaryMainFrame {
+                    reportPrimaryNavigationSettlement(
+                        RuntimeNavigationEvent(
+                            stage: .cancelled,
+                            destination: navigationPolicy.destination(for: url)
+                        ),
+                        in: webView
+                    )
+                }
                 decisionHandler(.cancel)
             }
             return
@@ -1813,11 +1957,22 @@ extension WebViewController: WKNavigationDelegate {
         {
             blockedBackForwardNavigation = true
             webView.allowsBackForwardNavigationGestures = false
+            reportPrimaryNavigationSettlement(
+                RuntimeNavigationEvent(
+                    stage: .cancelled,
+                    destination: navigationPolicy.destination(for: url)
+                ),
+                in: webView
+            )
             decisionHandler(.cancel)
             return
         }
 
-        decisionHandler(mainFrameNavigationDecision(for: url, in: webView))
+        let decision = mainFrameNavigationDecision(for: url, in: webView)
+        if isPrimaryWebView(webView), decision == .allow {
+            primaryNavigationDestination = navigationPolicy.destination(for: url)
+        }
+        decisionHandler(decision)
     }
 
     func webView(
@@ -1829,6 +1984,12 @@ extension WebViewController: WKNavigationDelegate {
             decisionHandler(.cancel)
             return
         }
+        let isPrimaryMainFrame = isPrimaryWebView(webView)
+            && navigationResponse.isForMainFrame
+        preparePrimaryNavigationSettlement(
+            for: webView,
+            isMainFrame: isPrimaryMainFrame
+        )
         guard
             isAttachment(navigationResponse.response) || !navigationResponse.canShowMIMEType
         else {
@@ -1836,6 +1997,15 @@ extension WebViewController: WKNavigationDelegate {
             return
         }
         guard let url = navigationResponse.response.url else {
+            if isPrimaryMainFrame {
+                reportPrimaryNavigationSettlement(
+                    RuntimeNavigationEvent(
+                        stage: .cancelled,
+                        destination: nil
+                    ),
+                    in: webView
+                )
+            }
             decisionHandler(.cancel)
             return
         }
@@ -1846,11 +2016,38 @@ extension WebViewController: WKNavigationDelegate {
             trustedMainFrame: mainFrameIsTrusted(in: webView)
         ) {
         case .download:
+            if isPrimaryMainFrame {
+                reportPrimaryNavigationSettlement(
+                    RuntimeNavigationEvent(
+                        stage: .handedOff,
+                        destination: navigationPolicy.destination(for: url)
+                    ),
+                    in: webView
+                )
+            }
             decisionHandler(.download)
         case .externalBrowser:
+            if isPrimaryMainFrame {
+                reportPrimaryNavigationSettlement(
+                    RuntimeNavigationEvent(
+                        stage: .handedOff,
+                        destination: .external
+                    ),
+                    in: webView
+                )
+            }
             decisionHandler(.cancel)
             presentExternalURL(url)
         case .blocked:
+            if isPrimaryMainFrame {
+                reportPrimaryNavigationSettlement(
+                    RuntimeNavigationEvent(
+                        stage: .cancelled,
+                        destination: navigationPolicy.destination(for: url)
+                    ),
+                    in: webView
+                )
+            }
             decisionHandler(.cancel)
         }
     }
@@ -1894,12 +2091,21 @@ extension WebViewController: WKNavigationDelegate {
         }
         cancelPendingDialogs(for: webView)
         if isPrimaryWebView(webView) {
+            preparePrimaryNavigationSettlement(for: webView, isMainFrame: true)
+            primaryWebContentTerminationHandled = false
             primaryNavigationInProgress = true
             accountFallbackWorkItem?.cancel()
             accountFallbackWorkItem = nil
             accountFallbackVisibilityChanged(false)
             primaryLoadFailed = false
             updatePageColorScheme()
+            runtimeNavigationChanged(
+                RuntimeNavigationEvent(
+                    stage: .started,
+                    destination: primaryNavigationDestination
+                        ?? runtimeDestination(in: webView)
+                )
+            )
             didStartLoading()
         }
     }
@@ -1910,6 +2116,17 @@ extension WebViewController: WKNavigationDelegate {
         }
         retainedWebViewFactory?.resetForNavigationCommit(in: webView)
         if isPrimaryWebView(webView) {
+            if let url = webView.url {
+                primaryNavigationDestination = navigationPolicy.destination(
+                    for: url
+                )
+            }
+            runtimeNavigationChanged(
+                RuntimeNavigationEvent(
+                    stage: .committed,
+                    destination: runtimeDestination(in: webView)
+                )
+            )
             blockedBackForwardNavigation = false
             resetAccountActionForNavigationCommit()
             updateBackNavigationGesture(in: webView)
@@ -1927,12 +2144,22 @@ extension WebViewController: WKNavigationDelegate {
         guard acceptsRuntimeCallback(from: webView) else {
             return
         }
-        if isPrimaryWebView(webView) {
-            primaryNavigationInProgress = false
-            updateBackNavigationGesture(in: webView)
-            scheduleAccountFallbackIfNeeded()
-            didFinishLoading()
+        guard isPrimaryWebView(webView) else {
+            return
         }
+        guard claimPrimaryNavigationSettlement(in: webView) else {
+            return
+        }
+        primaryNavigationInProgress = false
+        updateBackNavigationGesture(in: webView)
+        scheduleAccountFallbackIfNeeded()
+        runtimeNavigationChanged(
+            RuntimeNavigationEvent(
+                stage: .finished,
+                destination: runtimeDestination(in: webView)
+            )
+        )
+        didFinishLoading()
     }
 
     func webView(
@@ -1980,7 +2207,20 @@ extension WebViewController: WKNavigationDelegate {
         }
         cancelPendingDialogs(for: webView)
         if isPrimaryWebView(webView) {
+            guard !primaryWebContentTerminationHandled else {
+                return
+            }
+            primaryWebContentTerminationHandled = true
+            primaryNavigationInProgress = false
             discardAllPopups(animated: false)
+            reportPrimaryNavigationSettlement(
+                RuntimeNavigationEvent(
+                    stage: .restarting,
+                    destination: runtimeDestination(in: webView)
+                ),
+                in: webView,
+                evenWithoutPending: true
+            )
             loadConfiguredInstance()
         } else {
             closePopup(webView)
@@ -2003,7 +2243,49 @@ extension WebViewController: WKUIDelegate {
         let allowed = frame.isMainFrame
             && type == .microphone
             && webOrigin(for: origin) == instanceOrigin
-        decisionHandler(allowed ? .grant : .deny)
+        guard allowed else {
+            decisionHandler(.deny)
+            return
+        }
+        // Voice input sends speech to a third-party AI service. A page that asks
+        // each account first carries the consent marker; an older one gets no
+        // microphone and is told to update (VoiceConsentMarker).
+        webView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak webView] result, error in
+            guard let self, let webView, self.acceptsRuntimeCallback(from: webView) else {
+                decisionHandler(.deny)
+                return
+            }
+            switch error == nil ? VoiceConsentMarker(result: result) : .other {
+            case .marked:
+                decisionHandler(.grant)
+            case .unmarkedWorkbench:
+                decisionHandler(.deny)
+                self.presentVoiceUpdateRequired(for: webView)
+            case .other:
+                decisionHandler(.deny)
+            }
+        }
+    }
+
+    private func presentVoiceUpdateRequired(for webView: WKWebView) {
+        let alert = UIAlertController(
+            title: String(localized: "voice.update_required.title"),
+            message: String(localized: "voice.update_required.message"),
+            preferredStyle: .alert
+        )
+        // Tracked like the page's own alerts, so it goes with its WebView and a
+        // download that finished meanwhile is presented after it.
+        let identifier = registerDialog(for: webView, alert: alert, cancel: {})
+        alert.addAction(
+            UIAlertAction(title: String(localized: "common.ok"), style: .default) { [weak self] _ in
+                self?.resolveDialog(identifier, completion: {})
+            }
+        )
+        guard let presenter = dialogPresenter(for: webView) else {
+            resolveDialog(identifier, completion: {})
+            return
+        }
+        presenter.present(alert, animated: true)
     }
 
     func webView(
@@ -2172,8 +2454,8 @@ extension WebViewController: WKUIDelegate {
             return presentChildWebView(using: configuration, from: webView)
         case .externalApplication:
             openExternalApplication(url)
-        case .googleAuthentication:
-            presentGoogleSignInMessage()
+        case .thirdPartySignIn(let provider):
+            presentThirdPartySignInMessage(provider)
         }
         return nil
     }

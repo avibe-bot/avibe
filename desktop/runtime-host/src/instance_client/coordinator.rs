@@ -34,7 +34,17 @@ pub trait ClientView: Send + Sync {
     /// Restore that staged presentation without displacing a committed remote.
     fn local_rebound(&self, _epoch: Epoch) {}
     /// A staged view now matches the published committed identity.
-    fn committed(&self, _epoch: Epoch) {}
+    fn committed(&self, epoch: Epoch) -> Result<(), ClientError> {
+        epoch.check()
+    }
+    /// Whether this exact operation crossed irreversible native retirement.
+    fn terminal_commit(&self, _epoch: &Epoch) -> bool {
+        false
+    }
+    /// Retire an unpublished candidate without restoring a retired document.
+    async fn abort_commit(&self, _epoch: Epoch) -> Result<(), ClientError> {
+        Ok(())
+    }
     /// Stage a fresh disposable store; check the epoch before every UI callback.
     async fn commit(
         &self,
@@ -43,9 +53,13 @@ pub trait ClientView: Send + Sync {
         cookies: Vec<cookie::Cookie<'static>>,
     ) -> Result<(), ClientError>;
     /// Cancel presentation and restore the last committed route, without auth.
-    async fn restore(&self, epoch: Epoch, target: ClientTarget) -> Result<(), ClientError>;
+    async fn restore(&self, epoch: Epoch, target: ClientTarget, preserve_document: bool) -> Result<(), ClientError>;
     /// Erase and destroy every Desktop-owned instance store, including offline.
-    async fn signed_out(&self, epoch: Epoch, local: ClientTarget) -> Result<(), ClientError>;
+    async fn signed_out(&self, epoch: Epoch, local: ClientTarget, cleanup_failed: bool) -> Result<(), ClientError>;
+    /// Presentation only, after the cleanup error is readable by get_state.
+    async fn signout_failed(&self, _epoch: Epoch) -> Result<(), ClientError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -59,6 +73,7 @@ struct Inner {
     recency: InstanceRecency,
     restore_allowed: bool,
     committed_view_generation: Option<u64>,
+    display_account: Option<String>,
 }
 
 pub struct Coordinator {
@@ -106,6 +121,7 @@ impl Coordinator {
                 recency,
                 restore_allowed: true,
                 committed_view_generation: None,
+                display_account: None,
             }),
             generation,
             action_generation,
@@ -147,6 +163,18 @@ impl Coordinator {
         self.inner.lock().expect("client state").committed_view_generation
     }
 
+    /// Actual physical destruction retires presentation authority immediately.
+    /// A subsequent shell recreation uses the existing safe-local escape owner.
+    pub fn window_destroyed(&self) -> u64 {
+        let epoch = self.advance(None, false).expect("unconditional window retirement");
+        let mut inner = self.inner.lock().expect("client state");
+        inner.selection = None;
+        inner.state.consent = None;
+        inner.state.connection.pending = None;
+        inner.state.connection.status = committed_status(&inner.state);
+        epoch.value
+    }
+
     /// Local lifecycle supplies only its validated loopback origin. Rebinding
     /// cannot overwrite a committed remote target or reuse the old local jar.
     pub fn local_origin(&self, origin: Option<LoopbackOrigin>) {
@@ -161,6 +189,9 @@ impl Coordinator {
         inner.state.consent = None;
         inner.state.connection.pending = None;
         inner.state.connection.status = committed_status(&inner.state);
+        inner.state.local.instance_id = None;
+        inner.state.local.slug = None;
+        inner.state.local.remote_access_url = None;
         inner.local = url.map(|url| NativeSession::new(url, self.transport.clone()));
         if inner.local.is_none() {
             inner.state.local.remote_access = RemoteAccessState::Unavailable;
@@ -173,6 +204,9 @@ impl Coordinator {
         self.view.local_rebound(Epoch::new(self.generation.clone(), value));
     }
     pub async fn refresh_local(&self) {
+        // Share transaction ownership with account/enrollment publication.
+        // Otherwise an older account clone can resurrect invalidated proof.
+        let _operation = self.operation.lock().await;
         let mut working = self.inner.lock().expect("client state").clone();
         let epoch = Epoch::new(self.generation.clone(), working.state.generation);
         let Some(local) = &mut working.local else {
@@ -192,8 +226,13 @@ impl Coordinator {
                         current.state.connection.committed = working.state.connection.committed;
                     }
                 }
-                Err(_) => current.state.local.remote_access = RemoteAccessState::Unavailable,
+                Err(_) => {
+                    current.state.local.remote_access = RemoteAccessState::Unavailable;
+                    current.state.local.instance_id = None;
+                    current.state.local.remote_access_url = None;
+                }
             }
+            refresh_display(&mut current);
             current.state.revision += 1;
             current.state.clone()
         };
@@ -264,14 +303,16 @@ impl Coordinator {
             return self.reply(request.request_id, Err(ClientError::new("invalid_request")));
         }
         if matches!(request.action, ClientAction::GetState) {
-            return self.reply(request.request_id, Ok(None));
+            let error = self.credential_io.lock().await.cleanup_error.clone();
+            return self.reply(request.request_id, error.map_or(Ok(None), Err));
         }
         // Escape always fences old work. It can never restore old credentials.
         if matches!(
             request.action,
-            ClientAction::Cancel | ClientAction::ReturnLocal | ClientAction::SignOut
+            ClientAction::Cancel | ClientAction::ReturnLocal | ClientAction::SignOut { .. }
         ) {
-            let expected = matches!(request.action, ClientAction::SignOut).then_some(request.expected_generation);
+            let expected =
+                matches!(request.action, ClientAction::SignOut { .. }).then_some(request.expected_generation);
             let result = self.escape(request.action, expected, None).await.map(|_| None);
             return self.reply(request.request_id, result);
         }
@@ -307,7 +348,7 @@ impl Coordinator {
         }
         let epoch = if matches!(
             request.action,
-            ClientAction::RequestOtp { .. } | ClientAction::SelectInstance { .. }
+            ClientAction::RequestOtp { .. } | ClientAction::SignInPassword { .. } | ClientAction::SelectInstance { .. }
         ) {
             match self.advance(Some(request.expected_generation), restoring) {
                 Ok(epoch) => epoch,
@@ -324,34 +365,64 @@ impl Coordinator {
         if let Some(selection) = &mut working.selection {
             selection.session.fence(epoch.clone());
         }
+        let return_after_auth = !restoring
+            && matches!(
+                request.action,
+                ClientAction::SignInPassword { .. }
+                    | ClientAction::VerifyOtp { .. }
+                    | ClientAction::VerifySecondFactor { .. }
+                    | ClientAction::VerifyPasskey
+                    | ClientAction::FinishTotpEnrollment { .. }
+                    | ClientAction::RetryEnrollment
+            );
+        let owner = self.presentation_owner();
         let result = self.execute(&mut working, request.action, &epoch).await;
-        if epoch.check().is_err() {
-            return self.reply(request.request_id, Err(ClientError::new("stale_generation")));
+        if epoch.check().is_err() || (result.is_err() && self.view.terminal_commit(&epoch)) {
+            let error = result.err().unwrap_or_else(|| ClientError::new("stale_generation"));
+            self.recover_commit(&epoch, owner, &error).await;
+            return self.reply(request.request_id, Err(error));
         }
         if result
             .as_ref()
             .err()
             .is_some_and(|error| matches!(error.code.as_str(), "signed_out" | "account_changed"))
         {
-            let cleanup = self.escape(ClientAction::SignOut, None, None).await;
+            let cleanup = self.escape(ClientAction::SignOut { intent_id: None }, None, None).await;
             return self.reply(request.request_id, cleanup.and(result));
         }
-        if result.is_err() {
+        if let Err(error) = &result {
+            self.recover_commit(&epoch, owner, error).await;
             working.selection = None;
             working.state.consent = None;
             working.state.connection.pending = None;
             working.state.connection.status = committed_status(&working.state);
         }
         let persistence = self.persist(&mut working, &epoch).await;
-        if epoch.check().is_err() {
-            return self.reply(
-                request.request_id,
-                Err(persistence
-                    .err()
-                    .unwrap_or_else(|| ClientError::new("stale_generation"))),
-            );
+        if persistence.is_err() || epoch.check().is_err() {
+            let error = persistence
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| ClientError::new("stale_generation"));
+            self.recover_commit(&epoch, owner, &error).await;
+        } else if return_after_auth
+            && result.is_ok()
+            && !matches!(&result,
+            Ok(Some(DirectResult::TotpEnrolled { recovery_codes: Some(codes), .. })) if !codes.is_empty())
+        {
+            let state = self.state();
+            if state.account.status == AccountStatus::SignedIn
+                && state.enrollment.status == EnrollmentStatus::PairedThisAccount
+                && state.enrollment.error_code.is_none()
+                && self.presentation_epoch(owner).is_ok()
+            {
+                // Native initiation owns this return; no late UI reply can
+                // issue an unconditional Cancel against a successor.
+                if let Err(error) = self.escape(ClientAction::Cancel, Some(epoch.value), Some(owner)).await {
+                    return self.reply(request.request_id, Err(error));
+                }
+            }
         }
-        self.view.committed(epoch);
         self.view.changed(&self.state());
         self.reply(
             request.request_id,
@@ -378,6 +449,13 @@ impl Coordinator {
                     .account
                     .request_otp(email, epoch.clone(), &mut working.state)
                     .await?
+            }
+            ClientAction::SignInPassword { email, password } => {
+                working
+                    .account
+                    .sign_in_password(email, password, epoch.clone(), &mut working.state)
+                    .await?;
+                authenticated = true;
             }
             ClientAction::VerifyOtp { code } => {
                 working.account.verify_otp(code, &mut working.state).await?;
@@ -501,6 +579,13 @@ impl Coordinator {
             };
             working.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
             working.committed_view_generation = Some(epoch.value);
+            working.state.current_instance = Some(selection.instance.clone());
+            working.display_account = working
+                .state
+                .account
+                .identity
+                .as_ref()
+                .map(|account| account.id.clone());
             working.selection = None;
         }
         Ok(())
@@ -528,11 +613,12 @@ impl Coordinator {
             owned.ids.insert(id.clone());
         }
         let bytes = working.account.session.persist()?;
+        let written_id = working.record.account_id.clone();
         let record = working.record.clone();
         let credentials = self.credentials.clone();
         let store = self.store.clone();
         let checked = epoch.clone();
-        let (saved, previous) = tokio::task::spawn_blocking(move || {
+        let (mut saved, previous) = tokio::task::spawn_blocking(move || {
             let previous = match &record.account_id {
                 Some(id) => match credentials.read(id) {
                     Ok(previous) => Some(previous),
@@ -555,13 +641,28 @@ impl Coordinator {
         let mut recency = None;
         let rollback_record = {
             let mut current = self.inner.lock().expect("client state");
-            if epoch.check().is_err() {
-                Some(current.record.clone())
-            } else {
-                if let Err(error) = &saved {
+            let opened = working.committed_view_generation != current.committed_view_generation;
+            if saved.is_ok() && epoch.check().is_ok() && opened {
+                saved = self.view.committed(epoch.clone());
+            }
+            if epoch.check().is_err() || saved.is_err() {
+                let error = saved
+                    .as_ref()
+                    .err()
+                    .cloned()
+                    .unwrap_or_else(|| ClientError::new("stale_generation"));
+                let record = current.record.clone();
+                // First-factor/one-time-result state stays readable on a
+                // storage error. A failed target selection never publishes.
+                if epoch.check().is_ok() && !opened {
                     working.state.enrollment.error_code = Some(error.code.clone());
+                    working.record = record.clone();
+                    working.state.revision = current.state.revision + 1;
+                    refresh_display(working);
+                    *current = working.clone();
                 }
-                // Lifecycle facts may change during the network/storage wait.
+                Some((record, error))
+            } else {
                 working.local = current.local.as_ref().map(|local| {
                     if working.local.as_ref().is_some_and(|old| old.origin == local.origin) {
                         working.local.clone().expect("matched local")
@@ -571,9 +672,6 @@ impl Coordinator {
                 });
                 working.state.desktop = current.state.desktop.clone();
                 working.state.revision = current.state.revision + 1;
-                // The committed-view receipt changes only when this action
-                // published a new remote selection: the one moment it opens.
-                let opened = working.committed_view_generation != current.committed_view_generation;
                 if opened {
                     if let (Some(account), ClientTarget::Remote { instance_id, .. }) =
                         (&working.state.account.identity, &working.state.connection.committed)
@@ -582,6 +680,7 @@ impl Coordinator {
                         recency = Some(working.recency.clone());
                     }
                 }
+                refresh_display(working);
                 order_catalog(working);
                 *current = working.clone();
                 None
@@ -593,11 +692,11 @@ impl Coordinator {
             let store = self.store.clone();
             let _ = tokio::task::spawn_blocking(move || store.save_recency(&recency)).await;
         }
-        if let Some(record) = rollback_record {
+        if let Some((record, error)) = rollback_record {
             // Keep credential_io through public commit or rollback. Escape
             // waits on this lock; cancellation cannot leave an unpublished
             // first credential or overwrite an existing committed jar.
-            let id = working.record.account_id.clone();
+            let id = written_id;
             let credentials = self.credentials.clone();
             let store = self.store.clone();
             let rollback = tokio::task::spawn_blocking(move || {
@@ -626,9 +725,42 @@ impl Coordinator {
                 self.view.changed(&state);
                 return Err(error);
             }
-            return Err(ClientError::new("stale_generation"));
+            return Err(error);
         }
         saved
+    }
+
+    async fn recover_commit(&self, epoch: &Epoch, owner: u64, error: &ClientError) {
+        let terminal = self.view.terminal_commit(epoch);
+        let cleanup = self.view.abort_commit(epoch.clone()).await;
+        if let Err(cleanup) = &cleanup {
+            self.credential_io.lock().await.cleanup_error = Some(cleanup.clone());
+        }
+        if !terminal || self.presentation_epoch(owner).is_err() {
+            return;
+        }
+        let Ok((recovery_owner, recovery)) = self
+            .escape_outcome(ClientAction::ReturnLocal, Some(epoch.value), Some(owner))
+            .await
+        else {
+            return;
+        };
+        if self.presentation_epoch(recovery_owner).is_err() {
+            return;
+        }
+        if let Err(recovery) = recovery {
+            self.credential_io.lock().await.cleanup_error = Some(recovery);
+        }
+        {
+            let mut inner = self.inner.lock().expect("client state");
+            if self.action_generation.load(Ordering::SeqCst) != recovery_owner {
+                return;
+            }
+            inner.state.enrollment.error_code = Some(error.code.clone());
+            inner.state.revision += 1;
+        }
+        let _ = self.view.signout_failed(self.epoch()).await;
+        self.view.changed(&self.state());
     }
 
     async fn escape(
@@ -637,7 +769,17 @@ impl Coordinator {
         expected: Option<u64>,
         native_owner: Option<u64>,
     ) -> Result<u64, ClientError> {
-        let signing_out = matches!(action, ClientAction::SignOut);
+        let (owner, result) = self.escape_outcome(action, expected, native_owner).await?;
+        result.map(|()| owner)
+    }
+
+    async fn escape_outcome(
+        &self,
+        action: ClientAction,
+        expected: Option<u64>,
+        native_owner: Option<u64>,
+    ) -> Result<(u64, Result<(), ClientError>), ClientError> {
+        let signing_out = matches!(action, ClientAction::SignOut { .. });
         if signing_out && self.signing_out.swap(true, Ordering::SeqCst) {
             return Err(ClientError::new("busy"));
         }
@@ -712,6 +854,7 @@ impl Coordinator {
                 RemoteAuxiliary::DisabledIncomplete
             };
             inner.record.last_committed = target.clone();
+            refresh_display(&mut inner);
             (epoch, target, inner.record.clone(), old_session)
         };
         self.view.invalidate(epoch.value);
@@ -762,10 +905,12 @@ impl Coordinator {
         }
         drop(owned);
         let view_result = if signing_out {
-            self.view.signed_out(epoch.clone(), target).await
+            self.view.signed_out(epoch.clone(), target, cleanup.is_err()).await
         } else {
             self.presentation_epoch(epoch.value)?;
-            self.view.restore(epoch.clone(), target).await
+            self.view
+                .restore(epoch.clone(), target, matches!(action, ClientAction::Cancel))
+                .await
         };
         if signing_out {
             // Device-local best effort revocation never delays local erasure.
@@ -780,6 +925,11 @@ impl Coordinator {
             // as credential erasure. Only a successful sign-out retry clears
             // that obligation; no new account work can pass a failed owner.
             self.credential_io.lock().await.cleanup_error = result.as_ref().err().cloned();
+            if result.is_err() && self.presentation_epoch(epoch.value).is_ok() {
+                // A newly loaded receiver can immediately get_state. Store the
+                // error first; never rely on a later projection-only event.
+                let _ = self.view.signout_failed(epoch.clone()).await;
+            }
         }
         let state = {
             let mut inner = self.inner.lock().expect("client state");
@@ -790,7 +940,7 @@ impl Coordinator {
             inner.state.clone()
         };
         self.view.changed(&state);
-        result.map(|()| epoch.value)
+        Ok((epoch.value, result))
     }
 
     /// Called once at native initialization; cached URLs never authorize restore.
@@ -849,7 +999,8 @@ impl Coordinator {
         working.account.fence(epoch.clone());
         if let Err(error) = working.account.discover(&mut working.state).await {
             if matches!(error.code.as_str(), "signed_out" | "account_changed") {
-                self.escape(ClientAction::SignOut, None, None).await?;
+                self.escape(ClientAction::SignOut { intent_id: None }, None, None)
+                    .await?;
             }
             return Err(error);
         }
@@ -861,7 +1012,8 @@ impl Coordinator {
                 .as_ref()
                 .is_none_or(|account| account.id != id)
         {
-            self.escape(ClientAction::SignOut, None, None).await?;
+            self.escape(ClientAction::SignOut { intent_id: None }, None, None)
+                .await?;
             return Err(ClientError::new("account_changed"));
         }
         self.persist(&mut working, &epoch).await?;
@@ -942,5 +1094,57 @@ fn committed_status(state: &ClientState) -> ConnectionStatus {
         ConnectionStatus::Local
     } else {
         ConnectionStatus::RemoteConnected
+    }
+}
+
+/// Display metadata has no connection authority and is never persisted.
+fn refresh_display(inner: &mut Inner) {
+    let account = inner
+        .state
+        .account
+        .identity
+        .as_ref()
+        .filter(|_| inner.state.account.status == AccountStatus::SignedIn)
+        .map(|identity| identity.id.clone());
+    inner.state.local.slug = account.as_ref().and_then(|_| {
+        let id = inner.state.local.instance_id.as_ref()?;
+        inner
+            .state
+            .catalog
+            .instances
+            .iter()
+            .find(|instance| &instance.id == id)
+            .map(|instance| instance.name.clone())
+    });
+    if account.is_none() || account != inner.display_account {
+        inner.state.current_instance = None;
+    }
+    inner.display_account = account.clone();
+    let ClientTarget::Remote {
+        instance_id,
+        canonical_origin,
+        ..
+    } = &inner.state.connection.committed
+    else {
+        inner.state.current_instance = None;
+        return;
+    };
+    let matches = |instance: &Instance| {
+        instance.id == *instance_id
+            && instance_origin(instance).is_ok_and(|origin| origin.origin().ascii_serialization() == *canonical_origin)
+    };
+    if account.is_none() {
+        return;
+    }
+    if let Some(instance) = inner
+        .state
+        .catalog
+        .instances
+        .iter()
+        .find(|instance| instance.id == *instance_id)
+    {
+        inner.state.current_instance = matches(instance).then(|| instance.clone());
+    } else if !inner.state.current_instance.as_ref().is_some_and(matches) {
+        inner.state.current_instance = None;
     }
 }

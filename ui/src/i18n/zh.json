@@ -22,7 +22,9 @@
       "runtime_stop_failed": "Avibe 无法确认运行时已停止，其部分或全部组件可能仍在运行。点击“重试”重新连接，如有需要可再次停止它。",
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
-      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
+      "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。",
+      "database_disk_full": "磁盘已满，Avibe 无法更新数据库。数据没有任何改动。请在存放 Avibe 数据的磁盘上腾出一些空间，然后点击“重试”。",
+      "database_disk_full_unconfirmed": "磁盘已满，Avibe 无法更新数据库。请在存放 Avibe 数据的磁盘上腾出一些空间，然后点击“重试”。"
     },
     "tray": {
       "open": "打开应用",
@@ -143,7 +145,7 @@
       "skip": "跳过此版本",
       "cancel": "稍后",
       "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
-      "disabledDetail": "此构建尚未配置桌面自动更新，请手动安装新的签名版本。",
+      "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
     }
   },
@@ -319,7 +321,10 @@
       "current": "当前实例",
       "none": "尚未选择实例",
       "switch": "切换实例",
-      "choose": "选择实例"
+      "choose": "选择实例",
+      "privacy": "隐私政策",
+      "delete": "删除账号",
+      "deleteHint": "前往 avibe.bot，查看影响并确认删除。"
     },
     "twoFactor": {
       "title": "确认是你本人。",
@@ -803,8 +808,7 @@
       "windows": {
         "subtitle": "让 Avibe Agent 查看并操作这台 Windows 电脑。",
         "title": "Windows 上的电脑操作",
-        "previewBadge": "预览",
-        "previewDetail": "Windows 上的电脑操作目前为预览版，显示缩放、多显示器和输入法仍在验证中。",
+        "limitations": "在显示缩放、多显示器和输入法下可能工作不稳定。",
         "apps": "Agent 可以操作以你的 Windows 账户运行的普通应用，无需设置辅助功能或屏幕录制。",
         "elevated": "以管理员身份运行的窗口会被拒绝。Avibe 不会自行提升权限，Agent 会告诉你它无法操作该窗口。如需让它协助，请不要使用“以管理员身份运行”，重新打开该应用。",
         "launch": "Agent 会启动它能在这台电脑上可靠找到的桌面应用。商店应用和无法可靠找到的应用，需要你先手动打开：Agent 会请你打开，然后在该窗口中继续操作。",
@@ -1215,10 +1219,6 @@
     },
     "logsTitle": "实时日志",
     "logsSubtitle": "按来源、级别和搜索条件查看运行日志流。",
-    "inProgressTitle": "这个设置页已经有新路由，但功能 UI 还在迁移中",
-    "inProgressBody": "新版路由和页面壳子已经就位，但这个分区的具体界面还在从旧 Dashboard 和向导流程迁移。",
-    "inProgressHint": "在该分区完成重构前，底层配置仍可先通过设置向导进行调整。",
-    "openSetup": "打开设置向导",
     "models": {
       "title": "模型网关",
       "subtitle": "按 Agent 查看每个模型使用哪个供应商，并按路由自动切换。",
@@ -1237,8 +1237,6 @@
         "unread": "模型网关状态不可用",
         "notStarted": "模型网关尚未就绪",
         "notInstalled": "模型网关组件未安装",
-        "allDirect_one": "{{count}} 个后端都由 Agent 管理",
-        "allDirect_other": "{{count}} 个后端都由 Agent 管理",
         "starting": "正在启动…",
         "unsupported": "当前平台不支持模型网关",
         "closed": {
@@ -1288,50 +1286,15 @@
         }
       },
       "direct": {
-        "card": {
-          "current": "当前：Agent 管理",
-          "current.sub": "每个 Agent 后端使用自己的登录，直接连接模型供应商。"
-        },
-        "pill": {
-          "direct": "Agent 管理"
-        },
-        "backend": {
-          "claude": {
-            "detail": "走它自己的 Claude 登录"
-          },
-          "codex": {
-            "detail": "走它自己的 ChatGPT 登录"
-          },
-          "opencode": {
-            "detail": "用它自己的模型配置"
-          }
-        },
         "action": {
-          "switchToGateway": "交给模型网关管理",
           "refreshAgents": "重新检测 Agent 后端"
-        },
-        "benefits": {
-          "title": "切换到模型网关，有三大益处",
-          "1": "额度用尽不断线",
-          "1.detail": "Claude 订阅用满时，自动切换到下一个供应商，对话继续。",
-          "2": "一个 Key 用于多个后端",
-          "2.detail": "同一个 API Key 可以同时给 Claude Code、Codex、OpenCode 用。",
-          "3": "模型搭配随心所欲",
-          "3.detail": "哪个后端使用哪个供应商的哪个模型，都可以任意搭配。"
-        },
-        "note": {
-          "perBackend": "逐个后端切换，互不影响——其余后端仍由 Agent 管理。切换后随时可以切换回来。"
-        },
-        "empty": {
-          "title": "这台机器上没有找到 Agent 后端",
-          "body": "装好 Claude Code、Codex 或 OpenCode 之后，回到这一页，它们会出现在这里。",
-          "install": "安装一个后端 CLI，然后重新加载这一页。"
         }
       },
       "gateway": {
         "heading": "路由",
         "infoLabel": "什么是路由",
         "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
+        "address": "本机地址：{{address}}（把其他工具接到网关时使用）",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
         "addModel": "添加模型",
@@ -1395,7 +1358,8 @@
             "unconfigured": "未配置模型路由",
             "unused": "暂无 Agent 使用"
           },
-          "emptyModels": "这个后端的模型列表是空的"
+          "emptyModels": "这个后端的模型列表是空的",
+          "emptyNoProviders": "添加模型供应商后，这里会列出它提供的模型。"
         },
         "catalog": {
           "title": "{{backend}} 模型",
@@ -1417,7 +1381,7 @@
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
           "searchAdd": "在供应商和模型目录里搜索「{{query}}」",
-          "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
+          "legacy": "当前模型引擎版本不能编辑模型列表，以下是它提供的模型。",
           "baselineUnavailable": "没能读取这个后端的模型列表。",
           "save": "保存",
           "saving": "正在保存…",
@@ -1521,6 +1485,11 @@
           "cancel": "取消",
           "add": "添加模型",
           "apply": "保存模型"
+        },
+        "off": {
+          "status": "已停用",
+          "enable": "去启用",
+          "enableLabel": "去启用 {{backend}}（设置 › 后端）"
         }
       },
       "takeover": {
@@ -2101,7 +2070,6 @@
         "startNow": "立即启动",
         "starting": "正在启动"
       },
-      "experimental": "实验",
       "agents": {
         "title": "Agent",
         "subtitle": "各自选择供应商和优先级；失败时自动切换",
@@ -2264,14 +2232,15 @@
           "title": "已连接，但尚未完成验证",
           "detail": "这次响应不足以同时确认接口类型和凭证有效性"
         },
+        "more": "更多设置",
         "protocol": {
-          "saveFirstHint": "选择供应商使用的 API 格式，无需检测或测试通过即可保存。",
           "auto": "自动探测",
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "搜索服务",
+          "change": "更改格式",
           "idleHint": "填好 Base URL 和 API Key 后自动识别，不影响保存。",
           "detecting": "正在识别 API 格式…不用等它也能保存。",
           "manual": "手动选择 API 格式",
@@ -2435,7 +2404,7 @@
         "applyFailed": "迁移失败，请重试",
         "blocked": {
           "config": "配置文件格式有误。",
-          "environment": "环境变量里的密钥暂不支持迁移。",
+          "environment": "环境变量里的密钥无法迁移，请手动添加。",
           "credential": "不支持这种认证方式。",
           "dynamic_shell": "密钥由命令生成，无法读取。",
           "ambiguous_shell": "多个文件里的密钥不一致。",
@@ -2445,7 +2414,7 @@
           "token": "不支持这种登录令牌。",
           "headers": "不支持自定义请求头。",
           "transport": "模型网关无法按这种方式发送密钥。",
-          "fallback": "暂不支持迁移，请手动添加。"
+          "fallback": "无法迁移，请手动添加。"
         },
         "applying": "迁移中…",
         "interruptNotice": "迁移会中断所选助手在 Avibe 中正在运行的任务。",
@@ -2958,8 +2927,6 @@
         "sharedKey": "使用供应商「{{source}}」的密钥，请在「供应商与路由」中管理。",
         "manageSource": "管理供应商密钥",
         "removeNote": "移除后不再用于搜索，其他供应商不受影响。",
-        "addProvider": "添加供应商",
-        "menu": "搜索服务（Tavily、Exa…）",
         "month": "本月",
         "monthRequests_one": "{{requests}} 次请求",
         "monthRequests_other": "{{requests}} 次请求",
@@ -3216,6 +3183,7 @@
     "sandbox_browser_unavailable": "受保护的 Vault 需要具备 Web Crypto 的安全浏览器环境。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
     "sandbox_browser_required": "请在浏览器中继续此受保护的 Vault 操作，而不是在桌面应用中。",
     "sandbox_reset": "本次受保护保险库操作已取消或重置。请从 Avibe 重试，以重新验证沙箱。",
+    "authorization_window_closed": "安全窗口在这一步完成前关闭了，没有批准、签名或显示任何内容。请再试一次。",
     "sandbox_ready_timeout": "已验证的保险库沙箱未能启动。请检查网络、更新 Avibe 后重试。",
     "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
     "stale_login_session": "Avibe 仍运行在一个已经结束的 macOS 登录会话中。请在 Mac 当前桌面的终端运行 `vibe restart`，然后重试。请不要重复重试此操作。",
@@ -3367,7 +3335,6 @@
   },
   "apps": {
     "title": "应用",
-    "soon": "即将上线",
     "editor": {
       "label": "编辑器",
       "desc": "本机文件的快速代码编辑器。",
@@ -3473,11 +3440,10 @@
     "fileBrowser": {
       "label": "文件",
       "desc": "浏览、查看、编辑这台机器上的文件。",
-      "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。",
       "tagline": "整机 · 查看与编辑",
       "selectHint": "选择一个文件来查看或编辑。",
       "empty": "这个文件夹是空的。",
-      "noPreview": "这种文件类型暂不支持应用内预览。",
+      "noPreview": "这种文件类型无法在应用内预览。",
       "download": "下载",
       "tooLarge": "文件太大,无法在浏览器里编辑。请下载后查看。",
       "refresh": "刷新",
@@ -3575,7 +3541,6 @@
     "terminal": {
       "label": "终端",
       "desc": "在浏览器里跑真实 shell。",
-      "placeholder": "终端将在第二阶段上线:真实 shell,配 tmux 持久化会话。",
       "tagline": "在浏览器里跑真实 shell。",
       "persistent": "持久会话",
       "tabTitle": "终端 {{n}}",
@@ -3650,8 +3615,6 @@
   },
   "workbench": {
     "eyebrow": "Agent OS",
-    "placeholderTitle": "你的 AI 工作台正在搭建",
-    "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
     "home": {
       "greeting": {
         "morning": "早上好，今天做什么？",
@@ -3686,7 +3649,7 @@
           "action": "去授权"
         },
         "computer_use_windows": {
-          "title": "开启电脑操作（预览）",
+          "title": "开启电脑操作",
           "why": "让 {{name}} 操作这台 Windows 电脑上的普通应用。",
           "action": "去开启"
         },
@@ -3801,7 +3764,7 @@
         "daemonUnreachableDetail": "Avibe 无法连接电脑操作。请关闭再开启电脑操作；再次出现就重新打开 Avibe。",
         "controllerUnavailableDetail": "Avibe 服务暂无响应，恢复后电脑操作即可继续使用。",
         "socketPathTooLongDetail": "macOS 无法启动电脑操作。请更新或重新安装 Avibe。",
-        "unsupportedArchitectureDetail": "Windows 上的电脑操作需要 x64 电脑，预览版暂不支持此设备。",
+        "unsupportedArchitectureDetail": "Windows 上的电脑操作需要 x64 电脑。",
         "elevatedRuntimeDetail": "Avibe 服务正以管理员身份运行，因此电脑操作不可用。请退出 Avibe，然后不要使用“以管理员身份运行”，正常重新打开。",
         "sessionUnavailableDetail": "电脑操作需要已登录的 Windows 桌面。请登录这台电脑的桌面，然后重新打开 Avibe。",
         "sessionLockedDetail": "这台电脑已锁定，或远程会话已断开。请解锁或重新连接后再检查。",
@@ -3962,12 +3925,10 @@
       "navQuiet": "收件箱：有未读，通知已关闭"
     },
     "modules": {
-      "comingSoonEyebrow": "即将就位",
-      "comingSoon": "这个能力还在路上,后续版本会接入完整界面。",
       "inbox": {
         "eyebrow": "收件箱",
         "title": "收件箱",
-        "description": "跨项目汇聚所有 Avibe 会话的通知。hover 浮层和完整列表视图后续 commit 接入。"
+        "description": "跨项目汇聚所有 Avibe 会话的通知。"
       },
       "agents": {
         "eyebrow": "Agents",
@@ -4024,13 +3985,6 @@
     "feature1": "数据与 Agent 都留在你自己的机器上。",
     "feature2": "Slack、Discord、Telegram、飞书、微信，一个入口全搞定。",
     "feature3": "Claude、OpenCode、Codex —— 按群/频道路由。"
-  },
-  "modeSelection": {
-    "title": "选择模式",
-    "saasMode": "SaaS 模式",
-    "saasDescription": "OAuth 安装 + 云端中继 + 本地执行（即将推出）",
-    "selfHostMode": "自托管模式",
-    "selfHostDescription": "使用您自己的聊天应用 + Socket Mode 令牌"
   },
   "platform": {
     "eyebrow": "03 — 平台",
@@ -4669,7 +4623,8 @@
     "desktopManagedUpdateMemberHint": "请在运行 Avibe 的那台电脑上的桌面应用中更新此主机。",
     "desktopRemoteUpdateLocalRequest": "有人远程请求更新到 {{target}}。你可以立即安装或忽略此请求。",
     "desktopRemoteUpdateIgnore": "忽略此请求",
-    "runtimeVersionSkew": "本应用为 v{{app}}，但连接的 Avibe 运行时为 v{{runtime}}"
+    "runtimeVersionSkew": "本应用为 v{{app}}，但连接的 Avibe 运行时为 v{{runtime}}",
+    "audioTranscriptionDisclosure": "开启后，聊天平台里的语音消息会交给第三方 AI 语音服务转成文字，avibe.bot 不保存录音。"
   },
   "doctor": {
     "title": "系统状态",
@@ -5459,7 +5414,7 @@
     "createDialog": {
       "title": "和 Agent 对话来创建后台任务",
       "subtitle": "写 cron 是工具时代,描述意图是同事时代",
-      "body": "后台任务 / 等待器 / 未来的 Webhook 都通过和 Agent 对话创建。这样 Agent 能从你的真实意图里组装 vibe task add / vibe watch add 的参数,你不用记 cron 语法。",
+      "body": "后台任务和等待器都通过和 Agent 对话创建。Agent 会从你的真实意图里组装 vibe task add / vibe watch add 的参数，你不用记 cron 语法。",
       "example": "举例:「每天工作日早上 9:30 总结一下 ops 频道昨天的活动,发到 #ops。」Agent 会自动转换成 cron 表达式 + 注入 prompt 模板。",
       "projectLabel": "在哪个项目下创建",
       "noProject": "还没有项目 — 先到侧栏 + 按钮建一个吧。",
@@ -6252,11 +6207,10 @@
       "strictHelp": "每次授权和查看都要求 passkey，而不仅是沙箱内确认。签名无论如何都会要求。开启时会重新锁定保险库，使其立即生效。"
     },
     "reveal": {
-      "show": "查看值",
-      "copy": "复制值",
-      "showInBrowser": "在浏览器中查看",
+      "view": "查看密钥",
+      "viewInBrowser": "在浏览器中查看",
+      "browserFallback": "没能在桌面端显示这个密钥，请在它的菜单中选择「在浏览器中查看」。",
       "errors": {
-        "staleField": "此链接指向的字段已不存在。请打开密钥并选择当前字段。",
         "contextFailed": "无法准备查看，请重试。",
         "unavailable": "此保护档暂不支持查看。"
       }
@@ -6301,7 +6255,6 @@
       "recordConflict": "保存期间字段记录发生变化。值未写入，请重新加载 Secret 后再试。",
       "secretConflict": "保存期间此密钥发生变化，字段已刷新。请检查后重新保存；你的值尚未写入。",
       "replacePlaceholder": "已保存 · 输入即替换",
-      "revealField": "要显示的字段",
       "nameRequired": "填写字段名",
       "nameInvalid": "字段名只能用小写字母、数字和下划线，以字母开头",
       "nameTaken": "已经有一个 {{field}} 字段",
@@ -6340,12 +6293,13 @@
       "maybeLater": "以后再说",
       "unlockWithPasskey": "用 passkey 解锁",
       "unlockPasskeyCaption": "Face ID · Touch ID · 安全密钥",
-      "factorNote": "你的 passkey 证明绝不会离开浏览器——单凭这台机器无法解密",
+      "factorNote": "只有你的 Passkey 能解锁——单凭这台机器无法解密",
       "cancel": "取消",
       "passkeyUnrecoverableWarning": "这个 passkey 就是唯一的钥匙,丢了它,保护档里的密钥就再也找不回来了(没有备用恢复方式)。",
       "passkeyAck": "我明白:一旦丢失 passkey,这些密钥无法找回。",
       "unlockUnavailableHere": "请使用兼容的浏览器。在运行 Avibe 的电脑上，通过 localhost 或 127.0.0.1 打开 Vaults；在其他设备上，使用你的 HTTPS avibe.bot 地址。不支持局域网 HTTP 地址（如 192.168.x.x）。",
-      "browserNote": "桌面端无法使用 passkey。请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
+      "browserNote": "这个版本的桌面端还不能直接使用 Passkey，请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
+      "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中继续（同一个 Avibe），在那里填写这个密钥。",
       "openInBrowser": "在浏览器中打开",
       "errors": {
         "prfUnavailable": "这个 Passkey 不支持保护档需要的加密，没有设置成功。在 Mac 上，浏览器问保存到哪里时请选 iCloud 钥匙串；在 Windows 上，可以用已登录 Google 账号的 Chrome，保存到 Google 密码管理工具。然后再试一次。",
@@ -6461,6 +6415,10 @@
       "createNeedsAvault": "请先按上方提示安装或更新 avault。",
       "createNeedsPassphraseAgain": "请再输入一次 Passphrase，再创建钱包。"
     },
+    "handoff": {
+      "done": "已完成，可以关闭此标签页，回到桌面应用。",
+      "openApp": "打开桌面应用"
+    },
     "requests": {
       "title": "待处理请求",
       "subtitle": "Agent 在等你批准。",
@@ -6529,10 +6487,10 @@
       "close": "关闭",
       "ttlMinutes": "{{count}} 分钟",
       "ttlHours": "{{count}} 小时",
-      "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
-      "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
-      "protectedWarning": "保护档签名在安全浏览器沙箱中完成，只有公开签名会返回 Avibe。",
-      "browserNote": "这一步需要 passkey，而桌面端无法使用 passkey。请在浏览器中审阅并批准。",
+      "accessNote": "在安全窗口里解锁，密钥的值不会展示给 AI 或聊天。",
+      "signNote": "私钥只在安全窗口里使用，Avibe 只收到签名。",
+      "browserNote": "这个版本的桌面端还不能直接使用 Passkey，请在浏览器中审阅并批准。",
+      "browserFallbackNote": "这一步的 passkey 没能在桌面端完成，请在浏览器中审阅并批准。",
       "continueInBrowser": "在浏览器中继续",
       "errors": {
         "failed": "批准未能完成，请重试。",
@@ -6544,6 +6502,10 @@
       },
       "account": "账户",
       "path": "派生路径 {{path}}",
+      "btcInput": "比特币输入",
+      "btcInputType": "{{type}} {{code}}",
+      "btcInputNetwork": "网络：{{network}}（请求方填写的标签）",
+      "btcInputReview": "金额、收款方和手续费，点「签名」后在安全窗口里显示和核对。",
       "rawDigestNote": "这是原始哈希，无法显示转账内容；只批准你认识的请求。",
       "solanaBlockhashHint": "Solana 交易通常只在一两分钟内有效。批准晚了，这笔交易可能已经过期，需要重新发起；使用持久 nonce 的交易不受此限。"
     },
@@ -6661,8 +6623,8 @@
       "back": "上一步",
       "wallet": {
         "badge": "助记词 · {{count}} 个账户",
-        "used": "已用 {{count}} / {{limit}} 个账户 · 账户编号与 MetaMask、Phantom 的账户顺序一致",
-        "agentUsage": "Agent 用 --chain 选链，--account 选账户",
+        "used": "已用 {{count}} / {{limit}} 个账户 · EVM 和 Solana 的账户编号与 MetaMask、Phantom 的顺序一致",
+        "agentUsage": "Agent 用 --chain 选链，--account 选账户；比特币再用 --address-type 选地址类型。",
         "ask": "签名前问我",
         "askLocked": "已打开。目前不能在这里关闭。",
         "rename": "重命名",
@@ -6742,7 +6704,8 @@
           "vault_already_initialized": "保护档刚在别处完成设置"
         },
         "nameTakenCreate": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才那组助记词对应的钱包，请不要往它的地址转账。换一个名称重新创建，会生成一组新的助记词。",
-        "nameTakenImport": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才导入的钱包，请不要往它的地址转账。换一个名称重新导入，用同一组助记词即可。"
+        "nameTakenImport": "这个名称已被其他密钥使用，钱包没有保存。Avibe 里没有刚才导入的钱包，请不要往它的地址转账。换一个名称重新导入，用同一组助记词即可。",
+        "windowWhy": "助记词只在独立安全窗口出现，Avibe 无权读取及覆盖，更加安全"
       },
       "nameTakenAfterSave": "这个名称已被其他密钥使用，钱包还没有保存。换一个名称再保存，助记词不变。",
       "standardTierLine": "你选的是标准档：助记词在这个页面输入，加密后保存在运行 Avibe 的电脑上。"
@@ -7289,7 +7252,8 @@
       "stop": "停止语音输入",
       "startFailed": "无法使用麦克风。请在系统设置里检查麦克风权限，或直接打字。",
       "empty": "没听到说话。可以再说一次，或直接打字。",
-      "failed": "没能转成文字。可以再说一次，或直接打字。"
+      "failed": "没能转成文字。可以再说一次，或直接打字。",
+      "consentOff": "语音输入已关闭，可以在设置 › 常规里开启。"
     },
     "keyboard": {
       "open": "输入消息",
@@ -7420,6 +7384,21 @@
       "lost": "这段录音没能保存在这台设备上。",
       "insert": "放进输入框",
       "truncated": "录音的结尾没能保存在这台设备上，这里是保存下来的部分。"
+    },
+    "consent": {
+      "title": "开启语音输入？",
+      "body": "你说的话会交给第三方 AI 服务转成文字，为了更准确，也会带上当前对话里的少量文字。",
+      "learnMore": "了解详情",
+      "details": "录音和这些文字经 avibe.bot 转给阿里云百炼（新加坡）识别，再由同一平台上的模型整理。avibe.bot 不保存录音和文字。随时可以在设置 › 常规里更改。",
+      "privacyPolicy": "隐私政策",
+      "allow": "允许",
+      "deny": "不允许",
+      "saveFailed": "没能保存你的选择，请再试一次。",
+      "offTitle": "语音输入已关闭",
+      "offBody": "可以直接打字，或在设置 › 常规里开启。",
+      "turnOn": "开启",
+      "settingTitle": "语音输入",
+      "settingDescription": "用第三方 AI 语音服务把你说的话转成文字，avibe.bot 不保存录音。只对你的账号在这个 Avibe 上生效。"
     }
   },
   "mcpHub": {
@@ -7572,8 +7551,8 @@
     "accountService": "avibe.bot",
     "switchInstance": "切换实例",
     "localRemoteAccess": "本机远程访问",
-    "auxiliaryIncomplete": "第一阶段暂不支持远程实例的 Mini 和原生通知。返回本机后可继续使用。",
-    "signOut": "退出账号",
+    "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
+    "signOut": "在此设备退出",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
     "localVersion": "本机 Desktop 版本 {{version}}",
     "continueLocal": "继续使用本机",
@@ -7602,13 +7581,13 @@
     "useAuthenticator": "使用验证器",
     "loginHero": "你的 Avibe，\n从这里连起来。",
     "loginHeroBody": "登录一个账号，连接自己的电脑，也能访问与你共享的实例。",
-    "checkInbox": "查看你的邮箱",
-    "loginTitle": "登录或注册",
+    "checkInbox": "查看你的邮箱。",
+    "loginTitle": "从一封邮件开始。",
     "codeSent": "验证码已发送至 {{email}}",
-    "loginBody": "使用你的 avibe.bot 账号。新邮箱会自动创建账号。",
+    "loginBody": "登录 / 注册你的 avibe.bot 账号",
     "emailCode": "6 位验证码",
     "email": "邮箱",
-    "codeHelp": "请填写邮件中的验证码。",
+    "codeHelp": "输入邮件里的 6 位验证码，可直接粘贴。",
     "verifySignIn": "验证并登录",
     "sendCode": "发送验证码",
     "changeEmail": "修改邮箱",
@@ -7637,7 +7616,7 @@
     "transferSteps": "请当前所有者登录 avibe.bot 控制台，通过此实例现有的所有权转移流程操作。转移完成后，在这里重新登录。Desktop 不会替换当前所有者。",
     "keepLink": "保持绑定，仅使用本机",
     "reviewChange": "查看改绑步骤",
-    "otherInstances": "查看其他实例",
+    "otherInstances": "其他实例",
     "signedIn": "已登录",
     "registeringBody": "登记本机，然后开启远程访问…",
     "remoteAccessTitle": "远程访问",
@@ -7668,9 +7647,43 @@
       "bridge": "Desktop 连接暂不可用，请重试或返回工作台。",
       "request": "暂时无法完成这一步，请检查网络后重试。",
       "code": "验证码无效或已过期，请重试或重新发送。",
-      "upgrade": "此实例需要更新 Avibe 后才能从 Desktop 连接。你仍可使用本机。"
+      "upgrade": "这个实例需要先升级 Avibe。请在那台电脑上升级后重试。",
+      "credentials": "邮箱或密码不正确，请重试或使用邮箱验证码。",
+      "rateLimit": "尝试次数过多，请稍后重试。"
     },
-    "localStatus": "{{name}} · {{status}}"
+    "localStatus": "{{name}} · {{status}}",
+    "newEmailHelp": "新邮箱将自动注册，无需设置密码。",
+    "noCode": "没收到验证码？",
+    "password": "密码",
+    "passwordSignIn": "登录",
+    "usePassword": "使用密码登录",
+    "useEmailCode": "使用验证码登录",
+    "forgotPassword": "忘记密码？",
+    "showPassword": "显示密码",
+    "hidePassword": "隐藏密码",
+    "passwordHelp": "先用邮箱验证码登录，再到 avibe.bot 的「账号安全」中设置或重置密码。",
+    "opening": "正在打开…",
+    "offlineInstructions": "去那台电脑打开 Avibe 并连接网络，然后刷新列表。",
+    "signingOut": "正在退出账号…",
+    "signOutReturn": "返回工作台继续使用。",
+    "instancesTitle": "实例",
+    "currentlyUsing": "正在使用",
+    "accountTitle": "账户",
+    "currentAccount": "当前登录",
+    "addInstance": "添加实例",
+    "thisDevice": "本机",
+    "sharedBy": "{{owner}} 共享",
+    "addGuide": {
+      "body": "将另一台电脑或服务器加入同一账户，再回到这里刷新列表。",
+      "computerTitle": "在另一台电脑上",
+      "computerBody": "安装 Avibe Desktop，使用同一账户登录，并在那台电脑上完成账户验证与本机登记。",
+      "serverTitle": "在服务器或命令行安装中",
+      "serverBody": "按安装指南安装 Avibe 并完成设置，然后在那台服务器上运行：",
+      "pairingBody": "按照引导，使用同一 avibe.bot 账户完成配对。配对密钥只在那台服务器上使用，不要填到这里。",
+      "installGuide": "打开安装指南",
+      "done": "返回并刷新",
+      "command": "vibe remote"
+    }
   },
   "update": {
     "row": {

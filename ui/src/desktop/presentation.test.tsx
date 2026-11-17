@@ -31,7 +31,7 @@ const ask = (detail: unknown) => {
 };
 
 it.each([
-  ['approved', true, [['updates', 'native/req 1']]],
+  ['approved', true, [['updates', 'native/req 1', 'en']]],
   ['refused', false, []],
 ] as const)('AUTH-SETUP-177 a native updates request on a dirty page, %s, is consumed and keeps its token', (_case, approve, calls) => {
   const confirm = vi.spyOn(window, 'confirm').mockReturnValue(approve);
@@ -47,5 +47,5 @@ it('AUTH-SETUP-177 drops malformed tokens rather than creating a correlated URL'
   renderDirtyPage();
   ask({ view: 'instances' });
   ask({ view: 'updates', presentationToken: 7 });
-  expect(presented.mock.calls).toEqual([['instances', undefined], ['updates', undefined]]);
+  expect(presented.mock.calls).toEqual([['instances', undefined, 'en'], ['updates', undefined, 'en']]);
 });

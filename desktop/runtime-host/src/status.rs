@@ -48,6 +48,8 @@ pub enum BootstrapNoticeCode {
     LauncherExited,
     ReadyTimeout,
     WorkbenchNavigationFailed,
+    DatabaseDiskFull,
+    DatabaseDiskFullUnconfirmed,
 }
 
 /// Typed, bounded arguments for one localized bootstrap notice.
@@ -248,6 +250,11 @@ mod tests {
             (
                 BootstrapNoticeCode::WorkbenchNavigationFailed,
                 "workbench_navigation_failed",
+            ),
+            (BootstrapNoticeCode::DatabaseDiskFull, "database_disk_full"),
+            (
+                BootstrapNoticeCode::DatabaseDiskFullUnconfirmed,
+                "database_disk_full_unconfirmed",
             ),
         ];
         for (code, expected) in cases {

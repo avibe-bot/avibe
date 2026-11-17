@@ -57,6 +57,16 @@ const withRequests = (extra: Parameters<typeof vaultFixtures>[1] = {}) => vaultF
 );
 const fixtures = withRequests();
 // Nothing unread: the requests still show, above "all caught up", and the badge still counts them.
+// New Bitcoin requests are listed as summaries (#3871): the key's name and tier, no card or Session;
+// one whose name is too long for the summary keeps the generic line. Review reads each in full first.
+const btcSummary = (id: string, secret_name: string | null): VaultRequest => ({
+  ...accessRequest, id, request_type: 'sign', secret_name, protection: 'protected',
+  requester: null, delivery: null, message_id: null, card: null, session: null,
+});
+const btcFixtures = vaultFixtures(
+  { ...vaultApi({ grants: [], requests: [promote, btcSummary('vrq_btc_1', 'R9_PROT_KEY'), btcSummary('vrq_btc_2', null)] }), '/api/config': { ...settingsConfig, language: undefined } },
+  { inboxSessions: rows, unreadBySession: unread },
+);
 const caughtUp = withRequests({ inboxSessions: rows.map((row) => ({ ...row, unread: false, unread_count: 0 })), unreadBySession: {} });
 // The second row is the standard request; its dialog is the one a browser and the desktop app both show.
 const reviewStandard = ['role=button[name="{t:vaults.requests.review}"] >> nth=1'];
@@ -83,6 +93,17 @@ const designFrames = frames([
     route: '/inbox',
     fixtures,
     click: reviewStandard,
+    render: desktop,
+  },
+  {
+    name: 'btc-summaries',
+    title: '收件箱 · 新的 Bitcoin 签名请求：摘要行带密钥名和保护档；名称过长时仍显示「签名请求 · 点审阅查看详情」',
+    width: 1440,
+    height: 980,
+    status: 'shipped',
+    themes: ['light'],
+    route: '/inbox',
+    fixtures: btcFixtures,
     render: desktop,
   },
   {

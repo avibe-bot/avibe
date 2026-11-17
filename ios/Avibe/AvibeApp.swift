@@ -111,6 +111,13 @@ struct AvibeApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(appModel)
+                .task {
+                    // App Shortcuts (AppShortcuts.swift) reach the model here.
+                    let appModel = appModel
+                    InstancePathRequests.shared.attach { [weak appModel] path in
+                        appModel?.openSelectedInstance(path: path)
+                    }
+                }
         }
     }
 }

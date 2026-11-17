@@ -1,7 +1,8 @@
-import { ChevronRight, ExternalLink, ScrollText } from 'lucide-react';
+import { ChevronRight, ExternalLink, type LucideIcon, ScrollText, ShieldCheck } from 'lucide-react';
 import type { MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 import { type AppLicenseComponent, type AppLicenses, licenseBlocks } from './appLicenses';
@@ -11,31 +12,81 @@ const raised = 'rounded-3xl border border-edge bg-surface/80 p-5 shadow-elevatio
 const textLink =
   'inline-flex min-h-11 items-center gap-1 text-sm font-medium text-foreground underline underline-offset-4';
 
-/** Account's About section: the App's own information, not the instance's. Design: mobile-app/licenses/entry. */
-export function LicensesEntry({ disabled, onOpen }: { disabled?: boolean; onOpen?: () => void }) {
+type AboutRowProps = { icon: LucideIcon; label: string; disabled?: boolean; onClick?: () => void };
+
+function AboutRow({ icon: Icon, label, disabled, onClick }: AboutRowProps) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      className={cn(
+        raised,
+        'flex w-full items-center gap-3 text-left transition-transform duration-(--motion-duration-instant) active:scale-(--motion-scale-press) disabled:opacity-60',
+      )}
+      onClick={onClick}
+    >
+      <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft">
+        <Icon className="size-5 text-mint-ink" aria-hidden="true" />
+      </span>
+      <span className="min-w-0 flex-1 text-base font-semibold">{label}</span>
+      <ChevronRight className="size-4 shrink-0 text-muted" aria-hidden="true" />
+    </button>
+  );
+}
+
+/**
+ * Account's About section: the App's own information, not the instance's. The privacy policy is
+ * always there; the licenses once their notices have loaded. Design: mobile-app/licenses/entry.
+ */
+export function AboutSection({
+  disabled,
+  licenses,
+  onLicenses,
+  onPrivacy,
+}: {
+  disabled?: boolean;
+  licenses: boolean;
+  onLicenses?: () => void;
+  onPrivacy?: () => void;
+}) {
   const { t } = useTranslation();
   return (
     <section className="mt-8">
       <h2 className="mb-4 text-sm font-semibold">{t('mobileApp.licenses.about')}</h2>
-      <button
-        type="button"
-        disabled={disabled}
-        className={cn(
-          raised,
-          'flex w-full items-center gap-3 text-left transition-transform duration-(--motion-duration-instant) active:scale-(--motion-scale-press) disabled:opacity-60',
-        )}
-        onClick={onOpen}
-      >
-        <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft">
-          <ScrollText className="size-5 text-mint-ink" aria-hidden="true" />
-        </span>
-        <span className="min-w-0 flex-1 text-base font-semibold">{t('mobileApp.licenses.title')}</span>
-        <ChevronRight className="size-4 shrink-0 text-muted" aria-hidden="true" />
-      </button>
+      <div className="flex flex-col gap-3">
+        {onPrivacy ? (
+          <AboutRow icon={ShieldCheck} label={t('mobileApp.account.privacy')} disabled={disabled} onClick={onPrivacy} />
+        ) : null}
+        {licenses ? (
+          <AboutRow icon={ScrollText} label={t('mobileApp.licenses.title')} disabled={disabled} onClick={onLicenses} />
+        ) : null}
+      </div>
     </section>
   );
 }
 
+/**
+ * The last thing on Account: deleting the account on avibe.bot, which the App shows over this
+ * page with the App's sign-in.
+ */
+export function DeleteAccount({ disabled, onDelete }: { disabled?: boolean; onDelete: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="mt-auto pt-9 pb-3">
+      <Button
+        type="button"
+        variant="link"
+        disabled={disabled}
+        className="px-0 text-destructive-ink"
+        onClick={onDelete}
+      >
+        {t('mobileApp.account.delete')}
+        <ExternalLink className="size-4" aria-hidden="true" />
+      </Button>
+      <p className="mt-2 text-xs leading-6 text-muted">{t('mobileApp.account.deleteHint')}</p>
+    </div>
+  );
+}
 
 /**
  * The Open-source licenses page below its title: the MPL-2.0 source offer

@@ -40,35 +40,23 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     expect(denied).toEqual([]);
   });
 
-  test(`AUTH-SETUP-178 account menu affordances and stable press ${lang} ${theme}`, async ({ page }, info) => {
+  test(`AUTH-SETUP-178 direct footer entry and stable press ${lang} ${theme}`, async ({ page }, info) => {
     await page.setViewportSize({ width: 880, height: 600 });
     const denied = await serveProduct(page, lang);
     const state = clientState(); signIn(state);
     await installBridge(page, state, { projection: true });
     await page.goto(`/?theme=${theme}`);
     const trigger = page.locator('[data-account-trigger]');
-    const arrow = page.locator('[data-account-chevron]');
     await expect(trigger).toBeVisible();
-    const closed = await arrow.evaluate((node) => getComputedStyle(node).rotate);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await trigger.hover(); await page.mouse.down();
-    await trigger.evaluate(async (node) => {
-      await Promise.all(node.getAnimations().map((animation) => animation.finished));
-    });
+    await trigger.evaluate(async (node) => { await Promise.all(node.getAnimations().map((animation) => animation.finished)); });
     await expect(trigger).toHaveCSS('scale', '1');
     await page.mouse.up();
-    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
-    await expect.poll(() => arrow.evaluate((node) => getComputedStyle(node).rotate)).not.toBe(closed);
-    const menu = page.locator('[data-instance-menu]');
-    await expect(menu).toHaveCSS('opacity', '1');
-    const action = menu.getByRole('button', { name: lang === 'en' ? 'Switch instance' : '切换实例' });
-    expect(await action.evaluate((node) => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
-    const status = menu.getByText(lang === 'en' ? 'Remote access to this Mac' : '本机远程访问', { exact: true });
-    expect(await status.evaluate((node) => node.closest('button, a, [role="button"]') === null)).toBe(true);
-    await page.screenshot({ animations: 'disabled', path: info.outputPath('account-menu.png') });
-    await page.keyboard.press('Escape');
-    await expect(trigger).toBeFocused();
-    await expect.poll(() => arrow.evaluate((node) => getComputedStyle(node).rotate)).toBe(closed);
+    await expect(trigger).not.toHaveAttribute('aria-expanded');
+    await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
+    await expect(page.locator('[data-instance-menu]')).toHaveCount(0);
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('account-entry.png') });
     expect(denied).toEqual([]);
   });
 }

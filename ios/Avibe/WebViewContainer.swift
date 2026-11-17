@@ -28,6 +28,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
+    let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
     let didCreateController: (WebViewController) -> Void
     let didReleaseWebViews: (WebsiteDataStoreReleaseBarrier) -> Void
     let didStartLoading: () -> Void
@@ -49,6 +50,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
+        runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
         didCreateController: @escaping (WebViewController) -> Void,
         didReleaseWebViews: @escaping (WebsiteDataStoreReleaseBarrier) -> Void,
         didStartLoading: @escaping () -> Void,
@@ -70,6 +72,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
+        self.runtimeNavigationChanged = runtimeNavigationChanged
         self.didCreateController = didCreateController
         self.didReleaseWebViews = didReleaseWebViews
         self.didStartLoading = didStartLoading
@@ -98,6 +101,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,
+            runtimeNavigationChanged: runtimeNavigationChanged,
             didStartLoading: didStartLoading,
             didFinishLoading: didFinishLoading,
             didFailLoading: didFailLoading

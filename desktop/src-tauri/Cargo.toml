@@ -34,7 +34,7 @@ serde_json.workspace = true
 sha2.workspace = true
 sys-locale.workspace = true
 tar = "0.4"
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "unstable"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"

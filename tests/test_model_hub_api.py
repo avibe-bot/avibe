@@ -4654,6 +4654,32 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     }
 
 
+def test_agents_endpoint_projects_backend_enablement(tmp_path):
+    # An installed backend switched off in Settings · Backends must read as off,
+    # so the Models page stops drawing it as a live route (owner report 11-16).
+    service, _store, _adapter = _service(tmp_path)
+    service.cli_present_override = lambda backend: backend != "vibey"
+    service.backend_enabled_override = lambda backend: backend == "claude"
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert {backend: agent["backend_enabled"] for backend, agent in agents.items()} == {
+        "claude": True,
+        "codex": False,
+        "opencode": False,
+        "vibey": True,
+    }
+    for agent in agents.values():
+        _assert_valid("agent-supply.schema.json", agent)
+
+    def broken(backend):
+        raise RuntimeError("config unavailable")
+
+    service.backend_enabled_override = broken
+    agents = service.list_agents()
+    assert all(agent["backend_enabled"] is True for agent in agents)
+
+
 def test_agents_collection_reads_cli_presence_without_running_discovery(tmp_path):
     service, _store, _adapter = _service(tmp_path)
     calls = []

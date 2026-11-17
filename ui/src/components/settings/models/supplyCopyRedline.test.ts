@@ -33,7 +33,6 @@ const FALLBACK = /回退|切回|退回|改用|回到|继续用|fall ?back|revert
  * and rewriting that sentence into a promise should re-trip the check.
  */
 const CLASSIFIED: Record<string, string> = {
-  'direct.note.perBackend': 'The user is choosing one backend at a time on the all-direct screen.',
   'gateway.fail.switchToDirect': 'Reports a failed user-triggered switch; it does not promise an automatic fallback.',
 };
 

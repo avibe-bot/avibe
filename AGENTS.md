@@ -252,6 +252,7 @@ there rather than expanding this index.
 - run the smallest relevant validation first, then broader checks as needed
 - before `git push`, run `ruff check` on changed Python files at minimum
 - for UI changes, run `npm run build` in `ui/` before pushing
+- for UI changes reachable from `desktop/src/account.tsx`, also run `npm run build` in `desktop/`; its stricter TypeScript configuration checks the full imported graph before building bootstrap and account assets
 - fix lint errors before pushing; CI runs `pre-commit run --all-files` with Ruff
 - do not require a full local CI run before opening or updating a PR; prefer focused local validation and let GitHub CI run the slow gates asynchronously
 
@@ -268,6 +269,11 @@ there rather than expanding this index.
   panel shows) keeps its catalog key, and the CLI renders its English entry
 - frontend user-facing strings must go through `ui/src/i18n/en.json` and `ui/src/i18n/zh.json`
 - never hardcode user-visible display text in handlers, platform adapters, or React components
+- user-visible copy must not expose internal stages, roadmaps, or unfinished
+  state (Phase 1, MVP, coming soon, not supported yet, still being built);
+  state a real limitation as a fact the user can act on, or show nothing.
+  `tests/test_user_copy_unfinished_state.py` guards every shipped catalog;
+  a legitimate match needs an explicit `ALLOWED` entry with its reason
 
 ### Python and Module Conventions
 

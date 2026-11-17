@@ -6,7 +6,7 @@ import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
-import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { MAX_VAULT_FIELDS, vaultDefaultField, vaultFieldNameIssue, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
@@ -151,6 +151,8 @@ export function VaultSecretFieldsEditor({
   const fields = vaultFieldNames(current);
   const defaultField = vaultDefaultField(current);
   const isProtected = current.protection === 'protected';
+  // Re-render when a failed in-app passkey step moves the desktop app to the browser hand-off.
+  useVaultPasskeyHandoff();
   const entryIssue = vaultEntryIssue();
   const locked = disabled || busy;
   const fieldsCorrupt = current.fields_state === 'corrupt';

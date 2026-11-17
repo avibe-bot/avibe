@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ExternalLink, Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
+import { isVaultPasskeyFallback, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
@@ -42,7 +43,8 @@ const PANEL = 'flex flex-col gap-4 rounded-2xl border border-edge bg-surface px-
  *
  * `secretName` is shown in the unlock subtitle ("<NAME> is protected …"); it is optional
  * because the create-dialog gating step has no single secret name yet. Where passkeys can't run,
- * setup and unlock continue in the browser, where `onContinueInBrowser` reopens the caller's flow.
+ * including a desktop app whose in-app passkey step already failed on this page, setup and unlock
+ * continue in the browser, where `onContinueInBrowser` reopens the caller's flow.
  */
 export const VaultProtectedUnlock: React.FC<{
   vault: Vault;
@@ -57,6 +59,7 @@ export const VaultProtectedUnlock: React.FC<{
   // Passkey-only setup has no recovery fallback yet, so a lost passkey is
   // unrecoverable — gate the recommended action behind an explicit ack.
   const [ackLoss, setAckLoss] = useState(false);
+  const handoff = useVaultPasskeyHandoff();
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -64,6 +67,8 @@ export const VaultProtectedUnlock: React.FC<{
     try {
       await fn();
     } catch (err) {
+      // This attempt moved the app to the browser hand-off, whose note now says what happened.
+      if (isVaultPasskeyFallback(err)) return;
       vault.setError(friendlyError(t, vaultErrorMessage(t, err, String(err)), vault.status === 'needs-setup'));
     } finally {
       setBusy(false);
@@ -72,6 +77,20 @@ export const VaultProtectedUnlock: React.FC<{
 
   const issue = vaultEntryIssue();
   const inBrowser = issue === 'desktop';
+  // When a failed in-app step moves this panel to the browser hand-off, the control the user pressed
+  // (Add a passkey, Unlock, a seed-phrase wallet's launch button) is gone and focus falls to the page.
+  // Land it on the hand-off's action instead. Focus that is still somewhere is left where it is.
+  const handoffButton = useRef<HTMLButtonElement>(null);
+  const handoffNoteId = useId();
+  const showsFallback = inBrowser && handoff === 'fallback';
+  useEffect(() => {
+    const button = handoffButton.current;
+    if (!showsFallback || !button) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    button.focus({ preventScroll: true });
+    button.scrollIntoView?.({ block: 'nearest' });
+  }, [showsFallback, vault.status]);
   if (issue && !inBrowser) {
     return <div className="flex flex-col gap-3">
       <VaultEntryNotice issue={issue} warnDraftDiscard={warnDraftDiscard} />
@@ -79,7 +98,11 @@ export const VaultProtectedUnlock: React.FC<{
     </div>;
   }
 
-  if (vault.status === 'checking') {
+  // In the browser hand-off nothing runs here, so the only states are setting up or unlocking there;
+  // an in-app attempt that failed may have left this page checking, unlocked or in error.
+  const status = inBrowser && vault.status !== 'needs-setup' ? 'locked' : vault.status;
+
+  if (status === 'checking') {
     return (
       <div className="flex items-center gap-2 rounded-2xl border border-edge bg-surface px-4 py-3 text-sm text-muted shadow-elevation-0">
         <Loader2 className="size-4 animate-spin" />
@@ -88,7 +111,7 @@ export const VaultProtectedUnlock: React.FC<{
     );
   }
 
-  if (vault.status === 'error') {
+  if (status === 'error') {
     return (
       <div className="flex flex-col gap-2 rounded-2xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
         <span className="font-medium text-destructive-ink">{t('vaults.protectedUnlock.errorTitle')}</span>
@@ -101,7 +124,7 @@ export const VaultProtectedUnlock: React.FC<{
     );
   }
 
-  if (vault.status === 'unlocked') {
+  if (status === 'unlocked') {
     return (
       <div className="flex items-center gap-2 rounded-2xl border border-mint/40 bg-mint-soft px-4 py-3 text-sm text-mint-ink">
         <ShieldCheck className="size-4 shrink-0" />
@@ -116,8 +139,8 @@ export const VaultProtectedUnlock: React.FC<{
 
   const browserHandoff = (
     <div className="flex flex-col items-center gap-2.5">
-      <span className="text-center text-[12px] leading-snug text-muted-foreground">{t('vaults.protectedUnlock.browserNote')}</span>
-      <Button type="button" variant="brand" className="w-full" onClick={onContinueInBrowser}>
+      <span id={handoffNoteId} className="text-center text-[12px] leading-snug text-muted-foreground">{t(handoff === 'fallback' ? 'vaults.protectedUnlock.browserFallbackNote' : 'vaults.protectedUnlock.browserNote')}</span>
+      <Button ref={handoffButton} type="button" variant="brand" className="w-full" aria-describedby={handoffNoteId} onClick={onContinueInBrowser}>
         <ExternalLink className="size-5" />
         {t('vaults.protectedUnlock.openInBrowser')}
       </Button>
@@ -125,7 +148,7 @@ export const VaultProtectedUnlock: React.FC<{
   );
 
   // ---- Setup (needs-setup): ui/design: vault/protected-unlock/setup -------------------
-  if (vault.status === 'needs-setup') {
+  if (status === 'needs-setup') {
     return (
       <div className={PANEL}>
         <div className="flex flex-col items-center gap-4">

@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Run durable `vibe watch` waits for PR reviews, CI, files or external signals, then resume the Agent in the right Session.
-version: 0.20.2
+version: 0.20.3
 ---
 
 # Background Watch Hook
@@ -83,8 +83,8 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --state-file "$STATE_FILE" --seed-state
 
 vibe watch add \
-  --name "Watch PR 151 review and CI" --forever --timeout 0 \
-  --message "PR #151 has an event. Follow pr-delivery-loop; verify live gates, handle findings/errors, and keep half-success silent." \
+  --name 'Watch PR 151 review and CI' --forever --timeout 0 \
+  --message 'PR #151 has an event. Follow pr-delivery-loop; verify live gates, handle findings/errors, and keep half-success silent.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe --pr 151 --branch "$BRANCH" \

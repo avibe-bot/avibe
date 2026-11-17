@@ -1546,6 +1546,16 @@ describe('AppShell route prefetch', () => {
   });
 });
 
+it('the Web bottom row shows the running state on the left and the version chip on the right', async () => {
+  viewport.isDesktop = true;
+  render(<MemoryRouter><Routes><Route element={<AppShell />}><Route path="*" element={<div />} /></Route></Routes></MemoryRouter>);
+  // VersionBadge is stubbed in this file; its chip is covered by DesktopAccountRow.test.
+  const badge = await screen.findByTestId('version-badge');
+  const row = document.querySelector('[data-sidebar-footer] [data-sidebar-status-row]')!;
+  expect(row.firstElementChild!.querySelector('[data-status-indicator]')).toBeTruthy();
+  expect(row.lastElementChild!.contains(badge)).toBe(true);
+});
+
 it('uses the real footer slot without replacing the Apps/Settings tools', async () => {
   viewport.isDesktop = true;
   render(<MemoryRouter><Routes><Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}><span>Injected account row</span></AppShellFooter>} />}><Route path="*" element={<div />} /></Route></Routes></MemoryRouter>);

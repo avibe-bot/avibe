@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises'
 
 const expectedNoticeCodes = [
   'adopted',
+  'database_disk_full',
+  'database_disk_full_unconfirmed',
   'invalid_origin',
   'launcher_exited',
   'preparing',

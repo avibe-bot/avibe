@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use avibe_runtime_host::instance_client::{protocol::ClientError, transport::Epoch};
-use tauri::{Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, Webview};
 
 const ERASE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -16,7 +16,7 @@ const ERASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Wry's macOS adapter writes the string "FALSE" for Some(false); Foundation
 /// treats an explicit HttpOnly property as enabled. Omit disabled properties
 /// when round-tripping a native cookie so a readable CSRF cookie stays readable.
-pub fn project(window: &WebviewWindow, cookies: &[cookie::Cookie<'static>], epoch: &Epoch) -> Result<(), ClientError> {
+pub fn project(window: &Webview, cookies: &[cookie::Cookie<'static>], epoch: &Epoch) -> Result<(), ClientError> {
     for cookie in cookies {
         epoch.check()?;
         #[cfg(target_os = "macos")]
@@ -56,7 +56,7 @@ pub fn project(window: &WebviewWindow, cookies: &[cookie::Cookie<'static>], epoc
     epoch.check()
 }
 
-pub fn retire(window: &WebviewWindow) -> Result<(), String> {
+pub fn retire(window: &Webview) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if objc2::MainThreadMarker::new().is_some() {
         return Err("instance store retirement requires a worker thread".into());
@@ -69,7 +69,7 @@ pub fn retire(window: &WebviewWindow) -> Result<(), String> {
     erased.and(destroyed)
 }
 
-fn erase_completed(window: &WebviewWindow) -> Result<(), String> {
+fn erase_completed(window: &Webview) -> Result<(), String> {
     let (sender, receiver) = mpsc::channel();
     window
         .with_webview(move |platform| clear_platform(platform, sender))
@@ -87,19 +87,38 @@ fn erase_completed(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn destroy_completed(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn destroy_completed(window: &Webview) -> Result<(), String> {
     let label = window.label().to_owned();
     let app = window.app_handle().clone();
-    window.destroy().map_err(|_| "instance window destruction failed")?;
+    // Hide before close so the child is no longer the visible layer owner
+    // while the retained Runtime is about to be revealed.
+    let _ = window.hide();
+    window.close().map_err(|_| "instance window destruction failed")?;
+    // Tauri removes the manager entry synchronously from Webview::close(),
+    // while Wry handles native close through the main event mechanism. A
+    // single following main-thread turn establishes that the close handler
+    // has run before the caller reveals or focuses another WebView.
+    main_thread_barrier(&app, "instance window destruction completion timed out")?;
     let deadline = Instant::now() + ERASE_TIMEOUT;
-    while app.get_webview_window(&label).is_some() {
+    while app.get_webview(&label).is_some() {
         if Instant::now() >= deadline {
             return Err("instance window destruction timed out".into());
         }
-        // Wait for an observable registry transition, not a guessed erase delay.
+        // Keep the registry check as a diagnostic fence after the native turn.
         std::thread::sleep(Duration::from_millis(10));
     }
     Ok(())
+}
+
+fn main_thread_barrier(app: &AppHandle, timeout_error: &'static str) -> Result<(), String> {
+    let (sender, receiver) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(());
+    })
+    .map_err(|_| "instance window main-thread completion unavailable".to_owned())?;
+    receiver
+        .recv_timeout(ERASE_TIMEOUT)
+        .map_err(|_| timeout_error.to_owned())
 }
 
 #[cfg(target_os = "macos")]

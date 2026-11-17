@@ -99,7 +99,7 @@ from core.agent_core.messages import (
     message_to_dict,
     require_json_value,
 )
-from storage import agent_events_service, media_service, messages_service
+from storage import agent_events_service, media_service, messages_service, session_cache
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import retry_sqlite_write
 from storage.message_deliveries import TURN_OWNER_STATES
@@ -437,6 +437,7 @@ class SQLiteTranscriptStore:
             hosted_media = _register_images(conn, origin.scope_id, session_id, stored_message)
             if hosted_media:
                 row_metadata_for_write["hosted_media"] = hosted_media
+            stored_model = session_cache.compact_payload(conn, session_id, model)
             row = messages_service.append(
                 conn,
                 scope_id=origin.scope_id,
@@ -449,13 +450,13 @@ class SQLiteTranscriptStore:
                     message, final=final, display_text=display_text, replied=replied, superseded=superseded
                 ),
                 text=display_text,
-                content={"model": model},
+                content={"model": stored_model},
                 metadata=row_metadata_for_write or None,
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             return ContextEntry(
                 session_id, seq, "response", row["id"], message=replace(stored_message, transcript_row_id=row["id"]),
-                payload=model, created_at=_epoch(row["created_at"]),
+                payload=stored_model, created_at=_epoch(row["created_at"]),
             )
 
         return await self._write(session_id, work)
@@ -528,7 +529,7 @@ class SQLiteTranscriptStore:
                 session_id=session_id,
                 platform=origin.platform,
                 event_type=_AUDIT_EVENT_TYPE[kind],
-                content=data,
+                content=session_cache.compact_payload(conn, session_id, data),
                 agent_name=origin.agent_name,
                 backend=origin.backend,
                 turn_id=origin.turn_id,

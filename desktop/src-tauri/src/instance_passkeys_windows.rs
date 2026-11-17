@@ -16,7 +16,7 @@ pub fn cancel(_: &AppHandle) {
 }
 pub async fn perform(app: &AppHandle, input: Challenge, epoch: Epoch) -> Result<Value, ClientError> {
     let window = app
-        .get_webview_window(crate::MAIN_WINDOW)
+        .get_window(crate::MAIN_WINDOW)
         .ok_or_else(|| ClientError::new("passkey_unavailable"))?;
     let handle = window.hwnd().map_err(|_| ClientError::new("passkey_unavailable"))?.0 as usize;
     tokio::task::spawn_blocking(move || {

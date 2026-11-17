@@ -1145,6 +1145,10 @@ Ruled *out* of the class on evidence rather than by assumption, by reading
 still has sources and is not empty; the stat cards, `cached.none`, and the chart's
 aria-label each state a token figure they really do own.
 
+*Update 2026-11-17:* Frame 09 and `ModelsSurfaceKind` are removed (model-hub-ui-spec §1.8);
+the gateway page is the only landing, and MH-USAGE-022 now checks the Usage tab with no
+provider and with one. F2 and the Frame 09 note below are kept as history.
+
 **F2: deleting the last Source took the ledger with it.** `directEmpty` was a top-level
 routing fork, so the Frame 09 landing replaced the whole tab shell — including the Usage
 tab. But the ledger outlives the Sources it meters: retention is 62 days and MH-USAGE-017

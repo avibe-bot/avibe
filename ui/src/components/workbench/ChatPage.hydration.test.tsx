@@ -774,17 +774,20 @@ describe('ChatPage transcript hydration', () => {
 
   // A notification can outlive its chat; its tap must not strand the reader on
   // an error. Any other refusal, or the same refusal for an ordinary link, keeps
-  // the error view.
+  // the error view. The iOS Action Button shortcut opens the main Bot's
+  // conversation the same way, on whatever instance is selected: only the Owner
+  // has Bots, so anyone else gets the server's 404 and lands in the Inbox.
   it.each([
-    [404, '?msg=msg-1&from=notification', true],
-    [403, '?from=notification', true],
-    [404, '?msg=msg-1', false],
-    [500, '?msg=msg-1&from=notification', false],
-  ])('answers a %i bootstrap for /chat/session-gone%s with the Inbox: %s', async (status, search, toInbox) => {
+    [404, 'session-gone', '?msg=msg-1&from=notification', true],
+    [403, 'session-gone', '?from=notification', true],
+    [404, 'session-gone', '?msg=msg-1', false],
+    [500, 'session-gone', '?msg=msg-1&from=notification', false],
+    [404, 'ses_main', '?from=notification', true],
+  ])('answers a %i bootstrap for /chat/%s%s with the Inbox: %s', async (status, sessionId, search, toInbox) => {
     mocks.api.getSessionBootstrap.mockRejectedValue(Object.assign(new Error('chat refused'), { status }));
 
     render(
-      <MemoryRouter initialEntries={[`/chat/session-gone${search}`]}>
+      <MemoryRouter initialEntries={[`/chat/${sessionId}${search}`]}>
         <Routes>
           <Route path="/chat/:sessionId" element={<ChatPage />} />
           <Route path="/inbox" element={<p>inbox page</p>} />

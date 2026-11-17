@@ -1,6 +1,7 @@
 //! Native-owned account presentation and disposable instance window lifecycle.
 use async_trait::async_trait;
 use avibe_runtime_host::{
+    deep_link::DeepLinkReturn,
     instance_client::{
         account::Passkeys,
         coordinator::{ClientView, Coordinator},
@@ -11,7 +12,7 @@ use avibe_runtime_host::{
     LoopbackOrigin,
 };
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, Webview};
 use url::Url;
 
 use crate::{Shell, MAIN_WINDOW};
@@ -29,6 +30,7 @@ struct PresentationIntent {
     view: &'static str,
     owner: u64,
     guarded: bool,
+    locale: Option<&'static str>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct GuardAttempt {
@@ -50,9 +52,37 @@ struct PresentationQueue {
     guard_sequence: u64,
     guard: Option<GuardAttempt>,
     approval: Option<GuardAttempt>,
+    window: u64,
+    document: u64,
+    source: Option<PresentationSource>,
+    link: Option<(u64, DeepLinkReturn)>,
+    logout: Option<LogoutReceipt>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresentationSource {
+    window: u64,
+    document: u64,
+    label: String,
+    url: String,
+}
+/// An already admitted presentation, retained through off-handler popup work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PopupPresentation {
+    intent: PresentationIntent,
+    source: PresentationSource,
+}
+struct LogoutReceipt {
+    result: DirectResult,
+    owner: u64,
+    generation: u64,
+    window: u64,
+    document: u64,
+    destination: Url,
 }
 impl PresentationQueue {
-    fn enqueue(&mut self, view: &'static str, owner: u64, guarded: bool) {
+    fn enqueue(&mut self, view: &'static str, owner: u64, guarded: bool, locale: Option<&'static str>) {
+        self.logout = None;
+        self.source = None;
         self.sequence += 1;
         self.guard = None;
         self.approval = None;
@@ -61,8 +91,62 @@ impl PresentationQueue {
             view,
             owner,
             guarded,
+            locale,
         });
     }
+    fn window_created(&mut self) -> u64 {
+        self.retire_document_guard();
+        self.window += 1;
+        self.document = 0;
+        self.logout = None;
+        self.window
+    }
+    fn document_started(&mut self, window: u64, url: &Url) {
+        if window != self.window {
+            return;
+        }
+        self.retire_document_guard();
+        self.document += 1;
+        if self
+            .logout
+            .as_ref()
+            .is_some_and(|r| r.window != window || r.document != self.document || r.destination != *url)
+        {
+            self.logout = None;
+        }
+    }
+    fn retire_document_guard(&mut self) {
+        // Equal URLs do not make a reloaded document the receiver that was
+        // asked to approve. A late callback cannot re-create this authority.
+        if let Some(attempt) = self.guard.take() {
+            self.complete(attempt.intent.id);
+        }
+        self.approval = None;
+        if self.source.take().is_some() {
+            self.pending = None;
+        }
+    }
+    fn logout_result(&mut self, owner: u64, generation: u64, receiver: &Url) -> Option<DirectResult> {
+        if self
+            .logout
+            .as_ref()
+            .is_some_and(|r| r.owner != owner || r.generation != generation)
+        {
+            self.logout = None;
+        }
+        self.logout
+            .as_ref()
+            .filter(|r| r.window == self.window && r.document == self.document && r.destination == *receiver)
+            .map(|r| r.result.clone())
+    }
+    fn consume_logout(&mut self, id: &str, owner: u64, generation: u64, receiver: &Url) -> bool {
+        let matches = matches!(self.logout_result(owner, generation, receiver), Some(DirectResult::SignOutIntent { intent_id, .. }) if intent_id == id);
+        if matches {
+            self.logout = None;
+        }
+        matches
+    }
+
     fn current(&mut self, owner: u64) -> Option<PresentationIntent> {
         if self.pending.is_some_and(|intent| intent.owner != owner) {
             self.pending = None;
@@ -128,23 +212,65 @@ impl PresentationQueue {
     fn owns_guard_authority(&self, attempt: &GuardAttempt) -> bool {
         self.guard.as_ref() == Some(attempt) || self.approval.as_ref() == Some(attempt)
     }
-}
-#[derive(Clone)]
-struct PreviousView {
-    remote: Option<Url>,
-    route: Option<Url>,
-    cookies: Vec<cookie::Cookie<'static>>,
+    fn owns_intent(&self, id: u64) -> bool {
+        self.pending.is_some_and(|intent| intent.id == id)
+            || self.guard.as_ref().is_some_and(|attempt| attempt.intent.id == id)
+            || self.approval.as_ref().is_some_and(|attempt| attempt.intent.id == id)
+    }
+    fn source_matches(&self, label: &str, url: &Url) -> bool {
+        self.source.as_ref().is_some_and(|source| {
+            source.window == self.window
+                && source.document == self.document
+                && source.label == label
+                && source.url == url.as_str()
+        })
+    }
+    fn approve(&mut self, attempt: &GuardAttempt, locale: Option<&'static str>, label: &str, url: &Url) -> bool {
+        if !self.owns_guard_authority(attempt) || attempt.receiver != url.as_str() {
+            return false;
+        }
+        let continuation = if self.link.as_ref().is_some_and(|(id, _)| *id == attempt.intent.id) {
+            self.link.take()
+        } else {
+            None
+        };
+        self.enqueue(attempt.intent.view, attempt.intent.owner, false, locale);
+        if let Some((_, ticket)) = continuation {
+            self.link = Some((self.pending.expect("new intent").id, ticket));
+        }
+        self.source = Some(PresentationSource {
+            window: self.window,
+            document: self.document,
+            label: label.into(),
+            url: url.to_string(),
+        });
+        true
+    }
+    fn can_start(&self, intent: PresentationIntent, label: &str, url: &Url) -> bool {
+        self.pending == Some(intent) && (self.source.is_none() || self.source_matches(label, url))
+    }
+    fn popup_is_current(&self, presentation: &PopupPresentation) -> bool {
+        self.sequence == presentation.intent.id
+            && self.window == presentation.source.window
+            && self.document == presentation.source.document
+    }
+    fn cancel(&mut self) {
+        // Also retire a completed presentation whose popup is still loading.
+        self.sequence += 1;
+        self.pending = None;
+        self.guard = None;
+        self.approval = None;
+        self.source = None;
+        self.logout = None;
+    }
 }
 struct Presentation {
     state: ClientState,
-    previous: Option<PreviousView>,
     account: bool,
-    disposable: bool,
     staging: bool,
     pending_commit: Option<u64>,
-    local_owner: Option<u64>,
     remote: Option<Url>,
-    route: Option<Url>,
+    locale: Option<String>,
 }
 struct NativeView {
     app: AppHandle,
@@ -153,9 +279,48 @@ struct NativeView {
     presentation: Mutex<Presentation>,
     windows: Arc<tokio::sync::Mutex<()>>,
     navigation: Mutex<Option<Navigation>>,
-    store_directory: Mutex<Option<tempfile::TempDir>>,
+    views: Mutex<Views>,
+}
+#[derive(Default)]
+struct Views {
+    next: u64,
+    runtime: Option<RuntimeDocument>,
+    candidate: Option<RuntimeDocument>,
+    retired: Vec<RuntimeDocument>,
+    terminal: Option<u64>,
+    account: Option<AccountDocument>,
+}
+struct RuntimeDocument {
+    label: String,
+    window: u64,
+    destination: Url,
+    disposable: bool,
+    directory: Option<tempfile::TempDir>,
+    owner: u64,
+    document: u64,
+}
+impl RuntimeDocument {
+    fn allows_navigation(&self, destination: &Url, bundle: &Url) -> bool {
+        destination.as_str() == "about:blank"
+            || (!self.disposable && self.destination == *bundle && destination == &self.destination)
+            || (destination.origin() == self.destination.origin()
+                && destination.username().is_empty()
+                && destination.password().is_none())
+    }
+}
+struct AccountDocument {
+    label: String,
+    window: u64,
+    destination: Url,
+    document: u64,
+    admitted: bool,
+    loaded: bool,
+    token: Option<String>,
+    returning: Option<(String, u64)>,
+    owner: u64,
 }
 struct Navigation {
+    label: String,
     epoch: Epoch,
     destination: Url,
     completed: tokio::sync::oneshot::Sender<Result<(), ClientError>>,
@@ -164,7 +329,12 @@ fn failure(_: impl std::fmt::Display) -> ClientError {
     ClientError::new("window_unavailable")
 }
 
-pub(crate) fn enabled(app: &AppHandle) -> bool {
+/// The bundled origin the account pages (and the update popup) are served from.
+pub(crate) fn bundle(app: &AppHandle) -> Option<Url> {
+    app.try_state::<Client>().map(|client| client.view.bundle.clone())
+}
+
+pub(crate) fn enabled<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     app.try_state::<Client>().is_some()
 }
 pub(crate) fn local_selected(app: &AppHandle) -> bool {
@@ -204,7 +374,7 @@ pub(crate) fn epoch_matches(app: &AppHandle, generation: u64) -> bool {
     epoch(app) == Some(generation)
 }
 #[cfg(windows)]
-pub(crate) fn download_epoch(app: &AppHandle, current: &Url, target: &Url) -> Option<Epoch> {
+pub(crate) fn download_epoch(app: &AppHandle, label: &str, current: &Url, target: &Url) -> Option<Epoch> {
     let client = app.try_state::<Client>()?;
     let state = client.view.presentation.lock().expect("presentation");
     if state.account || state.staging || state.pending_commit.is_some() || current.origin() != target.origin() {
@@ -218,7 +388,7 @@ pub(crate) fn download_epoch(app: &AppHandle, current: &Url, target: &Url) -> Op
         _ => return None,
     }
     drop(state);
-    caller_can_present(app, MAIN_WINDOW, current).then(|| client.coordinator.epoch())
+    caller_can_present(app, label, current).then(|| client.coordinator.epoch())
 }
 /// Destroying the last WebView during a store replacement is not a request to
 /// quit the shell or stop its local Runtime. Explicit application exits retain
@@ -320,18 +490,15 @@ pub fn attach(
         local_origin: config.local_origin,
         presentation: Mutex::new(Presentation {
             state: config.state.clone(),
-            previous: None,
             account: false,
-            disposable: false,
             staging: false,
             pending_commit: None,
-            local_owner: None,
             remote: None,
-            route: None,
+            locale: None,
         }),
         windows: Arc::new(tokio::sync::Mutex::new(())),
         navigation: Mutex::new(None),
-        store_directory: Mutex::new(None),
+        views: Mutex::new(Views::default()),
     });
     let coordinator = Arc::new(Coordinator::new(
         config.state,
@@ -401,13 +568,22 @@ pub(crate) fn present_guarded(app: &AppHandle, view: &'static str) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    present_owned(app, view, client.coordinator.presentation_owner(), true, None)
+    present_owned(
+        app,
+        view,
+        client.coordinator.presentation_owner(),
+        true,
+        None,
+        None,
+        None,
+    )
 }
 pub(crate) fn return_local_for_link(app: &AppHandle) {
     let Some(client) = app.try_state::<Client>() else {
         return;
     };
     let coordinator = client.coordinator.clone();
+    retire_stale_link(app);
     let Some(ticket) = app
         .state::<Mutex<crate::DeepLinks>>()
         .lock()
@@ -418,6 +594,16 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
     else {
         return;
     };
+    if client.view.presentation.lock().expect("presentation").account {
+        {
+            let mut queue = client.presentations.lock().expect("presentation intent");
+            queue.enqueue("account", ticket.action_owner, true, None);
+            queue.link = Some((queue.pending.expect("new intent").id, ticket));
+        }
+        schedule_presentation(app);
+        ensure_presentation_retry(app);
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = coordinator
@@ -432,21 +618,186 @@ pub(crate) fn return_local_for_link(app: &AppHandle) {
         crate::apply_pending_deep_link(&app);
     });
 }
+
+/// The queue owns the single dormant link continuation. Consumed is not
+/// approved: it remains correlated until a URL arrives or authority retires.
+fn retire_stale_link(app: &AppHandle) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    let mut queue = client.presentations.lock().expect("presentation intent");
+    queue.current(client.coordinator.presentation_owner());
+    let Some((id, ticket)) = &queue.link else { return };
+    let Some(links) = app.try_state::<Mutex<crate::DeepLinks>>() else {
+        return;
+    };
+    let mut links = links.lock().expect("deep links");
+    if !queue.owns_intent(*id) || !links.owns_local_return(ticket) {
+        let (id, ticket) = queue.link.take().expect("link continuation");
+        if queue.owns_intent(id) {
+            queue.cancel();
+        }
+        links.finish_local_return(&ticket, None);
+    }
+}
+/// Per-physical-window callbacks cannot revive a retired document with the reused main label.
+pub fn window_created(app: &AppHandle) -> Option<u64> {
+    let client = app.try_state::<Client>()?;
+    let window = client
+        .presentations
+        .lock()
+        .expect("presentation intent")
+        .window_created();
+    retire_stale_link(app);
+    let mut views = client.view.views.lock().expect("views");
+    views.runtime = Some(RuntimeDocument {
+        label: MAIN_WINDOW.into(),
+        window,
+        destination: client.view.bundle.clone(),
+        disposable: false,
+        directory: None,
+        owner: client.coordinator.presentation_owner(),
+        document: 0,
+    });
+    drop(views);
+    Some(window)
+}
+pub(crate) fn window_destroyed(app: &AppHandle) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    let owner = client.coordinator.window_destroyed();
+    {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        queue.window_created();
+        queue.pending = None;
+        queue.source = None;
+    }
+    retire_stale_link(app);
+    {
+        let mut views = client.view.views.lock().expect("views");
+        views.account = None;
+        let runtime = views.runtime.take();
+        let candidate = views.candidate.take();
+        views.retired.extend(runtime);
+        views.retired.extend(candidate);
+        views.terminal = None;
+    }
+    {
+        let mut state = client.view.presentation.lock().expect("presentation");
+        state.account = false;
+        state.remote = None;
+        state.staging = false;
+        state.pending_commit = None;
+    }
+    let view = client.view.clone();
+    let coordinator = client.coordinator.clone();
+    tauri::async_runtime::spawn(async move {
+        // No cookies or URL snapshot can revive the destroyed document.
+        // Existing escape/storage ownership persists the safe-local fallback.
+        let _ = coordinator.return_local_if_current(owner, owner).await;
+        let _windows = view.windows.lock().await;
+        let retired = std::mem::take(&mut view.views.lock().expect("views").retired);
+        for role in retired {
+            let _ = view.retire_runtime(role).await;
+        }
+    });
+}
+pub fn document_started(app: &AppHandle, window: u64, url: &Url) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    if client.presentations.lock().expect("presentation intent").window != window {
+        return;
+    }
+    runtime_document_started(app, MAIN_WINDOW, url);
+}
+pub(crate) fn runtime_document_started(app: &AppHandle, label: &str, url: &Url) {
+    let Some(client) = app.try_state::<Client>() else {
+        return;
+    };
+    let current = {
+        let mut views = client.view.views.lock().expect("views");
+        if let Some(runtime) = views.runtime.as_mut().filter(|runtime| runtime.label == label) {
+            runtime.document += 1;
+        }
+        if let Some(candidate) = views.candidate.as_mut().filter(|candidate| candidate.label == label) {
+            candidate.document += 1;
+        }
+        views.account.is_none() && views.runtime.as_ref().is_some_and(|runtime| runtime.label == label)
+    };
+    if current {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        let window = queue.window;
+        queue.document_started(window, url);
+    }
+    retire_stale_link(app);
+}
 pub fn page_loaded(app: &AppHandle) {
     if let Some(client) = app.try_state::<Client>() {
         client.view.changed(&client.coordinator.state());
     }
 }
+/// Physical main survives child creation. Callers must choose the actual role,
+/// rather than relying on Tauri's single-WebView-window conversion.
+pub fn active_webview(app: &AppHandle) -> Option<Webview> {
+    let Some(client) = app.try_state::<Client>() else {
+        return app.get_webview(MAIN_WINDOW);
+    };
+    let views = client.view.views.lock().expect("views");
+    let label = views
+        .account
+        .as_ref()
+        .filter(|view| view.loaded)
+        .map(|view| &view.label)
+        .or(views.runtime.as_ref().map(|view| &view.label))?;
+    app.get_webview(label)
+}
+pub(crate) fn runtime_webview(app: &AppHandle) -> Option<Webview> {
+    let Some(client) = app.try_state::<Client>() else {
+        return app.get_webview(MAIN_WINDOW);
+    };
+    let label = client.view.views.lock().expect("views").runtime.as_ref()?.label.clone();
+    app.get_webview(&label)
+}
+pub(crate) fn is_current_runtime<R: tauri::Runtime>(view: &Webview<R>) -> bool {
+    let app = view.app_handle();
+    if !enabled(app) {
+        return view.label() == MAIN_WINDOW;
+    }
+    let client = app.state::<Client>();
+    let views = client.view.views.lock().expect("views");
+    let role = views.account.is_none()
+        && views
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.label == view.label());
+    drop(views);
+    let state = client.view.presentation.lock().expect("presentation");
+    role && !state.account && !state.staging && state.pending_commit.is_none() && client.view.windows.try_lock().is_ok()
+}
+pub(crate) fn is_main_view(app: &AppHandle, label: &str) -> bool {
+    if label == MAIN_WINDOW {
+        return true;
+    }
+    app.try_state::<Client>().is_some_and(|client| {
+        let views = client.view.views.lock().expect("views");
+        views.runtime.as_ref().is_some_and(|view| view.label == label)
+            || views.candidate.as_ref().is_some_and(|view| view.label == label)
+            || views.account.as_ref().is_some_and(|view| view.label == label)
+    })
+}
 /// The per-window callback captures the generation at construction. A late
 /// event from a retired window with the reused main label cannot complete a
 /// successor's navigation, including a reconnect to the same instance.
-pub(crate) fn navigation_loaded(app: &AppHandle, generation: u64, url: &Url) {
+pub(crate) fn navigation_loaded(app: &AppHandle, label: &str, generation: u64, url: &Url) {
     let Some(client) = app.try_state::<Client>() else {
         return;
     };
     let mut pending = client.view.navigation.lock().expect("navigation");
     if pending.as_ref().is_some_and(|pending| {
-        pending.epoch.value == generation
+        pending.label == label
+            && pending.epoch.value == generation
             && pending.epoch.check().is_ok()
             && if account_view(&pending.destination, &client.view.bundle).is_some() {
                 account_view(url, &client.view.bundle).is_some()
@@ -461,51 +812,160 @@ pub(crate) fn navigation_loaded(app: &AppHandle, generation: u64, url: &Url) {
         }
     }
 }
-fn trusted_page(client: &Client, window: &WebviewWindow) -> bool {
-    let owned = {
-        let presentation = client.view.presentation.lock().expect("presentation");
-        presentation.account && !presentation.staging && presentation.pending_commit.is_none()
-    };
-    window.label() == MAIN_WINDOW
-        && owned
-        && window
+fn trusted_page(client: &Client, window: &Webview) -> bool {
+    if window.window().label() != MAIN_WINDOW {
+        return false;
+    }
+    let destination = client
+        .view
+        .views
+        .lock()
+        .expect("views")
+        .account
+        .as_ref()
+        .filter(|owned| owned.label == window.label() && owned.admitted)
+        .map(|owned| owned.destination.clone());
+    destination.is_some_and(|destination| {
+        window
             .url()
-            .is_ok_and(|url| account_view(&url, &client.view.bundle).is_some())
+            .is_ok_and(|url| url == destination && account_view(&url, &client.view.bundle).is_some())
+    })
 }
+/// Who may drive this computer's updater through the desktop client: the account
+/// page in the main window, or the update popup on its own page while it is open.
+/// `desktop_client_request` has already checked the caller; this is the updater's
+/// own second check.
+fn updater_caller<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    bundle: &Url,
+    main_account_page: impl FnOnce() -> bool,
+) -> bool {
+    main_account_page()
+        || app
+            .get_webview_window(crate::update_popover::UPDATE_POPOVER)
+            .is_some_and(|window| crate::update_popover::is_page(window.as_ref(), bundle))
+}
+
 #[tauri::command]
 pub async fn desktop_client_request(
-    window: WebviewWindow,
+    window: Webview,
     app: AppHandle,
     request: ClientRequest,
 ) -> Result<ClientReply, String> {
     let client = app.try_state::<Client>().ok_or("desktop_client_unavailable")?;
+    // Popup requests never enter the Account receipt/return owner. Keep the
+    // original native receiver across GetState's credential-I/O suspension;
+    // a new popup with the same label is a different receiver.
+    if window.label() == crate::update_popover::UPDATE_POPOVER {
+        let receipt = crate::update_popover::admit(&window, &client.view.bundle, &request.action)
+            .ok_or("untrusted_desktop_caller")?;
+        let reply = client.coordinator.request(request).await;
+        return if crate::update_popover::still_current(&window, &client.view.bundle, &receipt) {
+            Ok(reply)
+        } else {
+            Err("untrusted_desktop_caller".into())
+        };
+    }
     if !trusted_page(&client, &window) {
         return Err("untrusted_desktop_caller".into());
     }
     let coordinator = client.coordinator.clone();
-    Ok(coordinator.request(request).await)
+    let receiver = window.url().map_err(|_| "untrusted_desktop_caller")?;
+    if matches!(request.action, ClientAction::FinishTotpEnrollment { .. })
+        && request.version == 1
+        && !request.request_id.is_empty()
+        && request.request_id.len() <= 128
+        && request.expected_generation == coordinator.state().generation
+    {
+        // Finalization can issue material without advancing the action owner.
+        // Serialize its admission with an approved presentation's actual start.
+        // Once replacement/escape has started it is too late to issue material;
+        // while it is merely queued, this explicit action supersedes it.
+        let admission = client.view.windows.try_lock().ok();
+        if admission.is_none()
+            || client.view.presentation.lock().expect("presentation").staging
+            || !trusted_page(&client, &window)
+        {
+            return Ok(ClientReply {
+                version: 1,
+                request_id: request.request_id,
+                ok: false,
+                state: coordinator.state(),
+                result: None,
+                error: Some(ClientError::new("busy")),
+            });
+        }
+        client.presentations.lock().expect("presentation intent").cancel();
+        retire_stale_link(&app);
+    }
+    let get_state = matches!(request.action, ClientAction::GetState);
+    let document = {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if let ClientAction::SignOut { intent_id: Some(id) } = &request.action {
+            if request.version != 1
+                || request.request_id.is_empty()
+                || request.request_id.len() > 128
+                || request.expected_generation != coordinator.state().generation
+                || !queue.consume_logout(
+                    id,
+                    coordinator.presentation_owner(),
+                    request.expected_generation,
+                    &receiver,
+                )
+            {
+                return Ok(ClientReply {
+                    version: 1,
+                    request_id: request.request_id,
+                    ok: false,
+                    state: coordinator.state(),
+                    result: None,
+                    error: Some(ClientError::new("invalid_sign_out_intent")),
+                });
+            }
+        } else if !get_state {
+            queue.logout = None;
+        }
+        (queue.window, queue.document)
+    };
+    let mut reply = coordinator.request(request).await;
+    if !trusted_page(&client, &window) || {
+        let queue = client.presentations.lock().expect("presentation intent");
+        (queue.window, queue.document) != document
+    } {
+        return Err("untrusted_desktop_caller".into());
+    }
+    if get_state && reply.ok && trusted_page(&client, &window) && window.url().ok().as_ref() == Some(&receiver) {
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if (queue.window, queue.document) == document {
+            reply.result = queue.logout_result(coordinator.presentation_owner(), reply.state.generation, &receiver);
+        }
+    }
+    Ok(reply)
 }
 
 /// Only the current main document can request enumerated presentation. This is
 /// separate from navigation admission and never performs the presented action.
 pub fn caller_can_present(app: &AppHandle, label: &str, current: &Url) -> bool {
-    if label != MAIN_WINDOW {
-        return false;
-    }
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
     if client.view.windows.try_lock().is_err() {
         return false;
     }
-    let view = client.view.presentation.lock().expect("presentation");
-    if view.staging || view.pending_commit.is_some() {
+    if active_webview(app).is_none_or(|view| view.label() != label) {
         return false;
     }
-    if view.account {
-        return account_view(current, &client.view.bundle).is_some();
+    let (account, remote) = {
+        let view = client.view.presentation.lock().expect("presentation");
+        if view.staging || view.pending_commit.is_some() {
+            return false;
+        }
+        (view.account, view.remote.clone())
+    };
+    if account {
+        return app.get_webview(label).is_some_and(|view| trusted_page(&client, &view));
     }
-    if let Some(origin) = &view.remote {
+    if let Some(origin) = remote {
         return current.origin() == origin.origin();
     }
     client
@@ -548,20 +1008,46 @@ fn presentation_source_allowed(
 /// Only native-generated guarded requests carry a correlation token. It is a
 /// presentation receipt, never updater authority, and has no uncorrelated
 /// fallback if it is stale or malformed.
-fn presentation_destination(destination: &Url) -> Option<(&'static str, Option<String>)> {
+fn presentation_destination(destination: &Url) -> Option<(&'static str, Option<String>, Option<&'static str>)> {
     let mut base = destination.clone();
-    let token = if destination.query().is_some() {
-        let pairs: Vec<_> = destination.query_pairs().collect();
-        if pairs.len() != 1 || pairs[0].0 != "native_request" || pairs[0].1.is_empty() || pairs[0].1.len() > 128 {
-            return None;
+    let mut token = None;
+    let mut locale = None;
+    for (key, value) in destination.query_pairs() {
+        match key.as_ref() {
+            "native_request" if token.is_none() && !value.is_empty() && value.len() <= 128 => {
+                token = Some(value.into_owned())
+            }
+            "locale" if locale.is_none() => {
+                locale = Some(match value.as_ref() {
+                    "en" => "en",
+                    "zh" => "zh",
+                    _ => return None,
+                })
+            }
+            _ => return None,
         }
-        base.set_query(None);
-        Some(pairs[0].1.to_string())
-    } else {
-        None
-    };
+    }
+    base.set_query(None);
     let view = presentation_view(&base).or_else(|| (base.as_str() == crate::updater::OPEN_URL).then_some("updates"))?;
-    Some((view, token))
+    Some((view, token, locale))
+}
+fn account_url(bundle: &Url, view: &str, locale: Option<&str>) -> Option<Url> {
+    let mut url = bundle.join("/account/index.html").ok()?;
+    url.query_pairs_mut()
+        .append_pair("view", view)
+        .append_pair("locale", locale.unwrap_or_else(|| system_locale()));
+    account_view(&url, bundle)?;
+    Some(url)
+}
+fn system_locale() -> &'static str {
+    if sys_locale::get_locales()
+        .next()
+        .is_some_and(|locale| locale.starts_with("zh"))
+    {
+        "zh"
+    } else {
+        "en"
+    }
 }
 
 /// Native presentation requests share one source check in every shell assembly.
@@ -572,10 +1058,10 @@ pub fn presentation_request(
     current: impl FnOnce() -> Option<Url>,
     destination: &Url,
 ) -> bool {
-    if !enabled(app) || label != MAIN_WINDOW {
+    if !enabled(app) || !is_main_view(app, label) {
         return false;
     }
-    let Some((view, token)) = presentation_destination(destination) else {
+    let Some((view, token, locale)) = presentation_destination(destination) else {
         return false;
     };
     // Wry's macOS URL getter has no value during the initial navigation.
@@ -588,6 +1074,13 @@ pub fn presentation_request(
     // recaptured as authority after this source was inspected.
     let owner = client.coordinator.presentation_owner();
     let Some(receiver) = current() else { return true };
+    if active_webview(app).is_none_or(|view| view.label() != label) {
+        return true;
+    }
+    if label.starts_with("main-account-") && !app.get_webview(label).is_some_and(|view| trusted_page(&client, &view)) {
+        return true;
+    }
+    let committed_receipt = client.coordinator.committed_view_generation();
     let allowed = {
         let view = client.view.presentation.lock().expect("presentation");
         let local = client.view.local_origin.lock().expect("local origin");
@@ -595,8 +1088,8 @@ pub fn presentation_request(
             &view,
             &client.view.bundle,
             local.as_ref(),
-            client.coordinator.committed_view_generation(),
-            label,
+            committed_receipt,
+            MAIN_WINDOW,
             &receiver,
         )
     };
@@ -614,7 +1107,16 @@ pub fn presentation_request(
         } else {
             None
         };
-        present_owned(app, view, owner, false, approval.as_ref());
+        let account_source = client.view.presentation.lock().expect("presentation").account;
+        present_owned(
+            app,
+            view,
+            owner,
+            account_source && approval.is_none(),
+            approval.as_ref(),
+            locale,
+            Some((label, &receiver)),
+        );
     }
     true
 }
@@ -625,7 +1127,15 @@ pub fn present(app: &AppHandle, view: &'static str) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    present_owned(app, view, client.coordinator.presentation_owner(), false, None)
+    present_owned(
+        app,
+        view,
+        client.coordinator.presentation_owner(),
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 fn present_owned(
@@ -634,15 +1144,13 @@ fn present_owned(
     owner: u64,
     guarded: bool,
     approval: Option<&GuardAttempt>,
+    locale: Option<&'static str>,
+    receiver: Option<(&str, &Url)>,
 ) -> bool {
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
-    let Ok(mut url) = client.view.bundle.join("/account/index.html") else {
-        return false;
-    };
-    url.set_query(Some(&format!("view={view}")));
-    if account_view(&url, &client.view.bundle).is_none() {
+    if account_url(&client.view.bundle, view, locale).is_none() {
         return false;
     }
     {
@@ -652,8 +1160,22 @@ fn present_owned(
         {
             return false;
         }
-        queue.enqueue(view, owner, guarded);
+        if let Some(approval) = approval {
+            let Some((label, url)) = receiver else { return false };
+            if !queue.approve(approval, locale, label, url) {
+                return false;
+            }
+        } else {
+            queue.enqueue(view, owner, guarded, locale);
+            queue.source = receiver.map(|(label, url)| PresentationSource {
+                window: queue.window,
+                document: queue.document,
+                label: label.into(),
+                url: url.to_string(),
+            });
+        }
     }
+    retire_stale_link(app);
     schedule_presentation(app);
     ensure_presentation_retry(app);
     true
@@ -712,6 +1234,7 @@ fn schedule_presentation(app: &AppHandle) {
 }
 
 fn apply_presentation(app: &AppHandle) {
+    retire_stale_link(app);
     let Some(client) = app.try_state::<Client>() else {
         return;
     };
@@ -727,13 +1250,15 @@ fn apply_presentation(app: &AppHandle) {
     let Some(intent) = intent else { return };
     let native = &client.view;
     let Ok(windows) = native.windows.try_lock() else { return };
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+    if native.presentation.lock().expect("presentation").staging {
+        return;
+    }
+    let Some(window) = active_webview(app) else {
         return;
     };
-    let Ok(mut url) = native.bundle.join("/account/index.html") else {
+    let Some(url) = account_url(&native.bundle, intent.view, intent.locale) else {
         return;
     };
-    url.set_query(Some(&format!("view={}", intent.view)));
     let route = window.url().ok();
     if client.coordinator.presentation_epoch(intent.owner).is_err() {
         client
@@ -743,16 +1268,34 @@ fn apply_presentation(app: &AppHandle) {
             .complete(intent.id);
         return;
     }
-    // Decide the bundled-account exemption only after taking the physical
-    // window serializer and reading the actual receiver. A request queued
-    // during restore must not inherit either the old account route or a later
-    // Runtime route's policy.
-    let native_account_entry = route.as_ref().is_some_and(|current| {
-        let state = native.presentation.lock().expect("presentation");
-        state.account && account_view(current, &native.bundle).is_some()
-    });
-    if intent.guarded && !native_account_entry {
+    let account_receiver = native.presentation.lock().expect("presentation").account;
+    if account_receiver && !trusted_page(&client, &window) {
+        return;
+    }
+    let remote_popup = intent.view == "updates" && !client.coordinator.state().connection.committed.is_local();
+    if remote_popup {
+        let Some(receiver) = route.as_ref() else { return };
+        if !popup_source_allowed(&client, &window, receiver) {
+            return;
+        }
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        if !queue.can_start(intent, window.label(), receiver) {
+            return;
+        }
+        if queue.source.is_none() {
+            queue.source = Some(PresentationSource {
+                window: queue.window,
+                document: queue.document,
+                label: window.label().into(),
+                url: receiver.to_string(),
+            });
+        }
+    }
+    // A remote Runtime is retained unchanged. An Account document still owns
+    // recovery material and must approve even when its retained target is remote.
+    if intent.guarded && (account_receiver || !remote_popup) {
         let Some(receiver) = route else { return };
+        let committed_receipt = client.coordinator.committed_view_generation();
         let allowed = {
             let state = native.presentation.lock().expect("presentation");
             let local = native.local_origin.lock().expect("local origin");
@@ -760,13 +1303,37 @@ fn apply_presentation(app: &AppHandle) {
                 &state,
                 &native.bundle,
                 local.as_ref(),
-                client.coordinator.committed_view_generation(),
+                committed_receipt,
                 MAIN_WINDOW,
                 &receiver,
             )
         };
         if !allowed {
             return;
+        }
+        if account_receiver {
+            // This exact admitted receiver owns any transient recovery material.
+            // Bring it forward before asking; refusal has no separate wire result.
+            let foreground = (|| -> Result<(), ClientError> {
+                client.coordinator.presentation_epoch(intent.owner)?;
+                let physical = window.window();
+                physical.unminimize().map_err(failure)?;
+                physical.show().map_err(failure)?;
+                window.show().map_err(failure)?;
+                physical.set_focus().map_err(failure)?;
+                window.set_focus().map_err(failure)?;
+                client.coordinator.presentation_epoch(intent.owner)?;
+                Ok(())
+            })();
+            if foreground.is_err() {
+                client
+                    .presentations
+                    .lock()
+                    .expect("presentation intent")
+                    .complete(intent.id);
+                retire_stale_link(app);
+                return;
+            }
         }
         let attempt = client
             .presentations
@@ -798,33 +1365,177 @@ fn apply_presentation(app: &AppHandle) {
         }
         return;
     }
-    let previous = {
-        let mut state = native.presentation.lock().expect("presentation");
-        if state.staging || state.pending_commit.is_some() {
-            return;
-        }
-        let previous = (state.account, state.route.clone());
-        if !state.account {
-            state.route = route;
-        }
-        state.account = true;
-        previous
-    };
-    if window.navigate(url).is_err() {
-        let mut state = native.presentation.lock().expect("presentation");
-        state.account = previous.0;
-        state.route = previous.1;
-        return;
-    }
-    client
-        .presentations
-        .lock()
-        .expect("presentation intent")
-        .complete(intent.id);
+    // Submission is not replacement admission. Keep one queued task, but let a
+    // newer material-producing action retire it before it obtains the serializer.
+    client.presentations.lock().expect("presentation intent").scheduled = true;
+    let native = native.clone();
+    let app = app.clone();
     drop(windows);
-    // A newer presentation may have arrived during native admission.
-    schedule_presentation(app);
+    tauri::async_runtime::spawn(async move {
+        let windows = native.windows.lock().await;
+        let client = app.state::<Client>();
+        let result = async {
+            let epoch = native.presentation_epoch(intent.owner)?;
+            let receiver = active_webview(&app).ok_or_else(|| failure("receiver missing"))?;
+            let current = receiver.url().map_err(failure)?;
+            if native.presentation.lock().expect("presentation").account && !trusted_page(&client, &receiver) {
+                return Err(ClientError::new("stale_generation"));
+            }
+            if intent.view == "updates" && !client.coordinator.state().connection.committed.is_local() {
+                if !popup_source_allowed(&client, &receiver, &current) {
+                    return Err(ClientError::new("stale_generation"));
+                }
+                let presentation = {
+                    let queue = client.presentations.lock().expect("presentation intent");
+                    if !queue.can_start(intent, receiver.label(), &current) {
+                        return Err(ClientError::new("stale_generation"));
+                    }
+                    PopupPresentation {
+                        intent,
+                        source: PresentationSource {
+                            window: queue.window,
+                            document: queue.document,
+                            label: receiver.label().into(),
+                            url: current.to_string(),
+                        },
+                    }
+                };
+                return if crate::update_popover::open(&app, &native.bundle, native.script(true, None), presentation) {
+                    Ok(())
+                } else {
+                    Err(failure("update popup unavailable"))
+                };
+            }
+            let continuation = {
+                let mut queue = client.presentations.lock().expect("presentation intent");
+                if !queue.can_start(intent, receiver.label(), &current) {
+                    return Err(ClientError::new("stale_generation"));
+                }
+                let continuation = if queue.link.as_ref().is_some_and(|(id, _)| *id == intent.id) {
+                    let links = app.state::<Mutex<crate::DeepLinks>>();
+                    let links = links.lock().expect("deep links");
+                    if !links.owns_local_return(&queue.link.as_ref().expect("link").1) {
+                        queue.cancel();
+                        return Err(ClientError::new("stale_generation"));
+                    }
+                    queue.link.take().map(|(_, ticket)| ticket)
+                } else {
+                    None
+                };
+                if intent.view == "sign-out" {
+                    if !queue.source_matches(receiver.label(), &current) {
+                        queue.complete(intent.id);
+                        return Err(ClientError::new("stale_generation"));
+                    }
+                    let generation = client.coordinator.state().generation;
+                    queue.logout = Some(LogoutReceipt {
+                        result: DirectResult::new_sign_out_intent(generation),
+                        owner: intent.owner,
+                        generation,
+                        window: queue.window,
+                        document: queue.document + 1,
+                        destination: url.clone(),
+                    });
+                }
+                native.presentation.lock().expect("presentation").staging = true;
+                continuation
+            };
+            if let Some(ticket) = continuation {
+                // The accepted local escape needs this serializer itself.
+                // Staging now prevents a new finalization from issuing material
+                // after this presentation has crossed its admission boundary.
+                drop(windows);
+                let result = client
+                    .coordinator
+                    .return_local_if_current(ticket.expected_generation, ticket.action_owner)
+                    .await;
+                let accepted = result
+                    .as_ref()
+                    .ok()
+                    .copied()
+                    .filter(|owner| client.coordinator.presentation_epoch(*owner).is_ok());
+                app.state::<Mutex<crate::DeepLinks>>()
+                    .lock()
+                    .expect("deep links")
+                    .finish_local_return(&ticket, accepted);
+                result.map(|_| ())
+            } else {
+                let result = native.open_account(epoch, url).await;
+                drop(windows);
+                result
+            }
+        }
+        .await;
+        native.presentation.lock().expect("presentation").staging = false;
+        let mut queue = client.presentations.lock().expect("presentation intent");
+        queue.scheduled = false;
+        if result.is_ok()
+            || result.as_ref().is_err_and(|error| error.code == "stale_generation")
+            || client.coordinator.presentation_epoch(intent.owner).is_err()
+        {
+            queue.complete(intent.id);
+        } else {
+            queue.logout = None;
+        }
+        drop(queue);
+        retire_stale_link(&app);
+        native.changed(&client.coordinator.state());
+    });
 }
+// Deferred popup construction and showing share the existing window serializer.
+// This does not grant command authority; popup IPC checks its actual receiver.
+pub(crate) async fn popup_window_lock(app: &AppHandle) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let windows = app.try_state::<Client>()?.view.windows.clone();
+    Some(windows.lock_owned().await)
+}
+
+fn popup_source_allowed(client: &Client, receiver: &Webview, current: &Url) -> bool {
+    // trusted_page may ask the event loop for a URL. Never hold presentation or
+    // queue locks across that getter; the event loop also needs those locks.
+    let account = trusted_page(client, receiver);
+    let state = client.view.presentation.lock().expect("presentation");
+    if state.state.connection.committed.is_local() || (state.account && !account) {
+        return false;
+    }
+    let local = client.view.local_origin.lock().expect("local origin");
+    presentation_source_allowed(
+        &state,
+        &client.view.bundle,
+        local.as_ref(),
+        client.coordinator.committed_view_generation(),
+        MAIN_WINDOW,
+        current,
+    )
+}
+
+/// Called with the window serializer held, immediately before a deferred action.
+/// Completion may clear pending, but cannot renew this immutable source receipt.
+pub(crate) fn popup_presentation_current(app: &AppHandle, presentation: &PopupPresentation) -> bool {
+    let Some(client) = app.try_state::<Client>() else {
+        return false;
+    };
+    if client
+        .coordinator
+        .presentation_epoch(presentation.intent.owner)
+        .is_err()
+    {
+        return false;
+    }
+    {
+        let queue = client.presentations.lock().expect("presentation intent");
+        if !queue.popup_is_current(presentation) {
+            return false;
+        }
+    }
+    let Some(receiver) = active_webview(app) else {
+        return false;
+    };
+    receiver.label() == presentation.source.label
+        && receiver
+            .url()
+            .is_ok_and(|url| url.as_str() == presentation.source.url && popup_source_allowed(&client, &receiver, &url))
+}
+
 /// The callback reports actual guarded-event delivery, not merely native eval submission.
 /// A compatible page cancels the event before it performs (or awaits) its own guarded
 /// navigation. An older page that does not know the event leaves it unconsumed and
@@ -850,15 +1561,23 @@ fn guarded_presentation_script(attempt: &GuardAttempt) -> String {
 /// Called before legacy navigation. None keeps the legacy shell policy.
 pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<bool> {
     let client = app.try_state::<Client>()?;
-    if label != MAIN_WINDOW {
-        return None;
+    {
+        let views = client.view.views.lock().expect("views");
+        if let Some(account) = &views.account {
+            if account.label == label {
+                return Some(destination == &account.destination);
+            }
+        }
+        if let Some(candidate) = views.candidate.as_ref().filter(|view| view.label == label) {
+            return Some(candidate.allows_navigation(destination, &client.view.bundle));
+        }
+        if views.runtime.as_ref().is_none_or(|view| view.label != label) {
+            return None;
+        }
     }
     let state = client.view.presentation.lock().expect("presentation");
     if state.staging && destination.as_str() == "about:blank" {
         return Some(true);
-    }
-    if state.account {
-        return Some(account_view(destination, &client.view.bundle).is_some());
     }
     if let Some(origin) = &state.remote {
         return Some(
@@ -871,12 +1590,215 @@ pub fn navigation(app: &AppHandle, label: &str, destination: &Url) -> Option<boo
 }
 
 impl NativeView {
+    /// The update popup's state: the bundled page in its own window, guarded to that document.
+    fn popover_script(&self, receiver: &Url) -> String {
+        let state = self.presentation.lock().expect("presentation");
+        let value = serde_json::to_value(&state.state).expect("client state");
+        format!(
+            "if (window.self === window.top && window.location.href === {}) {{window.dispatchEvent(new CustomEvent('{EVENT}', {{detail:{value}}}));}}",
+            serde_json::to_string(receiver.as_str()).expect("receiver URL")
+        )
+    }
+
+    async fn close_account(&self) -> Result<(), ClientError> {
+        let account = self.views.lock().expect("views").account.take();
+        let Some(account) = account else { return Ok(()) };
+        let app = self.app.clone();
+        let label = account.label.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            app.get_webview(&label).map_or(Ok(()), |view| {
+                crate::instance_store::destroy_completed(&view).map_err(failure)
+            })
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result);
+        if result.is_err() {
+            // Authority is already gone. Keep the exact old store as a
+            // cleanup obligation; never recover its account admission.
+            self.views.lock().expect("views").retired.push(RuntimeDocument {
+                label: account.label,
+                window: account.window,
+                destination: account.destination,
+                disposable: true,
+                directory: None,
+                owner: account.owner,
+                document: account.document,
+            });
+        }
+        result
+    }
+
+    async fn open_account(&self, epoch: Epoch, destination: Url) -> Result<(), ClientError> {
+        epoch.check()?;
+        self.close_account().await?;
+        epoch.check()?;
+        let physical = self
+            .app
+            .state::<Client>()
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .window;
+        let label = {
+            let mut views = self.views.lock().expect("views");
+            views.next += 1;
+            let label = format!("main-account-{}", views.next);
+            let returning = views
+                .runtime
+                .as_ref()
+                .map(|runtime| (runtime.label.clone(), runtime.document));
+            views.account = Some(AccountDocument {
+                label: label.clone(),
+                window: physical,
+                destination: destination.clone(),
+                document: 0,
+                admitted: false,
+                loaded: false,
+                token: None,
+                returning,
+                owner: epoch.value,
+            });
+            label
+        };
+        let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel();
+        *self.navigation.lock().expect("navigation") = Some(Navigation {
+            label: label.clone(),
+            epoch: epoch.clone(),
+            destination: destination.clone(),
+            completed: loaded_tx,
+        });
+        let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+        let app = self.app.clone();
+        let url = destination.clone();
+        let script = self.script(true, None);
+        let checked = epoch.clone();
+        let created_label = label.clone();
+        let creation = self.app.run_on_main_thread(move || {
+            let result: Result<Webview, ClientError> = (|| {
+                checked.check()?;
+                let window = app.get_window(MAIN_WINDOW).ok_or_else(|| failure("main missing"))?;
+                let size = window.inner_size().map_err(failure)?.to_logical::<f64>(window.scale_factor().map_err(failure)?);
+                let expected = url.clone();
+                let builder = tauri::webview::WebviewBuilder::new(&created_label, tauri::WebviewUrl::External(url))
+                    .incognito(true)
+                    .auto_resize()
+                    .initialization_script(script)
+                    .initialization_script("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_DOCUMENT__', {value:crypto.randomUUID()});")
+                    .on_new_window(|url, _| crate::handle_new_window_request(url))
+                    .on_page_load(move |view, event| {
+                        let Some(client) = view.app_handle().try_state::<Client>() else { return };
+                        let owned = {
+                            let mut views = client.view.views.lock().expect("views");
+                            let Some(account) = views.account.as_mut().filter(|account| account.label == view.label()) else { return };
+                            if event.event() == tauri::webview::PageLoadEvent::Started {
+                                account.document += 1;
+                                account.admitted = account.document == 1 && *event.url() == account.destination;
+                                account.loaded = false;
+                                account.token = None;
+                            } else {
+                                account.loaded = *event.url() == account.destination;
+                            }
+                            account.admitted
+                        };
+                        if event.event() == tauri::webview::PageLoadEvent::Started {
+                            {
+                                let mut queue = client.presentations.lock().expect("presentation intent");
+                                let physical = queue.window;
+                                queue.document_started(physical, event.url());
+                            }
+                            retire_stale_link(view.app_handle());
+                        }
+                        if event.event() == tauri::webview::PageLoadEvent::Finished && owned && *event.url() == expected {
+                            let app = view.app_handle().clone();
+                            let label = view.label().to_owned();
+                            let destination = expected.clone();
+                            let generation = checked.value;
+                            let _ = view.eval_with_callback("window.__AVIBE_DESKTOP_DOCUMENT__", move |raw| {
+                                let Ok(token) = serde_json::from_str::<String>(&raw) else { return };
+                                let client = app.state::<Client>();
+                                {
+                                    let mut views = client.view.views.lock().expect("views");
+                                    let Some(account) = views.account.as_mut().filter(|account| account.label == label && account.admitted && account.document == 1) else { return };
+                                    account.token = Some(token);
+                                }
+                                navigation_loaded(&app, &label, generation, &destination);
+                            });
+                        }
+                    });
+                #[cfg(target_os = "macos")]
+                let builder = builder.initialization_script(crate::macos_title_bar::inset_script());
+                let view = window.add_child(builder, tauri::LogicalPosition::new(0., 0.), size).map_err(failure)?;
+                view.hide().map_err(failure)?;
+                #[cfg(target_os = "macos")]
+                crate::macos_new_context::install(&view);
+                Ok(view)
+            })();
+            let _ = created_tx.send(result);
+        }).map_err(failure);
+        let result = async {
+            creation?;
+            let view = created_rx.await.map_err(failure)??;
+            tokio::time::timeout(std::time::Duration::from_secs(30), loaded_rx)
+                .await
+                .map_err(|_| ClientError::new("instance_navigation_timeout"))?
+                .map_err(failure)??;
+            epoch.check()?;
+            if !self
+                .views
+                .lock()
+                .expect("views")
+                .account
+                .as_ref()
+                .is_some_and(|account| account.label == label && account.admitted)
+            {
+                return Err(ClientError::new("stale_generation"));
+            }
+            if let Some(runtime) = runtime_webview(&self.app) {
+                runtime.hide().map_err(failure)?;
+            }
+            view.show().map_err(failure)?;
+            view.set_focus().map_err(failure)?;
+            let mut state = self.presentation.lock().expect("presentation");
+            state.account = true;
+            state.locale = destination
+                .query_pairs()
+                .find_map(|(key, value)| (key == "locale").then(|| value.into_owned()));
+            epoch.check()
+        }
+        .await;
+        if result.is_err() {
+            {
+                let mut navigation = self.navigation.lock().expect("navigation");
+                if navigation.as_ref().is_some_and(|pending| pending.label == label) {
+                    navigation.take();
+                }
+            }
+            self.close_account().await?;
+            if epoch.check().is_ok() {
+                if let Some(runtime) = runtime_webview(&self.app) {
+                    let _ = runtime.show();
+                }
+            }
+        }
+        result
+    }
+
     fn script(&self, initial: bool, receiver: Option<&Url>) -> String {
+        let account_token = self
+            .views
+            .lock()
+            .expect("views")
+            .account
+            .as_ref()
+            .filter(|account| account.admitted)
+            .and_then(|account| account.token.clone());
         let state = self.presentation.lock().expect("presentation");
         // Initialization survives navigation for the lifetime of a WebView.
         // It can never contain account-only state, even for an account build.
-        let account_receiver =
-            receiver.filter(|url| !initial && state.account && account_view(url, &self.bundle).is_some());
+        let account_receiver = receiver.filter(|url| {
+            !initial && state.account && account_token.is_some() && account_view(url, &self.bundle).is_some()
+        });
         let value = if account_receiver.is_some() {
             serde_json::to_value(&state.state).expect("client state")
         } else {
@@ -891,37 +1813,13 @@ impl NativeView {
             // navigation back to Runtime, staging, bootstrap or another frame.
             let receiver_guard = account_receiver.map_or(String::new(), |url| {
                 format!(
-                    " && window.location.href === {}",
-                    serde_json::to_string(url.as_str()).expect("receiver URL")
+                    " && window.location.href === {} && window.__AVIBE_DESKTOP_DOCUMENT__ === {}",
+                    serde_json::to_string(url.as_str()).expect("receiver URL"),
+                    serde_json::to_string(&account_token).expect("document token")
                 )
             });
             format!("if (window.self === window.top{receiver_guard}) {{{dispatch}}}")
         }
-    }
-    async fn remember_current(&self, epoch: &Epoch) -> Result<(), ClientError> {
-        let (remote, route) = {
-            let state = self.presentation.lock().expect("presentation");
-            if state.previous.is_some() {
-                // An interrupted candidate never becomes the rollback owner.
-                return epoch.check();
-            }
-            (state.remote.clone(), state.route.clone())
-        };
-        let cookies = if let Some(origin) = &remote {
-            let window = self
-                .app
-                .get_webview_window(MAIN_WINDOW)
-                .ok_or_else(|| failure("missing"))?;
-            let origin = origin.clone();
-            tokio::task::spawn_blocking(move || window.cookies_for_url(origin).map_err(failure))
-                .await
-                .map_err(failure)??
-        } else {
-            vec![]
-        };
-        epoch.check()?;
-        self.presentation.lock().expect("presentation").previous = Some(PreviousView { remote, route, cookies });
-        Ok(())
     }
     fn presentation_epoch(&self, owner: u64) -> Result<Epoch, ClientError> {
         self.app.state::<Client>().coordinator.presentation_epoch(owner)
@@ -931,151 +1829,83 @@ impl NativeView {
             && epoch.check().is_err()
             && self.presentation_epoch(owner).is_ok()
     }
-    async fn restore_previous(&self, owner: u64, previous: &PreviousView, account: bool) -> Result<(), ClientError> {
-        if previous.remote.is_none() && !account {
-            return self.restore_local(owner, previous.route.clone()).await;
-        }
-        // The caller holds windows for the whole obligation, including show.
-        // Keep the original material across repeated lifecycle invalidations;
-        // a later user action replaces the owner and stops this continuation.
-        loop {
-            let epoch = self.presentation_epoch(owner)?;
-            let result = async {
-                self.retire_current().await?;
-                epoch.check()?;
-                let disposable = previous.remote.is_some();
-                let url = if account {
-                    self.bundle.join("account/index.html").map_err(failure)?
-                } else {
-                    previous
-                        .route
-                        .clone()
-                        .or(previous.remote.clone())
-                        .unwrap_or(self.local_url()?)
-                };
-                let committed = self.app.state::<Client>().coordinator.state();
-                {
-                    let mut state = self.presentation.lock().expect("presentation");
-                    state.account = account;
-                    state.pending_commit = None;
-                    state.state = committed;
-                    state.remote = previous.remote.clone();
-                    state.disposable = disposable;
-                    state.route = previous.route.clone();
-                }
-                self.build(epoch.clone(), url.clone(), disposable, previous.cookies.clone())
-                    .await?;
-                self.show(epoch.clone(), &url).await?;
-                epoch.check()
+    async fn retire_runtime(&self, mut role: RuntimeDocument) -> Result<(), ClientError> {
+        let app = self.app.clone();
+        let label = role.label.clone();
+        let disposable = role.disposable;
+        let physical = self
+            .app
+            .state::<Client>()
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .window;
+        let destroyed = role.window != physical;
+        let retired = tokio::task::spawn_blocking(move || {
+            if destroyed {
+                return Ok(());
             }
-            .await;
-            if self.lifecycle_retry(owner, &epoch, &result) {
-                continue;
-            }
-            if result.is_ok() {
-                self.presentation.lock().expect("presentation").previous = None;
-            }
-            return result;
-        }
-    }
-    async fn restore_local(&self, owner: u64, route: Option<Url>) -> Result<(), ClientError> {
-        self.presentation_epoch(owner)?;
-        self.presentation.lock().expect("presentation").local_owner = Some(owner);
-        loop {
-            let epoch = self.presentation_epoch(owner)?;
-            let result = async {
-                self.retire_current().await?;
-                epoch.check()?;
-                let url = route
-                    .clone()
-                    .filter(|url| {
-                        self.local_origin
-                            .lock()
-                            .ok()
-                            .and_then(|origin| origin.clone())
-                            .is_some_and(|origin| origin.matches_url_origin(url))
-                    })
-                    .unwrap_or(self.local_url()?);
-                let committed = self.app.state::<Client>().coordinator.state();
-                {
-                    let mut state = self.presentation.lock().expect("presentation");
-                    state.account = false;
-                    state.pending_commit = None;
-                    state.state = committed;
-                    state.remote = None;
-                    state.disposable = false;
-                    state.route = None;
-                }
-                self.build(epoch.clone(), url.clone(), false, vec![]).await?;
-                self.show(epoch.clone(), &url).await?;
-                epoch.check()
-            }
-            .await;
-            if self.lifecycle_retry(owner, &epoch, &result) {
-                continue;
-            }
-            if result.is_ok() {
-                self.presentation.lock().expect("presentation").previous = None;
-            }
-            return result;
-        }
-    }
-    async fn finish_commit(&self, owner: u64, receipt: u64) -> Result<(), ClientError> {
-        loop {
-            let epoch = self.presentation_epoch(owner)?;
-            let destination = {
-                let state = self.presentation.lock().expect("presentation");
-                if state.pending_commit != Some(receipt)
-                    || self.app.state::<Client>().coordinator.committed_view_generation() != Some(receipt)
-                {
-                    return Err(ClientError::new("stale_generation"));
-                }
-                state.remote.clone().ok_or_else(|| failure("missing target"))?
-            };
-            let result = self.show(epoch.clone(), &destination).await;
-            if self.lifecycle_retry(owner, &epoch, &result) {
-                continue;
-            }
-            result?;
-            let mut state = self.presentation.lock().expect("presentation");
-            state.previous = None;
-            state.pending_commit = None;
-            return Ok(());
-        }
-    }
-    async fn retire_current(&self) -> Result<(), ClientError> {
-        let disposable = self.presentation.lock().expect("presentation").disposable;
-        let retired = if let Some(window) = self.app.get_webview_window(MAIN_WINDOW) {
-            tokio::task::spawn_blocking(move || {
+            if let Some(view) = app.get_webview(&label) {
                 if disposable {
-                    crate::instance_store::retire(&window)
+                    crate::instance_store::retire(&view)
                 } else {
-                    crate::instance_store::destroy_completed(&window)
+                    crate::instance_store::destroy_completed(&view)
                 }
-            })
-            .await
-            .map_err(failure)
-            .and_then(|result| result.map_err(failure))
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result.map_err(failure));
+        let removed = if destroyed || self.app.get_webview(&role.label).is_none() {
+            let removed = role.directory.as_ref().map_or(Ok(()), |directory| {
+                if directory.path().exists() {
+                    std::fs::remove_dir_all(directory.path()).map_err(failure)
+                } else {
+                    Ok(())
+                }
+            });
+            if removed.is_ok() {
+                role.directory.take();
+            }
+            removed
         } else {
-            Ok(())
+            Err(failure("retired view still registered"))
         };
-        let removed = if let Some(directory) = self.store_directory.lock().expect("store directory").take() {
-            directory.close().map_err(failure)
-        } else {
-            Ok(())
-        };
-        retired.and(removed)
+        let result = retired.and(removed);
+        if result.is_err() {
+            self.views.lock().expect("views").retired.push(role);
+        }
+        result
     }
-    async fn build(
+    async fn discard_candidate(&self) -> Result<(), ClientError> {
+        let role = self.views.lock().expect("views").candidate.take();
+        if let Some(role) = role {
+            self.retire_runtime(role).await?;
+        }
+        self.presentation.lock().expect("presentation").pending_commit = None;
+        Ok(())
+    }
+    async fn retire_current(&self) -> Result<Option<(String, u64)>, ClientError> {
+        let role = self.views.lock().expect("views").runtime.take();
+        // Capture identity at the same boundary that removes its authority.
+        // A candidate load may have awaited while this document navigated.
+        let document = role.as_ref().map(|role| (role.label.clone(), role.document));
+        if let Some(role) = role {
+            self.retire_runtime(role).await?;
+        }
+        Ok(document)
+    }
+    async fn build_candidate(
         &self,
         epoch: Epoch,
-        url: Url,
+        destination: Url,
         disposable: bool,
         cookies: Vec<cookie::Cookie<'static>>,
-    ) -> Result<(), ClientError> {
-        let app = self.app.clone();
-        let initial = url.clone();
-        self.presentation.lock().expect("presentation").staging = true;
+    ) -> Result<Webview, ClientError> {
+        epoch.check()?;
+        self.discard_candidate().await?;
         let directory = if disposable {
             let root = self
                 .app
@@ -1089,24 +1919,42 @@ impl NativeView {
             None
         };
         let path = directory.as_ref().map(|directory| directory.path().to_owned());
-        *self.store_directory.lock().expect("store directory") = directory;
+        let physical = self
+            .app
+            .state::<Client>()
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .window;
+        let label = {
+            let mut views = self.views.lock().expect("views");
+            views.next += 1;
+            let label = format!("main-runtime-{}", views.next);
+            views.candidate = Some(RuntimeDocument {
+                label: label.clone(),
+                window: physical,
+                destination: destination.clone(),
+                disposable,
+                directory,
+                owner: self.app.state::<Client>().coordinator.presentation_owner(),
+                document: 0,
+            });
+            label
+        };
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let app = self.app.clone();
         let checked = epoch.clone();
+        let created_label = label.clone();
         self.app
             .run_on_main_thread(move || {
-                let result: Result<WebviewWindow, ClientError> = (|| {
-                    checked.check()?;
-                    let window = crate::build_main_window(&app, Some(initial), disposable, path)
-                        .ok_or_else(|| failure("create"))?;
-                    Ok(window)
-                })();
+                let result = checked.check().and_then(|_| {
+                    crate::build_main_child(&app, &created_label, disposable, path, checked.value)
+                        .ok_or_else(|| failure("create child"))
+                });
                 let _ = tx.send(result);
             })
             .map_err(failure)?;
         let window = rx.await.map_err(failure)??;
-        self.presentation.lock().expect("presentation").staging = false;
-        // Native cookie APIs can block on the UI thread. The new view starts at
-        // the bundled page, with no instance request until projection completes.
         let projected = window.clone();
         let checked = epoch.clone();
         tokio::task::spawn_blocking(move || crate::instance_store::project(&projected, &cookies, &checked))
@@ -1114,41 +1962,35 @@ impl NativeView {
             .map_err(failure)??;
         let (loaded, navigation) = tokio::sync::oneshot::channel();
         *self.navigation.lock().expect("navigation") = Some(Navigation {
+            label,
             epoch: epoch.clone(),
-            destination: url.clone(),
+            destination: destination.clone(),
             completed: loaded,
         });
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let checked = epoch.clone();
-        self.app
-            .run_on_main_thread(move || {
-                let result: Result<(), ClientError> = (|| {
-                    checked.check()?;
-                    window.navigate(url).map_err(failure)?;
-                    Ok(())
-                })();
-                let _ = tx.send(result);
-            })
-            .map_err(failure)?;
-        rx.await.map_err(failure)??;
+        epoch.check()?;
+        window.navigate(destination).map_err(failure)?;
         let result = tokio::time::timeout(std::time::Duration::from_secs(30), navigation)
             .await
             .map_err(|_| ClientError::new("instance_navigation_timeout"))?
             .map_err(failure)?;
         epoch.check()?;
-        result
+        result?;
+        Ok(window)
     }
-    async fn show(&self, epoch: Epoch, destination: &Url) -> Result<(), ClientError> {
+    async fn show(&self, epoch: Epoch, view: &Webview, destination: &Url) -> Result<(), ClientError> {
         let app = self.app.clone();
         let bundle = self.bundle.clone();
         let destination = destination.clone();
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let view = view.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.app
             .run_on_main_thread(move || {
                 let result = (|| {
                     epoch.check()?;
-                    let window = app.get_webview_window(MAIN_WINDOW).ok_or_else(|| failure("missing"))?;
-                    let actual = window.url().map_err(failure)?;
+                    if app.get_webview(view.label()).is_none() {
+                        return Err(failure("retired"));
+                    }
+                    let actual = view.url().map_err(failure)?;
                     let matches = if destination == bundle || account_view(&destination, &bundle).is_some() {
                         actual == destination
                     } else {
@@ -1157,17 +1999,93 @@ impl NativeView {
                     if !matches {
                         return Err(ClientError::new("instance_navigation_mismatch"));
                     }
-                    window.show().map_err(failure)?;
-                    window.set_focus().map_err(failure)?;
-                    if app.try_state::<Shell>().is_some() {
-                        crate::refresh_native_controls(&app, None);
-                    }
+                    view.show().map_err(failure)?;
+                    view.window().show().map_err(failure)?;
+                    view.set_focus().map_err(failure)?;
                     epoch.check()
                 })();
-                let _ = sender.send(result);
+                let _ = tx.send(result);
             })
             .map_err(failure)?;
-        receiver.await.map_err(failure)?
+        rx.await.map_err(failure)?
+    }
+    async fn replace_local(&self, owner: u64, preserve_account: bool) -> Result<(), ClientError> {
+        self.presentation_epoch(owner)?;
+        let physical = self
+            .app
+            .state::<Client>()
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .window;
+        // A trusted lifecycle replacement may transfer an existing return
+        // receipt. Capture it before retirement (including lifecycle retries);
+        // arbitrary navigation or a different account document cannot acquire it.
+        let mut returning = if preserve_account {
+            let views = self.views.lock().expect("views");
+            views.account.as_ref().and_then(|account| {
+                let runtime = views.runtime.as_ref()?;
+                let receipt = (runtime.label.clone(), runtime.document);
+                (account.admitted
+                    && account.window == physical
+                    && runtime.window == physical
+                    && !runtime.disposable
+                    && account.returning.as_ref() == Some(&receipt))
+                .then(|| (account.label.clone(), account.document, account.owner, receipt))
+            })
+        } else {
+            None
+        };
+        loop {
+            let epoch = self.presentation_epoch(owner)?;
+            let result = async {
+                let url = self.local_url()?;
+                let candidate = self.build_candidate(epoch.clone(), url.clone(), false, vec![]).await?;
+                epoch.check()?;
+                if let Some(retired) = self.retire_current().await? {
+                    if returning.as_ref().is_some_and(|(_, _, _, receipt)| receipt != &retired) {
+                        returning = None;
+                    }
+                }
+                epoch.check()?;
+                if !preserve_account {
+                    self.close_account().await?;
+                    self.show(epoch.clone(), &candidate, &url).await?;
+                }
+                epoch.check()?;
+                let mut views = self.views.lock().expect("views");
+                let runtime = views.candidate.take();
+                if let (Some((label, document, account_owner, receipt)), Some(runtime)) = (&returning, &runtime) {
+                    if let Some(account) = views.account.as_mut().filter(|account| {
+                        account.admitted
+                            && account.label == *label
+                            && account.document == *document
+                            && account.owner == *account_owner
+                            && account.window == physical
+                            && runtime.window == physical
+                            && account.returning.as_ref() == Some(receipt)
+                    }) {
+                        account.returning = Some((runtime.label.clone(), runtime.document));
+                    }
+                }
+                views.runtime = runtime;
+                views.terminal = None;
+                drop(views);
+                let mut state = self.presentation.lock().expect("presentation");
+                state.account = preserve_account;
+                state.remote = None;
+                state.pending_commit = None;
+                Ok(())
+            }
+            .await;
+            if result.is_err() {
+                self.discard_candidate().await?;
+            }
+            if self.lifecycle_retry(owner, &epoch, &result) {
+                continue;
+            }
+            return result;
+        }
     }
     fn local_url(&self) -> Result<Url, ClientError> {
         if let Some(origin) = self.local_origin.lock().ok().and_then(|origin| origin.clone()) {
@@ -1181,6 +2099,7 @@ impl NativeView {
         }
         // Runtime monitor owns the single local control connection. Selection
         // only gates its user-facing output; it never stops or reopens it.
+        crate::notifications::reconcile(&self.app);
         crate::pet::reconcile(&self.app);
         crate::refresh_native_controls(&self.app, None);
     }
@@ -1192,11 +2111,9 @@ impl ClientView for NativeView {
             .app
             .try_state::<Client>()
             .ok_or_else(|| ClientError::new("desktop_client_unavailable"))?;
-        let window = self
-            .app
-            .get_webview_window(MAIN_WINDOW)
-            .ok_or_else(|| ClientError::new("untrusted_desktop_caller"))?;
-        if !trusted_page(&client, &window) {
+        if !updater_caller(&self.app, &client.view.bundle, || {
+            active_webview(&self.app).is_some_and(|window| trusted_page(&client, &window))
+        }) {
             return Err(ClientError::new("untrusted_desktop_caller"));
         }
         epoch.check()?;
@@ -1214,96 +2131,83 @@ impl ClientView for NativeView {
             if epoch.check().is_err() || view.presentation_epoch(owner).is_err() {
                 return;
             }
-            let committed = coordinator.committed_view_generation();
-            let (previous, committed_candidate, local) = {
-                let state = view.presentation.lock().expect("presentation");
-                if state.pending_commit.is_some() && state.pending_commit == committed {
-                    // Public commit won the lifecycle race after load completed.
-                    (None, state.pending_commit, false)
-                } else {
-                    (
-                        state.previous.clone(),
-                        None,
-                        state.local_owner == Some(owner) && !state.account && state.remote.is_none(),
-                    )
-                }
+            if !coordinator.state().connection.committed.is_local() {
+                return;
+            }
+            let preserve_account = view.presentation.lock().expect("presentation").account;
+            let destination = match view.local_url() {
+                Ok(url) => url,
+                Err(_) => return,
             };
-            let result = if let Some(previous) = previous {
-                view.restore_previous(owner, &previous, true).await
-            } else if let Some(receipt) = committed_candidate {
-                view.finish_commit(owner, receipt).await
-            } else if local {
-                // A completed local presentation can be invalidated just after
-                // its terminal show. Reconcile only the current local intent;
-                // an account page or committed remote is never displaced.
-                let expected = view.local_url();
-                let settled = expected.as_ref().is_ok_and(|expected| {
-                    view.app.get_webview_window(MAIN_WINDOW).is_some_and(|window| {
-                        window.is_visible().unwrap_or(false) && window.url().is_ok_and(|url| url == *expected)
-                    })
-                });
-                if settled {
-                    Ok(())
-                } else {
-                    view.restore_local(owner, None).await
+            let matches = runtime_webview(&view.app)
+                .is_some_and(|runtime| runtime.url().is_ok_and(|url| url.origin() == destination.origin()));
+            if !matches {
+                if let Err(error) = view.replace_local(owner, preserve_account).await {
+                    eprintln!("desktop client lifecycle restoration: {}", error.code);
                 }
-            } else {
-                Ok(())
-            };
-            if let Err(error) = result {
-                eprintln!("desktop client lifecycle restoration: {}", error.code);
             }
             drop(_windows);
             view.changed(&coordinator.state());
         });
     }
     fn changed(&self, state: &ClientState) {
-        {
-            let mut view = self.presentation.lock().expect("presentation");
-            let staged = view.state.connection.clone();
-            view.state = state.clone();
-            if view.pending_commit.is_some() {
-                // A fresh candidate is still hidden. Its document receives the
-                // identity whose cookies it owns, never the previous target's
-                // initial footer snapshot. Public commit follows load/readback.
-                view.state.connection = staged;
-                view.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
-            }
-        }
-        // During creation WKWebView may not have a URL yet. The serialized
-        // owner publishes after completion; no eval can target that gap.
+        self.presentation.lock().expect("presentation").state = state.clone();
+        retire_stale_link(&self.app);
         if self.windows.try_lock().is_ok() {
-            if let Some(window) = self.app.get_webview_window(MAIN_WINDOW) {
-                if let Ok(url) = window.url() {
-                    if caller_can_present(&self.app, MAIN_WINDOW, &url) {
-                        let _ = window.eval(self.script(false, Some(&url)));
+            if let Some(runtime) = runtime_webview(&self.app) {
+                // Runtime receives only the minimal projection even while retained.
+                let _ = runtime.eval(self.script(false, None));
+            }
+            if let Some(account) = active_webview(&self.app) {
+                let client = self.app.state::<Client>();
+                if trusted_page(&client, &account) {
+                    if let Ok(url) = account.url() {
+                        let _ = account.eval(self.script(false, Some(&url)));
                     }
                 }
             }
         }
+        crate::update_popover::publish(&self.app, &self.bundle, |url| self.popover_script(url));
         self.auxiliaries();
-        // Finished may arrive while this owner still holds the window lock.
-        // The owner's terminal publication is the deferred delivery handoff.
         crate::apply_pending_deep_link(&self.app);
         schedule_presentation(&self.app);
     }
-    fn committed(&self, epoch: Epoch) {
-        let Some(client) = self.app.try_state::<Client>() else {
-            return;
-        };
-        let view = client.view.clone();
-        let coordinator = client.coordinator.clone();
-        tauri::async_runtime::spawn(async move {
-            let _windows = view.windows.lock().await;
-            let pending = view.presentation.lock().expect("presentation").pending_commit;
-            if pending == Some(epoch.value) {
-                if let Err(error) = view.finish_commit(epoch.value, epoch.value).await {
-                    eprintln!("desktop client committed presentation: {}", error.code);
-                }
-            }
-            drop(_windows);
-            view.changed(&coordinator.state());
-        });
+    fn committed(&self, epoch: Epoch) -> Result<(), ClientError> {
+        // All fallible native work was awaited in commit. Publication only
+        // transfers the already-shown handle; it cannot spawn a second finish.
+        epoch.check()?;
+        let mut views = self.views.lock().expect("views");
+        if views.terminal != Some(epoch.value) {
+            return Ok(());
+        }
+        let mut state = self.presentation.lock().expect("presentation");
+        let candidate = views.candidate.take().ok_or_else(|| failure("candidate missing"))?;
+        state.remote = Some(candidate.destination.clone());
+        state.account = false;
+        state.pending_commit = None;
+        views.runtime = Some(candidate);
+        views.terminal = None;
+        Ok(())
+    }
+    fn terminal_commit(&self, epoch: &Epoch) -> bool {
+        self.views.lock().expect("views").terminal == Some(epoch.value)
+    }
+    async fn abort_commit(&self, epoch: Epoch) -> Result<(), ClientError> {
+        let _windows = self.windows.lock().await;
+        let current = self
+            .views
+            .lock()
+            .expect("views")
+            .candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.owner <= epoch.value);
+        if current {
+            self.discard_candidate().await?;
+        }
+        if !self.views.lock().expect("views").retired.is_empty() {
+            return Err(failure("retirement incomplete"));
+        }
+        Ok(())
     }
     fn invalidate(&self, _: u64) {
         if let Some(navigation) = self.navigation.lock().expect("navigation").take() {
@@ -1324,121 +2228,124 @@ impl ClientView for NativeView {
     ) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
         epoch.check()?;
-        let ClientTarget::Remote {
-            ref canonical_origin, ..
-        } = target
-        else {
+        let ClientTarget::Remote { canonical_origin, .. } = &target else {
             return Err(ClientError::new("invalid_action"));
         };
         let url: Url = canonical_origin.parse().map_err(failure)?;
-        self.remember_current(&epoch).await?;
         let result = async {
+            let candidate = self.build_candidate(epoch.clone(), url.clone(), true, cookies).await?;
+            epoch.check()?;
+            // From this point onward the old role is terminal. Its cookies and
+            // URL can never be used as a restoration snapshot.
+            self.views.lock().expect("views").terminal = Some(epoch.value);
             self.retire_current().await?;
             epoch.check()?;
-            {
-                let mut state = self.presentation.lock().expect("presentation");
-                state.account = false;
-                state.disposable = true;
-                state.local_owner = None;
-                state.remote = Some(url.clone());
-                state.route = Some(url.clone());
-                state.pending_commit = Some(epoch.value);
-                state.state.connection = ConnectionState {
-                    committed: target,
-                    pending: None,
-                    status: ConnectionStatus::RemoteConnected,
-                };
-                state.state.generation = epoch.value;
-                state.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
-            }
-            self.build(epoch.clone(), url, true, cookies).await
+            self.close_account().await?;
+            epoch.check()?;
+            self.show(epoch.clone(), &candidate, &url).await?;
+            epoch.check()?;
+            self.presentation.lock().expect("presentation").pending_commit = Some(epoch.value);
+            Ok(())
         }
         .await;
-        if result.is_err() && epoch.check().is_ok() {
-            let previous = self.presentation.lock().expect("presentation").previous.clone();
-            if let Some(previous) = previous {
-                self.restore_previous(epoch.value, &previous, true).await?;
-            }
+        if result.is_err() {
+            self.discard_candidate().await?;
         }
         result
     }
-    async fn restore(&self, epoch: Epoch, target: ClientTarget) -> Result<(), ClientError> {
+    async fn restore(&self, epoch: Epoch, target: ClientTarget, preserve_document: bool) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
         let owner = epoch.value;
         self.presentation_epoch(owner)?;
-        let previous = {
-            let mut state = self.presentation.lock().expect("presentation");
-            let matches_previous = state.previous.as_ref().is_some_and(|old| match &target {
-                ClientTarget::Local { .. } => old.remote.is_none(),
-                ClientTarget::Remote { canonical_origin, .. } => old
-                    .remote
-                    .as_ref()
-                    .is_some_and(|origin| origin.origin().ascii_serialization() == *canonical_origin),
-            });
-            if matches_previous {
-                state.previous.clone()
-            } else {
-                state.previous = None;
-                None
+        self.discard_candidate().await?;
+        if preserve_document {
+            let views = self.views.lock().expect("views");
+            if let Some(account) = &views.account {
+                if !views.runtime.as_ref().is_some_and(|runtime| {
+                    account.returning.as_ref() == Some(&(runtime.label.clone(), runtime.document))
+                }) {
+                    return Err(ClientError::new("instance_session_missing"));
+                }
             }
-        };
-        if let Some(previous) = previous {
-            return self.restore_previous(owner, &previous, false).await;
         }
-        let local = target.is_local();
-        let route = {
-            let state = self.presentation.lock().expect("presentation");
-            state.route.clone()
-        };
-        if local {
-            return self.restore_local(owner, route).await;
+        if let Some(runtime) = runtime_webview(&self.app) {
+            let same = runtime.url().is_ok_and(|url| match &target {
+                ClientTarget::Local { .. } => self
+                    .local_origin
+                    .lock()
+                    .expect("local origin")
+                    .as_ref()
+                    .is_some_and(|origin| origin.matches_url_origin(&url)),
+                ClientTarget::Remote { canonical_origin, .. } => {
+                    url.origin().ascii_serialization() == *canonical_origin
+                }
+            });
+            if same {
+                self.close_account().await?;
+                let epoch = self.presentation_epoch(owner)?;
+                let url = runtime.url().map_err(failure)?;
+                self.show(epoch, &runtime, &url).await?;
+                self.presentation.lock().expect("presentation").account = false;
+                return Ok(());
+            }
         }
-        let url = route.ok_or_else(|| ClientError::new("instance_session_missing"))?;
-        let epoch = self.presentation_epoch(owner)?;
-        let app = self.app.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.presentation.lock().expect("presentation").account = false;
-        self.app
-            .run_on_main_thread(move || {
-                let result = epoch
-                    .check()
-                    .and_then(|_| app.get_webview_window(MAIN_WINDOW).ok_or_else(|| failure("missing")))
-                    .and_then(|window| window.navigate(url).map_err(failure));
-                let _ = tx.send(result);
-            })
-            .map_err(failure)?;
-        rx.await.map_err(failure)?
+        if target.is_local() {
+            self.replace_local(owner, false).await
+        } else {
+            Err(ClientError::new("instance_session_missing"))
+        }
     }
-    async fn signed_out(&self, epoch: Epoch, _: ClientTarget) -> Result<(), ClientError> {
+    async fn signed_out(&self, epoch: Epoch, _: ClientTarget, cleanup_failed: bool) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
         let owner = epoch.value;
-        if self.presentation_epoch(owner).is_err() && !self.presentation.lock().expect("presentation").disposable {
-            // A newer explicit local escape already retired the instance and
-            // presented its replacement. Do not erase that new local window.
-            return Ok(());
+        // A newer escape may already have replaced every old role. Never erase
+        // that successor while completing the earlier cleanup obligation.
+        let roles = {
+            let mut views = self.views.lock().expect("views");
+            let mut roles = std::mem::take(&mut views.retired);
+            if views.runtime.as_ref().is_some_and(|view| view.owner <= owner) {
+                roles.extend(views.runtime.take());
+            }
+            if views.candidate.as_ref().is_some_and(|view| view.owner <= owner) {
+                roles.extend(views.candidate.take());
+            }
+            views.terminal = None;
+            roles
+        };
+        let mut retired = Ok(());
+        for role in roles {
+            if let Err(error) = self.retire_runtime(role).await {
+                retired = Err(error);
+            }
         }
-        // Erase even when another local escape superseded navigation.
-        let retired = self.retire_current().await;
+        if self.presentation_epoch(owner).is_err() {
+            return retired;
+        }
+        self.close_account().await?;
         {
             let mut state = self.presentation.lock().expect("presentation");
             state.account = false;
-            state.pending_commit = None;
             state.remote = None;
-            state.disposable = false;
-            state.route = None;
-            state.previous = None;
+            state.pending_commit = None;
         }
-        // A newer explicit escape owns its own queued restore. Lifecycle-only
-        // changes keep this owner and re-evaluate the local destination.
-        let restored = if self.presentation_epoch(owner).is_ok() {
-            match self.restore_local(owner, None).await {
-                Err(error) if error.code == "stale_generation" && self.presentation_epoch(owner).is_err() => Ok(()),
-                result => result,
-            }
-        } else {
-            Ok(())
-        };
-        retired.and(restored)
+        if cleanup_failed || retired.is_err() {
+            return retired;
+        }
+        self.replace_local(owner, false).await
+    }
+    async fn signout_failed(&self, epoch: Epoch) -> Result<(), ClientError> {
+        let _windows = self.windows.lock().await;
+        let owner = epoch.value;
+        let epoch = self.presentation_epoch(owner)?;
+        let locale = self.presentation.lock().expect("presentation").locale.clone();
+        let url = account_url(&self.bundle, "sign-out", locale.as_deref()).ok_or_else(|| failure("account route"))?;
+        self.app
+            .state::<Client>()
+            .presentations
+            .lock()
+            .expect("presentation intent")
+            .logout = None;
+        self.open_account(epoch, url).await
     }
 }
 
@@ -1446,19 +2353,296 @@ impl ClientView for NativeView {
 mod tests {
     use super::*;
 
+    /// The popup only opens while main shows another computer, so the updater's
+    /// own check must admit it there; otherwise Update, Check and both switches
+    /// would all be refused from the popup. Drives the same window lookup
+    /// `NativeView::desktop_update` uses; main's account-page test is passed in.
+    #[test]
+    fn the_update_popup_may_drive_the_updater_while_main_shows_another_computer() {
+        use tauri::{WebviewBuilder, WebviewUrl, WebviewWindowBuilder, WindowBuilder};
+
+        let app = tauri::test::mock_app();
+        let bundle = Url::parse("tauri://localhost/").unwrap();
+        let window = |label: &str, raw: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::External(Url::parse(raw).unwrap()))
+                .build()
+                .unwrap()
+        };
+        let account_page = || {
+            app.get_webview("main-runtime-1")
+                .is_some_and(|window| window.url().is_ok_and(|url| account_view(&url, &bundle).is_some()))
+        };
+        // Main shows another computer's page and no popup is open: refused.
+        let physical = WindowBuilder::new(&app, MAIN_WINDOW).build().unwrap();
+        physical
+            .add_child(
+                WebviewBuilder::new(
+                    "main-runtime-1",
+                    WebviewUrl::External("https://studio.avibe.bot/".parse().unwrap()),
+                ),
+                tauri::LogicalPosition::new(0.0, 0.0),
+                tauri::LogicalSize::new(880.0, 600.0),
+            )
+            .unwrap();
+        assert!(!updater_caller(app.handle(), &bundle, account_page));
+        // The popup on its own page: admitted.
+        let popover = window(
+            crate::update_popover::UPDATE_POPOVER,
+            "tauri://localhost/account/index.html?view=update-popover",
+        );
+        assert!(updater_caller(app.handle(), &bundle, account_page));
+        // Not once the popup shows anything else.
+        popover
+            .navigate(Url::parse("tauri://localhost/account/index.html?view=account").unwrap())
+            .unwrap();
+        assert!(!updater_caller(app.handle(), &bundle, account_page));
+    }
+
+    // A popup completes the presentation without replacing main. Its deferred
+    // build/show must still lose authority on a newer material action, click,
+    // document or physical window; pending alone cannot fence that interval.
+    #[test]
+    fn completed_popup_sources_retire_on_cancel_or_replacement() {
+        for replacement in ["cancel", "presentation", "document", "window"] {
+            let mut queue = PresentationQueue::default();
+            let url: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+            let physical = queue.window_created();
+            queue.document_started(physical, &url);
+            queue.enqueue("updates", 4, false, None);
+            let intent = queue.current(4).unwrap();
+            let presentation = PopupPresentation {
+                intent,
+                source: PresentationSource {
+                    window: queue.window,
+                    document: queue.document,
+                    label: "main-account-2".into(),
+                    url: url.to_string(),
+                },
+            };
+            queue.complete(intent.id);
+            assert!(queue.pending.is_none());
+            assert!(queue.popup_is_current(&presentation));
+            match replacement {
+                "cancel" => queue.cancel(),
+                "presentation" => queue.enqueue("account", 4, true, None),
+                "document" => queue.document_started(physical, &url),
+                "window" => {
+                    queue.window_created();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!queue.popup_is_current(&presentation), "{replacement}");
+        }
+    }
+
+    #[test]
+    fn a_local_bootstrap_candidate_admits_only_its_exact_bundled_destination() {
+        let bundle: Url = "tauri://localhost/".parse().unwrap();
+        let mut candidate = RuntimeDocument {
+            label: "main-runtime-1".into(),
+            window: 1,
+            destination: bundle.clone(),
+            disposable: false,
+            directory: None,
+            owner: 1,
+            document: 0,
+        };
+        assert!(candidate.allows_navigation(&bundle, &bundle));
+        assert!(candidate.allows_navigation(&"about:blank".parse().unwrap(), &bundle));
+        for raw in [
+            "tauri://localhost/account/index.html",
+            "tauri://localhost/?other=1",
+            "tauri://localhost/#other",
+            "tauri://other/",
+            "tauri://localhost:123/",
+            "tauri://user@localhost/",
+            "tauri://user:password@localhost/",
+            "https://localhost/",
+        ] {
+            assert!(!candidate.allows_navigation(&raw.parse().unwrap(), &bundle), "{raw}");
+        }
+        candidate.disposable = true;
+        assert!(!candidate.allows_navigation(&bundle, &bundle));
+        candidate.destination = "https://remote.example.test/".parse().unwrap();
+        assert!(!candidate.allows_navigation(&bundle, &bundle));
+        assert!(candidate.allows_navigation(
+            &"https://remote.example.test/path?query=1#fragment".parse().unwrap(),
+            &bundle
+        ));
+        assert!(!candidate.allows_navigation(&"https://user:password@remote.example.test/".parse().unwrap(), &bundle));
+        assert!(!candidate.allows_navigation(&"https://other.example.test/".parse().unwrap(), &bundle));
+        candidate.disposable = false;
+        candidate.destination = "tauri://localhost/account/index.html".parse().unwrap();
+        assert!(!candidate.allows_navigation(&candidate.destination, &bundle));
+        assert!(!candidate.allows_navigation(&bundle, &bundle));
+    }
+
+    #[test]
+    fn a_link_approval_preserves_its_exact_continuation_in_both_callback_orders() {
+        for callback_first in [false, true] {
+            let mut links = crate::DeepLinks::default();
+            links.receive_owned(["avibe://settings"], Some(4));
+            let ticket = links.claim_local_return(12, 4).unwrap();
+            let mut queue = PresentationQueue::default();
+            let physical = queue.window_created();
+            let receiver: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+            queue.document_started(physical, &receiver);
+            queue.enqueue("account", 4, true, None);
+            let intent = queue.current(4).unwrap();
+            queue.link = Some((intent.id, ticket));
+            let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+            if callback_first {
+                queue.guard_result(&attempt, "\"dispatched\"");
+                assert!(queue.pending.is_none());
+                assert!(queue.owns_intent(intent.id));
+                assert!(links.owns_local_return(&queue.link.as_ref().unwrap().1));
+            }
+            assert!(queue.approve(&attempt, Some("zh"), "main-account-2", &receiver));
+            let approved = queue.current(4).unwrap();
+            assert!(!approved.guarded);
+            assert!(queue.can_start(approved, "main-account-2", &receiver));
+            assert!(!queue.can_start(approved, "main-account-3", &receiver));
+            assert_eq!(queue.link.as_ref().unwrap().0, approved.id);
+            assert!(links.owns_local_return(&queue.link.as_ref().unwrap().1));
+            queue.guard_result(&attempt, "\"dispatched\"");
+            assert_eq!(queue.pending, Some(approved));
+            assert!(!queue.approve(&attempt, None, "main-account-2", &receiver));
+            // A new explicit material-producing action cancels even an already
+            // approved but not-yet-started replacement.
+            queue.cancel();
+            assert!(!queue.can_start(approved, "main-account-2", &receiver));
+            assert!(!queue.owns_intent(approved.id));
+        }
+    }
+
+    #[test]
+    fn a_consumed_or_unknown_link_guard_cannot_replay_and_retires_with_its_authority() {
+        for callback in ["\"dispatched\"", "\"unknown\"", "\"unconsumed\"", "null"] {
+            for retirement in ["presentation", "owner", "document", "window"] {
+                let mut queue = PresentationQueue::default();
+                let receiver: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+                let physical = queue.window_created();
+                queue.document_started(physical, &receiver);
+                queue.enqueue("account", 4, true, None);
+                let intent = queue.current(4).unwrap();
+                let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+                queue.guard_result(&attempt, callback);
+                // Consumed leaves only dormant approval; unknown keeps the
+                // original guard. Neither can schedule another guard.
+                assert!(queue.pending.is_none() || queue.guard.is_some());
+                assert!(queue.begin_guard(intent, receiver.to_string()).is_none());
+                match retirement {
+                    "presentation" => queue.enqueue("instances", 4, true, None),
+                    "owner" => {
+                        queue.current(5);
+                    }
+                    "document" => queue.document_started(physical, &receiver),
+                    "window" => {
+                        queue.window_created();
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(!queue.owns_guard_authority(&attempt));
+                assert!(!queue.approve(&attempt, None, "main-account-2", &receiver));
+            }
+        }
+    }
+
+    #[test]
+    fn an_approved_receiver_cannot_cross_a_same_url_document_replacement() {
+        let mut queue = PresentationQueue::default();
+        let receiver: Url = "tauri://localhost/account/index.html?view=account".parse().unwrap();
+        let physical = queue.window_created();
+        queue.document_started(physical, &receiver);
+        queue.enqueue("instances", 4, true, None);
+        let intent = queue.current(4).unwrap();
+        let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+        assert!(queue.approve(&attempt, None, "main-account-2", &receiver));
+        let approved = queue.current(4).unwrap();
+        queue.document_started(physical, &receiver);
+        assert!(!queue.can_start(approved, "main-account-2", &receiver));
+    }
+
     // A footer/menu intent used to disappear when its deferred callback met a
     // busy window or a lifecycle rebind. Only actual admission may settle it.
+    // A4: a repeated initial request is safe, but a new physical window or
+    // same-URL reload must retire the unspent receipt permanently.
+    #[test]
+    fn logout_receipt_follows_exact_document_and_is_consumed_once() {
+        for interruption in ["none", "reload", "window", "owner", "generation"] {
+            let mut queue = PresentationQueue::default();
+            let window = queue.window_created();
+            let url: Url = "tauri://localhost/account/index.html?view=sign-out&locale=zh"
+                .parse()
+                .unwrap();
+            let result = DirectResult::new_sign_out_intent(8);
+            let DirectResult::SignOutIntent { ref intent_id, .. } = result else {
+                unreachable!()
+            };
+            let id = intent_id.clone();
+            queue.logout = Some(LogoutReceipt {
+                result,
+                owner: 7,
+                generation: 8,
+                window,
+                document: 1,
+                destination: url.clone(),
+            });
+            assert!(queue.logout_result(7, 8, &url).is_none());
+            queue.document_started(window, &url);
+            for _ in 0..2 {
+                assert!(
+                    matches!(queue.logout_result(7,8,&url),Some(DirectResult::SignOutIntent {intent_id,..}) if intent_id==id)
+                );
+            }
+            let (owner, generation) = match interruption {
+                "reload" => {
+                    queue.document_started(window, &url);
+                    (7, 8)
+                }
+                "window" => {
+                    queue.window_created();
+                    queue.document_started(window, &url);
+                    (7, 8)
+                }
+                "owner" => (9, 9),
+                "generation" => (7, 9),
+                _ => (7, 8),
+            };
+            assert_eq!(
+                queue.consume_logout(&id, owner, generation, &url),
+                interruption == "none"
+            );
+            assert!(!queue.consume_logout(&id, 7, 8, &url));
+            assert!(queue.logout_result(7, 8, &url).is_none());
+        }
+    }
+    #[test]
+    fn locale_grammar_does_not_relax_presentation_authority() {
+        assert_eq!(
+            presentation_destination(&"avibe://desktop/sign-out?locale=zh&native_request=1-2".parse().unwrap()),
+            Some(("sign-out", Some("1-2".into()), Some("zh")))
+        );
+        for query in [
+            "locale=zh&locale=en",
+            "locale=fr",
+            "locale=zh&action=sign_out",
+            "native_request=1&native_request=2",
+        ] {
+            assert!(presentation_destination(&format!("avibe://desktop/sign-out?{query}").parse().unwrap()).is_none());
+        }
+    }
     #[test]
     fn presentation_intents_survive_retries_until_the_exact_navigation_is_admitted() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4, false);
+        queue.enqueue("updates", 4, false, None);
         let first = queue.current(4).unwrap();
         // Lock contention, pending presentation and failed navigation leave the
         // same intent available. Lifecycle generation is deliberately not owner.
         for _ in 0..3 {
             assert_eq!(queue.current(4), Some(first));
         }
-        queue.enqueue("account", 4, false);
+        queue.enqueue("account", 4, false, None);
         let newer = queue.current(4).unwrap();
         queue.complete(first.id);
         assert_eq!(queue.current(4), Some(newer));
@@ -1469,10 +2653,10 @@ mod tests {
     #[test]
     fn a_new_explicit_action_supersedes_an_old_presentation_without_reviving_it() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4, false);
+        queue.enqueue("updates", 4, false, None);
         let old = queue.current(4).unwrap();
         assert!(queue.current(5).is_none());
-        queue.enqueue("updates", 5, false);
+        queue.enqueue("updates", 5, false, None);
         let current = queue.current(5).unwrap();
         queue.complete(old.id);
         assert_eq!(queue.current(5), Some(current));
@@ -1490,6 +2674,7 @@ mod tests {
                 view: "updates",
                 owner: 4,
                 guarded: true,
+                locale: None,
             },
             receiver: "tauri://localhost/account/index.html?view=instances".into(),
         };
@@ -1501,7 +2686,7 @@ mod tests {
     #[test]
     fn guarded_presentation_retries_only_proven_non_dispatch_and_fences_callbacks() {
         let mut queue = PresentationQueue::default();
-        queue.enqueue("updates", 4, true);
+        queue.enqueue("updates", 4, true, None);
         let intent = queue.current(4).unwrap();
         let first = queue
             .begin_guard(intent, "https://fixture.avibe.bot/apps/1".into())
@@ -1523,10 +2708,10 @@ mod tests {
         assert!(queue.current(4).is_none());
         assert!(queue.guard.is_none());
 
-        queue.enqueue("updates", 4, true);
+        queue.enqueue("updates", 4, true, None);
         let intent = queue.current(4).unwrap();
         let old = queue.begin_guard(intent, retry.receiver.clone()).unwrap();
-        queue.enqueue("instances", 4, true);
+        queue.enqueue("instances", 4, true, None);
         let successor = queue.current(4).unwrap();
         queue.guard_result(&old, "\"dispatched\"");
         assert_eq!(queue.current(4), Some(successor));
@@ -1543,7 +2728,7 @@ mod tests {
         for callback_first in [false, true] {
             let mut queue = PresentationQueue::default();
             let receiver = Url::parse("tauri://localhost/account/index.html?view=instances").unwrap();
-            queue.enqueue("updates", 4, true);
+            queue.enqueue("updates", 4, true, None);
             let intent = queue.current(4).unwrap();
             let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
             let token = attempt.token();
@@ -1561,7 +2746,7 @@ mod tests {
                 .guard_authority(&token, "updates", 4, &Url::parse("https://fixture.avibe.bot/").unwrap())
                 .is_none());
             // Approved navigation consumes the receipt in the same queue lock.
-            queue.enqueue("updates", 4, false);
+            queue.enqueue("updates", 4, false, None);
             let approved = queue.current(4).unwrap();
             queue.guard_result(&attempt, "\"dispatched\"");
             assert_eq!(queue.current(4), Some(approved));
@@ -1570,22 +2755,41 @@ mod tests {
         }
         let mut queue = PresentationQueue::default();
         let receiver = Url::parse("https://fixture.avibe.bot/apps/1").unwrap();
-        queue.enqueue("updates", 4, true);
+        queue.enqueue("updates", 4, true, None);
         let intent = queue.current(4).unwrap();
         let old = queue.begin_guard(intent, receiver.to_string()).unwrap();
         queue.guard_result(&old, "\"dispatched\"");
-        queue.enqueue("instances", 4, true);
+        queue.enqueue("instances", 4, true, None);
         assert!(queue.guard_authority(&old.token(), "updates", 4, &receiver).is_none());
         assert!(!queue.owns_guard_authority(&old));
     }
 
     #[test]
+    fn a_same_url_reload_cannot_reuse_a_previous_guard_approval() {
+        let mut queue = PresentationQueue::default();
+        let receiver = Url::parse("http://127.0.0.1:1984/").unwrap();
+        let window = queue.window_created();
+        queue.document_started(window, &receiver);
+        queue.enqueue("sign-out", 4, true, None);
+        let intent = queue.current(4).unwrap();
+        let attempt = queue.begin_guard(intent, receiver.to_string()).unwrap();
+        queue.guard_result(&attempt, "\"dispatched\"");
+        assert!(queue
+            .guard_authority(&attempt.token(), "sign-out", 4, &receiver)
+            .is_some());
+        queue.document_started(window, &receiver);
+        assert!(queue
+            .guard_authority(&attempt.token(), "sign-out", 4, &receiver)
+            .is_none());
+    }
+
+    #[test]
     fn native_presentation_tokens_have_no_malformed_or_uncorrelated_fallback() {
         let parse = |url| presentation_destination(&Url::parse(url).unwrap());
-        assert_eq!(parse("avibe://updates"), Some(("updates", None)));
+        assert_eq!(parse("avibe://updates"), Some(("updates", None, None)));
         assert_eq!(
             parse("avibe://desktop/updates?native_request=1-2"),
-            Some(("updates", Some("1-2".into())))
+            Some(("updates", Some("1-2".into()), None))
         );
         for url in [
             "avibe://desktop/updates?native_request=",
@@ -1605,15 +2809,12 @@ mod tests {
     fn presentation_sources_require_owned_documents_not_an_idle_window() {
         let local = LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap();
         let mut view = Presentation {
+            locale: None,
             state: ClientState::new("fixture".into(), "0.1.0".into(), serde_json::json!({})),
-            previous: None,
             account: false,
-            disposable: false,
             staging: false,
             pending_commit: None,
-            local_owner: None,
             remote: None,
-            route: None,
         };
         for raw_bundle in ["tauri://localhost", "http://tauri.localhost"] {
             let bundle = Url::parse(raw_bundle).unwrap();

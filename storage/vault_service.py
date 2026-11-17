@@ -3095,6 +3095,12 @@ def audit(
     if snapshot is not None and (delivery is None or isinstance(delivery, dict)):
         stored_delivery = dict(delivery or {})
         stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = snapshot
+        if event == "proxied":
+            from storage.compatibility import permits_compact_writes
+            from storage.vault_snapshots import intern
+
+            if permits_compact_writes(conn):
+                stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = {"ref": intern(conn, snapshot)}
     # The audit trail is a non-secret summary, and callers now hand it the same
     # requester payload the request row stores. That payload may carry the
     # internal authorization snapshot, which belongs to the request's deferred
@@ -6728,6 +6734,9 @@ def _request_collection_columns():
         case((new_bitcoin, None), else_=vault_requests.c.delivery).label("delivery"),
         new_bitcoin.label("_bitcoin_summary"),
         case((new_bitcoin, func.json_extract(_safe_request_json(vault_requests.c.delivery), "$.signing_key.secret_id")), else_=None).label("_saved_secret_id"),
+        # Display-only capture: do not hydrate the card or consult live metadata.
+        case((and_(new_bitcoin, func.json_extract(_safe_request_json(vault_requests.c.delivery), "$.bitcoin_identity.protection") == "protected"),
+              "protected"), else_=None).label("_summary_protection"),
     ])
     for label, column, path in (
         ("requester", vault_requests.c.requester, "$.session_id"),
@@ -6773,13 +6782,19 @@ def _new_bitcoin_request_summary(row: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "id": row["id"], "request_type": "sign", "status": row["status"],
         "created_at": row["created_at"], "decided_at": row.get("decided_at"), "expires_at": row.get("expires_at"),
-        "secret_name": None, "requester": None, "delivery": None,
+        "secret_name": row.get("secret_name"), "protection": row.get("_summary_protection"),
+        "requester": None, "delivery": None,
         "message_id": None, "card": None, "session": None,
     }
     encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(encoded) > 1024 and summary["secret_name"] is not None:
+        # Legal names have no global length cap. Keep the whole name or the
+        # existing generic fallback, never a truncated name or a dropped row.
+        summary["secret_name"] = None
+        encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(encoded) > 1024:
-        # Never truncate/drop a row or change count semantics to repair a bad
-        # producer/serializer. All valid generated identifiers/times fit here.
+        # Invalid generated identifiers/times still fail rather than changing
+        # collection count semantics to repair a bad producer/serializer.
         raise InvalidRequestError("new Bitcoin summary exceeds its 1,024-byte bound")
     return summary
 

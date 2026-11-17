@@ -13,6 +13,7 @@ import { useApi, type BitcoinAddressType, type VaultCreatePayload, type VaultSec
 import { ProtectedHdDesignState } from './protectedHdDesign';
 import { blockHdWallet, isHdWalletBlocked, unblockHdWallet } from './vaultHdQuarantine';
 import { openVaultAuthorizationWindow, VaultSandboxError } from './vaultSandboxClient';
+import { isVaultPasskeyFallback, vaultPasskeyNeedsBrowser } from './vaultBrowserHandoff';
 import {
   parseProtectedHdReconciliation,
   protectedHdMatches,
@@ -166,7 +167,9 @@ export function useProtectedHdCreate() {
   const start = useCallback((input: ProtectedHdStart) => {
     const authorization = openVaultAuthorizationWindow();
     if (!authorization) {
-      setPhase({ kind: 'failed', reason: 'blocked' });
+      // A desktop app that refused the window moved this page to the browser, whose hand-off now
+      // says so; the browser's pop-up advice would be wrong there.
+      setPhase(vaultPasskeyNeedsBrowser() ? { kind: 'idle' } : { kind: 'failed', reason: 'blocked' });
       return Promise.resolve();
     }
     operation.current = null;
@@ -187,7 +190,8 @@ export function useProtectedHdCreate() {
       try {
         sealed = await input.seal(input.name, input.mode, authorization.id);
       } catch (error) {
-        setPhase({ kind: 'failed', reason: launchFailure(error) });
+        // Nothing was saved. When this failure moved the app to the browser, its hand-off says so.
+        setPhase(isVaultPasskeyFallback(error) ? { kind: 'idle' } : { kind: 'failed', reason: launchFailure(error) });
         return;
       } finally {
         authorization.close();
