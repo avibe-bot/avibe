@@ -204,6 +204,9 @@ private final class SheetFixtureRootViewController: UIViewController,
         sheetController = controller
         publishReadiness()
         observeDocument(in: controller)
+        // Only the plain sheet state: the selection and stall states time
+        // touches, and reading the page's text forces layout.
+        if realBundle, captureState == "default" { observePageRender(in: controller) }
         controller.overrideUserInterfaceStyle = overrideUserInterfaceStyle
         if showsFullPage {
             addChild(controller)
@@ -318,6 +321,57 @@ private final class SheetFixtureRootViewController: UIViewController,
     /// with a selection.
     private var showsFullPage: Bool {
         captureState == "first-run" || captureState == "page-switching"
+    }
+
+    /// Page-side receipts for the real bundle, logged when they change:
+    /// readiness, body text length, `#root` children, window errors and
+    /// rejections, and when "You're in" first rendered after presentation.
+    /// A slow first paint and a page that never renders read differently.
+    private var pageReceiptTask: Task<Void, Never>?
+
+    private func observePageRender(in controller: MobileOnboardingViewController) {
+        guard let webView = controller.view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
+        webView.configuration.userContentController.addUserScript(WKUserScript(
+            source: """
+            window.__fixtureErrors = [];
+            window.addEventListener('error', e => window.__fixtureErrors.push(String(e.message || e.type)));
+            window.addEventListener('unhandledrejection', e => window.__fixtureErrors.push('rejection: ' + String(e.reason)));
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        let started = ProcessInfo.processInfo.systemUptime
+        pageReceiptTask?.cancel()
+        pageReceiptTask = Task { @MainActor [weak self, weak webView] in
+            var last = ""
+            var rendered = false
+            while !Task.isCancelled, let webView,
+                  ProcessInfo.processInfo.systemUptime - started < 150 {
+                let probe = (try? await webView.evaluateJavaScript(
+                    """
+                    JSON.stringify({
+                      ready: document.readyState,
+                      text: document.body ? document.body.innerText.length : -1,
+                      youreIn: !!(document.body && /You’re in|正在使用/.test(document.body.innerText)),
+                      root: document.getElementById('root') ? document.getElementById('root').childElementCount : -1,
+                      errors: (window.__fixtureErrors || []).slice(0, 5)
+                    })
+                    """
+                ) as? String) ?? "unavailable"
+                let elapsed = ProcessInfo.processInfo.systemUptime - started
+                if !rendered, probe.contains("\"youreIn\":true") {
+                    rendered = true
+                    NSLog("[page receipt] first render %.2f s after presentation; documentReady=%ld",
+                          elapsed, (self?.documentReady ?? false) ? 1 : 0)
+                }
+                if probe != last {
+                    NSLog("[page receipt] %.2f s %@", elapsed, probe)
+                    last = probe
+                }
+                if rendered { return }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
     }
 
     private func publishReadiness() {
@@ -470,6 +524,7 @@ private final class SheetFixtureRootViewController: UIViewController,
         geometryDisplayLink = nil
         lastGeometrySignature = nil
         runtimeRouteTask?.cancel()
+        pageReceiptTask?.cancel()
         runtimeWebView?.removeFromSuperview()
         runtimeWebView = nil
         guard let controller = sheetController else { return false }
