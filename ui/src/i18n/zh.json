@@ -1339,7 +1339,11 @@
         },
         "row": {
           "current": "{{source}} → {{model}}",
-          "currentTakeover": "{{source}} → {{model}}（已自动切换）"
+          "currentTakeover": "{{source}} → {{model}}（已自动切换）",
+          "usedBy": "{{names}} 在用",
+          "usedByMore_one": "{{names}} 等 {{total}} 个在用",
+          "usedByMore_other": "{{names}} 等 {{total}} 个在用",
+          "usersSeparator": "、"
         },
         "group": {
           "subtitle": {
