@@ -7,7 +7,9 @@ import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { BotsContext, type BotsState } from '@/context/BotsContext';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
+import type { Bot } from '@/lib/bots';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
@@ -571,6 +573,60 @@ describe('SettingsModelsPage surface branches', () => {
 
     await userEvent.click(within(offRow).getByRole('button', { name: /Turn on Codex in Settings › Backends|去启用 Codex（设置 › 后端）/ }));
     expect(screen.getByTestId('location').textContent).toBe('/settings/backends/codex');
+  });
+
+  it('names under each model who uses it: a Bot by its own name, any other Agent by its Agent name', async () => {
+    const model = (id: string): BackendModel => ({
+      id, display_name: null, origin: 'manual', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true,
+    });
+    const uses = (modelId: string, ...names: string[]) => names.map((name) => ({ name, effective_model_id: modelId, supply_status: 'ok' as const, route_reason: null }));
+    const vibey: AgentSupply = {
+      ...emptyVibeyAgent,
+      sources: { order: [retainedSource.id], eligibility: [] },
+      catalog_models: [model('opus'), model('trio'), model('sonnet'), model('haiku')],
+      // The unmapped Agent comes first, the Bot's Agent second: Bots read first.
+      named_agents: [
+        ...uses('opus', 'reviewer', 'main'),
+        ...uses('trio', 't1', 't2', 't3'),
+        ...uses('sonnet', 'a1', 'a2', 'a3', 'a4', 'a5'),
+        { name: 'unset', effective_model_id: null, supply_status: null, route_reason: null },
+      ],
+    };
+    const weibi: Bot = { handle: 'main', display_name: '歪比', avatar: null, role: '', agent_name: 'main', session_id: 'ses_main', builtin: true, hide_details: true };
+    const bots = { botForAgent: (name: string | null | undefined) => (name === weibi.agent_name ? weibi : undefined), displayName: (bot: Bot) => bot.display_name } as unknown as BotsState;
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([vibey]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <BotsContext.Provider value={bots}>
+            <SettingsModelsPage />
+          </BotsContext.Provider>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const row = (modelId: string) => view.container.querySelector<HTMLElement>(`[data-route-model="${modelId}"]`);
+    // What the line shows, and what the row's button reads out (every name, none counted).
+    const users = (modelId: string) => row(modelId)?.querySelector('[data-model-users] > [aria-hidden="true"]:not(svg)')?.textContent ?? null;
+    const described = (modelId: string) => {
+      const id = row(modelId)?.querySelector('button')?.getAttribute('aria-describedby');
+      return id ? document.getElementById(id)?.textContent ?? null : null;
+    };
+    await waitFor(() => expect(users('opus')).not.toBeNull());
+    expect(users('opus')).toMatch(/^(?:歪比、reviewer 在用|Used by 歪比, reviewer)$/);
+    expect(users('trio')).toMatch(/^(?:t1、t2、t3 在用|Used by t1, t2, t3)$/);
+    expect(users('sonnet')).toMatch(/^(?:a1、a2 等 5 个在用|Used by a1, a2 and 3 more)$/);
+    expect(described('sonnet')).toMatch(/^(?:a1、a2、a3、a4、a5 在用|Used by a1, a2, a3, a4, a5)$/);
+    expect(users('haiku')).toBeNull();
+    expect(row('haiku')?.querySelector('button')?.hasAttribute('aria-describedby')).toBe(false);
+    expect(row('opus')?.querySelector('[data-model-users] button')).toBeNull();
   });
 
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
