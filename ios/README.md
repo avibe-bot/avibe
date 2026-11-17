@@ -279,7 +279,7 @@ origin and its navigation test in the same change.
 ## App Shortcuts
 
 `AppShortcuts.swift` holds the App's one `AppShortcutsProvider`. It offers
-"Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") to Siri, Spotlight, the
+"Open Main Bot" (`zh-Hans`: "打开主伙伴") to Siri, Spotlight, the
 Shortcuts app, and Settings > Action Button > Shortcut. Its intent,
 `OpenMainBotIntent`, runs in the App's own process with the App in front
 (`openAppWhenRun`, and `supportedModes` `.foreground(.immediate)` from
@@ -300,9 +300,9 @@ localized in `Localizable.xcstrings` and `AppShortcuts.xcstrings`. Xcode
 extracts the metadata the system reads into `Metadata.appintents` in the
 App bundle, and an XCTest checks it there.
 
-### Speak to Main Bot (background voice)
+### Talk to Main Bot (background voice)
 
-The provider also offers "Speak to Main Bot" (`zh-Hans`: "对主伙伴说") from
+The provider also offers "Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") from
 iOS 18, which is why the deployment target is iOS 17.4
 (`AppShortcutsBuilder.buildLimitedAvailability`). Its intent,
 `SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's

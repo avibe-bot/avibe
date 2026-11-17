@@ -1,7 +1,7 @@
 import AppIntents
 import Foundation
 
-/// 「对主伙伴说」: the Action Button (or Shortcuts, Siri, Spotlight) records
+/// 「和主伙伴说话」: the Action Button (or Shortcuts, Siri, Spotlight) records
 /// what the user says without bringing Avibe to the front, and sends it to
 /// the main Bot of the selected instance.
 ///
@@ -14,7 +14,7 @@ import Foundation
 /// (developer.apple.com/documentation/appintents/audiorecordingintent).
 @available(iOS 18.0, *)
 struct SpeakToMainBotIntent: AudioRecordingIntent {
-    static let title: LocalizedStringResource = "Speak to Main Bot"
+    static let title: LocalizedStringResource = "Talk to Main Bot"
     static let description = IntentDescription(
         "Records what you say and sends it to your main Bot without opening Avibe."
     )

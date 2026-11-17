@@ -8,18 +8,15 @@ struct AvibeAppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: OpenMainBotIntent(),
-            phrases: [
-                "Talk to Main Bot in \(.applicationName)",
-                "Open Main Bot in \(.applicationName)",
-            ],
-            shortTitle: "Talk to Main Bot",
+            phrases: ["Open Main Bot in \(.applicationName)"],
+            shortTitle: "Open Main Bot",
             systemImageName: "bubble.left.and.bubble.right"
         )
         if #available(iOS 18.0, *) {
             AppShortcut(
                 intent: SpeakToMainBotIntent(),
-                phrases: ["Speak to Main Bot in \(.applicationName)"],
-                shortTitle: "Speak to Main Bot",
+                phrases: ["Talk to Main Bot in \(.applicationName)"],
+                shortTitle: "Talk to Main Bot",
                 systemImageName: "waveform"
             )
         }
@@ -40,7 +37,7 @@ struct OpenMainBotIntent: AppIntent {
     /// for a notification whose chat is gone.
     static let path = "/chat/ses_main?from=notification"
 
-    static let title: LocalizedStringResource = "Talk to Main Bot"
+    static let title: LocalizedStringResource = "Open Main Bot"
 
     /// iOS 17 through 25. iOS 26 reads `supportedModes` instead.
     static let openAppWhenRun = true

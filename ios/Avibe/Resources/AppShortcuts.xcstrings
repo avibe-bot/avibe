@@ -32,22 +32,6 @@
           }
         }
       }
-    },
-    "Speak to Main Bot in ${applicationName}" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Speak to Main Bot in ${applicationName}"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "用${applicationName}对主伙伴说"
-          }
-        }
-      }
     }
   },
   "version" : "1.0"
