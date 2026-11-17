@@ -53,6 +53,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         UNUserNotificationCenter.current().delegate = self
         #if DEBUG
         VoiceCaptureProbeSetup.runIfRequested()
+        VoiceCaptureProbeSetup.showcaseIfRequested()
         #endif
         return true
     }

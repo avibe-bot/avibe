@@ -1,4 +1,5 @@
 #if DEBUG
+import ActivityKit
 import AppIntents
 import Foundation
 import WebKit
@@ -66,6 +67,41 @@ enum VoiceCaptureProbeSetup {
             if !cookies.isEmpty { return cookies.map(\.name).sorted() }
         }
         return []
+    }
+
+    /// `-voiceCaptureShowcase <phase> [reason] [heard]`: shows one Live
+    /// Activity state, with no recording, so CI can capture the frames.
+    static func showcaseIfRequested() {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-voiceCaptureShowcase"),
+              index + 1 < arguments.count,
+              let phase = VoiceCaptureAttributes.Phase(rawValue: arguments[index + 1])
+        else { return }
+        let reason = index + 2 < arguments.count
+            ? VoiceCaptureAttributes.Reason(rawValue: arguments[index + 2]) : nil
+        let heard = index + 3 < arguments.count ? arguments[index + 3] : nil
+        Task { @MainActor in
+            for activity in Activity<VoiceCaptureAttributes>.activities {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            let now = Date()
+            let state = VoiceCaptureAttributes.ContentState(
+                phase: phase,
+                startedAt: now.addingTimeInterval(-7),
+                endedAt: phase == .listening ? nil : now,
+                reason: reason,
+                heard: heard
+            )
+            do {
+                _ = try Activity.request(
+                    attributes: VoiceCaptureAttributes(botName: nil),
+                    content: ActivityContent(state: state, staleDate: nil, relevanceScore: 100)
+                )
+                VoiceCaptureProbe.record("showcase \(phase.rawValue) \(reason?.rawValue ?? "-")")
+            } catch {
+                VoiceCaptureProbe.record("showcase failed \(error)")
+            }
+        }
     }
 
     static func runIfRequested() {

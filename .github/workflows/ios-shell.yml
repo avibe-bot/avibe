@@ -187,6 +187,27 @@ jobs:
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
             -only-testing:AvibeSheetFixtureTests/VoiceCaptureProbeUITests \
+            -only-testing:AvibeSheetFixtureTests/VoiceCaptureShowcaseUITests \
+            CODE_SIGNING_ALLOWED=NO \
+            test-without-building
+
+      - name: Capture the Live Activity frames in zh-Hans (draft only)
+        if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          xcrun simctl spawn "$SIMULATOR_ID" defaults write -g AppleLanguages -array zh-Hans
+          xcrun simctl spawn "$SIMULATOR_ID" defaults write -g AppleLocale zh_CN
+          xcrun simctl shutdown "$SIMULATOR_ID"
+          xcrun simctl bootstatus "$SIMULATOR_ID" -b
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme AvibeSheetFixture \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/ShowcaseZh.xcresult" \
+            -only-testing:AvibeSheetFixtureTests/VoiceCaptureShowcaseUITests \
             CODE_SIGNING_ALLOWED=NO \
             test-without-building
 
@@ -215,6 +236,9 @@ jobs:
           gzip -f "$RUNNER_TEMP/probe/simulator-full.log" || true
           xcrun xcresulttool export attachments --path "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
             --output-path "$RUNNER_TEMP/probe/attachments" > "$RUNNER_TEMP/probe/attachments.txt" 2>&1 || true
+          mkdir -p "$RUNNER_TEMP/probe/frames-zh"
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ShowcaseZh.xcresult" \
+            --output-path "$RUNNER_TEMP/probe/frames-zh" > /dev/null 2>&1 || true
           echo "== app probe log"; cat "$RUNNER_TEMP/probe/voice-capture-probe.log" || true
           echo "== stand-in instance log"; cat "$RUNNER_TEMP/probe/probe-server.log" || true
           echo "== takes"; cat "$RUNNER_TEMP/probe/takes.txt"

@@ -36,8 +36,7 @@ final class VoiceCaptureProbeUITests: XCTestCase {
 
         // Round 1: the App is suspended in the background.
         note("round 1 app state before: \(avibe.state.rawValue)")
-        var candidates: [Trigger] = [.spotlight, .siri]
-        if actionButtonReady { candidates.insert(.actionButton, at: 0) }
+        let candidates: [Trigger] = actionButtonReady ? [.actionButton] : []
         var working: Trigger?
         for trigger in candidates {
             let before = serverRequestCount()
@@ -133,58 +132,61 @@ final class VoiceCaptureProbeUITests: XCTestCase {
     }
 
     /// Settings › Action Button › Shortcut › Avibe › Speak to Main Bot.
+    /// The chooser is a remote view that loads slowly; two attempts.
     private func configureActionButton() -> Bool {
         guard XCUIDevice.shared.hasHardwareButton(.action) else { return false }
-        settings.launch()
-        sleep(2)
-        let row = settings.cells.containing(NSPredicate(format: "label CONTAINS[c] %@", "Action Button")).firstMatch
-        if !row.waitForExistence(timeout: 3) {
-            settings.swipeUp()
+        for attempt in 1...2 {
+            if configureActionButtonOnce(attempt: attempt) { return true }
+            settings.terminate()
+            XCUIDevice.shared.press(.home)
+            sleep(2)
         }
-        guard row.waitForExistence(timeout: 3) else {
-            shot("ab-no-row")
-            note("action button: no Settings row; tree:\n\(settings.debugDescription.prefix(5000))")
+        return false
+    }
+
+    private func configureActionButtonOnce(attempt: Int) -> Bool {
+        settings.launch()
+        sleep(3)
+        let row = settings.cells.containing(NSPredicate(format: "label CONTAINS[c] %@", "Action Button")).firstMatch
+        if !row.waitForExistence(timeout: 5) { settings.swipeUp() }
+        guard row.waitForExistence(timeout: 5) else {
+            note("ab\(attempt): no Settings row")
             return false
         }
         row.tap()
-        sleep(2)
-        shot("ab-1-page")
-        for _ in 0..<12 {
-            if settings.staticTexts["Shortcut"].exists { break }
+        sleep(3)
+        let choose = settings.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] %@", "Choose a Shortcut")).firstMatch
+        for _ in 0..<14 {
+            if choose.exists && choose.isHittable { break }
             settings.swipeLeft()
-            sleep(1)
+            sleep(2)
         }
-        shot("ab-2-shortcut-page")
-        let choose = settings.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Shortcut")).allElementsBoundByIndex
-            .first { $0.isHittable && $0.label != "Shortcut" }
-        guard let choose else {
-            note("action button: no choose button; tree:\n\(settings.debugDescription.prefix(6000))")
+        shot("ab\(attempt)-shortcut-page")
+        guard choose.exists, choose.isHittable else {
+            note("ab\(attempt): no choose button; tree:\n\(settings.debugDescription.prefix(4000))")
             return false
         }
         choose.tap()
-        sleep(2)
-        shot("ab-3-chooser")
-        let avibeEntry = settings.descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", "Avibe")).firstMatch
-        if avibeEntry.waitForExistence(timeout: 15), avibeEntry.isHittable {
-            avibeEntry.tap()
-            sleep(2)
+        let any = settings.descendants(matching: .any)
+        let avibeEntry = any.matching(NSPredicate(format: "label == %@", "Avibe")).firstMatch
+        let direct = any.matching(NSPredicate(format: "label CONTAINS[c] %@", "Speak to Main Bot")).firstMatch
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline, !(direct.exists && direct.isHittable), !(avibeEntry.exists && avibeEntry.isHittable) {
+            sleep(1)
         }
-        shot("ab-4-avibe")
-        let shortcut = settings.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS[c] %@", "Speak to Main Bot")).firstMatch
-        _ = shortcut.waitForExistence(timeout: 20)
-        shot("ab-4b-waited")
-        guard shortcut.exists, shortcut.isHittable else {
-            XCUIDevice.shared.press(.home)
-            XCUIDevice.shared.press(.home)
-            settings.terminate()
-            note("action button: no Speak to Main Bot; tree:\n\(settings.debugDescription.prefix(6000))")
+        shot("ab\(attempt)-chooser")
+        if !(direct.exists && direct.isHittable), avibeEntry.exists, avibeEntry.isHittable {
+            avibeEntry.tap()
+            _ = direct.waitForExistence(timeout: 20)
+        }
+        shot("ab\(attempt)-avibe")
+        guard direct.exists, direct.isHittable else {
+            note("ab\(attempt): no Speak to Main Bot; tree:\n\(settings.debugDescription.prefix(4000))")
             return false
         }
-        shortcut.tap()
+        direct.tap()
         sleep(2)
-        shot("ab-5-chosen")
+        shot("ab\(attempt)-chosen")
         settings.terminate()
         XCUIDevice.shared.press(.home)
         sleep(1)

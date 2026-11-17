@@ -115,6 +115,7 @@
 		17000000000000000000000001 /* VoiceCaptureProbeSetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000001 /* VoiceCaptureProbeSetup.swift */; };
 		17000000000000000000000002 /* VoiceCaptureProbeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000002 /* VoiceCaptureProbeUITests.swift */; };
 		17000000000000000000000003 /* VoiceCaptureProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000003 /* VoiceCaptureProbeTests.swift */; };
+		17000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -262,6 +263,7 @@
 		27000000000000000000000001 /* VoiceCaptureProbeSetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeSetup.swift; sourceTree = "<group>"; };
 		27000000000000000000000002 /* VoiceCaptureProbeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeUITests.swift; sourceTree = "<group>"; };
 		27000000000000000000000003 /* VoiceCaptureProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeTests.swift; sourceTree = "<group>"; };
+		27000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureShowcaseUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -493,6 +495,7 @@
 				930000000000000000000001 /* InstanceSheetGestureUITests.swift */,
 				930000000000000000000003 /* RealBundleCaptureUITests.swift */,
 				27000000000000000000000002 /* VoiceCaptureProbeUITests.swift */,
+				27000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift */,
 			);
 			path = AvibeSheetFixtureTests;
 			sourceTree = "<group>";
@@ -1002,6 +1005,7 @@
 				910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */,
 				91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */,
 				17000000000000000000000002 /* VoiceCaptureProbeUITests.swift in Sources */,
+				17000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
