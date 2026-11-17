@@ -209,23 +209,106 @@ describe('SystemScheduleForwarder', () => {
     });
   });
 
-  it('retries Native recovery instead of terminalizing a local ledger write failure', async () => {
+  it.each([
+    { action: 'create', code: 'local_state_write_failed', systemIdentifier: receipt.systemIdentifier },
+    { action: 'create', code: 'local_state_unavailable', systemIdentifier: null },
+    { action: 'cancel', code: 'local_state_write_failed', systemIdentifier: receipt.systemIdentifier },
+    { action: 'cancel', code: 'local_state_unavailable', systemIdentifier: null },
+  ] as const)('keeps $action sticky across $code until Native recovery', async ({
+    action, code, systemIdentifier,
+  }) => {
     let reactivate: (() => void) | undefined;
     activity.onPageReactivated.mockImplementation((callback: () => void) => {
       reactivate = callback;
       return () => undefined;
     });
-    const localWriteFailure = {
-      ...receipt,
-      state: 'failed' as const,
-      error: {
-        code: 'local_state_write_failed',
-        message: 'The system item changed, but Avibe could not finish saving its management record.',
-      },
+    const cancelRequest = {
+      requestId: 'cancel-recovery',
+      operationId: request.operationId,
+      kind: request.kind,
+      purpose: 'user' as const,
     };
-    native.nativeSystemScheduleRequest
-      .mockResolvedValueOnce(localWriteFailure)
-      .mockResolvedValueOnce(receipt);
+    const claim = action === 'create'
+      ? createClaim
+      : { ...createClaim, action, request: cancelRequest };
+    const recoveredReceipt = action === 'create'
+      ? receipt
+      : { ...receipt, requestId: cancelRequest.requestId, state: 'cancelled' as const };
+    const localFailure = {
+      ...recoveredReceipt,
+      systemIdentifier,
+      state: 'failed' as const,
+      error: { code, message: 'Local alarm and reminder records are not available.' },
+    };
+    let recovered = false;
+    const nativeCall = action === 'create'
+      ? native.nativeSystemScheduleRequest
+      : native.nativeSystemScheduleCancel;
+    nativeCall.mockImplementation(async () => recovered ? recoveredReceipt : localFailure);
+    let offered = false;
+    let accepted = false;
+    apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
+      if (path === '/api/system-schedule/claim') {
+        const body = JSON.parse(init.body as string);
+        if (accepted || offered || body.exclude_lease_tokens.includes(claim.leaseToken)) {
+          return Response.json({ ok: true, claim: null });
+        }
+        offered = true;
+        return Response.json({ ok: true, claim });
+      }
+      accepted = true;
+      return Response.json({ ok: true });
+    });
+
+    render(<SystemScheduleForwarder />);
+    await waitFor(() => expect(callsFor('/api/system-schedule/claim').length).toBeGreaterThanOrEqual(2));
+    expect(nativeCall).toHaveBeenCalledOnce();
+
+    offered = false;
+    reactivate?.();
+    await waitFor(() => expect(callsFor('/api/system-schedule/claim').length).toBeGreaterThan(2));
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(0);
+    expect(JSON.parse(callsFor('/api/system-schedule/claim')[2][1].body)
+      .exclude_lease_tokens).not.toContain(claim.leaseToken);
+    expect(nativeCall).toHaveBeenCalledTimes(2);
+
+    recovered = true;
+    offered = false;
+    reactivate?.();
+    await waitFor(() => expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1));
+    expect(JSON.parse(callsFor('/api/system-schedule/receipt')[0][1].body)).toEqual({
+      instance_id: 'instance-1',
+      device_id: 'device-1',
+      lease_token: claim.leaseToken,
+      receipt: recoveredReceipt,
+    });
+    expect(nativeCall).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    { action: 'create', state: 'user_denied', code: 'user_denied' },
+    { action: 'create', state: 'expired', code: 'request_expired' },
+    { action: 'create', state: 'failed', code: 'operation_conflict' },
+    { action: 'create', state: 'stale_context', code: 'stale_context' },
+    { action: 'cancel', state: 'failed', code: 'item_not_found' },
+  ] as const)('still uploads the ordinary $action terminal error $code', async ({
+    action, state: terminalState, code,
+  }) => {
+    const claimRequest = action === 'create' ? request : {
+      requestId: 'cancel-terminal',
+      operationId: request.operationId,
+      kind: request.kind,
+      purpose: 'user' as const,
+    };
+    const terminalReceipt = {
+      ...receipt,
+      requestId: claimRequest.requestId,
+      state: terminalState,
+      systemIdentifier: null,
+      error: { code, message: 'A terminal Native outcome.' },
+    };
+    native.nativeSystemScheduleRequest.mockResolvedValue(terminalReceipt);
+    native.nativeSystemScheduleCancel.mockResolvedValue(terminalReceipt);
     let accepted = false;
     apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
       if (path === '/api/system-schedule/claim') {
@@ -234,7 +317,7 @@ describe('SystemScheduleForwarder', () => {
           ok: true,
           claim: accepted || body.exclude_lease_tokens.includes(createClaim.leaseToken)
             ? null
-            : createClaim,
+            : { ...createClaim, action, request: claimRequest },
         });
       }
       accepted = true;
@@ -242,13 +325,9 @@ describe('SystemScheduleForwarder', () => {
     });
 
     render(<SystemScheduleForwarder />);
-    await waitFor(() => expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce());
-    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(0);
-
-    reactivate?.();
-    await waitFor(() => expect(native.nativeSystemScheduleRequest).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1));
-    expect(JSON.parse(callsFor('/api/system-schedule/receipt')[0][1].body).receipt).toEqual(receipt);
+    expect(JSON.parse(callsFor('/api/system-schedule/receipt')[0][1].body).receipt)
+      .toEqual(terminalReceipt);
   });
 
   it('retries an undelivered receipt without invoking the same native lease again', async () => {

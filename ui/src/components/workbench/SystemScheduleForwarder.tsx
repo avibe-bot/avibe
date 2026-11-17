@@ -24,6 +24,7 @@ const PERMANENT_RECEIPT_ERRORS = new Set([
 ]);
 const RETRY_NATIVE_RECEIPT_ERRORS = new Set([
   'local_state_write_failed',
+  'local_state_unavailable',
 ]);
 
 type NativeIdentity = {
@@ -142,9 +143,9 @@ export const SystemScheduleForwarder: FC = () => {
           ? await nativeSystemScheduleRequest(claim.request as NativeSystemScheduleRequest)
           : await nativeSystemScheduleCancel(claim.request as NativeSystemScheduleCancel);
         if (receipt?.error && RETRY_NATIVE_RECEIPT_ERRORS.has(receipt.error.code)) {
-          // Native has a durable pre-effect record but could not commit the
-          // post-effect transition. Keep the Runtime lease sticky so the next
-          // poll re-enters Native recovery instead of terminalizing the attempt.
+          // Native cannot yet read or commit the item's management record.
+          // Keep the Runtime lease sticky so the next poll re-enters Native
+          // recovery instead of treating an uncertain effect as terminal.
           reconcileImmediately = false;
           return;
         }

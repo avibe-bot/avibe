@@ -16,6 +16,7 @@ and en/zh catalogs. The H3 repair also changes the model and the unpublished
 - The existing file store owns the committed snapshot, pending candidate, and
   typed commit error. All owner, detach, record, terminal and replay paths use
   this boundary. Execution slots retain their existing effect/waiter ownership.
+- Forwarder holds both `local_state_write_failed` and `local_state_unavailable` out of terminal receipt delivery for create/cancel, preserving the device-bound sticky lease until Native can replay its authoritative result.
 - Logout revokes immediately and decides retention from the last committed
   lifecycle. An uncommitted promotion cannot turn an in-flight item into a
   retained item.
