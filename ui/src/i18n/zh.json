@@ -2192,7 +2192,7 @@
         "field": {
           "vendor": "供应商",
           "vendor.custom": "其他供应商 · 自己填写地址",
-          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址和 API 格式",
+          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址",
           "vendor.search": "搜索供应商",
           "vendor.empty": "没有同名的供应商",
           "name": "名称(可选)",
@@ -7160,6 +7160,7 @@
       "addDescription": "添加一个供应商即可开始，由模型网关统一路由",
       "addDescriptionMore": "查看检测到的配置，确认后迁移，无需重新填写",
       "addDescriptionKey": "填写供应商的地址和 API Key",
+      "addDescriptionKeyPreset": "选择供应商，填写 API Key",
       "addMethodsLabel": "添加方式",
       "addMethodDetected": "已检测到",
       "addMethodSubscription": "订阅",

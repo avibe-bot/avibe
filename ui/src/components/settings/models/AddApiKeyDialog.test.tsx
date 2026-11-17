@@ -331,7 +331,10 @@ describe('AddApiKeyDialog · save reconciliation', () => {
   it('asks no format for a preset vendor', async () => {
     renderDialog();
     const user = userEvent.setup();
+    expect(screen.getByText("Enter the provider's address and API key.")).toBeTruthy();
     await selectVendor(user, API_KEY_VENDOR_PRESETS[0].id);
+    // The address is filled in, so the dialog no longer asks for it.
+    expect(screen.getByText('Choose the provider and enter its API key.')).toBeTruthy();
     expect(screen.queryByText('API format')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Choose the API format manually' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Anthropic Messages' })).toBeNull();
