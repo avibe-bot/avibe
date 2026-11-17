@@ -16,7 +16,7 @@ and Web resizing cannot both run.
 
 - Bundle identifier: `bot.avibe.ios`
 - Display name: `Avibe`
-- Deployment target: iOS 17
+- Deployment target: iOS 17.4 (App Shortcuts limited to a later iOS need `AppShortcutsBuilder.buildLimitedAvailability`, iOS 17.4)
 - The shell follows WebKit browser behavior except for the closed deviation
   list below. Origin-specific exceptions are not added for individual Web UI
   features.
@@ -279,7 +279,7 @@ origin and its navigation test in the same change.
 ## App Shortcuts
 
 `AppShortcuts.swift` holds the App's one `AppShortcutsProvider`. It offers
-"Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") to Siri, Spotlight, the
+"Open Main Bot" (`zh-Hans`: "打开主伙伴") to Siri, Spotlight, the
 Shortcuts app, and Settings > Action Button > Shortcut. Its intent,
 `OpenMainBotIntent`, runs in the App's own process with the App in front
 (`openAppWhenRun`, and `supportedModes` `.foreground(.immediate)` from
@@ -299,6 +299,56 @@ capability, extension, or Info.plist key. Its title and Siri phrases are
 localized in `Localizable.xcstrings` and `AppShortcuts.xcstrings`. Xcode
 extracts the metadata the system reads into `Metadata.appintents` in the
 App bundle, and an XCTest checks it there.
+
+### Talk to Main Bot (background voice)
+
+The provider also offers "Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") from
+iOS 18, which is why the deployment target is iOS 17.4
+(`AppShortcutsBuilder.buildLimitedAvailability`). Its intent,
+`SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
+process without bringing the App to the front (`supportedModes`
+`[.background, .foreground(.dynamic)]` from iOS 26), and Apple requires a Live
+Activity for as long as it records. No `UIBackgroundModes` key is declared;
+the only Info.plist addition is `NSSupportsLiveActivities`. The system asks
+for Face ID first (`authenticationPolicy` `.requiresAuthentication`), because
+the main Bot acts on the user's computer.
+
+- A run with no take starts one; a run while one records stops it and sends
+  it, so a second long press of the Action Button sends. The Live Activity's
+  Send, Cancel, Retry, and Discard are `LiveActivityIntent`s that run in the
+  App's process. A take ends by itself after five minutes, is discarded under
+  0.6 seconds, and is sent as far as it got when the microphone is
+  interrupted.
+- Before the microphone opens, `VoiceCaptureController` reads the selected
+  instance's `GET /api/asr/status` and records only when `consent` is
+  `granted`. A missing `consent` field is an Avibe from before the voice
+  consent question: nothing is recorded, and the Live Activity asks to update
+  Avibe. `null` or `declined`, no sign-in, no microphone permission, or Live
+  Activities turned off bring the App to the main Bot's conversation, where
+  the Web UI asks. A later `403 voice_consent_required` stops the take and
+  keeps nothing.
+- The take is sent as `POST /api/asr/transcribe` (the whole AAC take), then
+  `GET /api/sessions/main` and `POST /api/sessions/<id>/messages` with
+  `metadata.input = "voice"`. The reply arrives as the instance's usual
+  notification. A failure before the message `POST` keeps the take, and its
+  text once transcribed, for Retry for ten minutes. Once the `POST` was made
+  its outcome may be unknown, so a failure there is reported and never
+  retried: an instruction is never sent twice. An ordinary submission clears
+  the Session's composer draft, so an unsent draft is read first and put back
+  after, unless one was written meanwhile.
+- An account sign-out or change (`AppModel.prepareForAccountTransition`)
+  stops and discards any take, releases its WebView, and makes a start still
+  waiting on the instance give up.
+- `VoiceCaptureInstanceClient` makes these requests as the signed-in user
+  without the runtime WebView: a hidden `WKWebView` on the account's own
+  named store (the selection and store identifier the account coordinator
+  persisted, read and never written) loads `/api/csrf-token` on the instance
+  origin and runs same-origin `fetch` there. WebKit stays the only owner of
+  the session cookie, `Origin`, and the CSRF pair, as for the Workbench.
+- The `AvibeLiveActivity` widget extension (`bot.avibe.ios.live-activity`)
+  only draws. It has no entitlements, no App Group, and no network; the views
+  and their `VoiceCapture.xcstrings` table are also compiled into the App,
+  which renders review frames from them.
 
 ## Remote direct path (inactive)
 

@@ -41,10 +41,13 @@ from pathlib import Path
 TEAM_ID = "68B2SQ6YK3"
 BUNDLE_ID = "bot.avibe.ios"
 NOTIFICATION_SERVICE_BUNDLE_ID = "bot.avibe.ios.notification-service"
+# The Live Activity widget extension only draws; ActivityKit hands it state.
+LIVE_ACTIVITY_BUNDLE_ID = "bot.avibe.ios.live-activity"
 APPLICATION_IDENTIFIER = f"{TEAM_ID}.{BUNDLE_ID}"
 NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER = (
     f"{TEAM_ID}.{NOTIFICATION_SERVICE_BUNDLE_ID}"
 )
+LIVE_ACTIVITY_APPLICATION_IDENTIFIER = f"{TEAM_ID}.{LIVE_ACTIVITY_BUNDLE_ID}"
 INTERNAL_GROUP = "Avibe Internal"
 KEYCHAIN_NAME = "avibe-ios-signing.keychain-db"
 ASC_API = "https://api.appstoreconnect.apple.com"
@@ -71,9 +74,21 @@ NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS = {
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
     "keychain-access-groups": [SHARED_KEYCHAIN_ACCESS_GROUP],
 }
+LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS: dict[str, list[str]] = {}
 FORBIDDEN_ENTITLEMENTS = {
     "com.apple.developer.usernotifications.filtering",
 }
+# Extensions never carry push; the Live Activity carries no shared state.
+EXTENSION_FORBIDDEN_ENTITLEMENTS = {
+    NOTIFICATION_SERVICE_BUNDLE_ID: {"aps-environment"},
+    LIVE_ACTIVITY_BUNDLE_ID: {"aps-environment", "com.apple.security.application-groups"},
+}
+# The extensions an archive must contain, exactly.
+EXTENSION_BUNDLE_IDS = (NOTIFICATION_SERVICE_BUNDLE_ID, LIVE_ACTIVITY_BUNDLE_ID)
+
+
+def forbidden_entitlements(bundle_id: str) -> set[str]:
+    return set(FORBIDDEN_ENTITLEMENTS) | EXTENSION_FORBIDDEN_ENTITLEMENTS.get(bundle_id, set())
 # Kept as the main-app alias for callers and older tests.
 REQUIRED_ENTITLEMENTS = MAIN_REQUIRED_ENTITLEMENTS
 
@@ -82,6 +97,7 @@ SECRET_NAMES = (
     "IOS_DISTRIBUTION_P12_PASSWORD",
     "IOS_APP_STORE_PROFILE_BASE64",
     "IOS_NOTIFICATION_SERVICE_PROFILE_BASE64",
+    "IOS_LIVE_ACTIVITY_PROFILE_BASE64",
     "IOS_APPLE_TEAM_ID",
     "IOS_APP_STORE_CONNECT_KEY_ID",
     "IOS_APP_STORE_CONNECT_ISSUER_ID",
@@ -162,10 +178,7 @@ def check_profile(
     """Validate a current App Store profile and its target entitlements."""
     now = now or datetime.now(timezone.utc)
     entitlements = profile.get("Entitlements", {})
-    forbidden = set(FORBIDDEN_ENTITLEMENTS)
-    if bundle_id == NOTIFICATION_SERVICE_BUNDLE_ID:
-        forbidden.add("aps-environment")
-    present_forbidden = sorted(forbidden.intersection(entitlements))
+    present_forbidden = sorted(forbidden_entitlements(bundle_id).intersection(entitlements))
     if present_forbidden:
         raise TestFlightError(
             "The profile contains forbidden entitlements: "
@@ -317,7 +330,7 @@ def prepare(environment: dict[str, str], *, work_dir: Path, env_file: Path, home
     if not identities:
         raise TestFlightError(f"IOS_DISTRIBUTION_P12_BASE64 holds no Apple Distribution identity of Team {TEAM_ID}")
 
-    # Both targets must have real App Store profiles before archive signing.
+    # Every target must have a real App Store profile before archive signing.
     profile_specs = [
         (
             "app",
@@ -330,6 +343,12 @@ def prepare(environment: dict[str, str], *, work_dir: Path, env_file: Path, home
             NOTIFICATION_SERVICE_BUNDLE_ID,
             "IOS_NOTIFICATION_SERVICE_PROFILE_BASE64",
             NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+        ),
+        (
+            "live-activity",
+            LIVE_ACTIVITY_BUNDLE_ID,
+            "IOS_LIVE_ACTIVITY_PROFILE_BASE64",
+            LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS,
         ),
     ]
     profiles: dict[str, dict] = {}
@@ -367,6 +386,7 @@ def prepare(environment: dict[str, str], *, work_dir: Path, env_file: Path, home
     profile_names = {
         BUNDLE_ID: profiles["app"]["Name"],
         NOTIFICATION_SERVICE_BUNDLE_ID: profiles["notification-service"]["Name"],
+        LIVE_ACTIVITY_BUNDLE_ID: profiles["live-activity"]["Name"],
     }
     options_path.write_bytes(plistlib.dumps(export_options(profile_names)))
     (work_dir / "profile-uuids").write_text(
@@ -380,6 +400,8 @@ def prepare(environment: dict[str, str], *, work_dir: Path, env_file: Path, home
             "IOS_PROFILE_UUID": profile_uuids["app"],
             "IOS_NOTIFICATION_SERVICE_PROFILE_NAME": profiles["notification-service"]["Name"],
             "IOS_NOTIFICATION_SERVICE_PROFILE_UUID": profile_uuids["notification-service"],
+            "IOS_LIVE_ACTIVITY_PROFILE_NAME": profiles["live-activity"]["Name"],
+            "IOS_LIVE_ACTIVITY_PROFILE_UUID": profile_uuids["live-activity"],
             "IOS_EXPORT_OPTIONS": str(options_path),
             "IOS_ASC_KEY_PATH": str(key_path),
             "IOS_ASC_KEY_ID": values["IOS_APP_STORE_CONNECT_KEY_ID"],
@@ -388,7 +410,7 @@ def prepare(environment: dict[str, str], *, work_dir: Path, env_file: Path, home
             output.write(f"{name}={value}\n")
     print(
         "Apple Distribution identity and App Store profiles are ready for "
-        f"{BUNDLE_ID} and {NOTIFICATION_SERVICE_BUNDLE_ID}.",
+        f"{BUNDLE_ID}, {NOTIFICATION_SERVICE_BUNDLE_ID} and {LIVE_ACTIVITY_BUNDLE_ID}.",
         flush=True,
     )
 
@@ -404,18 +426,19 @@ def archived_app(archive: Path) -> Path:
     return apps[0]
 
 
-def archived_notification_service_extensions(app: Path) -> list[Path]:
+def archived_extensions(app: Path) -> dict[str, Path]:
+    """Each expected extension, exactly once, and nothing else."""
     extensions = sorted(app.rglob("*.appex"))
     extension_ids = [
         plistlib.loads((extension / "Info.plist").read_bytes()).get("CFBundleIdentifier")
         for extension in extensions
     ]
-    if set(extension_ids) != {NOTIFICATION_SERVICE_BUNDLE_ID} or len(extensions) != 1:
+    if sorted(extension_ids, key=str) != sorted(EXTENSION_BUNDLE_IDS):
         raise TestFlightError(
-            "The archive must contain exactly one "
-            f"{NOTIFICATION_SERVICE_BUNDLE_ID} extension, found {extension_ids}"
+            "The archive must contain exactly one each of "
+            f"{', '.join(EXTENSION_BUNDLE_IDS)}, found {extension_ids}"
         )
-    return extensions
+    return dict(zip(extension_ids, extensions))
 
 
 def check_signed_bundle(
@@ -440,15 +463,21 @@ def check_signed_bundle(
         raise TestFlightError("The bundle is not signed for " + application_identifier)
     if entitlements.get("get-task-allow"):
         raise TestFlightError("The bundle is signed with get-task-allow; that is a development signature")
-    forbidden = set(FORBIDDEN_ENTITLEMENTS)
-    if bundle_id == NOTIFICATION_SERVICE_BUNDLE_ID:
-        forbidden.add("aps-environment")
-    present_forbidden = sorted(forbidden.intersection(entitlements))
+    present_forbidden = sorted(forbidden_entitlements(bundle_id).intersection(entitlements))
     if present_forbidden:
         raise TestFlightError(
             "The signed bundle contains forbidden entitlements: "
             + ", ".join(present_forbidden)
         )
+    if bundle_id == LIVE_ACTIVITY_BUNDLE_ID:
+        # The profile's allowlist offers the Team's keychain groups; the
+        # signed extension may use at most its own, and needs none.
+        groups = entitlements.get("keychain-access-groups", [])
+        groups = {groups} if isinstance(groups, str) else set(groups)
+        if not groups <= {LIVE_ACTIVITY_APPLICATION_IDENTIFIER}:
+            raise TestFlightError(
+                f"{LIVE_ACTIVITY_BUNDLE_ID} must not share keychain groups, found {sorted(groups)}"
+            )
     for key, required in required_entitlements.items():
         actual = entitlements.get(key, [])
         if key == "aps-environment" and actual != "production":
@@ -483,13 +512,17 @@ def check_signed_app(info: dict, entitlements: dict, *, build: str) -> None:
     )
 
 
-def check_extension_version(app_info: dict, extension_info: dict) -> None:
+def check_extension_version(
+    app_info: dict,
+    extension_info: dict,
+    bundle_id: str = NOTIFICATION_SERVICE_BUNDLE_ID,
+) -> None:
     """An extension ships with its app's version; App Store Connect flags a mismatch."""
     app_version = app_info.get("CFBundleShortVersionString")
     extension_version = extension_info.get("CFBundleShortVersionString")
     if not app_version or extension_version != app_version:
         raise TestFlightError(
-            f"The {NOTIFICATION_SERVICE_BUNDLE_ID} version is {extension_version!r}, "
+            f"The {bundle_id} version is {extension_version!r}, "
             f"not the app's {app_version!r}"
         )
 
@@ -509,12 +542,15 @@ def check_privacy_manifest(bundle: Path) -> None:
 
 def verify_archive(archive: Path, *, build: str) -> dict:
     app = archived_app(archive)
-    extensions = archived_notification_service_extensions(app)
-    check_extension_version(
-        plistlib.loads((app / "Info.plist").read_bytes()),
-        plistlib.loads((extensions[0] / "Info.plist").read_bytes()),
-    )
-    for bundle in (app, extensions[0]):
+    extensions = archived_extensions(app)
+    app_info = plistlib.loads((app / "Info.plist").read_bytes())
+    for bundle_id, extension in extensions.items():
+        check_extension_version(
+            app_info,
+            plistlib.loads((extension / "Info.plist").read_bytes()),
+            bundle_id,
+        )
+    for bundle in (app, *extensions.values()):
         check_privacy_manifest(bundle)
     bundles = [
         (
@@ -525,10 +561,17 @@ def verify_archive(archive: Path, *, build: str) -> dict:
             True,
         ),
         (
-            extensions[0],
+            extensions[NOTIFICATION_SERVICE_BUNDLE_ID],
             NOTIFICATION_SERVICE_BUNDLE_ID,
             NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
             NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+            False,
+        ),
+        (
+            extensions[LIVE_ACTIVITY_BUNDLE_ID],
+            LIVE_ACTIVITY_BUNDLE_ID,
+            LIVE_ACTIVITY_APPLICATION_IDENTIFIER,
+            LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS,
             False,
         ),
     ]
@@ -565,7 +608,7 @@ def verify_archive(archive: Path, *, build: str) -> dict:
     run(["codesign", "--verify", "--deep", "--strict", str(app)])
     version = plistlib.loads((app / "Info.plist").read_bytes())["CFBundleShortVersionString"]
     print(
-        f"Archived {BUNDLE_ID} with {NOTIFICATION_SERVICE_BUNDLE_ID} "
+        f"Archived {BUNDLE_ID} with {', '.join(EXTENSION_BUNDLE_IDS)} "
         f"{version} ({build}) is signed for App Store distribution.",
         flush=True,
     )
