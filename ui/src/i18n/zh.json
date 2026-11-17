@@ -1450,7 +1450,10 @@
             "placeholder": "可选，留空时列表显示模型 ID"
           },
           "lookupLoading": "正在搜索 models.dev…",
-          "useAsId": "把「{{query}}」作为模型 ID",
+          "useAsId": "把「<id>{{query}}</id>」作为模型 ID",
+          "useAsIdKeep": "使用「<id>{{query}}</id>」，保留当前参数",
+          "parametersFrom": "参数来自 {{name}}",
+          "clearParameters": "清空参数",
           "fillFailed": "没能访问 models.dev",
           "fillUnavailable": "models.dev 不可用",
           "matches": "models.dev 匹配结果",

@@ -442,13 +442,10 @@ export const applyModelsDevMatch = (
 const sameList = (left: readonly unknown[], right: readonly unknown[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
-const sameValue = (left: unknown, right: unknown): boolean =>
-  Array.isArray(left) && Array.isArray(right) ? sameList(left, right) : left === right;
-
 /** The fields a models.dev answer decides. Stated once, beside the function that
  *  writes them, and checked against it by a test that applies a match differing
  *  from blank in every field — so a field added to `applyModelsDevMatch` is
- *  retired by the same change that fills it, or the test says so. */
+ *  cleared by the same change that fills it, or the test says so. */
 export const MODELS_DEV_FIELDS = [
   'display_name',
   'origin',
@@ -464,28 +461,24 @@ export const MODELS_DEV_FIELDS = [
 ] as const satisfies readonly (keyof BackendModel)[];
 
 /**
- * Un-apply a models.dev answer, because the id it answered about is being
- * retyped.
+ * Take a models.dev answer back out of a draft, because the user said its
+ * parameters are not this model's (「清空参数」).
  *
- * `filled` is the draft exactly as that answer left it, which is what makes the
- * two halves separable. A field still equal to it is models.dev's statement
- * about a model the user is no longer naming — keeping one model's context
- * window under another model's id would save a fact nobody ever made — so it
- * goes back to the blank floor. A field that differs is the user's own typing
- * since, and correcting an id is not a decision to retype the rest of the form.
+ * Every field the answer decides goes back to the blank floor, the user's later
+ * edits to them included: the action is 「start these from empty」, not 「undo
+ * the catalog's half」. The id and the display name stay — the id is the model
+ * being written, and the name sits with it under 「basic」, not with the
+ * parameters the action names. The provenance goes with the parameters, so the
+ * row no longer claims a models.dev source it now owes nothing to.
  *
- * `id` is set from the caller either way: it is the field being edited, never a
- * field being retired.
+ * Editing the id never comes here: a catalog model picked as a base is the
+ * starting point for a model under another id, and its parameters are kept.
  */
-export const retireModelsDevMatch = (
-  draft: BackendModel,
-  filled: BackendModel,
-  id: string,
-): BackendModel => {
+export const clearModelsDevParameters = (draft: BackendModel): BackendModel => {
   const blank = blankBackendModel();
-  const next: BackendModel = { ...draft, id };
+  const next: BackendModel = { ...draft };
   for (const field of MODELS_DEV_FIELDS) {
-    if (!sameValue(draft[field], filled[field])) continue;
+    if (field === 'display_name') continue;
     if (blank[field] === undefined) delete (next as Partial<BackendModel>)[field];
     else Object.assign(next, { [field]: blank[field] });
   }

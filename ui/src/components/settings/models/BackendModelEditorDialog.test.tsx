@@ -248,6 +248,9 @@ describe('BackendModelEditorDialog', () => {
     // belongs to the field the user can still answer.
     expect(screen.queryByRole('listbox')).toBeNull();
     expect(search).not.toHaveBeenCalled();
+    // A saved models.dev row is not a fresh pick: there is no base to name or clear.
+    expect(screen.queryByText(/Parameters from/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Clear parameters' })).toBeNull();
 
     // The grouped form is what the field shows, so the grouped form is what it
     // must accept back.
@@ -533,31 +536,124 @@ describe('BackendModelEditorDialog', () => {
     expect(modelField().value).toBe('private/model-2');
   });
 
-  it('retires filled metadata once the ID it describes is replaced', async () => {
-    // A fill describes the model it was chosen for. Keeping its facts under a
-    // different id would save one model's metadata under another model's name.
+  it('keeps every parameter a picked model filled while the ID is edited, and saves them under the new ID', async () => {
+    // A catalog model picked as a base is the starting point for a model under
+    // another id — a relay's name for it — so retyping the id keeps the form.
     const user = userEvent.setup();
     search.mockResolvedValue([match()]);
     const { onCommit } = renderEditor();
 
     await user.type(modelField(), 'sonnet');
     await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
+    // The user's own edit on top of the fill is kept the same way.
+    await user.clear(screen.getByLabelText('Maximum output'));
+    await user.type(screen.getByLabelText('Maximum output'), '8000');
+
+    await user.type(modelField(), '-relay');
+    await user.click(screen.getByLabelText('Display name'));
+
+    expect(modelField().value).toBe('claude-sonnet-4-5-relay');
+    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Claude Sonnet 4.5');
     expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
+    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('8,000');
+    expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('true');
+    expect(answered('Tool calling')).toBe('Yes');
+    expect(answered('Reasoning')).toBe('Yes');
+    expect(screen.getByRole('checkbox', { name: 'high' }).getAttribute('aria-checked')).toBe('true');
 
-    await user.clear(modelField());
-    await user.type(modelField(), 'openai/gpt-5');
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith({
+      ...blankBackendModel(),
+      id: 'claude-sonnet-4-5-relay',
+      display_name: 'Claude Sonnet 4.5',
+      origin: 'models_dev',
+      models_dev_id: 'anthropic/claude-sonnet-4-5',
+      context_window: 200000,
+      max_output_tokens: 8000,
+      input_modalities: ['text', 'image'],
+      output_modalities: ['text'],
+      supports_tools: true,
+      supports_reasoning: true,
+      reasoning_efforts: ['low', 'high'],
+    });
+  });
 
-    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('');
+  it('names the model the parameters came from, and clears them on request', async () => {
+    const user = userEvent.setup();
+    search.mockResolvedValue([match()]);
+    const { onCommit, onCancel } = renderEditor();
+
+    // Nothing to name while the form is the user's own.
+    expect(screen.queryByText(/Parameters from/)).toBeNull();
+    await user.type(modelField(), 'sonnet');
+    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
+    expect(screen.getByText('Parameters from Claude Sonnet 4.5')).toBeTruthy();
+
+    await user.type(modelField(), '-relay');
+    expect(screen.getByRole('listbox')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Clear parameters' }));
+
+    // The button leaves with its line; the caret stays in the id, so the list
+    // it is still showing is the one Escape closes — not the editor.
+    expect(document.activeElement).toBe(modelField());
+    expect(screen.getByRole('listbox')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
+
+    expect(screen.queryByText(/Parameters from/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Clear parameters' })).toBeNull();
     expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
     expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('');
     expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('false');
-    // Back to the blank row's own answers, not the filled model's.
     expect(answered('Reasoning')).toBe('No');
-    expect(screen.queryByRole('checkbox', { name: 'high' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: 'Add model' }));
-    // Nothing of the old model survives — not the provenance, not one field.
-    expect(onCommit).toHaveBeenCalledWith({ ...blankBackendModel(), id: 'openai/gpt-5' });
+    // The blank form under the id and name the user kept; no models.dev
+    // provenance survives the parameters it described.
+    expect(onCommit).toHaveBeenCalledWith({ ...blankBackendModel(), id: 'claude-sonnet-4-5-relay', display_name: 'Claude Sonnet 4.5' });
+  });
+
+  it('offers keeping the parameters first once a model is the base, so Enter keeps them', async () => {
+    const user = userEvent.setup();
+    const opus = match({ model_id: 'claude-opus-4-1', models_dev_id: 'anthropic/claude-opus-4-1', display_name: 'Claude Opus 4.1', context_window: 1000000 });
+    search.mockResolvedValue([match(), opus]);
+    const { onCommit } = renderEditor();
+
+    await user.type(modelField(), 'sonnet');
+    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
+    await user.type(modelField(), '-relay');
+    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
+    const rows = screen.getAllByRole('option');
+    expect(rows[0].textContent).toContain('Use "claude-sonnet-4-5-relay", keep current parameters');
+    expect(rows[0].getAttribute('aria-selected')).toBe('true');
+    expect(rows[1].textContent).toContain('Claude Sonnet 4.5');
+
+    // The Enter hint marks the row Enter takes, and follows the highlight.
+    expect(within(rows[0]).getByText('Enter')).toBeTruthy();
+    await user.keyboard('{ArrowDown}');
+    expect(within(screen.getAllByRole('option')[0]).queryByText('Enter')).toBeNull();
+    await user.keyboard('{ArrowUp}{Enter}');
+
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(modelField().value).toBe('claude-sonnet-4-5-relay');
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
+    expect(screen.getByText('Parameters from Claude Sonnet 4.5')).toBeTruthy();
+
+    // A different catalog row is a deliberate pick: its parameters replace these.
+    await user.type(modelField(), 'x');
+    await user.click(await screen.findByRole('option', { name: /Claude Opus 4\.1/ }));
+    expect(modelField().value).toBe('claude-opus-4-1');
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('1,000,000');
+    expect(screen.getByText('Parameters from Claude Opus 4.1')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'claude-opus-4-1',
+      display_name: 'Claude Opus 4.1',
+      models_dev_id: 'anthropic/claude-opus-4-1',
+      context_window: 1000000,
+    }));
   });
 
   it('keeps hand-typed metadata while the user corrects the ID', async () => {
@@ -580,45 +676,6 @@ describe('BackendModelEditorDialog', () => {
       context_window: 32000,
       input_modalities: ['text', 'image'],
     }));
-  });
-
-  it('keeps what the user typed over a fill while retiring the rest of it', async () => {
-    // The half the two cases above do not reach: a row that is part fill and
-    // part the user's own typing. Which half a field belongs to is decided
-    // against the fill itself — `retireModelsDevMatch` owns that rule and states
-    // it over every field — so this asserts the wiring the helper cannot see,
-    // the three boxes the editor holds as text until it commits.
-    const user = userEvent.setup();
-    search.mockResolvedValue([match()]);
-    const { onCommit } = renderEditor();
-
-    await user.type(modelField(), 'sonnet');
-    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
-    await user.clear(screen.getByLabelText('Display name'));
-    await user.type(screen.getByLabelText('Display name'), 'House relay');
-    await user.clear(screen.getByLabelText('Maximum output'));
-    await user.type(screen.getByLabelText('Maximum output'), '8000');
-
-    await user.clear(modelField());
-    await user.type(modelField(), 'openai/gpt-5');
-
-    // Theirs stands. Correcting an id is not a decision to retype the form.
-    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('House relay');
-    // Grouped, because leaving the box is what formats it — their 8000, shown
-    // the way every token count is.
-    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('8,000');
-    // The fill's own answers go, because they describe a model this row no
-    // longer names.
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
-    expect(answered('Reasoning')).toBe('No');
-
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith({
-      ...blankBackendModel(),
-      id: 'openai/gpt-5',
-      display_name: 'House relay',
-      max_output_tokens: 8000,
-    });
   });
 
   it('closes the suggestion list once the user is working somewhere else', async () => {

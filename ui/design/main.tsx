@@ -12,7 +12,7 @@ import '@/index.css';
 import.meta.glob(['/src/**/*.css', '!/src/index.css', '!/src/pet/**'], { eager: true });
 
 import { DesignRoot } from './Canvas';
-import type { DesignLang, DesignTheme, FrameSafeArea } from './frame';
+import type { DesignLang, DesignTheme, FrameSafeArea, FrameStep } from './frame';
 import { loadAllFrames, loadFrame } from './registry';
 import { installFixedClock } from './shell/clock';
 import { apiResponses } from './shell/fixtures';
@@ -30,7 +30,7 @@ void i18n.changeLanguage(lang);
 declare global {
   interface Window {
     __DESIGN__?: {
-      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: string[]; wait?: number; press?: string; reducedMotion?: boolean; safeArea?: FrameSafeArea }[];
+      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: FrameStep[]; wait?: number; press?: string; reducedMotion?: boolean; safeArea?: FrameSafeArea }[];
       unfixtured: () => string[];
       quiet: () => Promise<void>;
       t: (key: string) => string;
