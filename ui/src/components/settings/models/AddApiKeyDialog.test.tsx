@@ -129,6 +129,10 @@ const fillCredentials = async () => {
  *  continues with whichever vendor is currently chosen. */
 const vendorField = () => screen.getByRole('combobox', { name: /^(Provider|供应商)(\s|$)/ });
 const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
+/** A preset's address waits under More settings. */
+const revealBaseUrl = async (user: ReturnType<typeof userEvent.setup>) => {
+  if (!screen.queryByRole('textbox', { name: /^Base URL$/i })) await user.click(screen.getByRole('button', { name: 'More settings' }));
+};
 
 /** A catalog row read from the shipped file, so the case does not restate an id,
  *  a URL, or a pin that the backend owns. Chosen by protocol rather than by name:
@@ -331,6 +335,15 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     expect(screen.queryByText('API format')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Choose the API format manually' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Anthropic Messages' })).toBeNull();
+    // Its address is filled in, so it waits under More settings with the name.
+    expect(screen.queryByRole('textbox', { name: /^Base URL$/i })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'More settings' }));
+    expect((screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement).value).toBe(API_KEY_VENDOR_PRESETS[0].official_base_url);
+  });
+
+  it('keeps the address in view for a custom provider', async () => {
+    renderDialog();
+    expect(screen.getByRole('textbox', { name: /^Base URL$/i })).toBeTruthy();
   });
 
   it('lets the user choose a custom protocol and keeps validation failures editable', async () => {
@@ -851,6 +864,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     expect(highlighted()?.getAttribute('role')).toBe('option');
     await user.keyboard('{Enter}');
     await waitFor(() => expect(vendorField().textContent).toContain(vendorOptionName(next)));
+    await revealBaseUrl(user);
     expect(baseUrlInput().value).toBe(reached?.official_base_url);
   });
 
@@ -885,6 +899,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     const user = userEvent.setup();
 
     await selectVendor(user, entry.id);
+    await revealBaseUrl(user);
     await user.type(baseUrlInput(), '/edge');
     const edited = baseUrlInput().value;
     expect(edited).not.toBe(entry.official_base_url);

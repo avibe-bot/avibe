@@ -921,7 +921,8 @@ describe('SettingsModelsPage surface branches', () => {
       { ...emptyVibeyAgent, catalog_models: configured ? [catalogModel] : [] },
     ]);
     const vibeyCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
-    expect(within(vibeyCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
+    // Before any provider, an empty catalog offers nothing to manage; a listed model can still be managed.
+    expect(within(vibeyCard).queryAllByRole('button', { name: /^Manage models$|^管理模型$/i })).toHaveLength(configured ? 1 : 0);
     await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
     expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为 Agent 管理/i })).toBeNull();
