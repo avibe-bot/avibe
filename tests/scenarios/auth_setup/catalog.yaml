@@ -838,7 +838,8 @@ scenarios:
     backend: vibey
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_picks_a_model_no_provider_lists_and_completes
     # The scenario owns the server boundary for an unlisted pick: the catalog write
-    # with no supplier promise, the Agent's model, the runnable named route and
+    # with no supplier promise, the Agent's model, the unsupplied named route (no
+    # automatic forwarding), the explicit manual hop that makes it runnable, and
     # completion. The browser side (which rows the picker offers for a search, the
     # row a catalog or typed pick carries, and that it promises no suppliers) is the
     # supporting tests.

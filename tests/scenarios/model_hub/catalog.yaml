@@ -27,6 +27,7 @@ capability:
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
     - tests/test_model_hub_resolution.py
+    - tests/test_model_hub_routing_modes.py
     - tests/test_model_hub_background_discovery.py
     - tests/test_model_hub_injection.py
     - tests/test_codex_launch_failure.py
@@ -1710,7 +1711,7 @@ scenarios:
       - tests/test_model_hub_background_discovery.py::test_listing_for_a_source_changed_during_discovery_is_dropped
       - tests/test_model_hub_background_discovery.py::test_schedule_covers_hub_sources_and_skips_native_and_waiting_credentials
       - tests/test_model_hub_background_discovery.py::test_stale_sources_catch_up_together_then_refresh_at_different_times
-      - tests/test_model_hub_background_discovery.py::test_listing_that_would_strand_a_menu_model_is_left_to_manual_refresh
+      - tests/test_model_hub_background_discovery.py::test_listing_on_a_blocked_source_does_not_remove_nonexistent_supply
       - tests/test_model_hub_background_discovery.py::test_stop_retires_the_background_schedule_without_waiting_for_a_listing
   - id: MH-QUOTA-005
     name: Each subscription's quota is re-read at most every five minutes and concurrent reads share one fetch

@@ -806,8 +806,14 @@ async def test_every_refused_row_leaves_but_a_retired_tombstone_stays(tmp_path):
     service = _stale_listing_service(tmp_path)
     openai = _openai(service)
     openai.last_discovered_at = None
-    openai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
+    openai.models.append(ModelHubModelConfig(id="fixture-executor-secondary", provenance="discovered"))
     openai.models.append(ModelHubModelConfig(id="gpt-6-sol", provenance="discovered"))
+    # Both refused executor rows must be off every backend Route. A bundled
+    # catalog id (such as gpt-6-luna) silently creates a Codex automatic hop.
+    assert not any(
+        hop["source_id"] == OPENAI and hop["model_id"] in {"gpt-6-astra", "fixture-executor-secondary"}
+        for hop in service._effective_hop_refs(service.store.config)
+    )
 
     async def discover_models(*_args, **_kwargs):
         return [DiscoveredModel(id="gpt-6-chat")]
@@ -817,7 +823,7 @@ async def test_every_refused_row_leaves_but_a_retired_tombstone_stays(tmp_path):
     try:
         # Two turns frozen on different executor models are each refused.
         service.mark_stale_listing(_openai(service), "gpt-6-astra")
-        service.mark_stale_listing(_openai(service), "gpt-6-luna")
+        service.mark_stale_listing(_openai(service), "fixture-executor-secondary")
         service.mark_stale_listing(_openai(service), "gpt-6-sol")
         # The user retires gpt-6-sol before the listing returns.
         next(model for model in _openai(service).models if model.id == "gpt-6-sol").retired = True
@@ -859,12 +865,17 @@ async def test_a_disowned_row_on_a_route_does_not_hold_back_one_on_none(tmp_path
     service = _stale_listing_service(tmp_path)
     openai = _openai(service)
     openai.last_discovered_at = None
-    openai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
-    # xAI lists gpt-6-luna too, so Vibey's gpt-6-luna routes to both Sources:
-    # dropping OpenAI's row would remove OpenAI's hop.
+    openai.models.append(ModelHubModelConfig(id="fixture-executor-secondary", provenance="discovered"))
+    # Both Sources supply Vibey's fixture-only model, so dropping OpenAI's row
+    # would remove its hop, without any unrelated bundled-catalog protection.
     xai = next(item for item in service.store.config.sources if item.id == XAI)
-    xai.models.append(ModelHubModelConfig(id="gpt-6-luna", provenance="discovered"))
-    service.store.config.agents["vibey"].models.append(ModelHubBackendModelConfig(id="gpt-6-luna"))
+    xai.models.append(ModelHubModelConfig(id="fixture-executor-secondary", provenance="discovered"))
+    service.store.config.agents["vibey"].models.append(ModelHubBackendModelConfig(id="fixture-executor-secondary"))
+    assert {
+        (hop["backend"], hop["source_id"])
+        for hop in service._effective_hop_refs(service.store.config)
+        if hop["model_id"] == "fixture-executor-secondary"
+    } == {("vibey", OPENAI), ("vibey", XAI)}
 
     async def discover_models(*_args, **_kwargs):
         return [DiscoveredModel(id="gpt-6-chat")]
@@ -873,12 +884,12 @@ async def test_a_disowned_row_on_a_route_does_not_hold_back_one_on_none(tmp_path
     service.start_background_discovery()
     try:
         service.mark_stale_listing(_openai(service), "gpt-6-astra")
-        service.mark_stale_listing(_openai(service), "gpt-6-luna")
+        service.mark_stale_listing(_openai(service), "fixture-executor-secondary")
         await _settled(service)
     finally:
         await service.stop()
-    # Only a manual refresh removes OpenAI's gpt-6-luna.
-    assert [model.id for model in _openai(service).models] == ["gpt-6-chat", "gpt-6-luna"]
+    # Only a manual refresh removes OpenAI's fixture-executor-secondary.
+    assert [model.id for model in _openai(service).models] == ["gpt-6-chat", "fixture-executor-secondary"]
 
 
 @pytest.mark.asyncio
