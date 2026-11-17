@@ -327,8 +327,10 @@ describe('AgentCard', () => {
 
     expect(screen.getByText('1 个模型')).toBeTruthy();
     expect(screen.getByText(modelId)).toBeTruthy();
-    expect(screen.getByText('未配置模型路由')).toBeTruthy();
+    // The row and the backend's status both say no provider supplies it; no origin badge repeats it.
+    expect(screen.getAllByText('没有供应商提供').length).toBeGreaterThan(0);
     expect(screen.queryByText('没有可用供应商')).toBeNull();
+    expect(screen.queryByRole('button', { name: '未配置' })).toBeNull();
   });
 
   it.each([

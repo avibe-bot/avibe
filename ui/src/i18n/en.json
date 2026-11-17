@@ -1321,7 +1321,7 @@
         "routeStatus": {
           "empty": "No models",
           "unknown": "Unknown",
-          "unconfigured": "No routes",
+          "unconfigured": "No provider supplies these",
           "available": "Ready",
           "partial": "Partial",
           "unavailable": "Unavailable"
@@ -1361,7 +1361,7 @@
             "degraded": "Degraded",
             "waiting": "Supply unavailable for now",
             "interrupted": "No provider is available",
-            "unconfigured": "No model route configured",
+            "unconfigured": "No provider supplies it",
             "unused": "No Agent uses this backend"
           },
           "emptyModels": "This backend's model list is empty",
@@ -1655,7 +1655,7 @@
         "previewLoading": "Reading inherited routing...",
         "previewFailed": "Could not preview inherited routing. Nothing has been saved. Retry or undo the restore.",
         "draftEmpty": "No route entries in this draft.",
-        "noDefaults": "No default provider can route this model. Add a matching provider or an eligible API-key provider.",
+        "noDefaults": "No provider lists this model yet. Add one that lists it, or, if your provider does serve it, choose that provider for it under Custom.",
         "inventoryNotProvided": "Model list not provided",
         "configureDefaults": "Configure default routing",
         "close": "Close",

@@ -1321,7 +1321,7 @@
         "routeStatus": {
           "empty": "未配置模型",
           "unknown": "路由状态待确认",
-          "unconfigured": "未配置模型路由",
+          "unconfigured": "没有供应商提供",
           "available": "路由可用",
           "partial": "部分路由不可用",
           "unavailable": "路由不可用"
@@ -1361,7 +1361,7 @@
             "degraded": "降级",
             "waiting": "等待供应商恢复",
             "interrupted": "没有可用供应商",
-            "unconfigured": "未配置模型路由",
+            "unconfigured": "没有供应商提供",
             "unused": "暂无 Agent 使用"
           },
           "emptyModels": "这个后端的模型列表是空的",
@@ -1655,7 +1655,7 @@
         "previewLoading": "正在读取继承路由…",
         "previewFailed": "无法预览继承路由，尚未保存任何更改。请重试或撤销恢复。",
         "draftEmpty": "草稿中暂无路由条目。",
-        "noDefaults": "暂无可路由此模型的默认供应商。请加入匹配的供应商或符合条件的 API Key 供应商。",
+        "noDefaults": "还没有供应商列出这个模型。添加一个列出它的供应商；或者如果你的供应商其实提供它，在「自定义」里为它指定这个供应商。",
         "inventoryNotProvided": "模型列表未提供",
         "configureDefaults": "设置默认路由",
         "close": "关闭",

@@ -432,7 +432,7 @@ describe("RouteChainDialog", () => {
       renderEmptyRoute({ ...agent, sources: { order: [], eligibility: [] } }, []);
       await screen.findByRole('button', { name: 'Configure default routing' });
       expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
-      expect(screen.getByText(/No default provider can route this model/)).toBeTruthy();
+      expect(screen.getByText(/No provider lists this model yet/)).toBeTruthy();
       expect(screen.queryByRole('button', { name: 'Restore automatic' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
       expect(screen.queryByText(/saved route is empty/)).toBeNull();

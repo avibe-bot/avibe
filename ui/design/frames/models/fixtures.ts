@@ -184,7 +184,8 @@ export const eligible = (src: Source, backend: AgentBackend): boolean =>
 
 const modelSupply = (modelId: string, route: RouteSpec | undefined): ModelSupply => ({
   model_id: modelId,
-  route_origin: route?.origin ?? (route ? 'automatic' : null),
+  // The server's answer: an empty chain has no origin unless one was saved.
+  route_origin: route?.origin ?? (route && route.hops.length > 0 ? 'automatic' : null),
   chain_length: route?.hops.length ?? 0,
   has_runnable_hop: (route?.hops ?? []).some(([hop]) => runnable(route?.health?.[hop.id] ?? 'healthy')),
 });
@@ -225,13 +226,13 @@ export const chain = (backend: AgentBackend, modelId: string, route: RouteSpec |
     };
   });
   const first = links.find((link) => link.runnable) ?? null;
-  const origin = route?.origin ?? 'automatic';
+  const origin = route?.origin ?? (route && route.hops.length > 0 ? 'automatic' : null);
   return {
     contract_version: 23,
     backend,
     model_id: modelId,
     manual_override: origin === 'manual' ? { hops: links.map(({ source_id, model_id }) => ({ source_id, model_id })) } : null,
-    route_origin: route ? origin : null,
+    route_origin: origin,
     current: first ? { source_id: first.source_id, model_id: first.model_id } : null,
     chain: links,
     supply_state: first ? 'ok' : links.length ? 'waiting' : 'interrupted',
