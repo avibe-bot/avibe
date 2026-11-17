@@ -1134,10 +1134,9 @@ the app also declares system boot time (`35F9.1`), which the direct
 transport's deadlines read through `ProcessInfo.systemUptime`.
 The app also declares the data it collects, matching its App Privacy answers
 (owner-approved, 2026-11-17): the account's email address and user ID, the
-device's push token, which the avibe.bot relay stores (Device ID), and
+device's push token, which the avibe.bot relay stores (Device ID),
 hold-to-talk recordings, which avibe.bot relays to the speech service (Audio
-Data), and the voice usage records avibe.bot keeps for 180 days (Other Usage
-Data). Each is linked to the user, for App Functionality only, and not used
+Data), and the voice usage records avibe.bot keeps (Other Usage Data). Each is linked to the user, for App Functionality only, and not used
 for tracking. The extension decrypts and shows notifications on the device and
 collects nothing. `verify-archive` checks that each manifest exists and
 declares no tracking; it does not compare the collected types with App Store
