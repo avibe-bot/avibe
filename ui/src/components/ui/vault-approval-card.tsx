@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, Info, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, Info, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 
@@ -393,6 +393,10 @@ export const VaultApprovalCard: React.FC<{
   const [error, setError] = useState<string | null>(null);
   // The last approval failed because avault needs its one-time Keychain authorization.
   const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
+  // The secure code did not finish downloading (a slow or lost connection): the same step can simply
+  // run again, from a Retry click, which opens the secure window as the first click did.
+  const [canRetry, setCanRetry] = useState(false);
+  const lastRun = useRef<(() => Promise<void>) | null>(null);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   // The addresses this request signs as: a wallet's stored account snapshot, else the key's row.
   const signingAddresses = hdDerivation
@@ -473,15 +477,18 @@ export const VaultApprovalCard: React.FC<{
 
   const finish = useCallback(
     (run: () => Promise<void>) => {
+      lastRun.current = run;
       setBusy(true);
       setError(null);
       setNeedsAvaultAuthorization(false);
+      setCanRetry(false);
       run()
         .catch((err: unknown) => {
           // This attempt moved the app to the browser hand-off, whose note now says what happened.
           if (isVaultPasskeyFallback(err)) return;
           setError(vaultErrorMessage(t, err, t('vaults.approval.errors.failed')));
           setNeedsAvaultAuthorization(isAvaultAuthorizationRequired(err));
+          setCanRetry(typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'sandbox_unreachable');
         })
         .finally(() => setBusy(false));
     },
@@ -951,8 +958,17 @@ export const VaultApprovalCard: React.FC<{
       {needsAvaultAuthorization ? (
         <AvaultAuthorizationNotice forceVisible />
       ) : error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
+        <div className="flex flex-col gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
           {error}
+          {canRetry ? (
+            <Button
+              type="button" variant="secondary" size="sm" className="self-start" disabled={busy}
+              onClick={() => { if (lastRun.current) finish(lastRun.current); }}
+            >
+              <RefreshCw className="size-3.5" />
+              {t('vaults.requests.retry')}
+            </Button>
+          ) : null}
         </div>
       ) : null}
 
