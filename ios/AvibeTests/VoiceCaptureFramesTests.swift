@@ -110,6 +110,8 @@ private struct FrameSheet: View {
                 VoiceCaptureClock(state: state).font(.title3.monospacedDigit()).padding(.trailing, 4)
             }
             VoiceCaptureDetail(state: state)
+                .padding(.horizontal, VoiceCaptureDetail.islandInset)
+                .padding(.bottom, 4)
         }
         .padding(.horizontal, 18)
         .padding(.top, 14)
