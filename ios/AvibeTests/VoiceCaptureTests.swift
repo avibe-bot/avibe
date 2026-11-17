@@ -216,6 +216,32 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(after.phase, .listening)
     }
 
+    /// A press that cold-launches the App after the kill: launch cleanup may
+    /// end the leftover before the intent runs; that press still only ends it.
+    func testThePressThatLaunchesTheAppEndsTheLeftoverEvenIfLaunchCleanupRanFirst() async {
+        let world = World()
+        world.leftovers = [FakeActivity(.init(phase: .listening, startedAt: Date()))]
+        let controller = world.controller()
+        await controller.endLeftoversAtLaunch()
+        let press = await controller.toggle()
+        XCTAssertEqual(press, .stopped)
+        XCTAssertNil(world.audio)
+        let next = await controller.toggle()
+        XCTAssertEqual(next, .started)
+    }
+
+    func testAnOrdinaryLaunchDoesNotSwallowALaterPress() async {
+        let world = World()
+        world.leftovers = [FakeActivity(.init(phase: .listening, startedAt: Date()))]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        await controller.endLeftoversAtLaunch()
+        clock = clock.addingTimeInterval(60)
+        let press = await controller.toggle()
+        XCTAssertEqual(press, .started)
+    }
+
     func testLaunchEndsALeftoverIsland() async {
         let world = World()
         let leftover = FakeActivity(.init(phase: .listening, startedAt: Date()))
@@ -356,6 +382,7 @@ private final class World {
     var leftovers: [FakeActivity] = []
     var activityRequestFails = false
     var leftoverAudioDiscarded = 0
+    var now: () -> Date = Date.init
 
     func controller() -> VoiceCaptureController {
         VoiceCaptureController(environment: VoiceCaptureEnvironment(
@@ -376,7 +403,7 @@ private final class World {
             },
             existingActivities: { (self.leftovers + self.activities).filter { $0.ended == nil } },
             discardLeftoverAudio: { self.leftoverAudioDiscarded += 1 },
-            now: Date.init,
+            now: { self.now() },
             sleep: { _ in await Task.yield(); try? await Task.sleep(for: .seconds(3600)) }
         ))
     }

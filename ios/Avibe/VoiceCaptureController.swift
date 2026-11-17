@@ -59,8 +59,11 @@ private final class LiveVoiceCaptureActivity: VoiceCaptureActivityHandle {
     /// take whose process is gone never shows a timer that runs on.
     static func staleDate(for state: VoiceCaptureAttributes.ContentState) -> Date? {
         switch state.phase {
-        case .listening, .sending:
+        case .listening:
             return state.startedAt.addingTimeInterval(VoiceCaptureController.staleAfter)
+        case .sending:
+            // Each send attempt (Retry too) gets its own window.
+            return Date().addingTimeInterval(VoiceCaptureController.sendStaleAfter)
         default:
             return nil
         }
@@ -145,6 +148,11 @@ final class VoiceCaptureController {
     /// When a listening or sending island goes stale on its own: the cap
     /// plus time to send. Only a take whose process is gone gets there.
     static let staleAfter: TimeInterval = 5 * 60 + 90
+    /// How long one send attempt may show 正在发送 before it goes stale.
+    static let sendStaleAfter: TimeInterval = 120
+    /// A press this soon after launch cleanup ended a running leftover is
+    /// the press that launched the App: it ends that take, not starts one.
+    static let launchPressWindow: TimeInterval = 10
     /// A take shorter than this is treated as a slip and discarded.
     static let minimumDuration: TimeInterval = 0.6
     /// How long the island keeps a sent take before it goes.
@@ -211,8 +219,15 @@ final class VoiceCaptureController {
         // A take this process does not hold is a leftover of one whose
         // process is gone (killed, or ended by the system): its recording is
         // lost. A press then ends it and says so; the next press starts anew.
-        if case .idle = state, await endLeftovers(reason: .interrupted) {
-            return .stopped
+        if case .idle = state {
+            let ended = await endLeftovers(reason: .interrupted)
+            let byLaunch = launchEndedRunningLeftoverAt.map {
+                environment.now().timeIntervalSince($0) < Self.launchPressWindow
+            } ?? false
+            launchEndedRunningLeftoverAt = nil
+            if ended || byLaunch {
+                return .stopped
+            }
         }
         switch state {
         case .listening:
@@ -269,8 +284,13 @@ final class VoiceCaptureController {
     /// At launch: whatever this process does not hold is a leftover.
     func endLeftoversAtLaunch() async {
         guard case .idle = state else { return }
-        _ = await endLeftovers(reason: .interrupted)
+        if await endLeftovers(reason: .interrupted) {
+            launchEndedRunningLeftoverAt = environment.now()
+        }
     }
+
+    /// When launch cleanup last ended a take that was still running.
+    private var launchEndedRunningLeftoverAt: Date?
 
     /// Ends every Live Activity of ours this process does not hold, and the
     /// audio such a take left. A listening or sending one is shown as
