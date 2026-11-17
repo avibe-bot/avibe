@@ -1993,7 +1993,8 @@ final class DirectPathAppTests: XCTestCase {
             _ = await signOut.result
             signedOut.value = true
         }
-        try await eventually {
+        // Sign-out logs out through an account transport it may launch.
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
             notifications.providerPatches.releaseAll()
             return signedOut.value
         }
