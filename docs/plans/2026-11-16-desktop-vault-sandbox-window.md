@@ -248,7 +248,9 @@ hidden Workbench. Three things follow.
   observation first, one turn of the main run loop after the opener's last
   window closed (which can happen inside the observation's own callback), and
   every way a window ends goes through the one `close`. Hiding closes the
-  windows and so ends both before a retired web view is closed. On a product
+  windows and so ends both, one turn later. The shell may close a retired web
+  view before that turn; the web view is still held then, so it is never
+  freed while observed. On a product
   path the reference can outlive the Workbench by at most 60 seconds: between
   the hide and the close a hidden Workbench can still reserve a window
   (admission reads only that it is in its window), which can never be shown

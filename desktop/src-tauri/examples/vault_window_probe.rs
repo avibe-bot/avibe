@@ -978,9 +978,24 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             self.wait_children("the card of a hidden Workbench to close", |children| {
                 children.is_empty()
             });
-            self.eval("probe.report({ case: 'opener-hidden', closed: probe.windows.card.closed })");
+            // The page's handle turns `closed` when the card's page is
+            // destroyed, a moment after its window closed. The hidden
+            // Workbench page says how long that took.
+            self.eval(
+                r#"(async () => {
+                    const start = Date.now();
+                    while (!probe.windows.card.closed && Date.now() - start < 5000) {
+                        await new Promise((resolve) => setTimeout(resolve, 50));
+                    }
+                    probe.report({ case: 'opener-hidden', closed: probe.windows.card.closed, after: Date.now() - start });
+                })()"#,
+            );
             let hidden = self.report("opener-hidden");
             assert_eq!(hidden["closed"], true, "{hidden}");
+            println!(
+                "vault window probe: a hidden Workbench saw its card closed {} ms after it asked",
+                hidden["after"]
+            );
             self.eval(&format!("probe.windows.unseen = window.open('{sandbox}/quiet')"));
             self.never_on_screen("a sandbox window asked for by a hidden Workbench", "unseen", 0);
             let back = now_ms();

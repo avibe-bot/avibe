@@ -801,8 +801,10 @@ impl OpenerObserver {
 /// shell therefore never lets an observed web view be freed: it observes only
 /// while the opener has a sandbox window, and keeps a strong reference for
 /// exactly that time. The two are added together and removed together, the
-/// observation first. Hiding the opener closes its windows, which ends both,
-/// so a web view the shell retires is let go before it is closed. That AppKit
+/// observation first. Hiding the opener closes its windows, which ends both
+/// one turn of the main run loop later. The shell may close a retired web view
+/// before that turn; the web view is still held then, so it is never freed
+/// while observed. That AppKit
 /// announces `hidden` to an observer at all is behaviour the WebView probe
 /// checks, on the macOS versions CI runs it on.
 fn watch_opener(key: usize) {
@@ -897,10 +899,10 @@ struct Opener {
     webview: Weak<WKWebView>,
     app: AppHandle,
     observers: Vec<Observer>,
-    hidden_observer: Retained<OpenerObserver>,
     /// The web view, held while its `hidden` is observed: from its first
     /// sandbox window to its last. See `watch_opener`.
     watched: Option<Retained<WKWebView>>,
+    hidden_observer: Retained<OpenerObserver>,
 }
 
 impl Opener {
