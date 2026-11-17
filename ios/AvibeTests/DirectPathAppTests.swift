@@ -1078,6 +1078,106 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testEverySynchronousTerminalKeepsWriteFailureThroughAppModelRetryAndCancel() async throws {
+        for scenario in ["denial", "entry-expiry", "entry-fire", "timer", "confirm-expiry", "confirm-fire", "confirm-stale", "invalidation"] {
+            let initialNow = Date(timeIntervalSince1970: 1_800_000_000)
+            var now = initialNow
+            var commits = 0
+            var failFromCommit = Int.max
+            let platform = RuntimeSystemSchedulePlatform()
+            let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                systemScheduleNow: { now }, systemScheduleCheckpoint: { phase in
+                    if phase == .beforeDirectorySync {
+                        commits += 1
+                        if commits >= failFromCommit { throw CocoaError(.fileWriteUnknown) }
+                    }
+                })
+            let runtime = try await select("instance-1", in: app)
+            let page = try await showRuntimePage(app, runtime)
+            defer { page.close() }
+            let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
+            let admission = try XCTUnwrap(app.captureSystemScheduleAdmission(origin: origin))
+            let identifier = try XCTUnwrap(app.systemScheduleDeviceID)
+            var params = scheduleParams(requestID: "first-\(scenario)", operationID: "terminal-\(scenario)", now: now)
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if scenario == "entry-expiry" { params["expiresAt"] = formatter.string(from: now.addingTimeInterval(-1)) }
+            if scenario == "entry-fire" { params["fireAt"] = formatter.string(from: now.addingTimeInterval(-1)) }
+            if scenario == "timer" { params["expiresAt"] = formatter.string(from: now.addingTimeInterval(0.1)) }
+            if scenario == "confirm-fire" { params["fireAt"] = formatter.string(from: now.addingTimeInterval(1)) }
+            let original = try XCTUnwrap(SystemScheduleRequest.parse(params))
+            // Reservation succeeds; its following terminal write becomes
+            // visible but unacknowledged. Fail every subsequent commit too.
+            if scenario.hasPrefix("entry-") || scenario == "timer" {
+                failFromCommit = commits + 2
+            }
+            let request = Task { @MainActor in
+                await app.requestSystemSchedule(original, admission: admission)
+            }
+            if !scenario.hasPrefix("entry-") && scenario != "timer" {
+                try await eventually { app.systemScheduleConfirmation != nil }
+                let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+                failFromCommit = commits + 1
+                switch scenario {
+                case "denial": app.denySystemSchedule(id: confirmation.id)
+                case "confirm-expiry":
+                    now = now.addingTimeInterval(301)
+                    app.confirmSystemSchedule(id: confirmation.id)
+                case "confirm-fire":
+                    now = now.addingTimeInterval(2)
+                    app.confirmSystemSchedule(id: confirmation.id)
+                case "confirm-stale":
+                    try page.beginPrimaryProvisionalNavigation()
+                    app.confirmSystemSchedule(id: confirmation.id)
+                default: app.showAccount()
+                }
+            }
+            let first = await request.value
+            XCTAssertEqual((first["error"] as? [String: Any])?["code"] as? String,
+                           "local_state_write_failed", scenario)
+            let systemIdentifier = try XCTUnwrap(first["systemIdentifier"] as? String)
+            XCTAssertEqual(app.systemScheduleDeviceID, identifier)
+            params["requestId"] = "retry-\(scenario)"
+            let retry = await app.requestSystemSchedule(try XCTUnwrap(SystemScheduleRequest.parse(params)), admission: admission)
+            XCTAssertEqual(retry["requestId"] as? String, "retry-\(scenario)")
+            XCTAssertEqual((retry["error"] as? [String: Any])?["code"] as? String,
+                           "local_state_write_failed", scenario)
+            let cancel = await app.cancelSystemSchedule(.init(requestID: "cancel-\(scenario)",
+                operationID: original.operationID, kind: .alarm, purpose: .user), admission: admission)
+            XCTAssertEqual((cancel?["error"] as? [String: Any])?["code"] as? String,
+                           "local_state_write_failed", scenario)
+            XCTAssertEqual(cancel?["systemIdentifier"] as? String, systemIdentifier)
+            if scenario != "confirm-stale" && scenario != "invalidation" {
+                let recaptured = try XCTUnwrap(app.captureSystemScheduleAdmission(origin: origin))
+                guard case .localStateWriteFailed = recaptured else {
+                    return XCTFail("admission must retain the typed commit failure")
+                }
+                let admittedRetry = await app.requestSystemSchedule(original, admission: recaptured)
+                XCTAssertEqual((admittedRetry["error"] as? [String: Any])?["code"] as? String,
+                               "local_state_write_failed", scenario)
+                let admittedCancel = await app.cancelSystemSchedule(.init(requestID: "admitted-cancel",
+                    operationID: original.operationID, kind: .alarm, purpose: .user), admission: recaptured)
+                XCTAssertEqual(admittedCancel?["systemIdentifier"] as? String, systemIdentifier)
+                let failedInfo = try jsonObject(try await page.systemScheduleOutcome(method: "app.info", params: [:]))
+                let failedReceipt = failedInfo["receipt"] as? [String: Any]
+                XCTAssertEqual((failedReceipt?["device"] as? [String: Any])?["id"] as? String, identifier)
+            }
+            failFromCommit = Int.max
+            if scenario != "confirm-stale" && scenario != "invalidation" {
+                let recovered = await app.requestSystemSchedule(original, admission: admission)
+                XCTAssertNotEqual((recovered["error"] as? [String: Any])?["code"] as? String,
+                                  "local_state_write_failed", scenario)
+                let info = try jsonObject(try await page.systemScheduleOutcome(method: "app.info", params: [:]))
+                let receipt = info["receipt"] as? [String: Any]
+                XCTAssertEqual((receipt?["device"] as? [String: Any])?["id"] as? String, identifier)
+            }
+            XCTAssertEqual(platform.scheduleCalls, 0, scenario)
+            XCTAssertEqual(platform.cancelCalls, 0, scenario)
+            XCTAssertNil(app.systemScheduleConfirmation)
+        }
+    }
+
+    @MainActor
     func testCorruptSystemScheduleStoreReturnsTheLocalStateErrorThroughTheBridge() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let corrupt = Data("not-json".utf8)
@@ -4660,6 +4760,7 @@ final class DirectPathAppTests: XCTestCase {
         runtimeOpenNotificationCenter: NotificationCenter = .default,
         systemSchedulePlatform: SystemSchedulePlatforming? = nil,
         systemScheduleNow: @escaping @MainActor () -> Date = Date.init,
+        systemScheduleCheckpoint: ((FileSystemSystemScheduleStore.IOCheckpoint) throws -> Void)? = nil,
         launchesWithInstanceOneSelected: Bool = false,
         notifications: NotificationsOn? = nil,
         // Before `beforeTheAppExists`: an unlabeled trailing closure at a
@@ -4734,7 +4835,8 @@ final class DirectPathAppTests: XCTestCase {
             withIntermediateDirectories: true
         )
         let scheduleLedgerURL = scheduleDirectory.appendingPathComponent("ledger.json")
-        let scheduleStore = FileSystemSystemScheduleStore(fileURL: scheduleLedgerURL)
+        let scheduleStore = FileSystemSystemScheduleStore(fileURL: scheduleLedgerURL,
+                                                         checkpoint: systemScheduleCheckpoint)
         appScheduleStore = scheduleStore
         appScheduleLedgerURL = scheduleLedgerURL
         addTeardownBlock {
@@ -5016,6 +5118,7 @@ final class DirectPathAppTests: XCTestCase {
         return WebViewController(
             instanceOrigin: origin,
             websiteDataStore: app.runtimeWebsiteDataStore,
+            deviceID: { [weak app] in app?.systemScheduleDeviceID },
             directStatus: app.directStatusProvider,
             systemScheduleAdmission: { [weak app] origin in
                 let admission = app?.captureSystemScheduleAdmission(origin: origin)

@@ -146,20 +146,354 @@ final class SystemScheduleTests: XCTestCase {
         )
     }
 
-    func testDeviceIdentityIsStableForOneInstallationAndRepairsInvalidState() throws {
-        let suiteName = "SystemScheduleDeviceIdentityTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+    @MainActor
+    func testIdentityComesFromCanonicalDespiteMissingInvalidOrWrongPreferences() throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identifier = try XCTUnwrap(store.installationID)
+        let suite = "I3Identity.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let request = makeRequest()
+        let original = cleanupPendingRecord(request: request, owner: owner,
+            systemIdentifier: "preserved-system-id", updatedAt: now)
+        XCTAssertTrue(store.save(original))
+        let lifecycles: [StoredSystemSchedule.Lifecycle] = [
+            .reserved, .creatingUnknown, .managedScheduled, .managedCleanupPending,
+            .detachedRetained, .detachedCleanupPending, .closedNoItem, .closedRemoved,
+            .detachedCleaned, .detachedAbsent,
+        ]
+        let history = lifecycles.enumerated().map { index, lifecycle in
+            boundaryRecord(owner: owner, operationID: "history-\(index)", lifecycle: lifecycle)
+        }
+        for record in history { XCTAssertTrue(store.save(record)) }
+        for value in [nil, "invalid", UUID().uuidString, 42] as [Any?] {
+            defaults.set(value, forKey: SystemScheduleDeviceIdentity.legacyKey)
+            let reopened = FileSystemSystemScheduleStore(
+                fileURL: directory.appendingPathComponent("ledger.json"),
+                legacyEvidence: SystemScheduleDeviceIdentity.legacyEvidence(defaults: defaults))
+            XCTAssertEqual(reopened.installationID, identifier)
+            XCTAssertEqual(reopened.record(operationID: request.operationID,
+                instanceID: request.instanceID, owner: owner), original)
+            XCTAssertTrue(reopened.isActive(owner: owner))
+            for record in history {
+                XCTAssertEqual(reopened.record(operationID: record.operationID,
+                    instanceID: record.intent.instanceID, owner: owner), record)
+            }
+        }
+    }
 
-        let first = SystemScheduleDeviceIdentity.resolve(defaults: defaults)
-        XCTAssertEqual(SystemScheduleDeviceIdentity.resolve(defaults: defaults), first)
-        XCTAssertNotNil(UUID(uuidString: first))
+    @MainActor
+    func testBootstrapWithholdsUncommittedIdentityAcrossEveryWriterPhaseAndColdOpen() throws {
+        for phase in [FileSystemSystemScheduleStore.IOCheckpoint.beforeFileSync,
+                      .beforeRename, .beforeDirectorySync, .beforeParentDirectorySync] {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("I3Bootstrap.\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("ledger.json")
+            var failing = true
+            let store = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+                if $0 == phase && failing { throw CocoaError(.fileWriteUnknown) }
+            })
+            XCTAssertEqual(store.persistenceState, .writeFailed)
+            XCTAssertNil(store.installationID)
+            XCTAssertNil(store.managementOwner(accountID: "account-1"))
+            let visibleID = (try? Data(contentsOf: url)).flatMap {
+                (try? JSONSerialization.jsonObject(with: $0) as? [String: Any])?["installationID"] as? String
+            }
+            failing = false
+            XCTAssertTrue(store.retryCommit())
+            let identifier = try XCTUnwrap(store.installationID)
+            if let visibleID { XCTAssertEqual(identifier, visibleID) }
+            let failedColdOpen = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+                if $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
+            })
+            XCTAssertEqual(failedColdOpen.persistenceState, .writeFailed)
+            XCTAssertNil(failedColdOpen.installationID)
+            XCTAssertFalse(failedColdOpen.retryCommit())
+            let reopened = FileSystemSystemScheduleStore(fileURL: url)
+            XCTAssertEqual(reopened.installationID, identifier)
+            XCTAssertEqual(reopened.persistenceState, .ready)
+        }
+    }
 
-        defaults.set("not-a-uuid", forKey: "avibe.systemSchedule.deviceID")
-        let repaired = SystemScheduleDeviceIdentity.resolve(defaults: defaults)
-        XCTAssertNotEqual(repaired, first)
-        XCTAssertNotNil(UUID(uuidString: repaired))
-        XCTAssertEqual(SystemScheduleDeviceIdentity.resolve(defaults: defaults), repaired)
+    @MainActor
+    func testUniqueV1MigrationPreservesAllLifecyclesAndImmutableProvenance() throws {
+        let (directory, store) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("ledger.json")
+        let identifier = try XCTUnwrap(store.installationID)
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let lifecycles: [StoredSystemSchedule.Lifecycle] = [
+            .reserved, .creatingUnknown, .managedScheduled, .managedCleanupPending,
+            .detachedRetained, .detachedCleanupPending, .closedNoItem, .closedRemoved,
+            .detachedCleaned, .detachedAbsent,
+        ]
+        let records = lifecycles.enumerated().map { index, lifecycle in
+            boundaryRecord(owner: owner, operationID: "op-\(index)", lifecycle: lifecycle)
+        }
+        let legacyURL = directory.appendingPathComponent("system-schedule-ledger-\(identifier)-v1.json")
+        let original = try legacyBytes(owner: owner, records: records)
+        try original.write(to: legacyURL)
+        try FileManager.default.removeItem(at: url)
+        var migrationFailure = true
+        let interrupted = FileSystemSystemScheduleStore(fileURL: url,
+            beforeRename: { if migrationFailure { throw CocoaError(.fileWriteUnknown) } })
+        XCTAssertEqual(interrupted.persistenceState, .writeFailed)
+        XCTAssertNil(interrupted.installationID)
+        migrationFailure = false
+        try (original + Data(" ".utf8)).write(to: legacyURL)
+        XCTAssertFalse(interrupted.retryCommit(), "retry must recheck the immutable source")
+        XCTAssertNil(interrupted.installationID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        try original.write(to: legacyURL)
+        XCTAssertTrue(interrupted.retryCommit())
+        XCTAssertEqual(interrupted.installationID, identifier)
+        let migrated = FileSystemSystemScheduleStore(fileURL: url, legacyEvidence: .present)
+        XCTAssertEqual(migrated.installationID, identifier)
+        XCTAssertTrue(migrated.isActive(owner: owner))
+        for record in records {
+            XCTAssertEqual(migrated.record(operationID: record.operationID,
+                instanceID: record.intent.instanceID, owner: owner), record)
+        }
+        XCTAssertEqual(try Data(contentsOf: legacyURL), original)
+        let canonical = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        XCTAssertEqual((canonical?["migration"] as? [String: Any])?["filename"] as? String,
+                       legacyURL.lastPathComponent)
+        XCTAssertEqual(FileSystemSystemScheduleStore(fileURL: url).installationID, identifier)
+        try (original + Data(" ".utf8)).write(to: legacyURL)
+        let changed = FileSystemSystemScheduleStore(fileURL: url)
+        XCTAssertEqual(changed.persistenceState, .unavailable)
+        XCTAssertNil(changed.installationID)
+        try original.write(to: legacyURL)
+        let extra = directory.appendingPathComponent("system-schedule-ledger-\(UUID().uuidString)-v1.json")
+        try original.write(to: extra)
+        XCTAssertEqual(FileSystemSystemScheduleStore(fileURL: url).persistenceState, .unavailable)
+        try FileManager.default.removeItem(at: extra)
+        try FileManager.default.removeItem(at: legacyURL)
+        XCTAssertEqual(FileSystemSystemScheduleStore(fileURL: url).persistenceState, .unavailable)
+    }
+
+    @MainActor
+    func testAmbiguousLegacyAndPreferenceOnlyEvidenceNeverInitializeOrOverwrite() throws {
+        for scenario in ["pref-only", "default", "invalid-name", "corrupt", "future", "multiple", "unreadable", "namespace-not-file", "directory-unreadable", "listing-error"] {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("I3Ambiguous.\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("ledger.json")
+            let legacy = directory.appendingPathComponent("system-schedule-ledger-\(UUID().uuidString.lowercased())-v1.json")
+            let bytes = try legacyBytes(owner: nil, records: [])
+            switch scenario {
+            case "default", "invalid-name":
+                try bytes.write(to: directory.appendingPathComponent("system-schedule-ledger-\(scenario)-v1.json"))
+            case "corrupt": try Data("bad".utf8).write(to: legacy)
+            case "future": try Data("{\"version\":99,\"records\":[]}".utf8).write(to: legacy)
+            case "multiple":
+                try bytes.write(to: legacy)
+                try bytes.write(to: directory.appendingPathComponent("system-schedule-ledger-\(UUID().uuidString)-v1.json"))
+            case "unreadable":
+                try bytes.write(to: legacy)
+                try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: legacy.path)
+            case "namespace-not-file":
+                try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: false)
+            case "directory-unreadable":
+                try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: directory.path)
+            default: break
+            }
+            let manager = BoundaryListingFileManager()
+            manager.failListing = scenario == "listing-error"
+            let store = FileSystemSystemScheduleStore(fileURL: url, fileManager: manager,
+                legacyEvidence: scenario == "pref-only" ? .present : .absent)
+            XCTAssertEqual(store.persistenceState, .unavailable, scenario)
+            XCTAssertNil(store.installationID, scenario)
+            XCTAssertNil(store.managementOwner(accountID: "account-1"), scenario)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), scenario)
+            if scenario == "corrupt" { XCTAssertEqual(try Data(contentsOf: legacy), Data("bad".utf8)) }
+        }
+    }
+
+    @MainActor
+    func testFirstUseAndErasureUseTheSamePolicyWithoutDiscoveringUnknownSystemItems() throws {
+        let (directory, first) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let originalID = try XCTUnwrap(first.installationID)
+        let platform = SystemSchedulePlatformSpy()
+        let firstCoordinator = SystemScheduleCoordinator(platform: platform, store: first)
+        XCTAssertNotNil(firstCoordinator.managementOwner(accountID: "account-1"))
+        // Simulate total erasure of this test-owned namespace, not data loss
+        // detection or a physical power interruption.
+        try FileManager.default.removeItem(at: directory)
+        let replacement = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"))
+        let replacementCoordinator = SystemScheduleCoordinator(platform: platform, store: replacement)
+        XCTAssertNotEqual(replacement.installationID, originalID)
+        XCTAssertNotNil(replacementCoordinator.managementOwner(accountID: "account-1"))
+        XCTAssertEqual(platform.existenceCalls, 0)
+        XCTAssertEqual(platform.scheduleCalls, 0)
+        XCTAssertEqual(platform.cancelCalls, 0)
+    }
+
+    @MainActor
+    func testEveryNoEffectTerminalFailureSurvivesRetryCancelAndCoordinatorRecreation() async throws {
+        let outcomes: [(SystemScheduleState, String)] = [
+            (.userDenied, "user_denied"), (.expired, "expired"),
+            (.failed, "fire_time_in_past"), (.staleContext, "stale_context"),
+        ]
+        for (state, code) in outcomes {
+            let (directory, initial) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("ledger.json")
+            let identifier = initial.installationID
+            let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
+            let context = makeContext(owner: owner)
+            let platform = SystemSchedulePlatformSpy()
+            var failing = false
+            let store = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+                if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
+            })
+            let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+            XCTAssertNil(coordinator.prepare(makeRequest(), context: context))
+            failing = true
+            let failed = coordinator.finishWithoutEffect(makeRequest(), context: context,
+                state: state, code: code, message: "No effect terminal")
+            XCTAssertEqual(failed.error?.code, "local_state_write_failed", code)
+            XCTAssertNotNil(failed.systemIdentifier)
+            XCTAssertEqual(store.installationID, identifier)
+            let recreated = SystemScheduleCoordinator(platform: platform, store: store)
+            let retry = recreated.prepare(makeRequest(requestID: "retry"), context: context)
+            XCTAssertEqual(retry?.requestID, "retry")
+            XCTAssertEqual(retry?.error?.code, "local_state_write_failed", code)
+            let cancel = await recreated.cancel(makeCancelRequest(requestID: "cancel"), context: context,
+                stillCurrent: { true })
+            XCTAssertEqual(cancel.error?.code, "local_state_write_failed", code)
+            XCTAssertEqual(cancel.systemIdentifier, failed.systemIdentifier)
+            let coldFailed = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+                if $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
+            })
+            let coldCoordinator = SystemScheduleCoordinator(platform: platform, store: coldFailed)
+            XCTAssertEqual(coldCoordinator.prepare(makeRequest(), context: context)?.error?.code,
+                           "local_state_write_failed", code)
+            failing = false
+            let recovered = recreated.prepare(makeRequest(requestID: "recovered"), context: context)
+            XCTAssertEqual(recovered?.state, state, code)
+            XCTAssertEqual(recovered?.error?.code, code)
+            XCTAssertEqual(recreated.prepare(makeRequest(requestID: "again"), context: context)?.state, state)
+            let completedCancel = await recreated.cancel(makeCancelRequest(), context: context,
+                stillCurrent: { true })
+            XCTAssertEqual(completedCancel.state, .cancelled)
+            XCTAssertEqual(platform.scheduleCalls, 0)
+            XCTAssertEqual(platform.cancelCalls, 0)
+            XCTAssertEqual(FileSystemSystemScheduleStore(fileURL: url).installationID, identifier)
+        }
+    }
+
+    @MainActor
+    func testReservedCancelAndPlatformNoEffectFailuresUseTheSameCommitBarrier() async throws {
+        for scenario in ["reserved-cancel", "permission", "unsupported", "platform-failed", "absent"] {
+            let (directory, initial) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
+            let context = makeContext(owner: owner)
+            let platform = SystemSchedulePlatformSpy()
+            var failing = false
+            let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
+                checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } })
+            let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+            XCTAssertNil(coordinator.prepare(makeRequest(), context: context))
+            if scenario == "absent" {
+                XCTAssertTrue(store.save(boundaryRecord(owner: owner, operationID: makeRequest().operationID,
+                                                       lifecycle: .creatingUnknown)))
+                platform.existenceResults = [.absentConclusive(.authorized)]
+                failing = true
+            } else if scenario != "reserved-cancel" {
+                switch scenario {
+                case "permission": platform.scheduleResult = .failure(.permissionDenied(.denied))
+                case "unsupported": platform.scheduleResult = .failure(.unsupported)
+                default: platform.scheduleResult = .failure(.failed(code: "no_item", message: "No effect"))
+                }
+                platform.onBeforeScheduleWrite = { failing = true }
+            } else { failing = true }
+            let first: SystemScheduleReceipt
+            if scenario == "reserved-cancel" {
+                first = await coordinator.cancel(makeCancelRequest(), context: context, stillCurrent: { true })
+            } else {
+                first = await coordinator.schedule(makeRequest(), context: context,
+                    creationFence: { nil }, postWriteFence: { nil })
+            }
+            XCTAssertEqual(first.error?.code, "local_state_write_failed", scenario)
+            XCTAssertNotNil(first.systemIdentifier, scenario)
+            XCTAssertEqual(coordinator.prepare(makeRequest(), context: context)?.error?.code,
+                           "local_state_write_failed", scenario)
+            let cancelled = await coordinator.cancel(makeCancelRequest(), context: context, stillCurrent: { true })
+            XCTAssertEqual(cancelled.error?.code, "local_state_write_failed", scenario)
+            failing = false
+            let recovered = await coordinator.cancel(makeCancelRequest(), context: context, stillCurrent: { true })
+            XCTAssertEqual(recovered.state, .cancelled, scenario)
+            XCTAssertTrue(platform.systemItems.isEmpty, scenario)
+            XCTAssertEqual(platform.cancelCalls, 0, scenario)
+        }
+    }
+
+    @MainActor
+    func testOwnerFailureAndLogoutDoNotPromoteUncommittedManagedSuccess() async throws {
+        let (directory, initial) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("ledger.json")
+        let identifier = initial.installationID
+        var failing = false
+        let store = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+            if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
+        })
+        failing = true
+        XCTAssertNil(store.managementOwner(accountID: "account-1"))
+        XCTAssertEqual(store.persistenceState, .writeFailed)
+        XCTAssertEqual(store.installationID, identifier)
+        failing = false
+        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+        let platform = SystemSchedulePlatformSpy()
+        platform.onBeforeScheduleWrite = { failing = true }
+        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        let request = makeRequest()
+        let failed = await coordinator.schedule(request, context: makeContext(owner: owner),
+            creationFence: { nil }, postWriteFence: { nil })
+        XCTAssertEqual(failed.error?.code, "local_state_write_failed")
+        XCTAssertEqual(store.record(operationID: request.operationID,
+            instanceID: request.instanceID, owner: owner)?.lifecycle, .managedScheduled)
+        XCTAssertFalse(coordinator.detachActiveOwner())
+        XCTAssertFalse(store.isActive(owner: owner), "revocation is immediate even if commit fails")
+        XCTAssertEqual(store.record(operationID: request.operationID,
+            instanceID: request.instanceID, owner: owner)?.lifecycle, .detachedCleanupPending)
+        XCTAssertNil(coordinator.managementOwner(accountID: "account-1"))
+        failing = false
+        await coordinator.retryPendingCleanup()
+        XCTAssertEqual(platform.scheduleWriteCalls, 1)
+        XCTAssertEqual(platform.cancelWriteCalls, 1)
+        let replacementOwner = try XCTUnwrap(coordinator.managementOwner(accountID: "account-1"))
+        XCTAssertNotEqual(replacementOwner, owner)
+        XCTAssertEqual(store.record(operationID: request.operationID,
+            instanceID: request.instanceID, owner: owner)?.lifecycle, .detachedCleaned)
+    }
+
+    private func legacyBytes(owner: SystemScheduleManagementOwner?, records: [StoredSystemSchedule]) throws -> Data {
+        struct Fixture: Encodable {
+            let version = 1
+            let activeOwner: SystemScheduleManagementOwner?
+            let records: [StoredSystemSchedule]
+        }
+        return try JSONEncoder().encode(Fixture(activeOwner: owner, records: records))
+    }
+
+    private func boundaryRecord(owner: SystemScheduleManagementOwner, operationID: String,
+                                lifecycle: StoredSystemSchedule.Lifecycle) -> StoredSystemSchedule {
+        let request = makeRequest(operationID: operationID)
+        let effect = [.creatingUnknown, .managedScheduled, .managedCleanupPending,
+                      .detachedRetained, .detachedCleanupPending].contains(lifecycle)
+        return StoredSystemSchedule(operationID: operationID, owner: owner,
+            intent: StoredSystemScheduleIntent(request: request), systemIdentifier: "system-\(operationID)",
+            authorization: .authorized, lifecycle: lifecycle, effectMayExist: effect, generation: 1,
+            createState: lifecycle == .managedScheduled ? .scheduled : nil, lastError: nil, updatedAt: now)
     }
 
     @MainActor
@@ -183,7 +517,7 @@ final class SystemScheduleTests: XCTestCase {
         for data in [
             Data("not-json".utf8),
             try JSONSerialization.data(
-                withJSONObject: ["version": 2, "activeOwner": NSNull(), "records": []]
+                withJSONObject: ["version": 99, "activeOwner": NSNull(), "records": []]
             ),
         ] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -1086,7 +1420,8 @@ final class SystemScheduleTests: XCTestCase {
                 XCTAssertFalse(coordinator.requiresRecovery(request, context: makeContext(owner: owner)),
                                "an unissued create still needs confirmation, not automatic recovery")
             }
-            XCTAssertEqual(initial.record(operationID: request.operationID, instanceID: request.instanceID,
+            let reopened = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"))
+            XCTAssertEqual(reopened.record(operationID: request.operationID, instanceID: request.instanceID,
                 owner: owner)?.lifecycle, failAt == 2 ? .reserved : .creatingUnknown)
         }
     }
@@ -1155,17 +1490,18 @@ final class SystemScheduleTests: XCTestCase {
         XCTAssertEqual(completions.count, 4)
         XCTAssertEqual(platform.scheduleCalls, 1)
         XCTAssertEqual(platform.cancelCalls, 1)
-        XCTAssertEqual(initial.record(operationID: makeRequest().operationID,
+        let reopened = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"))
+        XCTAssertEqual(reopened.record(operationID: makeRequest().operationID,
             instanceID: context.instanceID, owner: owner)?.lifecycle, .managedCleanupPending)
         failCommits = false
-        let restarted = SystemScheduleCoordinator(platform: platform,
-            store: FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json")))
+        let restartedStore = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"))
+        let restarted = SystemScheduleCoordinator(platform: platform, store: restartedStore)
         await restarted.retryPendingCleanup()
         XCTAssertEqual(platform.scheduleCalls, 1)
         XCTAssertEqual(platform.cancelCalls, 2)
         XCTAssertEqual(platform.cancelWriteCalls, 1, "restart sees conclusive absence")
         XCTAssertEqual(Set(platform.cancelSystemIdentifiers), [platform.systemIdentifier(for: makeRequest(), owner: owner)])
-        XCTAssertEqual(initial.record(operationID: makeRequest().operationID,
+        XCTAssertEqual(restartedStore.record(operationID: makeRequest().operationID,
             instanceID: context.instanceID, owner: owner)?.lifecycle, .closedRemoved)
     }
 
@@ -1206,7 +1542,7 @@ final class SystemScheduleTests: XCTestCase {
     }
 
     @MainActor
-    func testAcceptedItemRecoversFromFinalLedgerWriteFailureWithoutDuplicateCreate() async {
+    func testAcceptedItemRecommitsKnownFinalCandidateWithoutDuplicateCreate() async {
         let owner = SystemScheduleManagementOwner(
             accountID: "account-1",
             ownerEpoch: "owner-epoch-1"
@@ -1247,7 +1583,7 @@ final class SystemScheduleTests: XCTestCase {
             postWriteFence: { nil }
         )
         XCTAssertEqual(recovered.state, .scheduled)
-        XCTAssertEqual(platform.existenceCalls, 1)
+        XCTAssertEqual(platform.existenceCalls, 0)
         XCTAssertEqual(platform.scheduleWriteCalls, 1)
         XCTAssertEqual(
             store.record(
@@ -1270,7 +1606,7 @@ final class SystemScheduleTests: XCTestCase {
             failOnSaveCalls: [3]
         )
         let platform = SystemSchedulePlatformSpy()
-        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        var coordinator = SystemScheduleCoordinator(platform: platform, store: store)
         let request = makeRequest()
         let context = makeContext(owner: owner)
 
@@ -1287,6 +1623,8 @@ final class SystemScheduleTests: XCTestCase {
         )?.systemIdentifier
 
         store.failOnSaveCalls = []
+        store.simulateProcessRestartBeforeRename()
+        coordinator = SystemScheduleCoordinator(platform: platform, store: store)
         platform.existenceResults = [
             .unknown(
                 .failed(
@@ -1367,7 +1705,7 @@ final class SystemScheduleTests: XCTestCase {
                 failOnSaveCalls: [3]
             )
             let platform = SystemSchedulePlatformSpy()
-            let coordinator = SystemScheduleCoordinator(
+            var coordinator = SystemScheduleCoordinator(
                 platform: platform,
                 store: store
             )
@@ -1385,6 +1723,8 @@ final class SystemScheduleTests: XCTestCase {
                 owner: owner
             )?.systemIdentifier
             store.failOnSaveCalls = []
+            store.simulateProcessRestartBeforeRename()
+            coordinator = SystemScheduleCoordinator(platform: platform, store: store)
             platform.existenceResults = [item.existence]
 
             let receipt = await coordinator.schedule(
@@ -2313,6 +2653,21 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
     }
 
     var isAvailable: Bool { true }
+    var installationID: String? { "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
+    private(set) var persistenceState: SystemSchedulePersistenceState = .ready
+    private var pendingRecord: StoredSystemSchedule?
+
+    func retryCommit() -> Bool {
+        guard let pendingRecord else { return true }
+        return save(pendingRecord)
+    }
+
+    /// Drop only the in-memory candidate to model an interruption before
+    /// rename. The retained records are the spy's prior committed snapshot.
+    func simulateProcessRestartBeforeRename() {
+        pendingRecord = nil
+        persistenceState = .ready
+    }
 
     func managementOwner(accountID: String) -> SystemScheduleManagementOwner? {
         if activeOwner?.accountID == accountID {
@@ -2370,6 +2725,8 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
     func save(_ record: StoredSystemSchedule) -> Bool {
         saveCalls += 1
         if failOnSaveCalls.contains(saveCalls) {
+            pendingRecord = record
+            persistenceState = .writeFailed
             return false
         }
         if let existing = records.first(where: {
@@ -2385,7 +2742,10 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
                 && $0.owner == record.owner
         }
         records.append(record)
-        return !failAfterSaveCalls.contains(saveCalls)
+        let succeeded = !failAfterSaveCalls.contains(saveCalls)
+        pendingRecord = succeeded ? nil : record
+        persistenceState = succeeded ? .ready : .writeFailed
+        return succeeded
     }
 
     @discardableResult
@@ -2424,5 +2784,15 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
             records[index].updatedAt = Date()
         }
         return true
+    }
+}
+
+private final class BoundaryListingFileManager: FileManager, @unchecked Sendable {
+    var failListing = false
+    override func contentsOfDirectory(at url: URL,
+        includingPropertiesForKeys keys: [URLResourceKey]?,
+        options mask: FileManager.DirectoryEnumerationOptions = []) throws -> [URL] {
+        if failListing { throw CocoaError(.fileReadNoPermission) }
+        return try super.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: mask)
     }
 }

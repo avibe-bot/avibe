@@ -6,18 +6,18 @@ import Foundation
 import OSLog
 import SwiftUI
 
+/// Identity is part of the ledger transaction. This key is read only to classify
+/// pre-envelope installations; it is never repaired or used as a new locator.
 enum SystemScheduleDeviceIdentity {
-    private static let key = "avibe.systemSchedule.deviceID"
+    static let legacyKey = "avibe.systemSchedule.deviceID"
 
-    static func resolve(defaults: UserDefaults = .standard) -> String {
-        if let raw = defaults.string(forKey: key),
-           let identifier = UUID(uuidString: raw)
-        {
-            return identifier.uuidString.lowercased()
-        }
-        let identifier = UUID().uuidString.lowercased()
-        defaults.set(identifier, forKey: key)
-        return identifier
+    enum LegacyEvidence {
+        case absent
+        case present
+    }
+
+    static func legacyEvidence(defaults: UserDefaults) -> LegacyEvidence {
+        defaults.object(forKey: legacyKey) == nil ? .absent : .present
     }
 }
 
@@ -317,6 +317,7 @@ struct SystemScheduleManagementOwner: Codable, Equatable {
 enum SystemScheduleAdmission {
     case authorized(SystemScheduleContext)
     case localStateUnavailable
+    case localStateWriteFailed(instanceID: String)
 }
 
 struct SystemScheduleContext: Equatable {
@@ -493,340 +494,450 @@ struct StoredSystemSchedule: Codable, Equatable {
     }
 }
 
+enum SystemSchedulePersistenceState: Equatable {
+    case ready
+    case writeFailed
+    case unavailable
+}
+
 @MainActor
 protocol SystemScheduleStoring: AnyObject {
     var isAvailable: Bool { get }
+    var persistenceState: SystemSchedulePersistenceState { get }
+    var installationID: String? { get }
+    /// Establish the common commit barrier before admission, replay or effects.
+    @discardableResult func retryCommit() -> Bool
     func managementOwner(accountID: String) -> SystemScheduleManagementOwner?
     func isActive(owner: SystemScheduleManagementOwner) -> Bool
-    func record(
-        operationID: String,
-        instanceID: String,
-        owner: SystemScheduleManagementOwner
-    ) -> StoredSystemSchedule?
-    func latestRecord(
-        operationID: String,
-        instanceID: String
-    ) -> StoredSystemSchedule?
+    /// Working records include unacknowledged candidates for exact effect
+    /// settlement. Callers must cross retryCommit before deriving a receipt.
+    func record(operationID: String, instanceID: String,
+                owner: SystemScheduleManagementOwner) -> StoredSystemSchedule?
+    func latestRecord(operationID: String, instanceID: String) -> StoredSystemSchedule?
     func cleanupRecords() -> [StoredSystemSchedule]
-    @discardableResult
-    func save(_ record: StoredSystemSchedule) -> Bool
-    @discardableResult
-    func detachActiveOwner() -> Bool
-    @discardableResult
-    func detachActiveOwner(unlessAccountID accountID: String) -> Bool
+    @discardableResult func save(_ record: StoredSystemSchedule) -> Bool
+    @discardableResult func detachActiveOwner() -> Bool
+    @discardableResult func detachActiveOwner(unlessAccountID accountID: String) -> Bool
 }
 
 @MainActor
 final class FileSystemSystemScheduleStore: SystemScheduleStoring {
+    private struct LegacyEnvelope: Codable {
+        let version: Int
+        let activeOwner: SystemScheduleManagementOwner?
+        let records: [StoredSystemSchedule]
+    }
+
+    private struct MigrationSource: Codable, Equatable {
+        let filename: String
+        let fingerprint: String
+    }
+
     private struct Envelope: Codable, Equatable {
         let version: Int
+        let installationID: String
+        let migration: MigrationSource?
         var activeOwner: SystemScheduleManagementOwner?
         var records: [StoredSystemSchedule]
     }
 
-    private enum LoadFailure: Error {
-        case unsupportedVersion(Int)
-        case invalidData(String)
+    /// Checkpoints surround actual IO, including cold-open durability. They
+    /// allow the same writer to be exercised under deterministic IO failures.
+    enum IOCheckpoint {
+        case beforeFileSync
+        case beforeRename
+        case beforeDirectorySync
+        case beforeParentDirectorySync
+        case beforeColdOpenSync
     }
 
-    private enum StoreIOError: Error {
+    private enum StoreError: Error {
+        case invalidEvidence
         case posix(String, Int32)
     }
 
-    private static let version = 1
-    private static let logger = Logger(
-        subsystem: "bot.avibe.ios",
-        category: "system-schedule-store"
-    )
-
+    private static let version = 2
+    private static let legacyPrefix = "system-schedule-ledger-"
+    private static let legacySuffix = "-v1.json"
+    private static let logger = Logger(subsystem: "bot.avibe.ios", category: "system-schedule-store")
     private let fileURL: URL
     private let fileManager: FileManager
+    private let legacyEvidence: SystemScheduleDeviceIdentity.LegacyEvidence
     private let beforeRename: (() throws -> Void)?
+    private let checkpoint: ((IOCheckpoint) throws -> Void)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var committed: Envelope?
+    private var pending: Envelope?
+    private var pendingColdOpen = false
+    private(set) var persistenceState: SystemSchedulePersistenceState = .unavailable
+    private var working: Envelope? { pending ?? committed }
 
-    static func defaultFileURL(
-        deviceID: String,
-        fileManager: FileManager = .default
-    ) -> URL {
-        let directory = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? URL(
-            fileURLWithPath: NSHomeDirectory(),
-            isDirectory: true
-        ).appendingPathComponent(
-            "Library/Application Support",
-            isDirectory: true
-        )
-        return directory.appendingPathComponent(
-            "system-schedule-ledger-\(deviceID)-v1.json"
-        )
+    static func defaultFileURL(fileManager: FileManager = .default) -> URL {
+        let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return directory.appendingPathComponent("system-schedule-envelope-v2.json")
     }
 
     init(
         fileURL: URL? = nil,
         fileManager: FileManager = .default,
-        beforeRename: (() throws -> Void)? = nil
+        legacyEvidence: SystemScheduleDeviceIdentity.LegacyEvidence = .absent,
+        beforeRename: (() throws -> Void)? = nil,
+        checkpoint: ((IOCheckpoint) throws -> Void)? = nil
     ) {
+        self.fileURL = fileURL ?? Self.defaultFileURL(fileManager: fileManager)
         self.fileManager = fileManager
+        self.legacyEvidence = legacyEvidence
         self.beforeRename = beforeRename
-        if let fileURL {
-            self.fileURL = fileURL
-        } else {
-            self.fileURL = Self.defaultFileURL(
-                deviceID: "default",
-                fileManager: fileManager
-            )
-        }
+        self.checkpoint = checkpoint
+        bootstrap()
     }
 
-    var isAvailable: Bool {
-        if case .success = loadEnvelope() { return true }
-        return false
+    var isAvailable: Bool { persistenceState != .unavailable }
+    // A record failure does not revoke the already committed device address.
+    var installationID: String? { committed?.installationID }
+
+    @discardableResult
+    func retryCommit() -> Bool {
+        if let pending {
+            return commit(pending, coldOpen: pendingColdOpen)
+        }
+        if let committed {
+            do {
+                let observed = try decoder.decode(Envelope.self, from: requiredData(fileURL))
+                guard observed == committed else { throw StoreError.invalidEvidence }
+                try validateProvenance(observed, sources: legacySources())
+                persistenceState = .ready
+            } catch {
+                persistenceState = .unavailable
+            }
+        } else if persistenceState == .unavailable {
+            bootstrap()
+        }
+        return persistenceState == .ready
     }
 
     func managementOwner(accountID: String) -> SystemScheduleManagementOwner? {
-        guard case .success(var envelope) = loadEnvelope() else { return nil }
-        if envelope.activeOwner?.accountID == accountID {
-            return envelope.activeOwner
-        }
-        if let active = envelope.activeOwner {
-            detach(active, in: &envelope)
-        }
-        let owner = SystemScheduleManagementOwner(
-            accountID: accountID,
-            ownerEpoch: UUID().uuidString.lowercased()
-        )
+        guard retryCommit(), var envelope = committed else { return nil }
+        if envelope.activeOwner?.accountID == accountID { return envelope.activeOwner }
+        if let active = envelope.activeOwner { detach(active, in: &envelope) }
+        let owner = SystemScheduleManagementOwner(accountID: accountID,
+            ownerEpoch: UUID().uuidString.lowercased())
         envelope.activeOwner = owner
-        return persist(envelope) ? owner : nil
+        return commit(envelope) ? owner : nil
     }
 
     func isActive(owner: SystemScheduleManagementOwner) -> Bool {
-        guard case .success(let envelope) = loadEnvelope() else { return false }
-        return envelope.activeOwner == owner
+        working?.activeOwner == owner
     }
 
-    func record(
-        operationID: String,
-        instanceID: String,
-        owner: SystemScheduleManagementOwner
-    ) -> StoredSystemSchedule? {
-        guard case .success(let envelope) = loadEnvelope() else { return nil }
-        return envelope.records.first {
-            $0.operationID == operationID
-                && $0.intent.instanceID == instanceID
-                && $0.owner == owner
+    func record(operationID: String, instanceID: String,
+                owner: SystemScheduleManagementOwner) -> StoredSystemSchedule? {
+        working?.records.first {
+            $0.operationID == operationID && $0.intent.instanceID == instanceID && $0.owner == owner
         }
     }
 
-    func latestRecord(
-        operationID: String,
-        instanceID: String
-    ) -> StoredSystemSchedule? {
-        guard case .success(let envelope) = loadEnvelope() else { return nil }
-        return envelope.records
-            .filter {
-                $0.operationID == operationID
-                    && $0.intent.instanceID == instanceID
-            }
-            .max(by: { $0.updatedAt < $1.updatedAt })
+    func latestRecord(operationID: String, instanceID: String) -> StoredSystemSchedule? {
+        working?.records.filter {
+            $0.operationID == operationID && $0.intent.instanceID == instanceID
+        }.max(by: { $0.updatedAt < $1.updatedAt })
     }
 
     func cleanupRecords() -> [StoredSystemSchedule] {
-        guard case .success(let envelope) = loadEnvelope() else { return [] }
-        return envelope.records
-            .filter {
-                [.managedCleanupPending, .detachedCleanupPending]
-                    .contains($0.lifecycle)
-            }
-            .sorted(by: { $0.updatedAt < $1.updatedAt })
+        (working?.records ?? []).filter {
+            [.managedCleanupPending, .detachedCleanupPending].contains($0.lifecycle)
+        }.sorted(by: { $0.updatedAt < $1.updatedAt })
     }
 
     @discardableResult
     func save(_ record: StoredSystemSchedule) -> Bool {
-        guard case .success(var envelope) = loadEnvelope() else { return false }
-        if let existing = envelope.records.first(where: {
-            $0.operationID == record.operationID
-                && $0.intent.instanceID == record.intent.instanceID
-                && $0.owner == record.owner
-        }), existing.lifecycle.isDetached, !record.lifecycle.isDetached {
-            return false
-        }
-        envelope.records.removeAll {
-            $0.operationID == record.operationID
-                && $0.intent.instanceID == record.intent.instanceID
-                && $0.owner == record.owner
-        }
+        guard var envelope = working else { return false }
+        let predecessor = matching(record, in: envelope)
+        if let existing = predecessor,
+           existing.lifecycle.isDetached, !record.lifecycle.isDetached { return false }
+        envelope.records.removeAll { sameKey($0, record) }
         envelope.records.append(record)
-        return persist(envelope)
+        let saved = commit(envelope)
+        if !saved, record.lifecycle == .creatingUnknown, let predecessor,
+           predecessor.lifecycle == .reserved {
+            // This is the required intent BEFORE issuing create. A failed
+            // intent authorizes no effect; retry must durably restore the
+            // reservation before asking for confirmation again. This remains
+            // a pending candidate, never an acknowledged rollback.
+            envelope.records.removeAll { sameKey($0, record) }
+            envelope.records.append(predecessor)
+            pending = envelope
+        }
+        return saved
     }
 
     @discardableResult
     func detachActiveOwner() -> Bool {
-        switch loadEnvelope() {
-        case .failure:
-            return false
-        case .success(var envelope):
-            guard let activeOwner = envelope.activeOwner else { return true }
-            detach(activeOwner, in: &envelope)
-            return persist(envelope)
-        }
+        guard var envelope = working else { return false }
+        guard let active = envelope.activeOwner else { return retryCommit() }
+        // Deliberately do not retry a pending promotion before revocation.
+        detach(active, in: &envelope)
+        return commit(envelope)
     }
 
     @discardableResult
     func detachActiveOwner(unlessAccountID accountID: String) -> Bool {
-        switch loadEnvelope() {
-        case .failure:
-            return false
-        case .success(var envelope):
-            guard let activeOwner = envelope.activeOwner else { return true }
-            guard activeOwner.accountID != accountID else { return true }
-            detach(activeOwner, in: &envelope)
-            return persist(envelope)
-        }
+        guard let active = working?.activeOwner else { return retryCommit() }
+        guard active.accountID != accountID else { return retryCommit() }
+        return detachActiveOwner()
     }
 
-    private func detach(
-        _ owner: SystemScheduleManagementOwner,
-        in envelope: inout Envelope
-    ) {
-        if envelope.activeOwner == owner {
-            envelope.activeOwner = nil
-        }
-        let now = Date()
-        for index in envelope.records.indices
-            where envelope.records[index].owner == owner
-        {
-            switch envelope.records[index].lifecycle {
-            case .managedScheduled:
-                envelope.records[index].lifecycle = .detachedRetained
-            case .reserved:
-                envelope.records[index].lifecycle = .closedNoItem
-                envelope.records[index].effectMayExist = false
-            case .creatingUnknown, .managedCleanupPending:
-                envelope.records[index].lifecycle = .detachedCleanupPending
-                envelope.records[index].effectMayExist = true
-            case .detachedRetained, .detachedCleanupPending,
-                    .closedNoItem, .closedRemoved, .detachedCleaned,
-                    .detachedAbsent:
-                break
+    private func sameKey(_ lhs: StoredSystemSchedule, _ rhs: StoredSystemSchedule) -> Bool {
+        lhs.operationID == rhs.operationID && lhs.intent.instanceID == rhs.intent.instanceID
+            && lhs.owner == rhs.owner
+    }
+
+    private func matching(_ record: StoredSystemSchedule, in envelope: Envelope?) -> StoredSystemSchedule? {
+        envelope?.records.first { sameKey($0, record) }
+    }
+
+    private func detach(_ owner: SystemScheduleManagementOwner, in envelope: inout Envelope) {
+        envelope.activeOwner = nil
+        for index in envelope.records.indices where envelope.records[index].owner == owner {
+            var record = envelope.records[index]
+            guard !record.lifecycle.isDetached else { continue }
+            let acknowledged = matching(record, in: committed)
+            if acknowledged?.lifecycle == .managedScheduled {
+                record.lifecycle = .detachedRetained
+            } else if [.closedNoItem, .closedRemoved].contains(record.lifecycle) {
+                // Keep acknowledged tombstones and no-effect pending outcomes.
+            } else if record.effectMayExist || acknowledged?.effectMayExist == true {
+                record.lifecycle = .detachedCleanupPending
+                record.effectMayExist = true
+            } else {
+                record.lifecycle = .closedNoItem
+                record.effectMayExist = false
+                record.createState = record.createState ?? .staleContext
             }
-            envelope.records[index].generation += 1
-            envelope.records[index].updatedAt = now
+            record.generation += 1
+            record.updatedAt = Date()
+            envelope.records[index] = record
         }
     }
 
-    private func loadEnvelope() -> Result<Envelope, LoadFailure> {
-        guard fileManager.fileExists(atPath: fileURL.path) else {
-            return .success(
-                Envelope(version: Self.version, activeOwner: nil, records: [])
-            )
-        }
+    private func bootstrap() {
         do {
-            let envelope = try decoder.decode(
-                Envelope.self,
-                from: Data(contentsOf: fileURL)
-            )
-            guard envelope.version == Self.version else {
-                Self.logger.error(
-                    "Unsupported system schedule store version: \(envelope.version, privacy: .public)"
-                )
-                return .failure(.unsupportedVersion(envelope.version))
+            let sources = try legacySources()
+            if let data = try readIfPresent(fileURL) {
+                let envelope = try decoder.decode(Envelope.self, from: data)
+                try validate(envelope)
+                try validateProvenance(envelope, sources: sources)
+                _ = commit(envelope, coldOpen: true)
+                return
             }
-            return .success(envelope)
+            if let source = sources.first {
+                guard sources.count == 1 else { throw StoreError.invalidEvidence }
+                let identifier = try legacyIdentifier(source.lastPathComponent)
+                let bytes = try requiredData(source)
+                let legacy = try decoder.decode(LegacyEnvelope.self, from: bytes)
+                guard legacy.version == 1 else { throw StoreError.invalidEvidence }
+                let envelope = Envelope(version: Self.version, installationID: identifier,
+                    migration: MigrationSource(filename: source.lastPathComponent, fingerprint: fingerprint(bytes)),
+                    activeOwner: legacy.activeOwner, records: legacy.records)
+                try validate(envelope)
+                _ = commit(envelope)
+                return
+            }
+            guard case .absent = legacyEvidence else { throw StoreError.invalidEvidence }
+            // initialize_without_local_history: this cannot distinguish first
+            // use from erasure of every supported local identity/ledger clue.
+            _ = commit(Envelope(version: Self.version, installationID: UUID().uuidString.lowercased(),
+                migration: nil, activeOwner: nil, records: []))
         } catch {
-            let description = String(describing: error)
-            Self.logger.error(
-                "System schedule store could not be decoded: \(description, privacy: .public)"
-            )
-            return .failure(.invalidData(description))
+            persistenceState = .unavailable
+            Self.logger.error("System schedule evidence could not be opened: \(String(describing: error), privacy: .public)")
         }
     }
 
-    private func persist(_ envelope: Envelope) -> Bool {
+    private func validate(_ envelope: Envelope) throws {
+        guard envelope.version == Self.version, UUID(uuidString: envelope.installationID) != nil else {
+            throw StoreError.invalidEvidence
+        }
+        if let owner = envelope.activeOwner, owner.accountID.isEmpty || owner.ownerEpoch.isEmpty {
+            throw StoreError.invalidEvidence
+        }
+        var keys = Set<[String]>()
+        for record in envelope.records {
+            guard !record.operationID.isEmpty, !record.owner.accountID.isEmpty, !record.owner.ownerEpoch.isEmpty,
+                  !record.intent.instanceID.isEmpty, !record.intent.sessionID.isEmpty,
+                  !record.systemIdentifier.isEmpty, record.generation > 0,
+                  keys.insert([record.owner.accountID, record.owner.ownerEpoch,
+                               record.intent.instanceID, record.operationID]).inserted else {
+                throw StoreError.invalidEvidence
+            }
+        }
+    }
+
+    private func legacyIdentifier(_ filename: String) throws -> String {
+        guard filename.hasPrefix(Self.legacyPrefix), filename.hasSuffix(Self.legacySuffix) else {
+            throw StoreError.invalidEvidence
+        }
+        let identifier = String(filename.dropFirst(Self.legacyPrefix.count).dropLast(Self.legacySuffix.count))
+        guard let uuid = UUID(uuidString: identifier), uuid.uuidString.lowercased() == identifier.lowercased() else {
+            throw StoreError.invalidEvidence
+        }
+        return identifier
+    }
+
+    private func legacySources() throws -> [URL] {
+        let root = fileURL.deletingLastPathComponent()
+        guard try entryExists(root, directory: true) else { return [] }
+        return try fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(Self.legacyPrefix) }
+            .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+    }
+
+    private func validateProvenance(_ envelope: Envelope, sources: [URL]) throws {
+        guard let migration = envelope.migration else {
+            guard sources.isEmpty else { throw StoreError.invalidEvidence }
+            return
+        }
+        guard sources.count == 1, let source = sources.first,
+              source.lastPathComponent == migration.filename,
+              try legacyIdentifier(migration.filename) == envelope.installationID else {
+            throw StoreError.invalidEvidence
+        }
+        let bytes = try requiredData(source)
+        let original = try decoder.decode(LegacyEnvelope.self, from: bytes)
+        guard original.version == 1, fingerprint(bytes) == migration.fingerprint else {
+            throw StoreError.invalidEvidence
+        }
+    }
+
+    private func fingerprint(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// lstat distinguishes absence from denied access and rejects symlinks and
+    /// non-regular namespace entries instead of treating them as an empty store.
+    private func entryExists(_ url: URL, directory: Bool = false) throws -> Bool {
+        var status = stat()
+        let result = url.path.withCString { lstat($0, &status) }
+        if result != 0 {
+            if errno == ENOENT { return false }
+            throw StoreError.posix("lstat", errno)
+        }
+        let expected = directory ? S_IFDIR : S_IFREG
+        guard status.st_mode & S_IFMT == expected else { throw StoreError.invalidEvidence }
+        return true
+    }
+
+    private func readIfPresent(_ url: URL) throws -> Data? {
+        guard try entryExists(url) else { return nil }
+        return try Data(contentsOf: url)
+    }
+
+    private func requiredData(_ url: URL) throws -> Data {
+        guard let data = try readIfPresent(url) else { throw StoreError.invalidEvidence }
+        return data
+    }
+
+    @discardableResult
+    private func commit(_ envelope: Envelope, coldOpen: Bool = false) -> Bool {
+        pending = envelope
+        pendingColdOpen = coldOpen
         let directory = fileURL.deletingLastPathComponent()
-        let temporaryURL = directory.appendingPathComponent(
-            ".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp"
-        )
+        let temporaryURL = directory.appendingPathComponent(".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp")
         do {
-            try fileManager.createDirectory(
-                at: directory,
-                withIntermediateDirectories: true
-            )
-            try writeAndSync(try encoder.encode(envelope), to: temporaryURL)
-            try beforeRename?()
-            try replaceAtomically(temporaryURL: temporaryURL)
+            try validate(envelope)
+            try validateProvenance(envelope, sources: legacySources())
+            if coldOpen {
+                try checkpoint?(.beforeColdOpenSync)
+                try syncFile(fileURL)
+            } else {
+                try ensureDurableDirectory(directory)
+                try writeAndSync(try encoder.encode(envelope), to: temporaryURL)
+                try checkpoint?(.beforeRename)
+                try beforeRename?()
+                try replaceAtomically(temporaryURL: temporaryURL)
+            }
+            try checkpoint?(.beforeDirectorySync)
             try syncDirectory(directory)
+            // The Application Support entry itself may have just been created.
+            // Creation of any further missing ancestors is synced recursively
+            // before the first envelope write in ensureDurableDirectory.
+            try checkpoint?(.beforeParentDirectorySync)
+            try syncDirectory(directory.deletingLastPathComponent())
+            committed = envelope
+            pending = nil
+            pendingColdOpen = false
+            persistenceState = .ready
             return true
         } catch {
             try? fileManager.removeItem(at: temporaryURL)
-            Self.logger.error(
-                "System schedule store could not be committed: \(String(describing: error), privacy: .public)"
-            )
+            persistenceState = .writeFailed
+            Self.logger.error("System schedule commit failed: \(String(describing: error), privacy: .public)")
             return false
         }
     }
 
+    private func ensureDurableDirectory(_ directory: URL) throws {
+        if try entryExists(directory, directory: true) {
+            // Retry also re-establishes a previously failed parent-entry sync.
+            try syncDirectory(directory)
+            try checkpoint?(.beforeParentDirectorySync)
+            try syncDirectory(directory.deletingLastPathComponent())
+            return
+        }
+        let parent = directory.deletingLastPathComponent()
+        try ensureDurableDirectory(parent)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
+        try syncDirectory(directory)
+        try checkpoint?(.beforeParentDirectorySync)
+        try syncDirectory(parent)
+    }
+
     private func writeAndSync(_ data: Data, to url: URL) throws {
-        let descriptor = url.path.withCString {
-            open($0, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
-        }
-        guard descriptor >= 0 else {
-            throw StoreIOError.posix("open", errno)
-        }
+        let descriptor = url.path.withCString { open($0, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR) }
+        guard descriptor >= 0 else { throw StoreError.posix("open", errno) }
         var needsClose = true
-        defer {
-            if needsClose { _ = close(descriptor) }
-        }
+        defer { if needsClose { _ = close(descriptor) } }
         try data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else { return }
             var offset = 0
             while offset < rawBuffer.count {
-                let count = Darwin.write(
-                    descriptor,
-                    baseAddress.advanced(by: offset),
-                    rawBuffer.count - offset
-                )
+                let count = Darwin.write(descriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
                 if count < 0, errno == EINTR { continue }
-                guard count > 0 else {
-                    throw StoreIOError.posix("write", errno)
-                }
+                guard count > 0 else { throw StoreError.posix("write", errno) }
                 offset += count
             }
         }
-        guard fsync(descriptor) == 0 else {
-            throw StoreIOError.posix("fsync-file", errno)
-        }
+        try checkpoint?(.beforeFileSync)
+        guard fsync(descriptor) == 0 else { throw StoreError.posix("fsync-file", errno) }
         guard close(descriptor) == 0 else {
             needsClose = false
-            throw StoreIOError.posix("close", errno)
+            throw StoreError.posix("close", errno)
         }
         needsClose = false
     }
 
+    private func syncFile(_ url: URL) throws {
+        let descriptor = url.path.withCString { open($0, O_RDONLY | O_NOFOLLOW) }
+        guard descriptor >= 0 else { throw StoreError.posix("open-file", errno) }
+        defer { _ = close(descriptor) }
+        guard fsync(descriptor) == 0 else { throw StoreError.posix("fsync-file", errno) }
+    }
+
     private func replaceAtomically(temporaryURL: URL) throws {
         let result = temporaryURL.path.withCString { temporaryPath in
-            fileURL.path.withCString { destinationPath in
-                rename(temporaryPath, destinationPath)
-            }
+            fileURL.path.withCString { rename(temporaryPath, $0) }
         }
-        guard result == 0 else {
-            throw StoreIOError.posix("rename", errno)
-        }
+        guard result == 0 else { throw StoreError.posix("rename", errno) }
     }
 
     private func syncDirectory(_ directory: URL) throws {
-        let descriptor = directory.path.withCString {
-            open($0, O_RDONLY)
-        }
-        guard descriptor >= 0 else {
-            throw StoreIOError.posix("open-directory", errno)
-        }
+        let descriptor = directory.path.withCString { open($0, O_RDONLY) }
+        guard descriptor >= 0 else { throw StoreError.posix("open-directory", errno) }
         defer { _ = close(descriptor) }
-        guard fsync(descriptor) == 0 else {
-            throw StoreIOError.posix("fsync-directory", errno)
-        }
+        guard fsync(descriptor) == 0 else { throw StoreError.posix("fsync-directory", errno) }
     }
 }
 
@@ -889,7 +1000,6 @@ final class SystemScheduleCoordinator {
         var writeFailure: SystemScheduleReceipt?
         var settled = false
         var drivesCreate = false
-        var recommitRequired = false
 
         init(key: ExecutionKey) { self.key = key }
     }
@@ -907,16 +1017,7 @@ final class SystemScheduleCoordinator {
             slot.waiters.append(.init(requestID: requestID, isCancel: isCancel, continuation: continuation))
             if let driver {
                 Task { @MainActor in
-                    let receipt: SystemScheduleReceipt
-                    if slot.recommitRequired,
-                       let current = self.store.record(operationID: slot.key.operationID,
-                           instanceID: slot.key.instanceID,
-                           owner: .init(accountID: slot.key.accountID, ownerEpoch: slot.key.ownerEpoch)),
-                       !self.commit(current, slot: slot) {
-                        receipt = slot.writeFailure!
-                    } else {
-                        receipt = await driver()
-                    }
+                    let receipt = await driver()
                     precondition(slot.runningEffect == nil)
                     slot.settled = true
                     let waiters = slot.waiters
@@ -931,8 +1032,13 @@ final class SystemScheduleCoordinator {
                         : (record?.createReceipt(requestID: receipt.requestID) ?? receipt)
                     let cancelOutcome = slot.cleanupReceipt
                         ?? record?.cancelReceipt(requestID: receipt.requestID) ?? receipt
+                    let pendingFailure = self.store.persistenceState == .writeFailed
+                        ? record.map { self.writeFailure($0.request(requestID: receipt.requestID),
+                                                         identifier: $0.systemIdentifier) }
+                        : nil
                     for waiter in waiters {
-                        let outcome = slot.writeFailure ?? (waiter.isCancel ? cancelOutcome : createOutcome)
+                        let outcome = slot.writeFailure ?? pendingFailure
+                            ?? (waiter.isCancel ? cancelOutcome : createOutcome)
                         waiter.continuation.resume(returning: outcome.replacingRequestID(waiter.requestID))
                     }
                 }
@@ -1006,6 +1112,9 @@ final class SystemScheduleCoordinator {
         platform.capabilities()
     }
 
+    var installationID: String? { store.installationID }
+    var persistenceState: SystemSchedulePersistenceState { store.persistenceState }
+
     func managementOwner(accountID: String) -> SystemScheduleManagementOwner? {
         guard detachActiveOwner(unlessAccountID: accountID) else { return nil }
         return store.managementOwner(accountID: accountID)
@@ -1042,6 +1151,7 @@ final class SystemScheduleCoordinator {
         _ request: SystemScheduleRequest,
         context: SystemScheduleContext
     ) -> SystemScheduleReceipt? {
+        if let failure = persistenceFailure(request, context: context) { return failure }
         guard store.isAvailable, store.isActive(owner: context.owner) else {
             return localStateUnavailable(request)
         }
@@ -1126,6 +1236,7 @@ final class SystemScheduleCoordinator {
         code: String?,
         message: String?
     ) -> SystemScheduleReceipt {
+        if let failure = persistenceFailure(request, context: context) { return failure }
         guard var record = store.record(
             operationID: request.operationID,
             instanceID: request.instanceID,
@@ -1173,7 +1284,6 @@ final class SystemScheduleCoordinator {
         let previous = executions[executionKey]
         let slot = ExecutionSlot(key: executionKey)
         slot.drivesCreate = true
-        slot.recommitRequired = previous?.writeFailure != nil
         slot.cleanupRequested = previous?.cleanupRequested ?? false
         slot.revoked = previous?.revoked
         executions[executionKey] = slot
@@ -1466,9 +1576,12 @@ final class SystemScheduleCoordinator {
         context: SystemScheduleContext,
         stillCurrent: @escaping @MainActor () -> Bool
     ) async -> SystemScheduleReceipt {
-        guard stillCurrent() else { return cancelFailure(request, code: "stale_context") }
         let executionKey = ExecutionKey(owner: context.owner, instanceID: context.instanceID,
                                         operationID: request.operationID)
+        if executions[executionKey]?.settled != false, !store.retryCommit() {
+            return persistenceFailure(request, instanceID: context.instanceID)
+        }
+        guard stillCurrent() else { return cancelFailure(request, code: "stale_context") }
         if let slot = executions[executionKey], !slot.settled {
             guard var record = store.record(operationID: request.operationID,
                 instanceID: context.instanceID, owner: context.owner), record.intent.kind == request.kind,
@@ -1489,7 +1602,6 @@ final class SystemScheduleCoordinator {
             return await join(slot, requestID: request.requestID, isCancel: true)
         }
         let slot = ExecutionSlot(key: executionKey)
-        slot.recommitRequired = executions[executionKey]?.writeFailure != nil
         slot.revoked = .cancelled
         slot.cleanupRequested = true
         executions[executionKey] = slot
@@ -1506,6 +1618,7 @@ final class SystemScheduleCoordinator {
         slot: ExecutionSlot,
         stillCurrent: @escaping @MainActor () -> Bool
     ) async -> SystemScheduleReceipt {
+        if let failure = persistenceFailure(request, context: context) { return failure }
         guard stillCurrent() else { return cancelFailure(request, code: "stale_context") }
         guard store.isAvailable else {
             return cancelFailure(request, code: "local_state_unavailable")
@@ -1687,7 +1800,7 @@ final class SystemScheduleCoordinator {
         excludingOperationID: String? = nil,
         context: SystemScheduleContext? = nil
     ) async {
-        guard store.isAvailable else { return }
+        guard !store.cleanupRecords().isEmpty, store.retryCommit(), store.isAvailable else { return }
         let records = store.cleanupRecords().filter { record in
             !(record.operationID == excludingOperationID
                 && record.owner == context?.owner && record.intent.instanceID == context?.instanceID)
@@ -1709,10 +1822,12 @@ final class SystemScheduleCoordinator {
             return await join(slot, requestID: requestID, isCancel: isCancel)
         }
         let slot = ExecutionSlot(key: executionKey)
-        slot.recommitRequired = executions[executionKey]?.writeFailure != nil
         slot.cleanupRequested = true
         executions[executionKey] = slot
         return await join(slot, requestID: requestID, isCancel: isCancel, driver: {
+            if self.store.persistenceState == .writeFailed {
+                return self.writeFailure(record.request(requestID: requestID), identifier: record.systemIdentifier)
+            }
             // Re-read only to inherit synchronous detach, never to arbitrate
             // a competing OS effect. This slot is its sole owner.
             guard let current = self.store.record(operationID: record.operationID,
@@ -1846,7 +1961,10 @@ final class SystemScheduleCoordinator {
     func localStateUnavailable(
         _ request: SystemScheduleRequest
     ) -> SystemScheduleReceipt {
-        terminal(
+        if store.persistenceState == .writeFailed {
+            return localStateWriteFailed(request)
+        }
+        return terminal(
             request,
             state: .failed,
             code: "local_state_unavailable",
@@ -1857,7 +1975,78 @@ final class SystemScheduleCoordinator {
     func localStateUnavailable(
         _ request: SystemScheduleCancelRequest
     ) -> SystemScheduleReceipt {
-        cancelFailure(request, code: "local_state_unavailable")
+        cancelFailure(request, code: store.persistenceState == .writeFailed
+            ? "local_state_write_failed" : "local_state_unavailable")
+    }
+
+    /// Live slots keep their issued effect and waiter failure; all other
+    /// consumers cross the store's common pending/committed boundary.
+    func persistenceFailure(
+        _ request: SystemScheduleRequest,
+        context: SystemScheduleContext
+    ) -> SystemScheduleReceipt? {
+        if let slot = executions[key(request, context)], !slot.settled {
+            return slot.writeFailure?.replacingRequestID(request.requestID)
+                ?? (store.persistenceState == .writeFailed
+                    ? localStateWriteFailed(request, owner: context.owner) : nil)
+        }
+        if store.retryCommit() {
+            if executions[key(request, context)]?.settled == true {
+                executions.removeValue(forKey: key(request, context))
+            }
+            return nil
+        }
+        if store.persistenceState == .writeFailed {
+            return localStateWriteFailed(request, owner: context.owner)
+        }
+        return localStateUnavailable(request)
+    }
+
+    func localStateWriteFailed(
+        _ request: SystemScheduleRequest,
+        owner: SystemScheduleManagementOwner? = nil
+    ) -> SystemScheduleReceipt {
+        let record = store.latestRecord(operationID: request.operationID, instanceID: request.instanceID)
+        let identifier = record?.systemIdentifier
+            ?? owner.map { platform.systemIdentifier(for: request, owner: $0) }
+        return SystemScheduleReceipt.terminal(
+            request: request, state: .failed, authorization: authorization(for: request.kind),
+            systemIdentifier: identifier, code: "local_state_write_failed",
+            message: "The system item changed, but Avibe could not finish saving its management record."
+        )
+    }
+
+    func persistenceFailure(
+        _ request: SystemScheduleCancelRequest,
+        instanceID: String
+    ) -> SystemScheduleReceipt {
+        let record = store.latestRecord(operationID: request.operationID, instanceID: instanceID)
+        return cancelFailure(request,
+            code: store.persistenceState == .writeFailed ? "local_state_write_failed" : "local_state_unavailable",
+            record: record)
+    }
+
+    func localStateWriteFailed(
+        _ request: SystemScheduleCancelRequest,
+        instanceID: String
+    ) -> SystemScheduleReceipt {
+        cancelFailure(request, code: "local_state_write_failed",
+            record: store.latestRecord(operationID: request.operationID, instanceID: instanceID))
+    }
+
+    func persistenceFailure(
+        _ request: SystemScheduleCancelRequest,
+        context: SystemScheduleContext
+    ) -> SystemScheduleReceipt? {
+        let executionKey = ExecutionKey(owner: context.owner, instanceID: context.instanceID,
+                                        operationID: request.operationID)
+        if let slot = executions[executionKey], !slot.settled {
+            return slot.writeFailure?.replacingRequestID(request.requestID)
+                ?? (store.persistenceState == .writeFailed
+                    ? localStateWriteFailed(request, instanceID: context.instanceID) : nil)
+        }
+        guard !store.retryCommit() else { return nil }
+        return persistenceFailure(request, instanceID: context.instanceID)
     }
 
     private func writeFailure(
@@ -1899,7 +2088,7 @@ final class SystemScheduleCoordinator {
             operationID: request.operationID,
             kind: request.kind,
             state: code == "stale_context" ? .staleContext : .failed,
-            systemIdentifier: record?.effectMayExist == true
+            systemIdentifier: record?.effectMayExist == true || code == "local_state_write_failed"
                 ? record?.systemIdentifier
                 : nil,
             fireAt: record?.intent.fireAt,

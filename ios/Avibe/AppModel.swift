@@ -225,6 +225,7 @@ final class AppModel: ObservableObject {
     private enum SystemScheduleContextResolution {
         case available(SystemScheduleContext)
         case localStateUnavailable
+        case localStateWriteFailed(instanceID: String)
         case invalid
     }
 
@@ -294,7 +295,7 @@ final class AppModel: ObservableObject {
     /// The App icon badge: the selected instance's Inbox total, which its Web
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let systemScheduleCoordinator: SystemScheduleCoordinator
-    let systemScheduleDeviceID: String
+    var systemScheduleDeviceID: String? { systemScheduleCoordinator.installationID }
     private let systemScheduleNow: () -> Date
     private var pendingSystemSchedule: PendingSystemSchedule?
     private let nativeBadge: NativeBadge
@@ -463,16 +464,10 @@ final class AppModel: ObservableObject {
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
         self.systemScheduleNow = systemScheduleNow
-        let systemScheduleDeviceID = SystemScheduleDeviceIdentity.resolve(
-            defaults: defaults
-        )
-        self.systemScheduleDeviceID = systemScheduleDeviceID
         self.systemScheduleCoordinator = SystemScheduleCoordinator(
             platform: systemSchedulePlatform ?? LiveSystemSchedulePlatform(),
             store: systemScheduleStore ?? FileSystemSystemScheduleStore(
-                fileURL: FileSystemSystemScheduleStore.defaultFileURL(
-                    deviceID: systemScheduleDeviceID
-                )
+                legacyEvidence: SystemScheduleDeviceIdentity.legacyEvidence(defaults: defaults)
             ),
             now: systemScheduleNow
         )
@@ -604,6 +599,7 @@ final class AppModel: ObservableObject {
         switch resolveCurrentSystemScheduleContext(origin: origin) {
         case .available(let context): return .authorized(context)
         case .localStateUnavailable: return .localStateUnavailable
+        case .localStateWriteFailed(let instanceID): return .localStateWriteFailed(instanceID: instanceID)
         case .invalid: return nil
         }
     }
@@ -633,6 +629,11 @@ final class AppModel: ObservableObject {
         case .authorized(let captured): context = captured
         case .localStateUnavailable:
             return systemScheduleCoordinator.localStateUnavailable(request).jsonObject
+        case .localStateWriteFailed:
+            return systemScheduleCoordinator.localStateWriteFailed(request).jsonObject
+        }
+        if let failure = systemScheduleCoordinator.persistenceFailure(request, context: context) {
+            return failure.jsonObject
         }
         guard request.instanceID == context.instanceID, isCurrentSystemScheduleContext(context) else {
             return systemScheduleReceipt(
@@ -798,6 +799,11 @@ final class AppModel: ObservableObject {
         case .authorized(let captured): context = captured
         case .localStateUnavailable:
             return systemScheduleCoordinator.localStateUnavailable(request).jsonObject
+        case .localStateWriteFailed(let instanceID):
+            return systemScheduleCoordinator.localStateWriteFailed(request, instanceID: instanceID).jsonObject
+        }
+        if let failure = systemScheduleCoordinator.persistenceFailure(request, context: context) {
+            return failure.jsonObject
         }
         guard isCurrentSystemScheduleContext(context) else { return nil }
         let pending = pendingSystemSchedule.flatMap { candidate in
@@ -956,6 +962,9 @@ final class AppModel: ObservableObject {
         guard let owner = systemScheduleCoordinator.managementOwner(
             accountID: runtime.account.id
         ) else {
+            if systemScheduleCoordinator.persistenceState == .writeFailed {
+                return .localStateWriteFailed(instanceID: runtime.instance.id)
+            }
             return .localStateUnavailable
         }
         return .available(
