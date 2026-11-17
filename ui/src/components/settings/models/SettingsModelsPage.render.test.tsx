@@ -585,10 +585,11 @@ describe('SettingsModelsPage surface branches', () => {
     const vibey: AgentSupply = {
       ...emptyVibeyAgent,
       sources: { order: [retainedSource.id], eligibility: [] },
-      catalog_models: [model('opus'), model('sonnet'), model('haiku')],
+      catalog_models: [model('opus'), model('trio'), model('sonnet'), model('haiku')],
       // The unmapped Agent comes first, the Bot's Agent second: Bots read first.
       named_agents: [
         ...uses('opus', 'reviewer', 'main'),
+        ...uses('trio', 't1', 't2', 't3'),
         ...uses('sonnet', 'a1', 'a2', 'a3', 'a4', 'a5'),
         { name: 'unset', effective_model_id: null, supply_status: null, route_reason: null },
       ],
@@ -611,12 +612,21 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    const users = (modelId: string) => view.container.querySelector(`[data-route-model="${modelId}"] [data-model-users]`)?.textContent ?? null;
+    const row = (modelId: string) => view.container.querySelector<HTMLElement>(`[data-route-model="${modelId}"]`);
+    // What the line shows, and what the row's button reads out (every name, none counted).
+    const users = (modelId: string) => row(modelId)?.querySelector('[data-model-users] > [aria-hidden="true"]:not(svg)')?.textContent ?? null;
+    const described = (modelId: string) => {
+      const id = row(modelId)?.querySelector('button')?.getAttribute('aria-describedby');
+      return id ? document.getElementById(id)?.textContent ?? null : null;
+    };
     await waitFor(() => expect(users('opus')).not.toBeNull());
     expect(users('opus')).toMatch(/^(?:歪比、reviewer 在用|Used by 歪比, reviewer)$/);
+    expect(users('trio')).toMatch(/^(?:t1、t2、t3 在用|Used by t1, t2, t3)$/);
     expect(users('sonnet')).toMatch(/^(?:a1、a2 等 5 个在用|Used by a1, a2 and 3 more)$/);
+    expect(described('sonnet')).toMatch(/^(?:a1、a2、a3、a4、a5 在用|Used by a1, a2, a3, a4, a5)$/);
     expect(users('haiku')).toBeNull();
-    expect(view.container.querySelector('[data-route-model="opus"] [data-model-users] button')).toBeNull();
+    expect(row('haiku')?.querySelector('button')?.hasAttribute('aria-describedby')).toBe(false);
+    expect(row('opus')?.querySelector('[data-model-users] button')).toBeNull();
   });
 
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {

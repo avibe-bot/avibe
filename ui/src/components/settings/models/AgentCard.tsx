@@ -80,7 +80,7 @@ const NAMES_SLOT = '\u0000';
 /** One quiet line under a model: who uses it. Nothing when nobody does. Long
  *  names shorten; the rest of the sentence, with its count, always shows.
  *  ui/design: models/model-users/phone */
-const ModelUsers: React.FC<{ names: readonly string[] }> = ({ names }) => {
+const ModelUsers: React.FC<{ names: readonly string[]; id: string }> = ({ names, id }) => {
   const { t } = useTranslation();
   if (names.length === 0) return null;
   const separator = t('settings.models.gateway.row.usersSeparator') as string;
@@ -90,10 +90,13 @@ const ModelUsers: React.FC<{ names: readonly string[] }> = ({ names }) => {
     ? t('settings.models.gateway.row.usedByMore', { names: NAMES_SLOT, count: names.length - USERS_NAMED, total: names.length })
     : t('settings.models.gateway.row.usedBy', { names: NAMES_SLOT })) as string;
   const [before, after = ''] = sentence.split(NAMES_SLOT);
+  // The row's button reads every name, including those the line shortens or counts.
+  const everyone = t('settings.models.gateway.row.usedBy', { names: names.join(separator) }) as string;
   return (
     <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-muted" data-model-users>
+      <span id={id} className="sr-only">{everyone}</span>
       <UsersRound className="size-3 shrink-0" aria-hidden="true" />
-      <span className="flex min-w-0 whitespace-pre">
+      <span className="flex min-w-0 whitespace-pre" aria-hidden="true">
         {before && <span className="shrink-0">{before}</span>}
         <span className="min-w-0 truncate">{shown}</span>
         {after && <span className="shrink-0">{after}</span>}
@@ -114,6 +117,7 @@ const ModelRow: React.FC<{
 }> = ({ agent, modelId, sources, users, read, originHelpOpen, onOriginHelpChange, onOpenRoute }) => {
   const { t } = useTranslation();
   const helpKey = modelChainKey(agent.backend, modelId);
+  const usersId = React.useId();
   const onHelpOpenChange = React.useCallback((open: boolean) => onOriginHelpChange(helpKey, open), [helpKey, onOriginHelpChange]);
   const current = currentLink(read);
   const takeover = isTakeoverRead(read);
@@ -141,7 +145,7 @@ const ModelRow: React.FC<{
       data-route-model={modelId}
       className={cn('model-hub-model-row relative flex w-full min-w-0 items-center gap-2.5 rounded-md border border-edge px-3 text-left shadow-elevation-0', users.length > 0 ? 'min-h-[52px] py-2' : 'h-[52px]')}
     >
-      <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
+      <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} aria-describedby={users.length > 0 ? usersId : undefined} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
       <span className="pointer-events-none flex min-w-0 flex-1 flex-col justify-center gap-0.5 pr-1">
         <span className="min-w-0 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
         {hasCurrentMapping ? (
@@ -155,7 +159,7 @@ const ModelRow: React.FC<{
         ) : (
           <span className={cn('model-hub-model-current min-w-0 truncate text-left text-[10.5px]', supplyState === 'paused' && 'model-hub-ink-gold')} title={currentCopy}>{currentCopy}</span>
         )}
-        <ModelUsers names={users} />
+        <ModelUsers names={users} id={usersId} />
       </span>
       <span className="relative flex shrink-0 items-center"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>
       <ChevronRight className="model-hub-overview-chevron pointer-events-none size-[15px] shrink-0" aria-hidden="true" />

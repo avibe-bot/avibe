@@ -1080,13 +1080,15 @@ a different key.
 
 | Slot | Filled with | Absent when | Interpolated by |
 | --- | --- | --- | --- |
-| `{{count}}` | A cardinality. The i18next plural family on the key picks the form; the number is never written into the singular text by hand. | Always present | `addKey.pull.result`, `gateway.moreModels`, `gateway.modelCount`, `guard.count`, `shell.allDirect`, `sourceDetail.refetch.removed`, `sourceDetail.summary`, `takeover.pill`, `upstream.count` (`shell.allDirect` removed 2026-11-17) |
+| `{{count}}` | A cardinality. The i18next plural family on the key picks the form; the number is never written into the singular text by hand. | Always present | `addKey.pull.result`, `gateway.moreModels`, `gateway.modelCount`, `gateway.row.usedByMore` (users beyond the two named; en only), `guard.count`, `shell.allDirect`, `sourceDetail.refetch.removed`, `sourceDetail.summary`, `takeover.pill`, `upstream.count` (`shell.allDirect` removed 2026-11-17) |
 | `{{backend}}` | The backend's product name — Claude Code, Codex, opencode — never the internal id. | Always present | `adopt.subtitle`, `adopt.title`, `adopt.undo.2`, `adopt.undo.3`, `guard.gap.subject`, `order.title`, `upstream.state.supplyingNative` |
 | `{{vendor}}` | The upstream vendor's product name, as the user chose it. | Always present | `addSub.title`, `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `adopt.effects.1` |
 | `{{host}}` | The source's host, as entered, without scheme or path. | **Absent when the source has no entered host** `[contract]`: `base_url` is `api_key`-kind only, null there means the vendor's official endpoint, and a subscription may not carry one at all. §1.6 states what the one string that interpolates it renders instead. | `sourceDetail.summary` |
 | `{{source}}` | A source's display name. | Always present | `gateway.row.current`, `gateway.row.currentTakeover`, `guard.title.editSource`, `guard.title.refetch`, `guard.title.removeModel`, `guard.title.removeSource`, `guard.title.replaceKey`, `sourceDetail.edit.title`, `upstream.repair.reauthConfirm.title` |
 | `{{model}}` | A model's display id, as the source reports it. | Always present | `gateway.row.current`, `gateway.row.currentTakeover`, `guard.title.removeModel`, server-owned `models.launch.route_unconfigured` |
 | `{{models}}` | Several model ids, joined by `、` / `,` — the ids that left the discovered slice on one fetch. Ids as the source reported them, never display names, because the row that carried a display name is the row that is gone. | Always present in the one key that carries it: `sourceDetail.refetch.removed` renders only when at least one id was removed, which is the same branch guarantee that keeps its `{{count}}` off zero. | `sourceDetail.refetch.removed` |
+| `{{names}}` | The users of one model, joined by `gateway.row.usersSeparator` (`、` / `, `): a Bot's Agent by the Bot's display name, other enabled Agents by name, Bots first. At most two in `usedByMore`. | Always present: the line renders only when a model has a user. | `gateway.row.usedBy`, `gateway.row.usedByMore` |
+| `{{total}}` | All users of that model, named or not. | Always present | `gateway.row.usedByMore` (zh only) |
 | `{{mapping}}` | The complete localized source-to-upstream-model phrase produced by `gateway.row.current` or `gateway.row.currentTakeover`. | Always present | `routeDialog.openWithMapping` |
 | `{{n}}` | A hop's 1-based position in the configured order. | Always present | `guard.hop.position`, `guard.hop.position.removeSource` |
 | `{{menuModel}}` | A protected **menu** model's id — from the held Route identity or `SupplyGap.model_id`. It is its own slot rather than a second use of `{{model}}` because the two name different things and the guard turns on the difference: `{{model}}` is an id a source reports, and `model-hub.md` says 「the protected identifier is always the menu model, never a hop's upstream `model_id`」. | Always present | `guard.gap.subject`, `guard.title.saveRoute`, `route.title` |
@@ -1607,6 +1609,10 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.menu.saveFailed` `[derived]` | 模型选择未保存，请重试 | The model selection was not saved |
 | `gateway.row.current` | {{source}} → {{model}} | {{source}} → {{model}} |
 | `gateway.row.currentTakeover` | {{source}} → {{model}}（已自动切换） | {{source}} → {{model}} (Taken over) |
+| `gateway.row.usedBy` | {{names}} 在用 | Used by {{names}} |
+| `gateway.row.usedByMore_one` | {{names}} 等 {{total}} 个在用 | Used by {{names}} and {{count}} more |
+| `gateway.row.usedByMore_other` | {{names}} 等 {{total}} 个在用 | Used by {{names}} and {{count}} more |
+| `gateway.row.usersSeparator` | 、 | , |
 | `models.launch.route_unconfigured` `[contract]` | 模型 {{model}} 尚未配置路由。请前往 Models 配置。 | Model {{model}} has no configured route. Open Models to configure one. |
 | `gateway.moreModels_one` | 还有 {{count}} 个型号 | {{count}} more model |
 | `gateway.moreModels_other` | 还有 {{count}} 个型号 | {{count}} more models |
