@@ -339,6 +339,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 self.activate();
             }
             self.open_workbench();
+            self.on_main_window(|_, workbench| trace::arm(workbench));
             self.reserve_and_draw();
 
             // Pointed at the sandbox, the reserved window appears once that
@@ -643,6 +644,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             );
             assert!(self.on_main_window(|window, _| window.isVisible()));
             self.open_workbench();
+            self.on_main_window(|_, workbench| trace::arm(workbench));
             self.reserve_and_draw();
 
             self.eval(&format!("probe.windows.reserved.location.replace('{sandbox}/quiet')"));
@@ -686,7 +688,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// replacement web view inside the same native window, with a data
         /// store of its own, and later retires it. Such a Workbench opens the
         /// sandbox's window as the first one does, and however it goes (retired
-        /// by the shell's own helper, hidden, or closed without being hidden)
+        /// as the shell retires one, hidden, or closed without being hidden)
         /// its card is closed and the card's page destroyed at that moment,
         /// before anything else happens to its data store.
         fn replacement_workbenches(&mut self) {
@@ -747,12 +749,10 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     "the card does not share its replacement Workbench's data store"
                 );
 
+                // A retirement begins by hiding the web view.
                 match ending {
-                    // The shell's own way: hide, erase the store, destroy.
-                    "retired" => avibe_desktop_lib::instance_store::retire(&view)
-                        .expect("a replacement Workbench is retired with a card up"),
-                    "hidden" => view.hide().unwrap(),
-                    _ => view.close().unwrap(),
+                    "closed" => view.close().unwrap(),
+                    _ => view.hide().unwrap(),
                 }
                 // Asked on the main thread right behind the hide or the close.
                 let (windows, destroyed) = self.on_main(|mtm| (child_windows(mtm).len(), kept_card_is_destroyed()));
@@ -762,9 +762,29 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     Some(false),
                     "the card's page outlived its {ending} Workbench"
                 );
-                if ending == "hidden" {
-                    view.close().unwrap();
-                    self.on_main(|_| ());
+                match ending {
+                    // The rest of a retirement, in the order of the shell's
+                    // `instance_store::retire`: erase the store, read its
+                    // cookies back, close the web view. The probe does not
+                    // link the library, so the steps are made here.
+                    "retired" => {
+                        self.erase_the_store_of(&view);
+                        // Time for a page that was still alive to write again.
+                        std::thread::sleep(Duration::from_millis(200));
+                        let cookies = view.cookies().expect("the erased store's cookies are read back");
+                        assert!(
+                            cookies.is_empty(),
+                            "a cookie was written to a retired Workbench's store after it was erased: {} left",
+                            cookies.len()
+                        );
+                        view.close().unwrap();
+                        self.on_main(|_| ());
+                    }
+                    "hidden" => {
+                        view.close().unwrap();
+                        self.on_main(|_| ());
+                    }
+                    _ => {}
                 }
                 println!(
                     "vault window probe: a replacement Workbench was {ending} with a card up; the card was closed{}",
@@ -778,6 +798,30 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             let first: &tauri::Webview = self.main.as_ref();
             first.show().unwrap();
             self.on_main(|_| ());
+        }
+
+        /// Erases everything in a web view's data store, as the shell does
+        /// when it retires a Workbench, and waits until WebKit says it is done.
+        fn erase_the_store_of(&self, view: &tauri::Webview) {
+            let (tx, rx) = mpsc::channel();
+            view.with_webview(move |platform| {
+                let mtm = MainThreadMarker::new().expect("main thread");
+                // SAFETY: Tauri hands out the live web view on the main thread.
+                unsafe {
+                    let view = Retained::retain(platform.inner().cast::<WKWebView>()).expect("the web view");
+                    view.stopLoading();
+                    let store = view.configuration().websiteDataStore();
+                    let types = objc2_web_kit::WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+                    let since = objc2_foundation::NSDate::dateWithTimeIntervalSince1970(0.0);
+                    let erased = block2::RcBlock::new(move || {
+                        let _ = tx.send(());
+                    });
+                    store.removeDataOfTypes_modifiedSince_completionHandler(&types, &since, &erased);
+                }
+            })
+            .unwrap();
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("the data store was erased");
         }
 
         /// Keeps a reference to the one card's web view for a later question,
@@ -1407,11 +1451,33 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// The main webview's pages cannot hold more than a few hidden windows,
         /// and those do not outlive the deadline.
         fn reservations_are_bounded(&mut self) {
+            // Nothing may close a reserved window while these are asked for.
+            // What the web views announced and which sandbox windows closed,
+            // shortly before and during, is printed either way.
+            trace::closely(true);
             self.eval(
-                "probe.report({ case: 'many', opened: [0, 1, 2, 3, 4, 5].map(() => !!window.open('about:blank')) })",
+                r#"(() => {
+                    const at = [];
+                    const opened = [0, 1, 2, 3, 4, 5].map(() => {
+                        const opened = !!window.open('about:blank');
+                        at.push(Date.now());
+                        return opened;
+                    });
+                    probe.report({ case: 'many', opened, at });
+                })()"#,
             );
             let many = self.report("many");
-            assert_eq!(many["opened"], json!([true, true, true, true, false, false]), "{many}");
+            trace::closely(false);
+            let seen = trace::seen();
+            println!(
+                "vault window probe: six windows asked for at {}; announcements and closes up to then:\n{seen}",
+                many["at"]
+            );
+            assert_eq!(
+                many["opened"],
+                json!([true, true, true, true, false, false]),
+                "{many}\n{seen}"
+            );
             let held = self.children();
             assert_eq!(held.len(), 4, "{held:?}");
             assert!(held.iter().all(|child| !child.visible), "{held:?}");
@@ -1622,6 +1688,258 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// Counted without the main window, which may be gone.
         fn child_windows(&self) -> usize {
             self.on_main(|mtm| child_windows(mtm).len())
+        }
+    }
+
+    /// A record of what the app's web views announced and which sandbox
+    /// windows closed, kept by the probe alone: it wraps the three methods the
+    /// module added to wry's web view class and listens for windows closing.
+    /// The module is not changed for it.
+    mod trace {
+        use std::{
+            cell::RefCell,
+            collections::VecDeque,
+            ptr::NonNull,
+            sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                Mutex, OnceLock,
+            },
+        };
+
+        use objc2::{
+            rc::{Retained, Weak},
+            runtime::{AnyClass, AnyObject, Imp, Sel},
+            sel, ClassType, MainThreadMarker,
+        };
+        use objc2_app_kit::{NSView, NSWindow, NSWindowWillCloseNotification};
+        use objc2_foundation::{NSNotification, NSNotificationCenter};
+        use objc2_web_kit::WKWebView;
+
+        type Announce = unsafe extern "C-unwind" fn(&AnyObject, Sel);
+
+        const KEPT: usize = 60;
+        const NAMES: [&str; 3] = ["viewDidHide", "viewDidUnhide", "viewDidMoveToWindow"];
+        static ORIGINAL: [OnceLock<Imp>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+        static ARMED: AtomicBool = AtomicBool::new(false);
+        /// With call stacks, while the case being looked at runs.
+        static CLOSELY: AtomicBool = AtomicBool::new(false);
+        /// The Workbench web view's address, to recognize it by.
+        static WORKBENCH: AtomicUsize = AtomicUsize::new(0);
+        thread_local! {
+            static WORKBENCH_VIEW: RefCell<Option<Weak<WKWebView>>> = const { RefCell::new(None) };
+        }
+        static LINES: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+        fn note(line: String) {
+            let mut lines = LINES.lock().expect("the trace");
+            if lines.len() == KEPT {
+                lines.pop_front();
+            }
+            lines.push_back(format!("  [{:.0}] {line}", super::now_ms()));
+        }
+
+        pub fn closely(on: bool) {
+            CLOSELY.store(on, Ordering::SeqCst);
+            note(
+                if on {
+                    "--- asking begins ---"
+                } else {
+                    "--- answered ---"
+                }
+                .to_owned(),
+            );
+        }
+
+        pub fn seen() -> String {
+            let lines = LINES.lock().expect("the trace");
+            lines.iter().cloned().collect::<Vec<_>>().join("\n")
+        }
+
+        /// The frames of this thread's call stack, innermost first.
+        fn stack() -> String {
+            std::backtrace::Backtrace::force_capture()
+                .to_string()
+                .lines()
+                .map(str::trim)
+                .filter(|line| {
+                    line.split_once(": ")
+                        .is_some_and(|(number, _)| number.parse::<u32>().is_ok())
+                })
+                .take(70)
+                .map(|line| format!("        {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn windows(mtm: MainThreadMarker) -> Vec<isize> {
+            super::child_windows(mtm)
+                .iter()
+                .map(|window| window.windowNumber())
+                .collect()
+        }
+
+        /// The three things the module reads about the Workbench's web view.
+        fn workbench() -> String {
+            let view = WORKBENCH_VIEW
+                .try_with(|view| view.borrow().as_ref().and_then(Weak::load))
+                .ok()
+                .flatten();
+            let Some(view) = view else {
+                return "gone".to_owned();
+            };
+            let view: &WKWebView = &view;
+            // SAFETY: Main thread; a view's superview lives while the view is in it.
+            let in_front: Vec<String> = match unsafe { view.superview() } {
+                None => vec!["no superview".to_owned()],
+                Some(parent) => {
+                    let mut after = false;
+                    let mut found = Vec::new();
+                    for sibling in parent.subviews().iter() {
+                        if std::ptr::addr_eq(&*sibling as *const NSView, view as *const WKWebView) {
+                            after = true;
+                        } else if after {
+                            let frame = sibling.frame();
+                            let object: &AnyObject = sibling.as_ref();
+                            found.push(format!(
+                                "{}{} at {:.0},{:.0} {:.0}x{:.0}",
+                                object.class().name().to_string_lossy(),
+                                if sibling.isHidden() { " (hidden)" } else { "" },
+                                frame.origin.x,
+                                frame.origin.y,
+                                frame.size.width,
+                                frame.size.height
+                            ));
+                        }
+                    }
+                    found
+                }
+            };
+            let frame = view.frame();
+            format!(
+                "in a window: {}, hidden or in a hidden view: {}, frame {:.0},{:.0} {:.0}x{:.0}, views in front: {in_front:?}",
+                view.window().is_some(),
+                view.isHiddenOrHasHiddenAncestor(),
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height
+            )
+        }
+
+        fn announced(which: usize, this: &AnyObject, selector: Sel) {
+            // SAFETY: The implementation the module added for this selector,
+            // which takes no argument and returns nothing.
+            let original: Announce =
+                unsafe { std::mem::transmute::<Imp, Announce>(*ORIGINAL[which].get().expect("armed")) };
+            let Some(mtm) = MainThreadMarker::new() else {
+                // SAFETY: As above.
+                return unsafe { original(this, selector) };
+            };
+            let before = windows(mtm);
+            let subject = format!(
+                "{} {:p}{}",
+                this.class().name().to_string_lossy(),
+                this,
+                if std::ptr::from_ref(this) as usize == WORKBENCH.load(Ordering::SeqCst) {
+                    " (the Workbench)"
+                } else {
+                    ""
+                }
+            );
+            let read = workbench();
+            // SAFETY: As above.
+            unsafe { original(this, selector) };
+            let after = windows(mtm);
+            note(format!(
+                "{} on {subject}; the Workbench was {read}; sandbox windows {before:?} -> {after:?}",
+                NAMES[which]
+            ));
+            if before != after && CLOSELY.load(Ordering::SeqCst) {
+                note(format!("    the announcement came from:\n{}", stack()));
+            }
+        }
+
+        unsafe extern "C-unwind" fn did_hide(this: &AnyObject, selector: Sel) {
+            announced(0, this, selector);
+        }
+
+        unsafe extern "C-unwind" fn did_unhide(this: &AnyObject, selector: Sel) {
+            announced(1, this, selector);
+        }
+
+        unsafe extern "C-unwind" fn did_move(this: &AnyObject, selector: Sel) {
+            announced(2, this, selector);
+        }
+
+        /// Starts the record, once, for the Workbench's web view.
+        pub fn arm(workbench: &WKWebView) {
+            if ARMED.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            WORKBENCH.store(std::ptr::from_ref(workbench) as usize, Ordering::SeqCst);
+            // SAFETY: Tauri hands out the live web view on the main thread.
+            let held = unsafe { Retained::retain(std::ptr::from_ref(workbench).cast_mut()) };
+            WORKBENCH_VIEW.with_borrow_mut(|view| *view = held.as_ref().map(Weak::from_retained));
+            // wry's class: the direct subclass of `WKWebView`.
+            let mut class: &'static AnyClass = workbench.class();
+            while let Some(parent) = class.superclass() {
+                if std::ptr::eq(parent, WKWebView::class()) {
+                    break;
+                }
+                class = parent;
+            }
+            let wrappers: [(Sel, Announce); 3] = [
+                (sel!(viewDidHide), did_hide),
+                (sel!(viewDidUnhide), did_unhide),
+                (sel!(viewDidMoveToWindow), did_move),
+            ];
+            let own = class.instance_methods();
+            for (which, (selector, wrapper)) in wrappers.into_iter().enumerate() {
+                // Only a method the class itself defines: one found on a
+                // superclass belongs to every view in the process.
+                match own.iter().find(|method| method.name() == selector) {
+                    Some(method) => {
+                        // SAFETY: The wrapper has the method's own signature
+                        // and calls what it replaces.
+                        let original =
+                            unsafe { method.set_implementation(std::mem::transmute::<Announce, Imp>(wrapper)) };
+                        let _ = ORIGINAL[which].set(original);
+                    }
+                    None => note(format!(
+                        "{} does not define {}",
+                        class.name().to_string_lossy(),
+                        NAMES[which]
+                    )),
+                }
+            }
+            let closing = block2::RcBlock::new(|notification: NonNull<NSNotification>| {
+                // SAFETY: AppKit posts this on the main thread with a live
+                // notification whose object is the window.
+                let notification = unsafe { notification.as_ref() };
+                let Some(object) = notification.object() else {
+                    return;
+                };
+                // SAFETY: The object of this notification is an `NSWindow`.
+                let window: &NSWindow = unsafe { &*Retained::as_ptr(&object).cast::<NSWindow>() };
+                if super::child_view(window).is_none() {
+                    return;
+                }
+                note(format!("sandbox window {} is closing", window.windowNumber()));
+                if CLOSELY.load(Ordering::SeqCst) {
+                    note(format!("    closed from:\n{}", stack()));
+                }
+            });
+            // SAFETY: Main thread; the name is AppKit's. The observation is
+            // kept for the life of the process.
+            let observer = unsafe {
+                NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                    Some(NSWindowWillCloseNotification),
+                    None,
+                    None,
+                    &closing,
+                )
+            };
+            std::mem::forget(observer);
         }
     }
 

@@ -356,7 +356,9 @@ after it is built, `opener_navigated` when its page starts loading) are in
 their own. Without the first there is no marker and the browser hand-off
 stays; without the second a sandbox window stays open across a Workbench
 reload. The probe makes its replacement web views itself, with the same two
-calls, and retires one through the shell's own `instance_store::retire`.
+calls, and retires one with the same sequence as `instance_store::retire`
+(hide, erase the data store, read its cookies back, close); it does not link
+the library, so the sequence is written out in the probe.
 
 Only a signed build can show the rest: the shell's install passing its own
 admission; the real origin and how long its first paint takes; the passkey

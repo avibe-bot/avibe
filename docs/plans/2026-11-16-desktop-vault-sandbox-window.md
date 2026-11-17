@@ -420,11 +420,13 @@ the sandbox's window goes to the browser with every other link.
     With a replacement web view in the same window, which has a data store of
     its own, three times: the replacement gets the marker and a card that
     shares its data store and writes a cookie every 20 ms; then the
-    replacement is retired by the shell's own `instance_store::retire`, or
-    hidden, or closed without being hidden. Each time the card's window is
-    gone and WebKit reports its page closed (`_isClosed`) when the probe asks
-    on the main thread right behind the hide or the close, and the retirement,
-    which reads the store's cookies back after erasing it, succeeds.
+    replacement is hidden, as a retirement begins, or closed without being
+    hidden. Each time the card's window is gone and WebKit reports its page
+    closed (`_isClosed`) when the probe asks on the main thread right behind
+    the hide or the close. One of the hidden ones is then taken through the
+    rest of the sequence of `instance_store::retire`, written out in the
+    probe because the probe does not link the library: the data store is
+    erased, and 200 ms later its cookies are read back and must be none.
     Minimizing, a Space change and display sleep are not
     produced by the probe; for those, as for full covering, the claim rests on
     AppKit's documentation of the occlusion state.
