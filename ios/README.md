@@ -300,6 +300,49 @@ localized in `Localizable.xcstrings` and `AppShortcuts.xcstrings`. Xcode
 extracts the metadata the system reads into `Metadata.appintents` in the
 App bundle, and an XCTest checks it there.
 
+### Speak to Main Bot (background voice)
+
+The provider also offers "Speak to Main Bot" (`zh-Hans`: "对主伙伴说") from
+iOS 18, which is why the deployment target is iOS 17.4
+(`AppShortcutsBuilder.buildLimitedAvailability`). Its intent,
+`SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
+process without bringing the App to the front (`supportedModes`
+`[.background, .foreground(.dynamic)]` from iOS 26), and Apple requires a Live
+Activity for as long as it records. No `UIBackgroundModes` key is declared;
+the only Info.plist addition is `NSSupportsLiveActivities`. The system asks
+for Face ID first (`authenticationPolicy` `.requiresAuthentication`), because
+the main Bot acts on the user's computer.
+
+- A run with no take starts one; a run while one records stops it and sends
+  it, so a second long press of the Action Button sends. The Live Activity's
+  Send, Cancel, Retry, and Discard are `LiveActivityIntent`s that run in the
+  App's process. A take ends by itself after five minutes, is discarded under
+  0.6 seconds, and is sent as far as it got when the microphone is
+  interrupted.
+- Before the microphone opens, `VoiceCaptureController` reads the selected
+  instance's `GET /api/asr/status` and records only when `consent` is
+  `granted`. A missing `consent` field is an Avibe from before the voice
+  consent question: nothing is recorded, and the Live Activity asks to update
+  Avibe. `null` or `declined`, no sign-in, no microphone permission, or Live
+  Activities turned off bring the App to the main Bot's conversation, where
+  the Web UI asks. A later `403 voice_consent_required` stops the take and
+  keeps nothing.
+- The take is sent as `POST /api/asr/transcribe` (the whole AAC take), then
+  `GET /api/sessions/main` and `POST /api/sessions/<id>/messages` with
+  `metadata.input = "voice"`. The reply arrives as the instance's usual
+  notification. A failed transcription or send keeps the take, and its text
+  once transcribed, for Retry for ten minutes.
+- `VoiceCaptureInstanceClient` makes these requests as the signed-in user
+  without the runtime WebView: a hidden `WKWebView` on the account's own
+  named store (the selection and store identifier the account coordinator
+  persisted, read and never written) loads `/api/csrf-token` on the instance
+  origin and runs same-origin `fetch` there. WebKit stays the only owner of
+  the session cookie, `Origin`, and the CSRF pair, as for the Workbench.
+- The `AvibeLiveActivity` widget extension (`bot.avibe.ios.live-activity`)
+  only draws. It has no entitlements, no App Group, and no network; the views
+  and their `VoiceCapture.xcstrings` table are also compiled into the App,
+  which renders review frames from them.
+
 ## Remote direct path (inactive)
 
 The design is `docs/plans/remote-direct-ios.md`. With a direct transport, the

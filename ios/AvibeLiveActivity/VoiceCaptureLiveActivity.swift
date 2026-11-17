@@ -201,6 +201,7 @@ struct VoiceCaptureDetail: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(.gray)
+                    .foregroundStyle(.primary)
                     Button(intent: VoiceCaptureSendIntent()) {
                         Text(VoiceCaptureCopy.text("voiceCapture.action.send")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }
@@ -215,6 +216,7 @@ struct VoiceCaptureDetail: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(.gray)
+                    .foregroundStyle(.primary)
                     Button(intent: VoiceCaptureRetryIntent()) {
                         Text(VoiceCaptureCopy.text("voiceCapture.action.retry")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }

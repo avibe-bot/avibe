@@ -104,8 +104,11 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     /// `GET /api/asr/status`. An instance without the `consent` field
     /// predates the consent question and is refused (`olderAvibe`).
     func status() async throws -> Status {
-        let response = try await request("GET", "/api/asr/status")
-        try Self.check(response)
+        try Self.parseStatus(try await request("GET", "/api/asr/status"))
+    }
+
+    static func parseStatus(_ response: Response) throws -> Status {
+        try check(response)
         guard let body = response.json else {
             throw Failure.server(response.status, nil)
         }
@@ -187,7 +190,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         }
     }
 
-    private static func check(_ response: Response) throws {
+    static func check(_ response: Response) throws {
         if response.redirected {
             throw Failure.signIn
         }
