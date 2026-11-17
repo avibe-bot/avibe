@@ -290,6 +290,19 @@ struct Views {
     terminal: Option<u64>,
     account: Option<AccountDocument>,
 }
+impl Views {
+    /// The role on screen in the main window. An account document is on
+    /// screen once loaded, and stays there while it reloads after being shown
+    /// (`loaded` is false from commit to finish). Until it is first shown, the
+    /// Runtime it will cover is still the visible one.
+    fn displayed(&self, account_shown: bool) -> Option<&str> {
+        self.account
+            .as_ref()
+            .filter(|account| account.loaded || account_shown)
+            .map(|account| account.label.as_str())
+            .or(self.runtime.as_ref().map(|runtime| runtime.label.as_str()))
+    }
+}
 struct RuntimeDocument {
     label: String,
     window: u64,
@@ -751,6 +764,19 @@ pub fn active_webview(app: &AppHandle) -> Option<Webview> {
         .filter(|view| view.loaded)
         .map(|view| &view.label)
         .or(views.runtime.as_ref().map(|view| &view.label))?;
+    app.get_webview(label)
+}
+/// The web view the user sees, for showing and focusing. Unlike
+/// `active_webview`, a shown account document that is reloading is still the
+/// answer: revealing or focusing the Runtime under it would send keystrokes to
+/// a covered Workbench.
+pub(crate) fn displayed_webview(app: &AppHandle) -> Option<Webview> {
+    let Some(client) = app.try_state::<Client>() else {
+        return app.get_webview(MAIN_WINDOW);
+    };
+    let shown = client.view.presentation.lock().expect("presentation").account;
+    let views = client.view.views.lock().expect("views");
+    let label = views.displayed(shown)?;
     app.get_webview(label)
 }
 pub(crate) fn runtime_webview(app: &AppHandle) -> Option<Webview> {
@@ -2352,6 +2378,48 @@ impl ClientView for NativeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Showing or focusing main must target what covers the window. A shown
+    /// account page reloads with `loaded == false`; the Runtime under it must
+    /// not be revealed and made first responder.
+    #[test]
+    fn a_reloading_account_page_stays_the_displayed_view() {
+        let url = Url::parse("tauri://localhost/account/index.html?view=account").unwrap();
+        let views = |account: Option<bool>| Views {
+            runtime: Some(RuntimeDocument {
+                label: "main-runtime-1".into(),
+                window: 1,
+                destination: Url::parse("https://studio.avibe.bot/").unwrap(),
+                disposable: true,
+                directory: None,
+                owner: 1,
+                document: 1,
+            }),
+            account: account.map(|loaded| AccountDocument {
+                label: "main-account-2".into(),
+                window: 1,
+                destination: url.clone(),
+                document: 2,
+                admitted: false,
+                loaded,
+                token: None,
+                returning: None,
+                owner: 1,
+            }),
+            ..Views::default()
+        };
+        // (account loaded?, account shown?, displayed)
+        for (account, shown, displayed) in [
+            (None, false, "main-runtime-1"),
+            // First load, still hidden: the Runtime is what is on screen.
+            (Some(false), false, "main-runtime-1"),
+            (Some(true), true, "main-account-2"),
+            // Shown, then reloading: it still covers the Runtime.
+            (Some(false), true, "main-account-2"),
+        ] {
+            assert_eq!(views(account).displayed(shown), Some(displayed), "{account:?} {shown}");
+        }
+    }
 
     /// The popup only opens while main shows another computer, so the updater's
     /// own check must admit it there; otherwise Update, Check and both switches
