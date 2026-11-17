@@ -3188,6 +3188,7 @@
   },
   "errors": {
     "sandbox_integrity_failed": "无法验证受保护保险库的安全代码，已阻止打开。请检查网络并更新 Avibe 后重试，不要绕过验证或重新创建通行密钥。",
+    "sandbox_unreachable": "网络太慢，安全代码没有加载完。",
     "sandbox_build_mismatch": "受保护保险库沙箱与当前 Avibe 版本不匹配。请更新 Avibe 或联系支持；现有密钥和通行密钥未改变。",
     "sandbox_entry_unavailable": "当前地址或浏览器环境无法使用受保护的 Vault。请使用兼容的浏览器，通过「设置 → 远程访问」提供的 HTTPS avibe.bot 地址打开，或在运行 Avibe 的电脑上使用 localhost / 127.0.0.1。",
     "sandbox_browser_unavailable": "受保护的 Vault 需要具备 Web Crypto 的安全浏览器环境。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
@@ -6321,6 +6322,7 @@
         "prfUnavailableUnlock": "这个浏览器没能用你的 Passkey 解锁保护档，保护档仍是锁定的。请换用最新版 Chrome 或 Safari，并在保存了这个 Passkey 的设备上再试一次。"
       }
     },
+    "sandboxLoading": "正在加载安全代码…",
     "dialog": {
       "title": "添加密钥",
       "subtitle": "加密存储，值不会进入聊天或模型。",

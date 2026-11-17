@@ -44,6 +44,8 @@ import {
 } from './vaultSandboxManifest';
 import { assertVaultEntryAvailable } from './vaultEntry';
 import { recordVaultPasskeyOutcome, vaultPasskeyHandoff } from './vaultBrowserHandoff';
+import i18next from 'i18next';
+
 import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
@@ -61,6 +63,9 @@ const VERSION = 2;
 // Protocol v2 operation surface (vault-sandbox #9): `unseal`→`reveal`, `releaseDEK`→`approveRelease`.
 const REQUIRED_OPS = ['status', 'setup', 'unlock', 'lock', 'seal', 'reveal', 'sign', 'approveRelease'] as const;
 const DEFAULT_TIMEOUT_MS = 15_000;
+// Downloading and hashing the pinned sandbox release before a frame or window opens. Its own bound,
+// longer than an RPC's: the bundle is large and a slow link is not tampering.
+const INTEGRITY_TIMEOUT_MS = 60_000;
 // Ops that may raise an in-sandbox card (confirm / passkey / plaintext display) can sit open for
 // as long as the user takes to act, so they get the long ceremony timeout regardless of tier.
 const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
@@ -271,6 +276,26 @@ export function authorizationWindowFeatures(): string {
   return `popup,width=${width},height=${height},left=${left},top=${top}`;
 }
 
+/** While the reserved blank window waits for verification, it says so instead of staying empty.
+ *  Plain text in our own about:blank document; it is replaced by the pinned sandbox on navigation. */
+function showWindowLoading(popup: Window): void {
+  try {
+    const doc = popup.document;
+    const text = i18next.t('vaults.sandboxLoading');
+    doc.title = text;
+    const dark = getVaultSandboxAppearance().theme === 'dark';
+    doc.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    const body = doc.body ?? doc.documentElement.appendChild(doc.createElement('body'));
+    body.style.cssText = 'margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+      + 'font:14px system-ui,sans-serif;background:Canvas;color:GrayText';
+    const line = doc.createElement('p');
+    line.textContent = text;
+    body.replaceChildren(line);
+  } catch {
+    // A window this page cannot write to stays blank; verification is unaffected.
+  }
+}
+
 /** Reserve user activation without loading protected code. Each popup is inert
  * until its own verification finishes. The RPC awaits that result by id, so a
  * failed/cancelled popup can never silently fall back to an unverified window. */
@@ -285,6 +310,7 @@ export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null 
     recordVaultPasskeyOutcome(new VaultSandboxError('authorization_popup_blocked', 'The app did not open the sandbox window'));
     return null;
   }
+  showWindowLoading(popup);
   let closed = false;
   const close = (): void => {
     closed = true;
@@ -330,15 +356,34 @@ function failIntegrity(message: string): never {
   throw new VaultSandboxError('sandbox_integrity_failed', message);
 }
 
-/** No successful cache: every new frame or parent-created popup checks again.
- * Hash the manifest bytes too; redirects, CORS/network/parse failures are never
- * an invitation to trust a mutable endpoint or downgrade protected custody. */
+/** The release could not be downloaded in time, or at all (a slow or lost connection). Nothing was
+ *  verified or opened; trying again verifies afresh. Never used for a byte or identity mismatch. */
+function failUnreachable(message: string): never {
+  throw new VaultSandboxError('sandbox_unreachable', message, true);
+}
+
+/** The pinned resources the verified document itself loads under browser-enforced SRI (its script
+ *  and stylesheet): every one except the document. A test over the pinned release checks that the
+ *  document names each with the pin's integrity. Only these may be revalidated from the HTTP cache
+ *  (`no-cache`: the host is still asked each time and answers 304, without a second download); the
+ *  manifest and the document stay `no-store`, so a build that is not published yet, or a changed
+ *  document, is never answered from a cache. */
+const SRI_LOADED_RESOURCE_PATHS: ReadonlySet<string> = new Set(
+  VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.filter((path) => path !== VAULT_SANDBOX_IFRAME_RESOURCE_PATH),
+);
+
+/** No successful cache: every new frame or parent-created popup checks again,
+ * hashing every byte against the pin. Hash the manifest bytes too; redirects,
+ * CORS/parse/identity failures are never an invitation to trust a mutable endpoint
+ * or downgrade protected custody. A download that fails or runs out of time is
+ * `sandbox_unreachable` (retryable), never reported as a mismatch. */
 export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise<void> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
-  const timer = setTimeout(abort, DEFAULT_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; abort(); }, INTEGRITY_TIMEOUT_MS);
   try {
     if (typeof window === 'undefined' || typeof crypto === 'undefined' || !crypto.subtle) {
       failIntegrity('Sandbox integrity requires Web Crypto in a browser context');
@@ -354,13 +399,26 @@ export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise
     }
     const verify = async (path: string, expected: string): Promise<ArrayBuffer> => {
       const url = `${VAULT_SANDBOX_ORIGIN}${path}`;
-      const response = await fetch(url, {
-        cache: 'no-store', mode: 'cors', credentials: 'omit', redirect: 'error', signal: controller.signal,
-      });
+      let response: Response;
+      let bytes: ArrayBuffer;
+      try {
+        // A redirect is never followed: `manual` returns it as an opaque response, refused below
+        // as a mismatch, where `error` would be indistinguishable from a lost connection.
+        response = await fetch(url, {
+          cache: SRI_LOADED_RESOURCE_PATHS.has(path) ? 'no-cache' : 'no-store',
+          mode: 'cors', credentials: 'omit', redirect: 'manual', signal: controller.signal,
+        });
+      } catch {
+        failUnreachable(`Sandbox resource could not be downloaded: ${path}`);
+      }
       if (response.status !== 200 || response.redirected || response.url !== url || response.type !== 'cors') {
         failIntegrity(`Sandbox resource was missing, redirected, or not CORS-readable: ${path}`);
       }
-      const bytes = await response.arrayBuffer();
+      try {
+        bytes = await response.arrayBuffer();
+      } catch {
+        failUnreachable(`Sandbox resource download did not finish: ${path}`);
+      }
       if (await sha256Subresource(bytes) !== expected) failIntegrity(`Sandbox resource hash mismatch: ${path}`);
       return bytes;
     };
@@ -370,10 +428,13 @@ export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise
       || manifest.schema !== pin.schema || manifest.algorithm !== pin.algorithm
       || JSON.stringify(manifest.resources) !== JSON.stringify(pin.resources)) failIntegrity('Sandbox manifest identity mismatch');
     await Promise.all(VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.map((path) => verify(path, resources[path])));
-    if (controller.signal.aborted) failIntegrity('Sandbox verification was cancelled or timed out');
+    if (controller.signal.aborted) failUnreachable('Sandbox verification timed out');
   } catch (error) {
     if (signal?.aborted) throw new VaultSandboxError('sandbox_reset', 'Sandbox verification was cancelled', true);
+    // A mismatch found before the deadline stays a mismatch; anything else the deadline cut short
+    // (a body still being read or parsed) is a slow connection.
     if (error instanceof VaultSandboxError) throw error;
+    if (timedOut) failUnreachable('Sandbox verification timed out');
     failIntegrity('Unable to verify the pinned sandbox release. Check connectivity and update Avibe if necessary.');
   } finally {
     clearTimeout(timer);
