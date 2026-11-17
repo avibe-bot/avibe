@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { closeVoiceConsent, voiceConsentAsking } from '../../lib/voiceConsent';
+import { answerVoiceConsent, closeVoiceConsent, voiceConsentAsking } from '../../lib/voiceConsent';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 import { MobileBotCenter } from '../MobileChrome';
 import { useHoldToTalk, type HoldToTalkOptions } from './useHoldToTalk';
@@ -741,13 +741,37 @@ describe('useHoldToTalk', () => {
     expect(hold.outcome).toBeNull();
   });
 
-  it('says voice input is off, without recording, once the reader said no', async () => {
+  // A "no" is recoverable (owner decision, 2026-11-17): the next press asks again, and only a yes
+  // lets a later press record.
+  it('asks again on a press after a no, and records on the press after Allow', async () => {
     pipeline.asr.consent = 'declined';
     const el = await mount();
     await holdFor(el);
-    expect(hold.outcome).toBe('voice-off');
-    expect(voiceConsentAsking()).toBe(false);
+    up(el);
+    expect(voiceConsentAsking()).toBe(true);
+    expect(hold.outcome).toBeNull();
     expect(native.permission).not.toHaveBeenCalled();
+    expect(pipeline.takes).toHaveLength(0);
+
+    await act(async () => { await answerVoiceConsent('granted'); });
+    closeVoiceConsent();
+    await holdFor(el);
+    expect(voiceConsentAsking()).toBe(false);
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
+  it('a second no keeps voice off, and the press after it asks again', async () => {
+    pipeline.asr.consent = 'declined';
+    const el = await mount();
+    await holdFor(el);
+    up(el);
+    expect(voiceConsentAsking()).toBe(true);
+    await act(async () => { await answerVoiceConsent('declined'); });
+    closeVoiceConsent();
+
+    await holdFor(el);
+    up(el);
+    expect(voiceConsentAsking()).toBe(true);
     expect(pipeline.takes).toHaveLength(0);
   });
 

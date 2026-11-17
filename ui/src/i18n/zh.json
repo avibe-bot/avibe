@@ -7405,9 +7405,6 @@
       "allow": "允许",
       "deny": "不允许",
       "saveFailed": "没能保存你的选择，请再试一次。",
-      "offTitle": "语音输入已关闭",
-      "offBody": "可以直接打字，或在设置 › 常规里开启。",
-      "turnOn": "开启",
       "settingTitle": "语音输入",
       "settingDescription": "用第三方 AI 语音服务把你说的话转成文字，avibe.bot 不保存录音。只对你的账号在这个 Avibe 上生效。"
     }

@@ -3,8 +3,8 @@
 // tab bar's main Bot, a Bot's avatar, a Show Page's dictation) asks once per account, before the
 // microphone opens; existing users are asked once on their next press. The body says where speech
 // goes; "Learn more" opens the small print. Allow: the next press records as it does today. Don't
-// allow: voice stays off, typing is unchanged, a hold leaves a note with Turn on, and the mic
-// button asks again. The desktop mini window says where to turn it on. Settings › General holds
+// allow: voice stays off, typing is unchanged, and the next press asks again (owner decision,
+// 2026-11-17: a mis-tap is recoverable). The desktop mini window says where to turn it on. Settings › General holds
 // the answer (on asks the question; off is at once).
 // Every part is shipped.
 import type { ReactNode } from 'react';
@@ -15,7 +15,6 @@ import { VoiceConsentDialog } from '@/components/voice/VoiceConsent';
 import { frames } from '../../frame';
 import { DesktopScreen } from '../../shell/DesktopScreen';
 import { botConversationApi, demoProjects, demoSessions, inboxRow, mainBot, message, type WorkbenchFixtures } from '../../shell/fixtures';
-import { HeldComposer } from '../../shell/HeldComposer';
 import { PhoneConversation } from '../../shell/PhoneScreen';
 import { agentsApi } from '../../shell/teamFixtures';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
@@ -59,10 +58,6 @@ const ask = (screen: 'phone' | 'desktop', expanded = false) => () => (
   </>
 );
 
-const off = (screen: 'phone' | 'desktop') => () => {
-  const note = <HeldComposer pointer={screen === 'phone' ? 'touch' : 'mouse'} to={{ bot: 'main' }} hold={{ outcome: 'voice-off' }} />;
-  return screen === 'phone' ? <PhoneConversation overlay={note} /> : <DesktopScreen overlay={note} />;
-};
 
 const settings = settingsPage('general', <SettingsGeneralPage />);
 
@@ -70,8 +65,6 @@ const designFrames = frames([
   frame('b-details-phone', '1 · 第一次按住说话（老用户：升级后第一次）：麦克风还没打开，先问一次', phone, ask('phone')),
   frame('b-details-phone-open', '1 · 点「了解详情」：小字写明经 avibe.bot、服务商与地区、不保存、在哪里更改、隐私政策', phone, ask('phone', true)),
   frame('b-details-desktop', '1 · 同上，桌面', desktop, ask('desktop')),
-  frame('c-off-phone', '2 · 选了「不允许」后再按住：不录音，提示怎么开启；打字照常', phone, off('phone'), everydayFixtures('declined')),
-  frame('c-off-desktop', '2 · 同上，桌面', desktop, off('desktop'), everydayFixtures('declined')),
   frame('d-settings-off', '3 · 设置 › 常规：语音输入（按账号、按这个 Avibe）。打开时先问一次；关闭立即生效', [1440, 1280], settings, settingsFixtures(status('declined')), '/settings/general'),
   frame('d-settings-on-phone', '3 · 同上，已允许，手机', [390, 1760], settings, settingsFixtures(status('granted')), '/settings/general'),
 ]);

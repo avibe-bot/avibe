@@ -14,7 +14,7 @@ import {
   noteVoiceStatus,
   voiceConsentAsking,
 } from '../../lib/voiceConsent';
-import { VoiceConsentHost } from './VoiceConsent';
+import { VoiceConsentHost, VoiceInputSetting } from './VoiceConsent';
 
 // The question voice input asks before speech goes to a third-party AI service
 // (ui/design: composer/voice-consent/*): only Allow records a yes, and what was answered is
@@ -86,7 +86,32 @@ describe('voice consent', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'voice.consent.deny' }));
     });
     expect(saved('declined')).toHaveLength(1);
+    expect(voiceConsentAsking()).toBe(false);
+    // A no is recoverable: the next press records nothing and asks again.
     expect(gateVoicePress()).toBe('declined');
+    expect(voiceConsentAsking()).toBe(true);
+  });
+
+  it('Settings › General turns voice off at once, and turning it on asks', async () => {
+    api.fetch.mockImplementation(async (path: string) => ({
+      ok: true,
+      json: async () => (path === '/api/asr/status' ? { available: true, consent: 'granted' } : { ok: true }),
+    }));
+    noteVoiceStatus({ available: true, consent: 'granted' });
+    render(
+      <ToastContext.Provider value={{ showToast }}>
+        <VoiceInputSetting />
+      </ToastContext.Provider>,
+    );
+    const toggle = await screen.findByRole('switch', { name: 'voice.consent.settingTitle' });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    await act(async () => { fireEvent.click(toggle); });
+    expect(saved('declined')).toHaveLength(1);
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect(voiceConsentAsking()).toBe(false);
+    fireEvent.click(toggle);
+    expect(voiceConsentAsking()).toBe(true);
+    expect(saved('granted')).toHaveLength(0);
   });
 
   it('keeps the question up and says so when the answer could not be saved', async () => {

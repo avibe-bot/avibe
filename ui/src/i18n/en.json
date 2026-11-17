@@ -7405,9 +7405,6 @@
       "allow": "Allow",
       "deny": "Don't allow",
       "saveFailed": "Couldn't save your choice. Try again.",
-      "offTitle": "Voice input is off",
-      "offBody": "Type instead, or turn it on in Settings › General.",
-      "turnOn": "Turn on",
       "settingTitle": "Voice input",
       "settingDescription": "A third-party AI speech service turns what you say into text; avibe.bot doesn't keep your recordings. Applies to your account on this Avibe."
     }

@@ -5,7 +5,6 @@ import { Trans, useTranslation } from 'react-i18next';
 
 import { isDesktopShell } from '@/lib/desktopShell';
 import { isApplePlatform } from '@/lib/platform';
-import { askVoiceConsent } from '@/lib/voiceConsent';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { Button } from '../ui/button';
@@ -190,7 +189,6 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
       {note === 'too-short' && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       {(note === 'no-sound' || note === 'mic-busy' || note === 'no-device' || note === 'mic-failed') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
       {note === 'denied' && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
-      {note === 'voice-off' && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       {note === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
         {note === 'cancelled' && <span className="text-foreground">{t('voice.cancelled')}</span>}
@@ -210,18 +208,7 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
           </>
         )}
         {note === 'unavailable' && <span className="text-foreground">{t('pet.voice.cloudRequired')}</span>}
-        {note === 'voice-off' && (
-          <>
-            <span className="font-semibold text-foreground">{t('voice.consent.offTitle')}</span>
-            <span className="text-muted">{t('voice.consent.offBody')}</span>
-          </>
-        )}
       </div>
-      {note === 'voice-off' && (
-        <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => { onDismiss(); askVoiceConsent(); }}>
-          {t('voice.consent.turnOn')}
-        </Button>
-      )}
       <VoiceClose label={t('voice.dismiss')} onClick={onDismiss} />
     </div>
   );

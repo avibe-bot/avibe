@@ -5,8 +5,9 @@
 // asks: the question itself is drawn by `VoiceConsentHost`.
 //
 // A voice control calls `gateVoicePress()` before it opens the microphone. Only `granted` goes
-// on; `ask` puts the question up and the press records nothing; `declined` leaves the press to
-// the control's own "voice input is off" note.
+// on; any other answer puts the question up and the press records nothing. An account that said
+// no is asked again on its next press (owner decision, 2026-11-17), so a mis-tap is recoverable;
+// its answer stays "no", and nothing is sent, until it says yes.
 
 import { useSyncExternalStore } from 'react';
 
@@ -117,15 +118,15 @@ export function voiceConsentForPress(): VoicePress {
 }
 
 /** Before a voice control opens the microphone: `granted` records; otherwise this press records
- *  nothing, and `ask` has put the question up. */
+ *  nothing and puts the question up, for a "no" as for an account not asked yet. */
 export function gateVoicePress(): VoicePress {
   const press = voiceConsentForPress();
-  if (press === 'ask') askVoiceConsent();
+  if (press !== 'granted') askVoiceConsent();
   return press;
 }
 
 /** Before a voice control opens the microphone, with the answer read first when it is not known
- *  yet (so a reader who said yes is not asked, and one who said no gets the off note). */
+ *  yet, so a reader who said yes is not asked. */
 export async function resolveVoicePress(): Promise<VoicePress> {
   if (known === undefined) await refreshVoiceConsent();
   return gateVoicePress();
