@@ -8,11 +8,13 @@ import WidgetKit
 /// Prototype layout; the reviewed frames replace it.
 struct VoiceCaptureLiveActivity: Widget {
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: VoiceCaptureAttributes.self) { context in
+        ActivityConfiguration(for: VoiceCaptureAttributes.self) { raw in
+            let context = VoiceCaptureShown(raw)
             VoiceCaptureLockScreenView(state: context.state)
                 .padding(16)
                 .activityBackgroundTint(nil)
-        } dynamicIsland: { context in
+        } dynamicIsland: { raw in
+            let context = VoiceCaptureShown(raw)
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     VoiceCaptureGlyph(state: context.state)
@@ -48,6 +50,31 @@ struct VoiceCaptureLiveActivity: Widget {
 
 /// The Live Activity's words, from the `VoiceCapture` table, which both
 /// the App and the extension carry (the App renders the review frames).
+/// What the island shows: the state, except that a listening or sending
+/// take past its stale date (its process is gone) shows as interrupted.
+struct VoiceCaptureShown {
+    /// The longest take (`VoiceCaptureController.maximumDuration`).
+    static let timerCap: TimeInterval = 5 * 60
+
+    let state: VoiceCaptureAttributes.ContentState
+
+    init(_ context: ActivityViewContext<VoiceCaptureAttributes>) {
+        self.init(state: context.state, isStale: context.isStale)
+    }
+
+    init(state: VoiceCaptureAttributes.ContentState, isStale: Bool) {
+        if isStale, state.phase == .listening || state.phase == .sending {
+            var interrupted = state
+            interrupted.phase = .failed
+            interrupted.reason = .interrupted
+            interrupted.endedAt = interrupted.endedAt ?? state.startedAt.addingTimeInterval(Self.timerCap)
+            self.state = interrupted
+        } else {
+            self.state = state
+        }
+    }
+}
+
 enum VoiceCaptureCopy {
     static func text(_ key: String) -> LocalizedStringResource {
         LocalizedStringResource(String.LocalizationValue(key), table: "VoiceCapture")
@@ -78,6 +105,7 @@ enum VoiceCaptureCopy {
         case .updateAvibe: return text("voiceCapture.reason.updateAvibe")
         case .voiceUnavailable: return text("voiceCapture.reason.voiceUnavailable")
         case .liveActivities: return text("voiceCapture.reason.liveActivities")
+        case .activityFailed: return text("voiceCapture.reason.activityFailed")
         case .interrupted: return text("voiceCapture.reason.interrupted")
         }
     }
@@ -161,7 +189,11 @@ struct VoiceCaptureClock: View {
 
     var body: some View {
         if state.phase == .listening {
-            Text(timerInterval: state.startedAt...Date.distantFuture, countsDown: false)
+            // Stops at the cap: a timer never runs on for a take no one holds.
+            Text(
+                timerInterval: state.startedAt...state.startedAt.addingTimeInterval(VoiceCaptureShown.timerCap),
+                countsDown: false
+            )
         } else if let endedAt = state.endedAt, state.phase == .sending {
             Text(Duration.seconds(endedAt.timeIntervalSince(state.startedAt)),
                  format: .time(pattern: .minuteSecond))

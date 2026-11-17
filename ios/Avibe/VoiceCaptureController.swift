@@ -30,6 +30,10 @@ extension VoiceCaptureRecorder: VoiceCaptureAudio {}
 /// One take's Live Activity.
 @MainActor
 protocol VoiceCaptureActivityHandle: AnyObject {
+    /// The system's identifier, to tell this process's take from a leftover.
+    var id: String { get }
+    /// What it shows now (nil when the system no longer has it).
+    var currentState: VoiceCaptureAttributes.ContentState? { get }
     func update(_ state: VoiceCaptureAttributes.ContentState) async
     func end(_ state: VoiceCaptureAttributes.ContentState?, dismissal: ActivityUIDismissalPolicy) async
 }
@@ -42,8 +46,30 @@ private final class LiveVoiceCaptureActivity: VoiceCaptureActivityHandle {
         self.activity = activity
     }
 
+    var id: String { activity.id }
+
+    var currentState: VoiceCaptureAttributes.ContentState? {
+        switch activity.activityState {
+        case .active, .stale: return activity.content.state
+        default: return nil
+        }
+    }
+
+    /// Past this the island draws the take as interrupted by itself, so a
+    /// take whose process is gone never shows a timer that runs on.
+    static func staleDate(for state: VoiceCaptureAttributes.ContentState) -> Date? {
+        switch state.phase {
+        case .listening, .sending:
+            return state.startedAt.addingTimeInterval(VoiceCaptureController.staleAfter)
+        default:
+            return nil
+        }
+    }
+
     func update(_ state: VoiceCaptureAttributes.ContentState) async {
-        await activity.update(ActivityContent(state: state, staleDate: nil, relevanceScore: 100))
+        await activity.update(ActivityContent(
+            state: state, staleDate: Self.staleDate(for: state), relevanceScore: 100
+        ))
     }
 
     func end(_ state: VoiceCaptureAttributes.ContentState?, dismissal: ActivityUIDismissalPolicy) async {
@@ -63,6 +89,11 @@ struct VoiceCaptureEnvironment {
     var microphoneAllowed: () -> Bool
     var activitiesEnabled: () -> Bool
     var requestActivity: (VoiceCaptureAttributes.ContentState) throws -> VoiceCaptureActivityHandle
+    /// Every Live Activity of ours the system still shows, including one a
+    /// process that is gone left behind.
+    var existingActivities: () -> [VoiceCaptureActivityHandle]
+    /// Deletes recordings a gone process left behind.
+    var discardLeftoverAudio: () -> Void
     var now: () -> Date
     var sleep: (Duration) async -> Void
 
@@ -76,10 +107,18 @@ struct VoiceCaptureEnvironment {
             LiveVoiceCaptureActivity(
                 try Activity.request(
                     attributes: VoiceCaptureAttributes(botName: nil),
-                    content: ActivityContent(state: state, staleDate: nil, relevanceScore: 100)
+                    content: ActivityContent(
+                        state: state,
+                        staleDate: LiveVoiceCaptureActivity.staleDate(for: state),
+                        relevanceScore: 100
+                    )
                 )
             )
         },
+        existingActivities: {
+            Activity<VoiceCaptureAttributes>.activities.map(LiveVoiceCaptureActivity.init)
+        },
+        discardLeftoverAudio: { VoiceCaptureRecorder.discardAll() },
         now: Date.init,
         sleep: { try? await Task.sleep(for: $0) }
     )
@@ -103,6 +142,9 @@ final class VoiceCaptureController {
 
     /// The longest take; it is then sent as if the user stopped it.
     static let maximumDuration: Duration = .seconds(5 * 60)
+    /// When a listening or sending island goes stale on its own: the cap
+    /// plus time to send. Only a take whose process is gone gets there.
+    static let staleAfter: TimeInterval = 5 * 60 + 90
     /// A take shorter than this is treated as a slip and discarded.
     static let minimumDuration: TimeInterval = 0.6
     /// How long the island keeps a sent take before it goes.
@@ -166,6 +208,12 @@ final class VoiceCaptureController {
 
     /// The intent: start a take, or stop and send the one recording.
     func toggle() async -> Outcome {
+        // A take this process does not hold is a leftover of one whose
+        // process is gone (killed, or ended by the system): its recording is
+        // lost. A press then ends it and says so; the next press starts anew.
+        if case .idle = state, await endLeftovers(reason: .interrupted) {
+            return .stopped
+        }
         switch state {
         case .listening:
             await finish(send: true)
@@ -189,6 +237,9 @@ final class VoiceCaptureController {
             if !send, case .failed(let take) = state {
                 state = .idle
                 await end(take, dismissal: .immediate)
+            } else if case .idle = state {
+                // The island's button for a take no process holds.
+                _ = await endLeftovers(reason: send ? .interrupted : nil)
             }
             return
         }
@@ -208,8 +259,55 @@ final class VoiceCaptureController {
 
     /// Retry on a failed take: send the kept audio (or text) again.
     func retry() async {
-        guard case .failed(let take) = state else { return }
+        guard case .failed(let take) = state else {
+            if case .idle = state { _ = await endLeftovers(reason: .interrupted) }
+            return
+        }
         await deliver(take)
+    }
+
+    /// At launch: whatever this process does not hold is a leftover.
+    func endLeftoversAtLaunch() async {
+        guard case .idle = state else { return }
+        _ = await endLeftovers(reason: .interrupted)
+    }
+
+    /// Ends every Live Activity of ours this process does not hold, and the
+    /// audio such a take left. A listening or sending one is shown as
+    /// interrupted for a moment (`reason`), anything else goes at once.
+    /// Returns whether one was still listening or sending.
+    private func endLeftovers(reason: VoiceCaptureAttributes.Reason?) async -> Bool {
+        // Taken before any wait, while nothing is recording, so a take that
+        // starts meanwhile keeps its own activity and audio.
+        let held = heldActivityID
+        let leftovers = environment.existingActivities().filter { $0.id != held }
+        environment.discardLeftoverAudio()
+        var wasRunning = false
+        for activity in leftovers {
+            guard let shown = activity.currentState else { continue }
+            let running = shown.phase == .listening || shown.phase == .sending
+            wasRunning = wasRunning || running
+            if running, let reason {
+                let now = environment.now()
+                await activity.end(
+                    VoiceCaptureAttributes.ContentState(
+                        phase: .failed, startedAt: shown.startedAt, endedAt: now, reason: reason
+                    ),
+                    dismissal: .after(now.addingTimeInterval(Self.sentDismissal))
+                )
+            } else {
+                await activity.end(nil, dismissal: .immediate)
+            }
+        }
+        if wasRunning { record("ended a leftover take") }
+        return wasRunning
+    }
+
+    private var heldActivityID: String? {
+        switch state {
+        case .listening(let take), .sending(let take), .failed(let take): return take.activity.id
+        case .idle, .preparing: return nil
+        }
     }
 
     /// The account is signing out or changing: stop and discard any take,
@@ -307,8 +405,11 @@ final class VoiceCaptureController {
         } catch {
             instance.close()
             state = .idle
+            // No island means no recording (Apple stops it). Nothing was
+            // recorded; the App comes forward and says why.
+            audio.discard()
             record("start: activity request failed \(error)")
-            return .needsApp(.liveActivities)
+            return .needsApp(.activityFailed)
         }
         do {
             try audio.start()

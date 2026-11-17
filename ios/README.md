@@ -308,8 +308,11 @@ iOS 18, which is why the deployment target is iOS 17.4
 `SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
 process without bringing the App to the front (`supportedModes`
 `[.background, .foreground(.dynamic)]` from iOS 26), and Apple requires a Live
-Activity for as long as it records. No `UIBackgroundModes` key is declared;
-the only Info.plist addition is `NSSupportsLiveActivities`. The system asks
+Activity for as long as it records. It is also a `LiveActivityIntent`, the
+documented way for an App that is not in front to start a Live Activity.
+`UIBackgroundModes` declares `audio`, which Apple requires to keep recording
+once the App is in the background (`AVAudioSession.Category.record`); the
+other Info.plist addition is `NSSupportsLiveActivities`. The system asks
 for Face ID first (`authenticationPolicy` `.requiresAuthentication`), because
 the main Bot acts on the user's computer.
 
@@ -336,6 +339,15 @@ the main Bot acts on the user's computer.
   retried: an instruction is never sent twice. An ordinary submission clears
   the Session's composer draft, so an unsent draft is read first and put back
   after, unless one was written meanwhile.
+- A Live Activity this process does not hold is a leftover of a take whose
+  process is gone (killed, or ended by the system); its recording is lost. It
+  is ended at launch, and by any press or island button that finds it, shown
+  for a moment as 录音中断了，没有发出去. Such a press records nothing; the next
+  one starts a new take. A listening or sending Live Activity also goes stale
+  on its own 90 seconds past the five-minute cap, and a stale one is drawn as
+  interrupted, so no timer runs on for a take nobody holds.
+- If the system will not start the Live Activity, nothing is recorded. When
+  "Talk to Main Bot" has to bring Avibe forward, an alert says why.
 - An account sign-out or change (`AppModel.prepareForAccountTransition`)
   stops and discards any take, releases its WebView, and makes a start still
   waiting on the instance give up.

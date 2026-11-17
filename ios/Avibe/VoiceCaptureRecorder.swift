@@ -16,6 +16,14 @@ final class VoiceCaptureRecorder {
         self.url = url
     }
 
+    /// Deletes every take on disk; only called while none is recording.
+    static func discardAll() {
+        guard let directory = try? FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false
+        ).appending(path: "VoiceCapture", directoryHint: .isDirectory) else { return }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     static func takeURL(id: UUID) throws -> URL {
         let directory = try FileManager.default.url(
             for: .cachesDirectory,

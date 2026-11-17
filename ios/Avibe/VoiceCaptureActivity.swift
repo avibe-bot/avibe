@@ -36,6 +36,9 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         case updateAvibe
         case voiceUnavailable
         case liveActivities
+        /// The system would not start the Live Activity, so nothing was
+        /// recorded.
+        case activityFailed
         case interrupted
     }
 
