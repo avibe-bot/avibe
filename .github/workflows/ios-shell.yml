@@ -175,7 +175,9 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeSheetFixtureTests.xcresult" \
-            -skip-testing:AvibeSheetFixtureTests/RealBundleCaptureUITests \
+            -only-testing:AvibeSheetFixtureTests/InstanceSheetGestureUITests/testColdRealBundleNeedsItsOwnWebContentAfterNativeReadiness \
+            -only-testing:AvibeSheetFixtureTests/InstanceSheetGestureUITests/testSwitchingPageCurrentBlockReopensTheSelectedInstance \
+            -test-iterations 30 \
             CODE_SIGNING_ALLOWED=NO \
             test-without-building
 

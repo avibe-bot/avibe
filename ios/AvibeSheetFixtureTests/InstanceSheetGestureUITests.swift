@@ -84,6 +84,7 @@ final class InstanceSheetGestureUITests: XCTestCase {
                     XCTWaiter.wait(for: [reopened], timeout: 10), .completed,
                     "Expected one accepted selection of the current instance; receipt=\(surface.label)"
                 )
+                print("[page tap receipt] \(language) \(surface.label)")
             }
         }
     }

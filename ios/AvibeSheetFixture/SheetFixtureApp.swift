@@ -541,12 +541,57 @@ private final class FixtureTouchObserver: UIGestureRecognizer {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let touch = touches.first else { return }
         let point = touch.location(in: nil)
+        origin = point
         publish(["kind": "native-touch-began", "timestamp": touch.timestamp,
                  "windowX": Double(point.x), "windowY": Double(point.y)])
     }
 
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { state = .failed }
+    private var maxTravel: Double = 0
+    private var moves = 0
+    private var origin: CGPoint?
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let touch = touches.first, let origin else { return }
+        let point = touch.location(in: nil)
+        moves += 1
+        maxTravel = max(maxTravel, Double(hypot(point.x - origin.x, point.y - origin.y)))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        publish(["kind": "native-touch-ended", "moves": moves, "maxTravel": maxTravel])
+        state = .failed
+    }
+
+    /// Draft diagnostics: who held the touch when UIKit cancelled it.
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        let touch = touches.first
+        let active = (touch?.gestureRecognizers ?? []).compactMap { recognizer -> String? in
+            switch recognizer.state {
+            case .possible, .failed: return nil
+            default:
+                return "\(type(of: recognizer)):\(recognizer.state.rawValue)@\(recognizer.view.map { String(describing: type(of: $0)) } ?? "nil")"
+            }
+        }
+        let all = (touch?.gestureRecognizers ?? []).map {
+            "\(type(of: $0)):\($0.state.rawValue)"
+        }
+        publish([
+            "kind": "native-touch-cancelled",
+            "moves": moves, "maxTravel": maxTravel,
+            "touchView": touch?.view.map { String(describing: type(of: $0)) } ?? "nil",
+            "touchWindow": touch?.window != nil,
+            "activeRecognizers": active,
+            "allRecognizers": all,
+        ])
+        state = .failed
+    }
+
+    override func reset() {
+        super.reset()
+        maxTravel = 0
+        moves = 0
+        origin = nil
+    }
 }
 
 // Data-only transport shapes keep the fixture independent of the production
