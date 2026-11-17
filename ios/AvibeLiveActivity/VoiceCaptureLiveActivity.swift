@@ -30,6 +30,8 @@ struct VoiceCaptureLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VoiceCaptureDetail(state: context.state)
+                        .padding(.horizontal, VoiceCaptureDetail.islandInset)
+                        .padding(.bottom, 4)
                 }
             } compactLeading: {
                 VoiceCaptureGlyph(phase: context.state.phase)
@@ -122,6 +124,9 @@ struct VoiceCaptureClock: View {
 struct VoiceCaptureDetail: View {
     let state: VoiceCaptureAttributes.ContentState
 
+    /// Keeps text and buttons clear of the expanded island's rounded ends.
+    static let islandInset: CGFloat = 14
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let heard = state.heard, state.phase == .sent {
@@ -129,33 +134,40 @@ struct VoiceCaptureDetail: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if let reason = state.reason {
                 Text(VoiceCaptureCopy.reason(reason))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             switch state.phase {
             case .listening:
-                HStack {
+                HStack(spacing: 10) {
                     Button(intent: VoiceCaptureCancelIntent()) {
-                        Text(VoiceCaptureCopy.text("voiceCapture.action.cancel")).frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.cancel")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.bordered)
                     .tint(.gray)
                     Button(intent: VoiceCaptureSendIntent()) {
-                        Text(VoiceCaptureCopy.text("voiceCapture.action.send")).frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.send")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.borderedProminent)
                     .tint(.orange)
                 }
             case .failed where state.reason.map(VoiceCaptureDetail.retryable) == true:
-                HStack {
+                HStack(spacing: 10) {
                     Button(intent: VoiceCaptureCancelIntent()) {
-                        Text(VoiceCaptureCopy.text("voiceCapture.action.discard")).frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.discard")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.bordered)
                     .tint(.gray)
                     Button(intent: VoiceCaptureRetryIntent()) {
-                        Text(VoiceCaptureCopy.text("voiceCapture.action.retry")).frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.retry")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.borderedProminent)
                     .tint(.orange)
                 }
             default:
