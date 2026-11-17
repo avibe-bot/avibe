@@ -349,8 +349,17 @@ enum SheetFixtureReadiness {
             predicate: NSPredicate(format: "exists == false"), object: close
         )
         guard XCTWaiter.wait(for: [gone], timeout: timeout) == .completed else {
-            let last = ownStages(dismissalEvidence(in: app, sheetUp: true))
-            XCTFail(dismissalFailure(from: last), file: file, line: line)
+            // The sheet stayed. A single read can fail on a loaded host;
+            // keep reading briefly for a receipt to classify.
+            var last: [String: Any] = [:]
+            let read = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    last = dismissalEvidence(in: app, sheetUp: true)
+                    return !last.isEmpty
+                }, object: nil
+            )
+            _ = XCTWaiter.wait(for: [read], timeout: 10)
+            XCTFail(dismissalFailure(from: ownStages(last)), file: file, line: line)
             return
         }
         let evidence = ownStages(dismissalEvidence(in: app, sheetUp: false))
@@ -383,8 +392,6 @@ enum SheetFixtureReadiness {
         }
     }
 
-    /// The fixture's dismissal receipt: on the root view once the sheet is
-    /// gone, on the sheet's surface while it is up.
     /// XCTest's own budget for evaluating one UI query.
     static let uiQueryBudget: TimeInterval = 30
 
@@ -393,17 +400,17 @@ enum SheetFixtureReadiness {
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
     }
 
-    /// The receipt is on the sheet's surface while it is up, and on the root
-    /// view once it is gone (the sheet's modal accessibility hides the root
-    /// meanwhile). Ask the likely one first: each query is a snapshot.
+    /// The fixture's dismissal receipt. The fixture writes it on the sheet's
+    /// surface and on the root view; the surface is gone once the sheet is.
+    /// Ask the likely element first, and read it in one snapshot: on a
+    /// loaded host one resolution took up to 7.5 s, plus retries.
     static func dismissalEvidence(in app: XCUIApplication, sheetUp: Bool = true) -> [String: Any] {
         let order = sheetUp
             ? ["fixture-document-surface", "fixture-root"]
             : ["fixture-root", "fixture-document-surface"]
         for identifier in order {
-            let element = app.otherElements[identifier]
-            guard element.exists,
-                  let data = element.label.data(using: .utf8),
+            guard let snapshot = try? app.otherElements[identifier].snapshot(),
+                  let data = snapshot.label.data(using: .utf8),
                   let evidence = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let dismissal = evidence["dismissal"] as? [String: Any]
             else { continue }
