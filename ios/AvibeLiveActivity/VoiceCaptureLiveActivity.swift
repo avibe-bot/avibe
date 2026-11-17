@@ -15,7 +15,7 @@ struct VoiceCaptureLiveActivity: Widget {
                 .activityBackgroundTint(nil)
         } dynamicIsland: { raw in
             let context = VoiceCaptureShown(raw)
-            DynamicIsland {
+            return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     VoiceCaptureGlyph(state: context.state)
                         .font(.title2)
