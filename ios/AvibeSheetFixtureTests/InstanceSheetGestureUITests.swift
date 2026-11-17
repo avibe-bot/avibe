@@ -205,10 +205,16 @@ final class InstanceSheetGestureUITests: XCTestCase {
         }
         let close = app.webViews.firstMatch.buttons["Close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
+        // On CI the first touch of a fixture session reached the sheet's
+        // dismissal about 0.33 s late (0.03-0.08 s otherwise), leaving a
+        // 0.7 s flick too little travel, so it snapped back. One tap on
+        // static text, confirmed by its native touch receipt, takes that
+        // first-touch cost before the flick; the flick itself is unchanged.
+        let warmed = SheetFixtureReadiness.warmTouchHandling(in: app)
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
         start.press(forDuration: 0.01, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
-        SheetFixtureReadiness.requireGestureDismissal(of: close, in: app)
+        SheetFixtureReadiness.requireGestureDismissal(of: close, in: app, ignoringStages: warmed)
     }
 
     func testSheetSurvivesCompactHeightRotation() throws {
@@ -269,9 +275,36 @@ enum SheetFixtureReadiness {
     /// requires the element to be gone at its first check and never waits
     /// for it to go. If the sheet stays, the failure names what the gesture
     /// did, from the fixture's native receipt.
+    /// Taps the sheet's static scroll-state text and waits for the
+    /// fixture's native touch-up receipt. Returns how many receipt stages
+    /// that tap recorded, so a later gesture is judged on its own.
+    @discardableResult
+    static func warmTouchHandling(
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> Int {
+        let status = app.webViews.firstMatch.staticTexts["scroll-offset-0"]
+        XCTAssertTrue(status.waitForExistence(timeout: 10), file: file, line: line)
+        status.tap()
+        var stages: [String] = []
+        let received = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                stages = dismissalEvidence(in: app)["stages"] as? [String] ?? []
+                return stages.contains("native-touch-ended")
+            }, object: nil
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [received], timeout: 10), .completed,
+            "The warm-up tap never reached the window", file: file, line: line
+        )
+        return stages.count
+    }
+
     static func requireGestureDismissal(
         of close: XCUIElement,
         in app: XCUIApplication,
+        ignoringStages ignored: Int = 0,
         timeout: TimeInterval = 5,
         file: StaticString = #filePath,
         line: UInt = #line
@@ -279,7 +312,10 @@ enum SheetFixtureReadiness {
         var last: [String: Any] = [:]
         let gone = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                let evidence = dismissalEvidence(in: app)
+                var evidence = dismissalEvidence(in: app)
+                if let stages = evidence["stages"] as? [String] {
+                    evidence["stages"] = Array(stages.dropFirst(ignored))
+                }
                 if !evidence.isEmpty { last = evidence }
                 return !close.exists
             }, object: nil
