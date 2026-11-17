@@ -24,6 +24,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import (
+    ApiKeyModelsCheck,
     DiscoveredModel,
     EngineEnsureResult,
     EngineHealth,
@@ -260,6 +261,17 @@ class FakeAdapter:
         if self.discovery_error is not None:
             raise self.discovery_error
         return tuple(DiscoveredModel(id=model_id) for model_id in self.discovered)
+
+    async def check_api_key_models(
+        self, vendor, protocol, base_url, *, secret=None, credential_ref=None, timeout,
+    ):
+        try:
+            models = await asyncio.wait_for(
+                self.discover_models(vendor, protocol, base_url, credential_ref), timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return ApiKeyModelsCheck(authenticated=None)
+        return ApiKeyModelsCheck(authenticated=None, models=tuple(models))
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
         self.observed_protocol_orders.append(tuple(protocol_order))
@@ -2264,6 +2276,7 @@ def test_created_source_cancellation_fails_when_cleanup_is_not_durable(tmp_path)
     adapter = FakeAdapter()
     service, store, _ = _service(tmp_path, ModelHubConfig(), adapter)
     provision_credential = adapter.provision_credential
+    provisioned = asyncio.Event()
 
     def fail_journal_write(*_args, **_kwargs):
         raise OSError("journal is unavailable")
@@ -2272,8 +2285,7 @@ def test_created_source_cancellation_fails_when_cleanup_is_not_durable(tmp_path)
         credential_ref = await provision_credential(*args)
         adapter.revoke_error = True
         service.revocations.add = fail_journal_write
-        adapter.discovery_started = asyncio.Event()
-        adapter.discovery_block = asyncio.Event()
+        provisioned.set()
         return credential_ref
 
     adapter.provision_credential = provision_then_lose_cleanup
@@ -2291,13 +2303,17 @@ def test_created_source_cancellation_fails_when_cleanup_is_not_durable(tmp_path)
                 }
             )
         )
-        while adapter.discovery_started is None:
-            await asyncio.sleep(0)
-        await adapter.discovery_started.wait()
-        task.cancel()
-        with pytest.raises(ModelHubError) as exc_info:
-            await task
-        return exc_info.value
+        # Save-time discovery now precedes provisioning. Hold the commit lock
+        # to cancel after custody exists but before a Source can own it.
+        await service._mutation_lock.acquire()
+        try:
+            await asyncio.wait_for(provisioned.wait(), timeout=1)
+            task.cancel()
+            with pytest.raises(ModelHubError) as exc_info:
+                await task
+            return exc_info.value
+        finally:
+            service._mutation_lock.release()
 
     refusal = asyncio.run(scenario())
 

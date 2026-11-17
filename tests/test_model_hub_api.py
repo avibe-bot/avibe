@@ -321,8 +321,10 @@ class FakeAdapter:
         self, vendor, protocol, base_url, *, secret=None, credential_ref=None, timeout,
     ):
         try:
-            models = await self.discover_models(vendor, protocol, base_url, credential_ref)
-        except ModelHubError:
+            models = await asyncio.wait_for(
+                self.discover_models(vendor, protocol, base_url, credential_ref), timeout=timeout,
+            )
+        except (ModelHubError, asyncio.TimeoutError):
             return ApiKeyModelsCheck(authenticated=None)
         return ApiKeyModelsCheck(authenticated=None, models=tuple(models))
 
