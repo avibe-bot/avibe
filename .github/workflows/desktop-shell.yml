@@ -204,3 +204,15 @@ jobs:
           python ../scripts/desktop_release.py verify-macos-build-version
           --binary target/debug/avibe-desktop=11.0
           --minimum-sdk 26.0
+
+      # Real WebViews on loopback pages, with disposable browsing data: a
+      # Workbench web view retired through the shell's own helpers must stop its
+      # page, its iframe and its event stream, while a hidden control page runs on.
+      - name: Verify retired Workbench web views stop in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example retired_workbench_probe --all-features
+          python src-tauri/tests/run_cookie_probe.py target/debug/examples/retired_workbench_probe \
+            --log "$RUNNER_TEMP/retired-workbench-probe.log"

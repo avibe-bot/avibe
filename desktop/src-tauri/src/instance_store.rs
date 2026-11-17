@@ -87,7 +87,7 @@ fn erase_completed(window: &Webview) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn destroy_completed(window: &Webview) -> Result<(), String> {
+pub fn destroy_completed(window: &Webview) -> Result<(), String> {
     let label = window.label().to_owned();
     let app = window.app_handle().clone();
     // Hide before close so the child is no longer the visible layer owner
