@@ -1,4 +1,5 @@
 import ActivityKit
+import UIKit
 import AppIntents
 import SwiftUI
 import WidgetKit
@@ -14,7 +15,7 @@ struct VoiceCaptureLiveActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    VoiceCaptureGlyph(phase: context.state.phase)
+                    VoiceCaptureGlyph(state: context.state)
                         .font(.title2)
                         .padding(.leading, 4)
                 }
@@ -34,15 +35,13 @@ struct VoiceCaptureLiveActivity: Widget {
                         .padding(.bottom, 4)
                 }
             } compactLeading: {
-                VoiceCaptureGlyph(phase: context.state.phase)
+                VoiceCaptureMark()
             } compactTrailing: {
-                VoiceCaptureClock(state: context.state)
-                    .monospacedDigit()
-                    .frame(maxWidth: 44)
+                VoiceCaptureCompactTrailing(state: context.state)
             } minimal: {
-                VoiceCaptureGlyph(phase: context.state.phase)
+                VoiceCaptureGlyph(state: context.state)
             }
-            .keylineTint(.orange)
+            .keylineTint(VoiceCaptureStyle.accent)
         }
     }
 }
@@ -55,6 +54,9 @@ enum VoiceCaptureCopy {
     }
 
     static func title(_ state: VoiceCaptureAttributes.ContentState) -> LocalizedStringResource {
+        if state.phase == .failed, state.reason == .updateAvibe {
+            return text("voiceCapture.phase.updateRequired")
+        }
         switch state.phase {
         case .listening: return text("voiceCapture.phase.listening")
         case .sending: return text("voiceCapture.phase.sending")
@@ -81,27 +83,75 @@ enum VoiceCaptureCopy {
     }
 }
 
-struct VoiceCaptureGlyph: View {
-    let phase: VoiceCaptureAttributes.Phase
+/// Avibe's colours: the mint accent (the Web UI's `--primary`, darker in
+/// light mode) and red for errors only.
+enum VoiceCaptureStyle {
+    static let accent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x5B / 255, green: 0xFF / 255, blue: 0xA0 / 255, alpha: 1)
+            : UIColor(red: 0x10 / 255, green: 0xB9 / 255, blue: 0x81 / 255, alpha: 1)
+    })
+    /// Text on an accent-filled button.
+    static let onAccent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x08 / 255, green: 0x08 / 255, blue: 0x12 / 255, alpha: 1)
+            : .white
+    })
+}
+
+/// The Avibe mark, in the compact island's leading slot.
+struct VoiceCaptureMark: View {
+    var body: some View {
+        Image("AvibeMark")
+            .resizable()
+            .scaledToFit()
+            .frame(width: 22, height: 22)
+            .clipShape(Circle())
+    }
+}
+
+/// The compact island's trailing slot: the timer while it records or sends,
+/// otherwise the outcome.
+struct VoiceCaptureCompactTrailing: View {
+    let state: VoiceCaptureAttributes.ContentState
 
     var body: some View {
-        switch phase {
+        switch state.phase {
+        case .listening, .sending:
+            VoiceCaptureClock(state: state)
+                .monospacedDigit()
+                .foregroundStyle(VoiceCaptureStyle.accent)
+                .frame(maxWidth: 44)
+        default:
+            VoiceCaptureGlyph(state: state)
+        }
+    }
+}
+
+struct VoiceCaptureGlyph: View {
+    let state: VoiceCaptureAttributes.ContentState
+
+    var body: some View {
+        switch state.phase {
         case .listening:
             Image(systemName: "waveform")
                 .symbolEffect(.variableColor.iterative)
-                .foregroundStyle(.orange)
+                .foregroundStyle(VoiceCaptureStyle.accent)
         case .sending:
             Image(systemName: "arrow.up.circle")
-                .foregroundStyle(.orange)
+                .foregroundStyle(VoiceCaptureStyle.accent)
         case .sent:
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(VoiceCaptureStyle.accent)
+        case .failed where state.reason == .updateAvibe:
+            Image(systemName: "arrow.up.forward.app")
+                .foregroundStyle(VoiceCaptureStyle.accent)
         case .failed:
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(.red)
         case .needsApp:
             Image(systemName: "arrow.up.forward.app")
-                .foregroundStyle(.orange)
+                .foregroundStyle(VoiceCaptureStyle.accent)
         }
     }
 }
@@ -155,7 +205,8 @@ struct VoiceCaptureDetail: View {
                         Text(VoiceCaptureCopy.text("voiceCapture.action.send")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.orange)
+                    .tint(VoiceCaptureStyle.accent)
+                    .foregroundStyle(VoiceCaptureStyle.onAccent)
                 }
             case .failed where state.reason.map(VoiceCaptureDetail.retryable) == true:
                 HStack(spacing: 10) {
@@ -168,7 +219,8 @@ struct VoiceCaptureDetail: View {
                         Text(VoiceCaptureCopy.text("voiceCapture.action.retry")).font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.orange)
+                    .tint(VoiceCaptureStyle.accent)
+                    .foregroundStyle(VoiceCaptureStyle.onAccent)
                 }
             default:
                 EmptyView()
@@ -190,7 +242,7 @@ struct VoiceCaptureLockScreenView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                VoiceCaptureGlyph(phase: state.phase)
+                VoiceCaptureGlyph(state: state)
                     .font(.title3)
                 Text(VoiceCaptureCopy.title(state))
                     .font(.headline)

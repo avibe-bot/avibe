@@ -121,6 +121,8 @@
 		16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
 		16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
 		17000000000000000000000005 /* VoiceCaptureFramesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000005 /* VoiceCaptureFramesTests.swift */; };
+		16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
+		16000000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -272,6 +274,7 @@
 		26000000000000000000000014 /* AvibeLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeLiveActivityBundle.swift; sourceTree = "<group>"; };
 		26000000000000000000000015 /* VoiceCapture.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = VoiceCapture.xcstrings; sourceTree = "<group>"; };
 		27000000000000000000000005 /* VoiceCaptureFramesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureFramesTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -514,6 +517,7 @@
 			children = (
 				26000000000000000000000011 /* Info.plist */,
 				26000000000000000000000014 /* AvibeLiveActivityBundle.swift */,
+				26000000000000000000000018 /* Assets.xcassets */,
 				26000000000000000000000012 /* Localizable.xcstrings */,
 				26000000000000000000000013 /* PrivacyInfo.xcprivacy */,
 				26000000000000000000000015 /* VoiceCapture.xcstrings */,
@@ -720,6 +724,7 @@
 				100000000000000000000009 /* InfoPlist.xcstrings in Resources */,
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
 				16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */,
+				16000000000000000000000019 /* Assets.xcassets in Resources */,
 				10000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */,
 				100000000000000000000012 /* MobileApp in Resources */,
 			);
@@ -767,6 +772,7 @@
 				16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */,
 				16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */,
 				16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */,
+				16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

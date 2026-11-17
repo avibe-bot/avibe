@@ -28,7 +28,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "不要了"
+            "value" : "放弃"
           }
         }
       }
@@ -141,6 +141,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已发给主伙伴"
+          }
+        }
+      }
+    },
+    "voiceCapture.phase.updateRequired" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe needs an update"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要更新 Avibe"
           }
         }
       }

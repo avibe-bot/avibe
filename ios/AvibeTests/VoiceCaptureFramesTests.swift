@@ -79,9 +79,9 @@ private struct FrameSheet: View {
 
     private var compact: some View {
         HStack(spacing: 0) {
-            VoiceCaptureGlyph(phase: state.phase).frame(width: 52)
+            VoiceCaptureMark().frame(width: 52)
             Spacer().frame(width: 126)
-            VoiceCaptureClock(state: state).monospacedDigit().frame(width: 52)
+            VoiceCaptureCompactTrailing(state: state).frame(width: 52)
         }
         .font(.system(size: 15, weight: .semibold))
         .frame(height: 37)
@@ -92,7 +92,7 @@ private struct FrameSheet: View {
     private var minimal: some View {
         HStack(spacing: 8) {
             Capsule().fill(.black).frame(width: 126, height: 37)
-            VoiceCaptureGlyph(phase: state.phase)
+            VoiceCaptureGlyph(state: state)
                 .font(.system(size: 15, weight: .semibold))
                 .frame(width: 37, height: 37)
                 .background(Circle().fill(.black))
@@ -103,7 +103,7 @@ private struct FrameSheet: View {
     private var expanded: some View {
         VStack(spacing: 10) {
             HStack(alignment: .center) {
-                VoiceCaptureGlyph(phase: state.phase).font(.title2).padding(.leading, 4)
+                VoiceCaptureGlyph(state: state).font(.title2).padding(.leading, 4)
                 Spacer()
                 Text(VoiceCaptureCopy.title(state)).font(.headline).lineLimit(1)
                 Spacer()
