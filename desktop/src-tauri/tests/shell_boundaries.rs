@@ -917,10 +917,11 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
         .expect("handler body");
     assert!(handler.contains("new_window_decision(&url)"));
     assert!(handler.contains("tauri_plugin_opener::open_url(url.as_str(), None::<&str>)"));
+    // The one in-app window, the Vault sandbox's on macOS, is not wry's.
     for forbidden in ["NewWindowResponse::Allow", "NewWindowResponse::Create"] {
         assert!(
             !source.contains(forbidden) && !instance_client.contains(forbidden),
-            "the page must never get a second webview, found {forbidden:?}"
+            "wry must never build the page a second webview, found {forbidden:?}"
         );
     }
 }

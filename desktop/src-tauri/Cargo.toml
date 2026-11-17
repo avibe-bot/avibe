@@ -90,22 +90,27 @@ keyring = { version = "3.6", features = ["apple-native"] }
 block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "block2",
   "NSAppleEventDescriptor",
   "NSAppleEventManager",
   "NSArray",
   "NSDate",
   "NSData",
+  "NSDictionary",
   "NSSet",
   "NSEnumerator",
   "NSError",
   "NSGeometry",
   "NSNotification",
   "NSOperation",
+  "NSProcessInfo",
   "NSString",
   "NSURL",
   "NSURLRequest",
+  "NSURLResponse",
   "NSUserDefaults",
   "NSUserNotification",
+  "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -121,9 +126,22 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "block2",
   "objc2-app-kit",
   "WKFrameInfo",
+  "WKNavigation",
   "WKNavigationAction",
   "WKNavigationDelegate",
+  "WKNavigationResponse",
+  "WKPreferences",
+  "WKSecurityOrigin",
+  "WKUIDelegate",
+  "WKURLSchemeHandler",
+  "WKURLSchemeTask",
+  "WKUserContentController",
+  "WKUserScript",
   "WKWebView",
   "WKWebViewConfiguration",
   "WKWebsiteDataStore",
+  "WKWindowFeatures",
 ] }
+# Reads the running app's own signed entitlements for the Vault passkey marker.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecTask"] }

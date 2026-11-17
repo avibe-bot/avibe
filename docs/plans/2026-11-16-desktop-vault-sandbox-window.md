@@ -1,0 +1,438 @@
+# The Vault sandbox window in the macOS Desktop App
+
+Status: implemented in `desktop/src-tauri/src/macos_vault_window.rs`. A real
+passkey ceremony in the window is not verified yet; see the last section.
+Date: 2026-11-16.
+Related: `2026-11-10-ios-protected-vault-passkey.md` (the same decision for the
+iOS App), `vault-sandbox-protocol-v2.md`, `desktop/README.md` ("The Vault
+sandbox window").
+
+## Background
+
+Protected Vault passkey steps run in sandbox code at `https://sandbox.avibe.bot`.
+Two surfaces take part: the sandbox iframe inside the Workbench, and a top-level
+sandbox window, which is the only place a passkey is created and the only place
+an approval, signature or reveal is confirmed. That window finds the requesting
+iframe through `window.opener`.
+
+The Desktop shell sent every request for a new window to the system browser, so
+the window never existed in the app and never had an opener. The Workbench
+therefore hands every protected step to the browser
+(`ui/src/lib/vaultBrowserHandoff.ts`).
+
+Three changes together move those steps into the app on macOS: the app's
+signature is associated with the sandbox's passkeys; the shell shows the
+sandbox's window (this document); and the Workbench stops handing off when the
+shell says it can.
+
+## Goal
+
+On macOS, a request from the Workbench or from the sandbox iframe for the
+sandbox's window opens a native child window of the app, linked to its opener,
+so the Web flow runs unchanged. Nothing else gains an in-app window, and the
+window gains nothing of the shell.
+
+## Solution
+
+WebKit asks the opener's UI delegate for a new webview and requires the answer
+to be built from the configuration it hands over; that configuration carries the
+opener link and the website data store. Tauri's `on_new_window` can only answer
+with a Tauri window, and wry's own child shares the opener's
+`WKUserContentController`. The shell therefore replaces the implementation of
+wry's delegate method, as `macos_new_context.rs` already does for the navigation
+delegate, answers for the sandbox's window, and passes every other request to
+wry unchanged.
+
+The passkey prompt, the review and the cryptography stay in sandbox code. None
+of the shell's own code handles the passkey result. WebKit's passkey code does
+run in the app's process, so the result, including the PRF output, crosses that
+process as it crosses a browser's. The app, like a browser, is trusted to run
+the sandbox unmodified.
+
+### Rules
+
+1. **Which requests.** A request from the main window's webview for exactly the
+   sandbox origin (`https`, `sandbox.avibe.bot`, default port, no credentials),
+   or for exactly `about:blank`. Everything else goes to wry.
+2. **What the window may load.** Only the sandbox origin. Every frame is
+   checked when a navigation starts (this also sees each redirect) and when its
+   response arrives; the main frame is checked again when it commits. The
+   reserved blank page is allowed in the main frame until the first sandbox
+   document. A nested request for a window, a download, and a response WebKit
+   cannot display are refused. The origin is what is enforced, not the release:
+   an older retained release or the origin's root loads too, as in a browser
+   tab. Pinning the release stays the Workbench's check before it navigates.
+3. **When it is displayed.** The native window is created ordered out. When a
+   sandbox document commits it comes on screen with a transparent webview. Its
+   content is revealed by the first presentation update WebKit delivers after
+   that commit, so the empty window stays until the sandbox's first paint. At
+   that moment it is ordered in front of the app's other windows and made key.
+   If anything but a sandbox document commits, the window is closed. If it has
+   displayed nothing 60 seconds after it was created, it is closed.
+4. **When it comes on screen, and when it takes input.** It comes on screen
+   only if, when its first sandbox document commits, the web view that asked
+   is the one the user is looking at (still in the native window the support
+   was installed for, not hidden and with no hidden view around it, no other
+   web view of that window in front of it, the window visible, on the active
+   Space and not minimized, and the app active) and no other sandbox window is
+   on screen over that native window. Otherwise it is
+   closed, never kept for later. A window on screen takes clicks and keys only while
+   the app is active and the window is visible, and that has held without a
+   break for 0.75 seconds the first time the card is seen and 2 seconds every
+   later time, and never sooner than 2 seconds after the user last arrived
+   (the app became active; the opener came back into view: its window from
+   hidden, minimized or another Space, or its web view from hidden; or an
+   opener that had no sandbox window asked for one). Until then input is dropped at the window's
+   event entry and is not passed to what is underneath. Its content size is
+   clamped to 360-900 by 400-1000 points.
+5. **What it holds.** A new, empty `WKUserContentController` and default
+   `WKPreferences` of its own with element fullscreen, picture in picture and
+   video presentation modes off. Before the webview is returned to WebKit, the
+   shell reads both back from it: the controller must be the empty one, and the
+   preferences must not be the opener's and must report each of those features
+   off. Otherwise there is no child. Media capture is refused. Its title is the allowed host.
+6. **How it ends.** `window.close()`, the user closing it, the opener committing
+   a new document, the opener's web view being hidden, the opener's window
+   being closed or destroyed, a crashed web content process, or rules 3 and 4. Each path takes the window out of the
+   shell's registry, closes the native window and destroys the page one turn of
+   the main run loop later. The web view keeps its navigation delegate until
+   the page is destroyed; with the window out of the registry that delegate
+   refuses every navigation.
+
+At most four children exist at once for the main webview, hidden ones included.
+This bounds resources; it is not a security boundary between pages.
+
+### Why the content is revealed by a presentation update
+
+The Workbench reserves `about:blank` in the approval click and navigates it
+after verifying the pinned sandbox release. A blank page inherits its opener's
+origin, so the opener can draw in it, and the Workbench origin also serves
+Agent-authored Show Pages.
+
+Keeping the window off screen until a sandbox document commits is not enough.
+WebKit keeps displaying the previous document's layers until the new document
+has something to show, so that navigations do not flash. A window ordered in at
+the commit showed the opener's page, under the sandbox's title, until the
+sandbox first painted. The probe measured this: an opener that filled the
+reserved page with one colour had that colour displayed for as long as the
+sandbox page's stylesheet was held back.
+
+So the window appears with its webview transparent, and the webview is revealed
+by the first presentation update after the commit. That update is requested
+after the sandbox document committed, so the layers it brings are that
+document's; while the display is frozen it does not arrive. It is not a timer.
+Until then the window cannot become key and ignores clicks, so no input can
+reach a page the user cannot see.
+
+A sandbox document is cross-origin to the opener, so the opener cannot draw in
+it, and rule 2 means it can only be replaced by another sandbox document. From
+the reveal on, what is displayed is a sandbox document.
+
+The presentation update (`_doAfterNextPresentationUpdate:`) and destroying a
+page at once (`_close`) are WebKit methods outside its public API, as is the
+feature list used for rule 5. Each is checked to exist before anything is
+installed. Existence says nothing about behaviour: that is checked only by the
+probe, on the macOS versions CI runs it on, and the marker is limited to those
+versions. The public snapshot call with `afterScreenUpdates` waits on the same
+update and is a possible later replacement for the first; it has not been
+tested. The page is destroyed one turn of the main run loop after the window
+closes, so that the shell does not depend on what WebKit does after one of its
+own callbacks returns.
+
+### Why being displayed is not taking input
+
+On macOS WebKit's default lets scripts open windows without a user gesture. A
+browser requires one. Changing that default would also change every link the
+Workbench and its Show Pages open from script. So a page of the Workbench
+origin can make the sandbox's real window appear, showing the card of a real
+pending request, at a moment it chooses. It cannot put content of its own into
+the card, because the window and the iframe speak only to documents of the
+sandbox origin, and a confirmation still needs the user's click on a truthful
+card.
+
+The bad outcome is not a window appearing. It is a click or a key reaching
+Confirm on a card that has not just been displayed to a user who is present.
+Rules about when a window may appear do not prevent that, for two reasons
+found in review. The sandbox arms Confirm half a second after it builds the
+card, with no condition on visibility, and a hidden page's timers run; so a
+card held back and then shown takes a confirming click in its first visible
+frame. And once a card is on screen nothing was judged again: a card left on
+screen was live the moment the user returned or the app was pulled forward.
+
+So there is one rule, about input, and it is the fourth above. It is checked
+for each event at the one place every mouse, scroll and key event for a window
+passes (`sendEvent:`, and `performKeyEquivalent:` for keys with Command).
+"Visible" is AppKit's own occlusion state for the window, so that hiding the
+app or the main window, minimizing, a Space change and display sleep are one
+signal and not a list of causes. The probe produces the first two. The others
+rest on AppKit's documentation, and one of them is known not to hold as
+documented: on the CI runner AppKit did not report a card fully covered by
+another window of the app as hidden. The app can be brought forward without the user
+choosing it (a page asking for the main window or opening an app window, an
+`avibe:` link from another app, an Agent launching the app), so an arrival
+counts from the system's notification, not from any of those commands, and it
+counts even if the card did not exist yet.
+
+The intervals: 0.75 seconds at first sight is longer than the default
+double-click interval, so a click begun on something else never lands on a
+card that appeared in its place. Two seconds after an arrival gives a user who
+has just come to the app, or been brought there, time to see where they are.
+
+Clicks on the window's content in the interval are dropped, not passed
+through; clicks on the title bar are delivered, so the window can be moved or
+closed. The card is on screen;
+a click on its Confirm that fell through would land on whatever the Workbench
+has at that spot, which the page chooses and which can be a real control. The
+card is put in front of the app's other windows and made key at the moment it
+is displayed, and the shell never moves or keys it again, so nothing happens
+on screen at the moment it turns live that a page could time. Another window
+of the app can be put in front of it later, by the user or by a page. Keys are
+dropped at the same entry, so being key early costs nothing.
+
+There is no visual cue for "not live yet". One consequence: keys typed in the
+two seconds after the user comes back to a card are dropped silently. In the
+seed-wallet window that can shorten a typed passphrase without notice; the
+double entry catches it when a wallet is created, and the address comparison
+when one is imported.
+
+Not covered, by decision or by nature: a second card navigated into the same
+visible window (the sandbox's own arming applies, as in a browser); a present
+user who confirms without reading; a card displayed while nobody is at the Mac,
+which is live when they return; a card fully covered by another window of the
+app and brought forward again, which may be live at once; the main window
+merely raised from behind another window of the app, which is not an arrival
+(the first 0.75 seconds cover it); partial covering, since a window counts as
+visible when any part shows, so a card mostly covered by another window of the
+app and brought forward again is live at once, and only its first click, made
+while it is not the key window, is not delivered; menu commands and system input panels (Paste, the
+emoji picker, dictation), which reach a key window and cannot confirm;
+Computer Use and other accessibility-driven actions, as in a browser; drag and
+drop.
+
+The complete answer to the missing gesture still belongs to the sandbox
+(arming Confirm only after its document has been focused and visible for the
+arming time) and is not part of this change.
+
+### One native window, several web views
+
+While this change was in review the shell changed what a main window is. A
+Runtime replacement (the user switching to another instance, or back) used to
+build a new main window; it now creates a child web view inside the one native
+main window, and the account screen is another child web view shown over a
+hidden Workbench. Three things follow.
+
+- "The main window is on screen" is no longer enough for rule 4: a Workbench's
+  web view can be hidden while the native window is visible and the page keeps
+  running. So the rule is stated on the opener: the web view that asked must be
+  the one the user is looking at. That is three reads, made afresh at the
+  commit, for every click and key, and for the arrival bookkeeping: the web
+  view is still in the native window the support was installed for; it is not
+  hidden and has no hidden view around it; and no other web view of that
+  window that is not hidden lies in front of it. The first matters because
+  closing a web view takes it out of its window without changing its `hidden`,
+  and the shell does not rely on a closed web view being freed, on its page
+  having stopped, or on a weak reference to it clearing; admission at
+  `window.open` uses the same read. The third
+  matters because the shell covers a Workbench by hiding it, but one path
+  (bringing the main window forward while the account page reloads) can show
+  the Workbench under the account screen.
+- Separately, the shell key-value observes `hidden` on the opener's web view,
+  since nothing else announces it. That is only what makes closing prompt:
+  hidden, every sandbox window of that opener is closed at once, reserved and
+  empty ones included. AppKit posts changes of `hidden` itself, so
+  Foundation's promise to end an observation when the observed object is
+  freed does not cover this key. The shell therefore observes only while the
+  opener has a sandbox window, from its first to its last, and holds a strong
+  reference to the web view for exactly that time: an observed web view is
+  never freed. The two are added together and removed together, the
+  observation first, one turn of the main run loop after the opener's last
+  window closed (which can happen inside the observation's own callback), and
+  every way a window ends goes through the one `close`. Hiding closes the
+  windows and so ends both, one turn later. The shell may close a retired web
+  view before that turn; the web view is still held then, so it is never
+  freed while observed. On a product
+  path the reference can outlive the Workbench by at most 60 seconds: between
+  the hide and the close a hidden Workbench can still reserve a window
+  (admission reads only that it is in its window), which can never be shown
+  and goes at the deadline. That AppKit announces `hidden` to an observer is
+  behaviour the probe checks, on the versions CI runs, like the three WebKit
+  calls.
+- An opener without a sandbox window is not observed, so the shell does not
+  know how long it has been in front of the user. It does not assume: **the
+  first window an opener asks for when it has none is an arrival, stamped at
+  the moment it is asked for.** While a window exists the observation is on
+  and a hide closes every window, so the next request is again a first one.
+  The cost: Confirm takes clicks no sooner than 2 seconds after the step's
+  window was asked for (after the Approve click), instead of 0.75 seconds
+  after the card appears, and approving a second request after the first card
+  closed waits 2 seconds from that click too. An explicit word from the shell
+  when it hides, shows or closes a Workbench's web view would give the 0.75
+  seconds back; see the follow-up.
+- Nothing announces a
+  web view being covered by another, or a view around it being hidden. Coming
+  out from under one of those is an arrival only if the shell looked while it
+  held (a window was asked for, or an event arrived for a card); otherwise a
+  card asked for then is live after 0.75 seconds, not 2. Input is not affected:
+  every event reads the opener afresh. All three of the
+  shell's retirement paths hide a web view before closing it. A close alone
+  does not hide; a card whose opener was closed without being hidden stays on
+  screen and takes no input, until the user closes it or the main window
+  goes, and for that time the reference above keeps the closed web view from
+  being freed. "Any close of the opener's web view also closes its cards" is
+  the right rule, but nothing announces a close; it is not in this change and
+  is required once replacement web views become openers, whose disposable
+  data store a reference must not keep alive. Before a card is displayed the opener is read once more; if it
+  is no longer in view the card is closed instead.
+- "One on screen" is counted for the native window, whichever web view in it
+  asked. The cap of four is for the whole app.
+- The support is installed only on the web view the app starts with. A
+  replacement web view is not an opener: its window requests go to wry, its
+  page has no marker, and nothing it does reaches what was installed for the
+  first one, because requests are admitted by the identity of the web view that
+  made them. So in this version a Workbench after an instance switch, and a
+  remote instance, keep the browser hand-off. Installing on replacement web
+  views, with the reload hook there and a probe case, is the follow-up.
+
+### Why the URL schemes are guarded
+
+WebKit's copy of the opener's configuration includes its custom URL scheme
+handlers (`ipc`, `tauri`), and the public API can neither list nor remove them.
+wry's handler reads fields that only its own webview class has. In wry 0.57 a
+request to `ipc://` from a webview of another class aborts the process in a
+debug build ("tried to access uninitialized instance variable"); a release
+build makes the same read without the check. The blank page a
+child starts with is scriptable by its opener, so this is reachable.
+
+The shell therefore wraps the two methods of every URL scheme handler class
+registered at run time (wry creates one such class per scheme). A request from
+a child's webview fails with "unsupported URL" before the handler runs; every
+other request goes to the handler unchanged. If the classes cannot be listed,
+or the handler Tauri always registers (`ipc`) is not among those wrapped, the
+feature is not installed at all.
+
+### The capability marker
+
+`window.__AVIBE_DESKTOP_VAULT_PASSKEY__` is defined on the main webview's
+top-level document by the same call that installs the hooks, and only after
+they are in place. That call returns before doing anything unless both hold:
+
+- The system is a macOS major version on which the probe has passed in CI.
+  Today that is 26 only; for macOS 15 see "Not verified". It is a list, not a
+  floor: on a version the probe has not run on, nothing says the non-public
+  calls behave as rule 3 needs.
+- The running process's own code signature carries
+  `com.apple.developer.associated-domains` with
+  `webcredentials:sandbox.avibe.bot` (read with `SecTask`, which reports what
+  the kernel holds for the process). A build flag is not consulted. macOS
+  refuses to start an ad-hoc build that claims this entitlement, so a
+  development build can only be without it.
+
+A shell without the marker is the shell as it was: nothing is installed, and
+the sandbox's window goes to the browser with every other link.
+
+### Alternatives not taken
+
+- **wry's `NewWindowResponse::Allow`.** Shared content controller, no
+  navigation rule, no close on `window.close()`, and the URL scheme hazard.
+- **A Tauri window through `NewWindowResponse::Create`.** wry registers the new
+  webview's scripts and IPC handler on the shared controller and removes the
+  opener's IPC handler when it is dropped. The window would also be a labelled
+  Tauri webview.
+- **No blank step** (the Workbench opens the sandbox address directly). Not
+  needed, and it would not help: a window opened for the sandbox address also
+  starts with a blank document its opener can draw in.
+- **Requiring a user gesture through WebKit's switch.** It governs when a
+  window may be created, not when a reserved one is navigated, so it does not
+  stop a window held in reserve; and it would change links opened from script
+  in Show Pages. The Workbench's own code opens windows only inside click and
+  key handlers.
+- **Revealing on the commit, on load finished, or after a delay.** The first is
+  what the probe disproved; the others are timing.
+- **Holding a window off screen until the user has been there for a while.**
+  Built once and removed: the page runs and arms while it waits, so the card
+  is confirmable in its first visible frame.
+- **Refusing a window shortly after another closed.** Replaced by the input
+  rule, which protects the same click without refusing the window.
+
+## Verification
+
+- Unit tests in the module: the origin rule, which requests open a window, what
+  a child may load, the commit rule, the attention rule and its interval, the
+  size bounds, and the marker's two conditions.
+- `desktop/src-tauri/examples/vault_window_probe.rs`, run by CI on macOS 26:
+  real WebKit windows on two loopback origins with a disposable data store. The
+  probe compiles the module's source file into itself and enters one step below
+  the signature check, so the library exports nothing for tests and has no
+  test-only feature. Three runs:
+  - **App active.** Both ways a window is requested (the Workbench's
+    reservation and the iframe's own window); the opener link in both
+    directions; nothing of the shell in the page; every navigation refusal;
+    every close path; which window is key. For rule 3, the opener fills the
+    reserved page with one colour and the sandbox page cannot paint for two
+    seconds: the probe reads back what the window's views draw, from the moment
+    it is on screen, and no sample may have that colour. A page that never
+    paints stays empty and without input and is closed at the deadline. For
+    rule 4: a second window while one is on screen, and a window opened while
+    the main window is hidden, are each closed without ever being on screen.
+    For input, the test sandbox page arms itself half a second after it starts
+    running and logs every click and key it receives, and the probe delivers
+    clicks, a Return key and a Command key to the window every 30 ms. No
+    input may be logged before 0.75 seconds after a card is first displayed
+    (with a page that was armed long before it could paint); before 2 seconds
+    after the card comes back with the main window, or the user returns from
+    another app or un-hides the app; or before 2 seconds after an arrival for
+    a card asked for at once. The probe also covers the card completely with
+    another window of the app and checks the same if AppKit then reports the
+    card as hidden; on the CI runner it did not, so that case is not proven.
+    Clicks must be logged afterwards, so the check cannot pass by never
+    delivering. A card displayed while another window of the app is in front
+    is the app's frontmost window and key, and neither changes when it starts
+    to take input. With the Workbench's own web view hidden: its card is
+    closed, a window it asks for is closed without ever being on screen, and
+    after the web view is shown again a card asked for at once takes no input
+    for two seconds. With another web view of the main window shown in front of
+    the Workbench: a window it asks for is closed without ever being on screen,
+    and after that web view is removed a card takes no input for two seconds.
+    With the Workbench's web view closed without being hidden: its card takes
+    no more input. Minimizing, a Space change and display sleep are not
+    produced by the probe; for those, as for full covering, the claim rests on
+    AppKit's documentation of the occlusion state.
+  - **App not active.** A sandbox window is closed instead of appearing. This
+    run takes no keyboard focus.
+  - **The shell's own install** on the unsigned test executable: no marker and
+    no window.
+- These rules were also removed once by hand to see the probe fail: the
+  opener's content controller kept, no URL scheme guard, reveal on the commit,
+  two windows on screen, a window over a hidden main window. The input rule
+  was not tried this way: its cases need the app activated, which is done only
+  in CI.
+- The two calls in `build_main_window` that connect the module to the main
+  window have no automated check. Removing the install leaves the browser
+  hand-off; removing the navigation hook leaves a sandbox window open across a
+  Workbench reload. Both show in the manual check on a signed build.
+
+## Not verified
+
+**macOS 15 to 25.** Passkey PRF starts with macOS 15, so 15 would be the
+natural floor. The probe was run once on a hosted macOS 15.8 runner. Every step
+before the pixel check passed there, including windows being revealed, which
+means the presentation update is delivered. The pixel check then failed: the
+window stayed on screen and revealed, the probe never read the opener's colour
+from it, and it never read the sandbox page's colour either. Either the
+read-back does not see WebKit's content on that system, which would make the
+check blind there, or the page was not displayed. The two cannot be told apart
+without a macOS 15 machine. Until the probe passes on it, the marker is not set
+on macOS 15, and those systems keep the browser hand-off. Follow-up: make the
+read-back work on macOS 15 (or replace it), then add a CI job and the version.
+
+Only a signed build with a real passkey can show these:
+
+- The shell's install passing its own admission. In every test it either
+  refuses (the unsigned executable) or is entered one step below.
+- The real origin, and how long its first paint takes in the window.
+- The passkey sheet from the window, and passkey PRF from the sandbox iframe
+  inside the app.
+- Focus while a real system sheet is on screen, and the two-second wait after
+  it closes.
+- A release build. Tests run debug builds.
+- The association being fetched after the app's first launch.

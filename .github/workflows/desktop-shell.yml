@@ -128,6 +128,26 @@ jobs:
       - name: Test Rust
         run: cargo test --locked --workspace --all-features
 
+      # Real WebKit windows on loopback pages, with disposable browsing data.
+      # The first run activates the app, as a user in the Workbench has: sandbox
+      # windows may appear, and everything a window on screen must satisfy is
+      # checked. The second leaves the app inactive, where a sandbox window must
+      # be closed instead. The third runs the shell's own install on this
+      # unsigned build.
+      - name: Verify the Vault sandbox window boundary in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example vault_window_probe --all-features
+          probe() {
+            python src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_probe \
+              --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log "$RUNNER_TEMP/vault-window-probe-$1.log" "${@:2}"
+          }
+          probe active --set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1
+          probe inactive
+          probe shipping --set AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1
+
       # Hosted Windows runs elevated. Prove ordinary-user admission refuses
       # that token; this does not substitute for non-elevated lifecycle tests.
       - name: Verify elevated shell cannot start the Computer Use driver
