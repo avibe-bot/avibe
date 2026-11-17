@@ -724,8 +724,11 @@ impl OpenerObserver {
         // SAFETY: `NSObject`'s designated initializer.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         // SAFETY: Key-value observing of a view's `hidden`, with no options and
-        // no context. The observer is removed in `Opener::stop_watching`, or
-        // outlived by nothing: the web view may be deallocated while observed.
+        // no context. The observer object lives in the opener's entry, which
+        // outlasts the registration. The registration ends in one of two ways:
+        // `Opener::stop_watching` removes it while the web view is alive, or
+        // the web view is freed first and Foundation ends it then (see the
+        // check in `adopt`). It is never removed through a stale pointer.
         let _: () = unsafe {
             msg_send![
                 webview,
@@ -789,6 +792,8 @@ impl Opener {
             // SAFETY: The token `addObserverForName` returned, removed once.
             unsafe { center.removeObserver(observer) };
         }
+        // Only while the web view is alive, which the weak reference says. If
+        // it has been freed, the observation ended with it.
         if let Some(webview) = self.webview.load() {
             // SAFETY: Removes the observation `OpenerObserver::watch` added.
             let _: () = unsafe {
@@ -1335,6 +1340,15 @@ fn adopt(webview: &WKWebView) -> bool {
             return false;
         };
         if child_preferences(mtm).is_none() {
+            return false;
+        }
+        // The opener's `hidden` is observed, and the web view may be freed
+        // while that observation is registered. Foundation then ends the
+        // observation itself, on every macOS this app runs on, provided the
+        // class leaves the notifications for that key to Foundation.
+        let class: &AnyClass = webview.class();
+        let automatic: bool = msg_send![class, automaticallyNotifiesObserversForKey: ns_string!("hidden")];
+        if !automatic {
             return false;
         }
         if !guard_url_schemes() {
