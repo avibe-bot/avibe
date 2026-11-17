@@ -202,6 +202,7 @@ final class VoiceCaptureTests: XCTestCase {
         world.leftovers = [leftover]
         world.activities = []
         world.audio = nil
+        let discardedBefore = world.leftoverAudioDiscarded
         let after = world.controller()
 
         let first = await after.toggle()
@@ -209,7 +210,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(leftover.ended?.phase, .failed)
         XCTAssertEqual(leftover.ended?.reason, .interrupted)
         XCTAssertNil(world.audio, "the ending press records nothing")
-        XCTAssertEqual(world.leftoverAudioDiscarded, 1)
+        XCTAssertEqual(world.leftoverAudioDiscarded, discardedBefore + 1, "its audio is deleted")
 
         let second = await after.toggle()
         XCTAssertEqual(second, .started)
@@ -551,7 +552,9 @@ private final class FakeActivity: VoiceCaptureActivityHandle {
 
     func end(_ state: VoiceCaptureAttributes.ContentState?, dismissal: ActivityUIDismissalPolicy) async {
         ended = state ?? states.last
-        endedImmediately = String(describing: dismissal).contains("immediate")
+        // Cancel ends with no final state (gone at once); an ending that
+        // says something carries one.
+        endedImmediately = state == nil
     }
 }
 
