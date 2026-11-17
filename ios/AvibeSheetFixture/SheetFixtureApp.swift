@@ -332,6 +332,8 @@ private final class SheetFixtureRootViewController: UIViewController,
         webView.configuration.userContentController.addUserScript(WKUserScript(
             source: """
             window.__fixtureErrors = [];
+            // mutation check: the page never renders.
+            document.addEventListener('readystatechange', () => { const r = document.getElementById('root'); if (r) r.remove(); });
             window.addEventListener('error', e => window.__fixtureErrors.push(String(e.message || e.type)));
             window.addEventListener('unhandledrejection', e => window.__fixtureErrors.push('rejection: ' + String(e.reason)));
             """,
