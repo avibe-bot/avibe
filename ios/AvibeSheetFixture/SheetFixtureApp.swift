@@ -216,6 +216,8 @@ private final class SheetFixtureRootViewController: UIViewController,
             // Notification-only delegate methods: the fixture never answers
             // whether the sheet may dismiss.
             controller.presentationController?.delegate = self
+            // mutation check: the sheet ignores a dismissing gesture.
+            controller.isModalInPresentation = true
             present(controller, animated: false) { [weak self, weak controller] in
                 self?.presentationCompletedUptime = ProcessInfo.processInfo.systemUptime
                 self?.observeDismissalTouches(of: controller)
