@@ -581,7 +581,7 @@ describe('BackendModelEditorDialog', () => {
   it('names the model the parameters came from, and clears them on request', async () => {
     const user = userEvent.setup();
     search.mockResolvedValue([match()]);
-    const { onCommit } = renderEditor();
+    const { onCommit, onCancel } = renderEditor();
 
     // Nothing to name while the form is the user's own.
     expect(screen.queryByText(/Parameters from/)).toBeNull();
@@ -590,7 +590,16 @@ describe('BackendModelEditorDialog', () => {
     expect(screen.getByText('Parameters from Claude Sonnet 4.5')).toBeTruthy();
 
     await user.type(modelField(), '-relay');
+    expect(screen.getByRole('listbox')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Clear parameters' }));
+
+    // The button leaves with its line; the caret stays in the id, so the list
+    // it is still showing is the one Escape closes — not the editor.
+    expect(document.activeElement).toBe(modelField());
+    expect(screen.getByRole('listbox')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
 
     expect(screen.queryByText(/Parameters from/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Clear parameters' })).toBeNull();
@@ -620,7 +629,11 @@ describe('BackendModelEditorDialog', () => {
     expect(rows[0].getAttribute('aria-selected')).toBe('true');
     expect(rows[1].textContent).toContain('Claude Sonnet 4.5');
 
-    await user.keyboard('{Enter}');
+    // The Enter hint marks the row Enter takes, and follows the highlight.
+    expect(within(rows[0]).getByText('Enter')).toBeTruthy();
+    await user.keyboard('{ArrowDown}');
+    expect(within(screen.getAllByRole('option')[0]).queryByText('Enter')).toBeNull();
+    await user.keyboard('{ArrowUp}{Enter}');
 
     expect(screen.queryByRole('listbox')).toBeNull();
     expect(modelField().value).toBe('claude-sonnet-4-5-relay');

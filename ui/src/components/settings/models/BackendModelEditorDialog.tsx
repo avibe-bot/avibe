@@ -15,7 +15,7 @@ import type { TranslationKey } from '@/i18n/types';
 // ui/design: models/model-menu/custom-model-from-catalog, models/model-menu/custom-model-id-edited
 import * as React from 'react';
 import { Check, Plus } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -170,6 +170,7 @@ export const BackendModelEditorDialog: React.FC<{
    *  under another name far more often than a search for a different one. */
   const [base, setBase] = React.useState<string | null>(null);
   const listId = React.useId();
+  const idRef = React.useRef<HTMLInputElement>(null);
 
   const seed = React.useCallback((next: BackendModel) => {
     setDraft(next);
@@ -319,12 +320,15 @@ export const BackendModelEditorDialog: React.FC<{
     patch({ id: nextId });
   };
 
-  /** 「Clear parameters」: back to the blank form under the same id and name. */
+  /** 「Clear parameters」: back to the blank form under the same id and name.
+   *  The button goes with the line it sits on, so the caret goes back to the
+   *  id — where an open list and its Escape still belong. */
   const clearParameters = () => {
     setDraft(clearModelsDevParameters);
     setContextText('');
     setOutputText('');
     setBase(null);
+    idRef.current?.focus();
   };
 
   // The escape is in the list in every open state, including 「searching」 and
@@ -431,13 +435,18 @@ export const BackendModelEditorDialog: React.FC<{
       )}
     >
       {/* The id it will create, through the same resolver `commit` uses — not
-          the raw query, whose surrounding whitespace is not part of the id. */}
-      <span className="model-hub-model-match-literal min-w-0 truncate">
-        {t(keepFirst ? 'settings.models.gateway.modelEditor.useAsIdKeep' : 'settings.models.gateway.modelEditor.useAsId', {
-          query: backendModelId(lookup.trim()),
-        })}
+          the raw query, whose surrounding whitespace is not part of the id.
+          A long id gives way, never the words that say what the row does. */}
+      <span className="model-hub-model-match-literal flex min-w-0 whitespace-pre">
+        <Trans
+          i18nKey={keepFirst ? 'settings.models.gateway.modelEditor.useAsIdKeep' : 'settings.models.gateway.modelEditor.useAsId'}
+          values={{ query: backendModelId(lookup.trim()) }}
+          components={{ id: <span className="min-w-0 truncate" /> }}
+        />
       </span>
-      {keepFirst && <span className="model-hub-model-match-meta ml-auto shrink-0 max-md:hidden" aria-hidden="true">{t('settings.shortcuts.keyLabels.enter')}</span>}
+      {keepFirst && activeRow === literalRow && (
+        <span className="model-hub-model-match-meta ml-auto shrink-0 max-md:hidden" aria-hidden="true">{t('settings.shortcuts.keyLabels.enter')}</span>
+      )}
     </button>
   );
   const backendName = getBackendUiMeta(backend).label;
@@ -482,6 +491,7 @@ export const BackendModelEditorDialog: React.FC<{
                   data-model-id-lookup
                 >
                   <Input
+                    ref={idRef}
                     id={id}
                     value={draft.id}
                     readOnly={!creating}
@@ -507,6 +517,8 @@ export const BackendModelEditorDialog: React.FC<{
                       <span aria-hidden="true" className="shrink-0 before:content-['·']" />
                       <button
                         type="button"
+                        // A click keeps the caret in the id, like the list's rows.
+                        onMouseDown={(event) => event.preventDefault()}
                         onClick={clearParameters}
                         className="shrink-0 font-semibold text-foreground underline underline-offset-2"
                       >

@@ -1450,8 +1450,8 @@
             "placeholder": "Optional — the list shows the model ID when this is empty"
           },
           "lookupLoading": "Searching models.dev…",
-          "useAsId": "Use \"{{query}}\" as the model ID",
-          "useAsIdKeep": "Use \"{{query}}\", keep current parameters",
+          "useAsId": "Use \"<id>{{query}}</id>\" as the model ID",
+          "useAsIdKeep": "Use \"<id>{{query}}</id>\", keep current parameters",
           "parametersFrom": "Parameters from {{name}}",
           "clearParameters": "Clear parameters",
           "fillFailed": "models.dev could not be reached",
