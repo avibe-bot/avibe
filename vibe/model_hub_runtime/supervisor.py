@@ -8,6 +8,7 @@ import socket
 import subprocess
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -484,7 +485,19 @@ class EngineSupervisor:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            managed = self.installer.status()
+            lifecycle_status = self.lifecycle.status() if self.lifecycle is not None else None
+            # A live lifecycle-owned process was verified synchronously before
+            # spawn. Report that exact launch, not a later disk inspection:
+            # provenance publication can briefly obstruct reads on Windows,
+            # and changed files cannot relabel the process already running.
+            # The owner exposes running only after recovery/commit settlement;
+            # stop/exit drops this snapshot and fresh starts still re-verify.
+            launched = (
+                self._instance[0]
+                if lifecycle_status and lifecycle_status.get("running") is not None and self._instance is not None
+                else None
+            )
+            managed = launched if launched is not None else self.installer.status()
             installed = bool(managed.get("installed"))
             install_state_reader = getattr(self.installer, "install_state", None)
             install_state = install_state_reader() if callable(install_state_reader) else None
@@ -513,16 +526,15 @@ class EngineSupervisor:
                 if callable(host_platform_reader)
                 else str(managed.get("platform") or "")
             )
-            lifecycle_status = self.lifecycle.status() if self.lifecycle is not None else None
             if lifecycle_status and (not self.lifecycle._ready or not self.lifecycle.recovered):
                 listening = None  # never publish a provisional listener
-                if installed and health != "installing":
+                if health not in {"installing", "not_installed"}:
                     health = "down"
             return {
                 "host_platform": host_platform,
-                "manifest": self.installer.contract_manifest(),
+                "manifest": deepcopy(launched["contract_manifest"]) if launched is not None else self.installer.contract_manifest(),
                 "engine_lifecycle": lifecycle_status,
-                "committed_release": ((managed.get("engine_lifecycle") or {}).get("committed") or {}).get("asset_release_tag"),
+                "committed_release": ((lifecycle_status or managed.get("engine_lifecycle") or {}).get("committed") or {}).get("asset_release_tag"),
                 "running_release": (
                     self.lifecycle.running_release if self.lifecycle and self.lifecycle._ready and self.lifecycle.recovered and self._is_running_locked()
                     else self._published_release if self.lifecycle is None and self._is_running_locked() else None

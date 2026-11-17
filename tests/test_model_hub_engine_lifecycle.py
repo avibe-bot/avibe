@@ -282,6 +282,103 @@ def owner_fixture(tmp_path, monkeypatch, *, bundled_version="v8.0.30"):
     return owner, supervisor, staged
 
 
+@pytest.mark.parametrize("inspection_failure", ["provenance_unavailable", "binary_changed"])
+def test_recovered_start_reports_the_verified_launch_not_a_later_disk_inspection(
+    tmp_path, monkeypatch, inspection_failure,
+):
+    """A recovered start/status must describe its verified process, not re-inspect
+    mutable publication paths. Existing owner tests substitute the supervisor,
+    and runtime status tests do not overlap launch with failed disk inspection.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from core.handlers.model_hub.adapter import EngineHealth
+    from core.process_isolation import fingerprint_process_marker, new_process_identity_marker
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    old_owner, _recorder, baseline = owner_fixture(tmp_path, monkeypatch)
+    manager = old_owner.manager
+    generation = baseline["generation"]
+    provenance = manager.runtime_dir / "provenance" / f"{generation['manifest_sha256']}.manifest.json"
+    witness = fingerprint_process_marker(new_process_identity_marker())
+    value = old_owner.journal.load()
+    value["launch"] = {"fingerprint": witness, "generation": generation}
+    old_owner.journal.save(value)
+    reaped = []
+    exited = False
+    launched = False
+    read_bytes = Path.read_bytes
+
+    def inspect(path):
+        if launched and inspection_failure == "provenance_unavailable" and path == provenance:
+            # Hold the read failure from just after verified launch until the
+            # end of the test. No sleep or probabilistic Windows overlap.
+            raise PermissionError("injected publication overlap")
+        return read_bytes(path)
+
+    def spawn(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        if inspection_failure == "binary_changed":
+            Path(baseline["path"]).write_bytes(b"changed after launch verification")
+        return SimpleNamespace(poll=lambda: 0 if exited else None)
+
+    def reap(*args, worker_fingerprint, **kwargs):
+        reaped.append(worker_fingerprint)
+        return "reaped"
+
+    monkeypatch.setattr(Path, "read_bytes", inspect)
+    monkeypatch.setattr(supervisor_module, "reap_marked_processes", reap)
+    supervisor = supervisor_module.EngineSupervisor(
+        installer=manager, state_store=EngineStateStore(tmp_path / "state"),
+        process_factory=spawn, port_allocator=lambda: 15220,
+    )
+    monkeypatch.setattr(supervisor, "_record_engine_locked", lambda *args: True)
+    monkeypatch.setattr(supervisor, "_check_health_locked", lambda client: True)
+    monkeypatch.setattr(supervisor, "_oauth_grants_listed_locked", lambda connection: True)
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor)
+    expected_manifest = manager.contract_manifest()
+
+    async def exercise():
+        nonlocal exited
+        await adapter.recover_lifecycle()
+        assert witness in reaped
+        assert adapter.lifecycle.recovered
+        try:
+            started = await adapter.start()
+            assert started.health is EngineHealth.OK
+            assert started.verified is True
+            assert started.installed_version == generation["runtime_version"]
+            assert started.manifest == expected_manifest
+            assert started.engine_lifecycle["running"] == generation
+            assert started.committed_release == started.running_release == generation["asset_release_tag"]
+            assert await adapter.status() == started
+            # The launch result is not fabricated by a fake installer: independent
+            # disk inspection really fails, and is still used after process exit.
+            assert manager.status()["installed"] is False
+            with monkeypatch.context() as provisional:
+                provisional.setattr(adapter.lifecycle, "_ready", False)
+                blocked = await adapter.status()
+                assert blocked.health is EngineHealth.DOWN
+                assert blocked.verified is False and blocked.listen_port is None
+            exited = True
+            stopped = await adapter.status()
+            assert stopped.verified is False and stopped.installed_version is None
+            assert stopped.listen_port is None
+            # A launch snapshot never authorizes another process from damaged
+            # bytes or unavailable provenance.
+            with pytest.raises(supervisor_module.EngineUnavailableError):
+                await adapter.start()
+        finally:
+            exited = True
+            supervisor.stop()
+
+    asyncio.run(exercise())
+
+
 def test_repeated_repairs_automatically_reclaim_retired_installations(tmp_path, monkeypatch):
     owner, _supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
     clean = owner.manager.clean
