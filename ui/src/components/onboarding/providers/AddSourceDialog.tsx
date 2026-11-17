@@ -51,7 +51,7 @@ import {
   createContinuationSettlement,
   type ContinuationTicket,
 } from '@/components/settings/models/mutationSettlement';
-import { modelsApi, type Adoption, type SourceCreated } from '@/components/settings/models/modelsApi';
+import { apiFailure, modelsApi, type Adoption, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { OAuthConnectDialog } from '@/components/settings/models/OAuthConnectDialog';
 import { SubscriptionTermsNote } from '@/components/settings/models/SubscriptionTermsNote';
 import { reconcileUnknownWrite } from '@/components/settings/models/reconcileUnknownWrite';
@@ -88,7 +88,7 @@ type WritePhase =
   | { kind: 'waitingAuth' }
   /** `settled` separates a server verdict from a write whose outcome is unknown —
    *  and an unknown one may never simply be sent again. */
-  | { kind: 'failed'; settled: boolean };
+  | { kind: 'failed'; settled: boolean; messageKey?: string | null };
 
 const subscriptionBrand = (vendor: string): string =>
   subscriptionChooser(vendor)?.brand ?? providerBrandLabel(vendor);
@@ -248,7 +248,7 @@ export const AddSourceDialog: React.FC<{
     try {
       await land(seq, await modelsApi.createApiKeySource(apiKeySourceCreate(draft, clientNonce.current)));
     } catch (error) {
-      continuation.settle(seq, () => setPhase({ kind: 'failed', settled: apiKeyWriteSettled(error) }));
+      continuation.settle(seq, () => setPhase({ kind: 'failed', settled: apiKeyWriteSettled(error), messageKey: apiFailure(error)?.detail ?? null }));
     }
   }, [continuation, draft, land]);
 
@@ -506,6 +506,7 @@ export const AddSourceDialog: React.FC<{
                 keyLabel={keyPreset
                   ? t('onboarding.providers.addKeyLabelNamed', { name: keyPreset.label })
                   : undefined}
+                keyRefusalNamed={phase.kind === 'failed' && phase.messageKey === 'modelHub.errors.authentication_failed'}
                 onChange={editDraft}
                 onToggleReveal={() => setRevealed((value) => !value)}
                 // Enter is the footer button, so it obeys the footer button's rule:
@@ -527,7 +528,10 @@ export const AddSourceDialog: React.FC<{
               {phase.kind === 'failed' && (
                 <>
                   <CircleX className="setup-add-status-icon setup-add-status-icon--error" aria-hidden="true" />
-                  <span className="setup-add-status-error">{t('onboarding.providers.addErrorPreserved')}</span>
+                  {/* A refused key is named, so nobody retries the same key; anything else keeps the generic line. */}
+                  <span className="setup-add-status-error">{phase.messageKey === 'modelHub.errors.authentication_failed'
+                    ? serverText(t, phase.messageKey, 'onboarding.providers.addErrorPreserved')
+                    : t('onboarding.providers.addErrorPreserved')}</span>
                 </>
               )}
             </span>

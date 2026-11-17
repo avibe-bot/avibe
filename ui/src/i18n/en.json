@@ -2257,8 +2257,8 @@
           "catalogPinned.hint": "Interface supplied by the built-in catalog; credential verification is separate",
           "declared": "Manually specified",
           "detected": "Recognised as {{format}}",
-          "unrecognised": "Couldn't recognise the format, so {{format}} is used. Pick another if it's wrong.",
-          "unrecognisedRejected": "The endpoint rejected this key, so the format couldn't be recognised; {{format}} is used."
+          "keyRefused": "This address refused the key. Check or replace it.",
+          "unrecognised": "Couldn't recognise the format, so {{format}} is used. Pick another if it's wrong."
         },
         "inventory": {
           "title": "The interface is identified — but its model list did not come back this time"

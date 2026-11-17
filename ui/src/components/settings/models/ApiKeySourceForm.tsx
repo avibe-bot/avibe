@@ -116,11 +116,7 @@ const DetectionNote: React.FC<{ detection: ProtocolDetection }> = ({ detection }
       ? [<CircleCheck key="icon" className="model-hub-ink-mint size-3 shrink-0" aria-hidden="true" />,
         t('settings.models.addKey.protocol.detected', { format: t(PROTOCOL_COPY_KEYS[detection.protocol]) })]
       : detection.kind === 'unrecognised'
-        ? [null, t(detection.rejected
-          ? 'settings.models.addKey.protocol.unrecognisedRejected'
-          : 'settings.models.addKey.protocol.unrecognised', {
-          format: t(PROTOCOL_COPY_KEYS.openai_chat),
-        })]
+        ? [null, t('settings.models.addKey.protocol.unrecognised', { format: t(PROTOCOL_COPY_KEYS.openai_chat) })]
         : [null, t('settings.models.addKey.protocol.idleHint')];
   return (
     <p className="model-hub-add-key-hint model-hub-add-key-protocol-note" role="status" aria-live="polite" data-detection={detection.kind}>
@@ -204,7 +200,9 @@ export const ApiKeySourceForm: React.FC<{
   onChange: (next: ApiKeySourceDraft, field: keyof ApiKeySourceDraft) => void;
   onToggleReveal: () => void;
   onSubmit?: () => void;
-}> = ({ draft, disabled, revealed, autoFocusKey, keyLabel, onChange, onToggleReveal, onSubmit }) => {
+  /** A save already said the key was refused, so detection's own hint stays quiet. */
+  keyRefusalNamed?: boolean;
+}> = ({ draft, disabled, revealed, autoFocusKey, keyLabel, onChange, onToggleReveal, onSubmit, keyRefusalNamed = false }) => {
   const { t } = useTranslation();
   const vendorOptions = useVendorOptions();
   const vendorPreset = modelApiKeyVendorPreset(draft.vendor);
@@ -216,7 +214,11 @@ export const ApiKeySourceForm: React.FC<{
   const [formatOpen, setFormatOpen] = React.useState(false);
   // Detection failing or a choice already made opens the formats by themselves;
   // otherwise one toggle opens them, and stays where it is so focus does too.
-  const formatsForced = draft.protocolChosen || detection.kind === 'unrecognised';
+  // A refused key is not a format question: detection says the key was refused, in one
+  // line, and leaves the formats closed. Once a save has named the refusal, that line
+  // is the only one (the server's check is the verdict; detection only hinted).
+  const keyRefused = detection.kind === 'unrecognised' && detection.rejected;
+  const formatsForced = draft.protocolChosen || (detection.kind === 'unrecognised' && !keyRefused);
   const showFormats = formatOpen || formatsForced;
   const formatsId = React.useId();
   // The name is optional and defaults to the address, so it waits behind 「更多设置」.
@@ -305,7 +307,9 @@ export const ApiKeySourceForm: React.FC<{
               />
             )}
           </div>
-          {draft.protocolChosen ? null : <DetectionNote detection={detection} />}
+          {keyRefused
+            ? (keyRefusalNamed ? null : <p className="model-hub-add-key-hint model-hub-add-key-protocol-note" role="status" aria-live="polite" data-detection="refused">{t('settings.models.addKey.protocol.keyRefused')}</p>)
+            : draft.protocolChosen ? null : <DetectionNote detection={detection} />}
           {!formatsForced && (
             <button
               type="button"

@@ -395,6 +395,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               draft={draft}
               disabled={formLocked}
               revealed={revealed}
+              keyRefusalNamed={phase.kind === 'persist_failure' && phase.messageKey === 'modelHub.errors.authentication_failed'}
               onChange={editDraft}
               onToggleReveal={() => setRevealed((value) => !value)}
             />}

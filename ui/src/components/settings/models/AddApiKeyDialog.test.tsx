@@ -267,9 +267,38 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'anthropic', save_unverified: true });
   });
 
+  it('says a refused key once, without a format question; after a refused save only the save line remains', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation('rejected'));
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(
+      new ApiCallError('discovery_failed', 'modelHub.errors.authentication_failed', true, [], [], [], 422),
+    );
+    renderDialog();
+    const user = await fillCredentials();
+    await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
+    // Before saving: one line about the key; no format line and no formats forced open.
+    expect(await screen.findByText('This address refused the key. Check or replace it.', undefined, DETECTION_WAIT)).toBeTruthy();
+    expect(screen.queryByText(/Couldn't recognise the format/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'OpenAI Chat Completions' })).toBeNull();
+    await clickConfirm(user);
+    expect(await screen.findByText('API key invalid or lacks permission. Check or replace it.')).toBeTruthy();
+    expect(screen.queryByText('This address refused the key. Check or replace it.')).toBeNull();
+  });
+
+  it('keeps the format choice reachable after a refused detection, and saves a picked format', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation('rejected'));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({ source, added_to: [], adopted_by: [] });
+    renderDialog();
+    const user = await fillCredentials();
+    await screen.findByText('This address refused the key. Check or replace it.', undefined, DETECTION_WAIT);
+    await user.click(screen.getByRole('button', { name: 'Choose the API format manually' }));
+    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
+    await clickConfirm(user);
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'openai_responses' });
+  });
+
   it.each([
     ['unknown', /Couldn't recognise the format, so OpenAI Chat Completions is used/],
-    ['rejected', /The endpoint rejected this key/],
   ] as const)('keeps the default when nothing answers (%s) and still saves a picked format', async (authenticated, note) => {
     vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation(authenticated));
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
