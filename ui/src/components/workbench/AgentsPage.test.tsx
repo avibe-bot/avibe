@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import { BotsContext, type BotsState } from '../../context/BotsContext';
@@ -16,6 +16,9 @@ import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
 import { modelsApi } from '../settings/models/modelsApi';
 import type { AgentSupply } from '../settings/models/types';
 import { AgentsPage } from './AgentsPage';
+
+// The Add model dialog loads on demand (lib/useAddModelDialog); have its code here before a case opens it.
+beforeAll(async () => { await import('../settings/models/AddModelsDialog'); });
 
 type FakeApi = {
   listVibeAgents: ReturnType<typeof vi.fn>;

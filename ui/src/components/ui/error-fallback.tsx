@@ -3,18 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Loader2, RotateCcw, RotateCw } from 'lucide-react';
 import clsx from 'clsx';
 
+import { isChunkLoadError } from '../../lib/chunkLoadError';
 import { Button } from './button';
-
-// A lazy module that failed to load, worded differently by Chromium, Firefox, and Safari, plus
-// Vite's own message when a lazy chunk's CSS fails to preload. Retrying in place cannot recover
-// it: React.lazy keeps the rejected import, and browsers keep a failed module fetch until the page
-// reloads. The usual cause is a page left open across an Avibe update.
-const CHUNK_LOAD_ERROR =
-  /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS/i;
-
-function isChunkLoadError(error: unknown): boolean {
-  return error instanceof Error && CHUNK_LOAD_ERROR.test(error.message);
-}
 
 // Kept dependency-light on purpose: this renders precisely when something else just threw, so it must
 // not itself rely on app data that might be the cause. i18n `t` returns the key if missing (no throw).

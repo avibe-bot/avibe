@@ -21,9 +21,10 @@ import { useInstanceAuthorization } from '../context/InstanceAuthorizationContex
 import { VersionBadge } from './VersionBadge';
 import { RunningStatus, SidebarStatusRow } from './SidebarStatusRow';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
-import { BotProfileDialogHost } from './workbench/bots/BotProfileDialog';
 import { lazyPage } from '../lib/lazyPage';
-import { useVoiceConsentAsking } from '../lib/voiceConsent';
+import { useBots } from '../context/BotsContext';
+import { closeVoiceConsent, useVoiceConsentAsking } from '../lib/voiceConsent';
+import { LazyDialog } from './ui/lazy-dialog';
 import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
@@ -177,13 +178,29 @@ export type AppShellProps = {
   footer?: (slots: { tools: React.ReactNode; defaultView: React.ReactNode }) => React.ReactNode;
 };
 
+// The Bots add/edit dialog's code loads with the first request to open it; after that it stays
+// mounted, so its close animation and the next opening behave as before.
+const BotProfileDialogHost = lazyPage(() => import('./workbench/bots/BotProfileDialog').then((module) => module.BotProfileDialogHost));
+
+function BotProfileDialogSlot() {
+  const { profileRequest, closeProfile } = useBots();
+  const [requested, setRequested] = useState(false);
+  if (profileRequest && !requested) setRequested(true);
+  if (!requested) return null;
+  return (
+    <LazyDialog onFailed={() => { setRequested(false); closeProfile(); }}>
+      <BotProfileDialogHost />
+    </LazyDialog>
+  );
+}
+
 // The question's code loads when it is first put up; nothing on the first screen draws it.
 const VoiceConsentHost = lazyPage(() => import('./voice/VoiceConsent').then((module) => module.VoiceConsentHost));
 
 function VoiceConsentSlot() {
   const asking = useVoiceConsentAsking();
   if (!asking) return null;
-  return <React.Suspense fallback={null}><VoiceConsentHost /></React.Suspense>;
+  return <LazyDialog onFailed={closeVoiceConsent}><VoiceConsentHost /></LazyDialog>;
 }
 
 export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
@@ -708,7 +725,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
           shell, so any Settings placement suspends it with its form intact (the
           model picker's Add model exit opens Settings over it). */}
       <RouteSurfaceActivityBoundary active={!settingsOpen}>
-        <BotProfileDialogHost />
+        <BotProfileDialogSlot />
       </RouteSurfaceActivityBoundary>
 
       {/* Voice input's question (ui/design: composer/voice-consent/*): put up by any voice

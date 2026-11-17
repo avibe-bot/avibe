@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { useState } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -17,6 +17,9 @@ import { ToastContext } from '../../context/ToastContext';
 import { modelsApi } from '../settings/models/modelsApi';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch, AgentRouteValue } from './AgentRoutePicker';
+
+// The Add model dialog loads on demand (lib/useAddModelDialog); have its code here before a case opens it.
+beforeAll(async () => { await import('../settings/models/AddModelsDialog'); });
 
 vi.mock('react-i18next', () => ({
   // The key, plus the Source names a hint interpolates, so a test can read both.
