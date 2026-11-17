@@ -1537,7 +1537,7 @@
           "hub": "模型网关管理"
         },
         "kind": {
-          "nativeCredential": "自己登录 · 本机",
+          "nativeCredential": "本机凭据",
           "subscription": "订阅",
           "apiKey": "API Key"
         },
@@ -2435,7 +2435,7 @@
         "notes": {
           "customBaseUrl": "含自定义 Base URL",
           "keepNativeSanctioned": "保留在 Agent 自己的凭据库（受官方认可）",
-          "keepNativeReauthHint": "保留给助手自己登录；要交给模型网关时另行添加订阅",
+          "keepNativeReauthHint": "保留为助手自己登录；要交给模型网关时另行添加订阅",
           "fromOpencode": "来自 opencode 配置"
         },
         "source": {
