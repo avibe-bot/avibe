@@ -48,7 +48,11 @@
 //!   [`LIVE_AFTER_RETURN`] every later time, and never sooner than
 //!   [`LIVE_AFTER_RETURN`] after the user last arrived: the app became the
 //!   active one, or the opener's window came back from hidden, minimized or
-//!   another Space. Until then every key for the window, and every click on
+//!   another Space. Each event is judged at the time it was made, not at the
+//!   time it is handed to the window: an event waits in the queue while the
+//!   main thread is busy, and the time it waited must not count as time the
+//!   user had the card in front of them. The card must also still be in view
+//!   when the event is handed over. Until then every key for the window, and every click on
 //!   its content, is dropped where the window receives it and is not passed
 //!   to what is underneath; clicks on the title bar are delivered, so the
 //!   window can be moved or closed. The card is on screen the whole time. When
@@ -333,6 +337,51 @@ fn input_wait(seen_for: Option<Duration>, first_sight: bool, arrived_for: Option
         LIVE_AFTER_RETURN.saturating_sub(arrived_for)
     });
     Some(since_sight.max(since_arrival))
+}
+
+/// [`input_wait`] for an event made `age` ago, from what is read when the
+/// event is dispatched. An event waits in the queue while the main thread is
+/// busy; the card must have been in front of the user for the interval when
+/// the event was made, so the event's age is taken off both elapsed times.
+/// `None`, which is "not live", when the event was made before the current
+/// period began, or before the user last arrived: the card was not in front
+/// of the user then, or the user has come back since. (An arrival that
+/// cannot be placed before the event must not turn into "never arrived",
+/// which would mean no wait.)
+fn input_wait_when_made(
+    seen_for: Option<Duration>,
+    first_sight: bool,
+    arrived_for: Option<Duration>,
+    age: Duration,
+) -> Option<Duration> {
+    let seen_for = seen_for?.checked_sub(age)?;
+    let arrived_for = match arrived_for {
+        Some(arrived_for) => Some(arrived_for.checked_sub(age)?),
+        None => None,
+    };
+    input_wait(Some(seen_for), first_sight, arrived_for)
+}
+
+/// How long ago an event was made: the system's uptime now less the event's
+/// timestamp, which AppKit states on the same clock. Only this difference
+/// crosses to the clock the periods are kept on. Never negative: a timestamp
+/// can make an event older, never newer than its dispatch. `None` when the
+/// two do not give a length of time; the event is then refused.
+fn event_age(uptime: f64, timestamp: f64) -> Option<Duration> {
+    let age = uptime - timestamp;
+    // `max` would turn "not a number" into zero, which is "made just now".
+    if age.is_nan() {
+        return None;
+    }
+    Duration::try_from_secs_f64(age.max(0.0)).ok()
+}
+
+/// Whether the card is in front of the user at this moment. `presented` is set
+/// only by the block `reveal` queues, once the opaque card has been committed
+/// to the window server: until then the window may still be empty on screen,
+/// and no event may start the period.
+fn in_view(displayed: bool, presented: bool, opener_shown: bool, visible: bool, app_active: bool) -> bool {
+    displayed && presented && opener_shown && visible && app_active
 }
 
 /// Whether an event is input that a window not yet live must not receive.
@@ -961,6 +1010,10 @@ define_class!(
 struct WindowFields {
     /// The sandbox document has been presented; see `appear` and `reveal`.
     displayed: Cell<bool>,
+    /// The opaque card has been committed to the window server, one turn of
+    /// the main run loop after `reveal`. Set by the block `reveal` queues and
+    /// by nothing else.
+    presented: Cell<bool>,
     /// When the current unbroken period began in which the card is displayed,
     /// the window visible and this app active. `None` outside such a period.
     seen_since: Cell<Option<Instant>>,
@@ -992,7 +1045,7 @@ define_class!(
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             // SAFETY: The superclass implementation, with its argument.
-            self.is_live() && unsafe { msg_send![super(self), performKeyEquivalent: event] }
+            self.is_live_for(event) && unsafe { msg_send![super(self), performKeyEquivalent: event] }
         }
 
         /// A displayed card may have the keyboard before it takes input:
@@ -1012,11 +1065,12 @@ define_class!(
 
 impl SandboxWindow {
     /// Brings the record of whether the user has the card in front of them up
-    /// to this moment, and returns how long until the window takes input.
-    /// Called for every event, so a change the window was not told about in
-    /// time can only make the wait longer: a period found to have begun is
-    /// counted from now.
-    fn input_wait(&self) -> Option<Duration> {
+    /// to this moment, and returns what the input rule reads: how long the
+    /// card has been seen, whether that is the first such period, and how
+    /// long ago the user arrived. Called for every event, so a change the
+    /// window was not told about in time can only make the wait longer: a
+    /// period found to have begun is counted from now.
+    fn look(&self) -> (Option<Duration>, bool, Option<Duration>) {
         let fields = self.ivars();
         // A card whose opener is not what the user is looking at is on its
         // way out (see `opener_view_changed`); until it is gone it is not live.
@@ -1024,10 +1078,13 @@ impl SandboxWindow {
             .opener
             .load()
             .is_some_and(|opener| look_at_opener(&opener).is_some());
-        let seen = fields.displayed.get()
-            && opener_shown
-            && self.occlusionState().contains(NSWindowOcclusionState::Visible)
-            && MainThreadMarker::new().is_some_and(app_is_active);
+        let seen = in_view(
+            fields.displayed.get(),
+            fields.presented.get(),
+            opener_shown,
+            self.occlusionState().contains(NSWindowOcclusionState::Visible),
+            MainThreadMarker::new().is_some_and(app_is_active),
+        );
         match (seen, fields.seen_since.get()) {
             (true, None) => fields.seen_since.set(Some(Instant::now())),
             (false, Some(_)) => {
@@ -1036,15 +1093,21 @@ impl SandboxWindow {
             }
             _ => {}
         }
-        input_wait(
+        (
             fields.seen_since.get().map(|since| since.elapsed()),
             !fields.seen_before.get(),
             arrived_for(),
         )
     }
 
-    fn is_live(&self) -> bool {
-        self.input_wait() == Some(Duration::ZERO)
+    /// Whether the window takes this event: whether it was live when the
+    /// event was made, and the card is still in view now.
+    fn is_live_for(&self, event: &NSEvent) -> bool {
+        let (seen_for, first_sight, arrived_for) = self.look();
+        // Read last: time that passes between the readings makes the event
+        // older, never newer.
+        let age = event_age(NSProcessInfo::processInfo().systemUptime(), event.timestamp());
+        age.is_some_and(|age| input_wait_when_made(seen_for, first_sight, arrived_for, age) == Some(Duration::ZERO))
     }
 
     /// Whether an event is delivered. A window that is not live, whether still
@@ -1054,7 +1117,7 @@ impl SandboxWindow {
     /// title bar keeps working, so the window can be moved or closed.
     fn admits(&self, event: &NSEvent) -> bool {
         let kind = event.r#type();
-        if !is_input(kind) || self.is_live() {
+        if !is_input(kind) || self.is_live_for(event) {
             return true;
         }
         if is_key(kind) {
@@ -1208,7 +1271,7 @@ define_class!(
                     .map(|child| child.window.clone())
             });
             if let Some(window) = window {
-                window.input_wait();
+                window.look();
             }
         }
     }
@@ -1368,7 +1431,24 @@ fn reveal(id: u64) {
     // is not the active one.
     window.makeKeyAndOrderFront(None);
     window.makeFirstResponder(Some(&webview));
-    window.input_wait();
+    // The period in which the user has the card in front of them does not
+    // start here. This runs inside WebKit's presentation callback, and what it
+    // changed reaches the screen only after this turn of the run loop: time
+    // the main thread spends before that is time the window is still empty.
+    // One turn later, outside any callback of WebKit, the change is committed
+    // to the window server and only then is the card looked at. Nothing else
+    // starts the period before: an event that arrives in between finds the
+    // card not presented.
+    let present = RcBlock::new(move || {
+        if let Some(transaction) = AnyClass::get(c"CATransaction") {
+            // SAFETY: `+[CATransaction flush]`, which takes no argument.
+            let _: () = unsafe { msg_send![transaction, flush] };
+        }
+        window.ivars().presented.set(true);
+        window.look();
+    });
+    // SAFETY: The block runs once, on the main thread.
+    unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&present) };
 }
 
 /// Ends a child. Its opener can no longer reach it and the native window
@@ -1585,6 +1665,7 @@ fn open_child(
         let window: Retained<SandboxWindow> = msg_send![
             super(SandboxWindow::alloc(mtm).set_ivars(WindowFields {
                 displayed: Cell::new(false),
+                presented: Cell::new(false),
                 seen_since: Cell::new(None),
                 seen_before: Cell::new(false),
                 opener: opener_view,
@@ -2045,6 +2126,76 @@ mod tests {
                 "seen for {seen_for:?}, first sight {first_sight}, arrived {arrived_for:?} ago"
             );
         }
+    }
+
+    #[test]
+    fn an_event_is_judged_at_the_time_it_was_made() {
+        let s = Duration::from_millis;
+        let live = Some(Duration::ZERO);
+        // (seen for, first sight, arrived how long ago, the event's age) -> wait
+        for (seen_for, first_sight, arrived_for, age, expected) in [
+            // Made now: as before.
+            (Some(s(5000)), true, None, s(0), live),
+            (Some(s(500)), true, None, s(0), Some(s(250))),
+            // Made 0.1 s after the card appeared, handed over 4.9 s later: the
+            // card had been seen for 0.1 s then, however long it has been since.
+            (Some(s(5000)), true, None, s(4900), Some(s(650))),
+            (Some(s(60_000)), false, None, s(58_500), Some(s(500))),
+            // Made after the interval: taken, also when handed over late.
+            (Some(s(5000)), true, None, s(4000), live),
+            // Made before the current period began: the card was not in front
+            // of the user then.
+            (Some(s(5000)), true, None, s(5001), None),
+            (Some(s(5000)), true, None, s(3_600_000), None),
+            // Not in view at dispatch: never, whenever it was made.
+            (None, true, None, s(0), None),
+            (None, false, Some(s(60_000)), s(100), None),
+            // The arrival is judged at the event's time too.
+            (Some(s(60_000)), false, Some(s(10_000)), s(9000), Some(s(1000))),
+            (Some(s(60_000)), false, Some(s(10_000)), s(8000), live),
+            // The user arrived after the event was made: refused. It must not
+            // read as "never arrived", which waits for nothing.
+            (Some(s(60_000)), false, Some(s(1000)), s(3000), None),
+            (Some(s(60_000)), true, Some(s(0)), s(1), None),
+            // Never arrived stays "no wait".
+            (Some(s(60_000)), false, None, s(3000), live),
+        ] {
+            assert_eq!(
+                input_wait_when_made(seen_for, first_sight, arrived_for, age),
+                expected,
+                "seen for {seen_for:?}, first sight {first_sight}, arrived {arrived_for:?} ago, made {age:?} ago"
+            );
+        }
+    }
+
+    #[test]
+    fn a_timestamp_makes_an_event_older_and_never_newer() {
+        // Uptime now and the event's timestamp, in seconds.
+        assert_eq!(event_age(100.0, 99.5), Some(Duration::from_millis(500)));
+        assert_eq!(event_age(100.0, 100.0), Some(Duration::ZERO));
+        // Dated in the future: made at dispatch, no later.
+        assert_eq!(event_age(100.0, 250.0), Some(Duration::ZERO));
+        // Dated zero: as old as the system has been up.
+        assert_eq!(event_age(86_400.0, 0.0), Some(Duration::from_secs(86_400)));
+        // Not a time: no age, and so no delivery.
+        assert_eq!(event_age(100.0, f64::NAN), None);
+        assert_eq!(event_age(f64::NAN, 100.0), None);
+        assert_eq!(event_age(f64::INFINITY, 100.0), None);
+        // Dated at minus infinity it is older than any period.
+        assert_eq!(event_age(100.0, f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn the_period_does_not_start_before_the_revealed_card_has_left_the_app() {
+        // Displayed, but the block queued by the reveal has not run: an event
+        // that arrives now finds the card not in view, so no period starts.
+        assert!(!in_view(true, false, true, true, true));
+        assert!(in_view(true, true, true, true, true));
+        // And each of the others is needed as before.
+        assert!(!in_view(false, true, true, true, true));
+        assert!(!in_view(true, true, false, true, true));
+        assert!(!in_view(true, true, true, false, true));
+        assert!(!in_view(true, true, true, true, false));
     }
 
     #[test]

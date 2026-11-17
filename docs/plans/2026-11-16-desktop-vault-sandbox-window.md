@@ -195,6 +195,43 @@ seed-wallet window that can shorten a typed passphrase without notice; the
 double entry catches it when a wallet is created, and the address comparison
 when one is imported.
 
+**Each event is judged at the time it was made.** The first version judged an
+event at the moment the window was handed it. A click is addressed to the
+window that was in front when it was made and then waits in the queue while
+the main thread is busy; judged at dispatch, the time it waited counted as
+time the user had the card in front of them, so under a stall, or on a loaded
+Mac, both intervals shrank by the length of the wait. Now:
+
+`live(E) = in view at dispatch ∧ seen_for − age(E) ≥ (first ? 0.75 s : 2 s) ∧ arrived_for − age(E) ≥ 2 s`
+
+with `age(E) = max(0, uptime now − E.timestamp)`. AppKit states an event's
+timestamp on the clock of the system's uptime; both readings are taken when
+the event is dispatched, the event's last, so only a difference crosses to
+the clock the periods are kept on, and a gap between the readings makes the
+event older. The age is never negative: a timestamp can make an event older,
+never newer than its dispatch. An event made before the current period began,
+or before the user last arrived, is dropped; so is one whose timestamp gives
+no length of time. Keys and Command keys are judged the same way. What this
+can drop that was delivered before: an event forwarded or posted again later
+than it was made, and an event some software dated zero; each costs the user
+a second click or key.
+
+The period in view no longer starts in `reveal`, which runs inside WebKit's
+presentation callback: what it changes reaches the screen only after that
+turn of the run loop. `reveal` queues a block; the block, run from the run
+loop outside any WebKit callback, commits the change to the window server
+(`CATransaction flush`), then looks at the card and starts the period.
+Nothing else can start it before: until the block has run, the card does not
+count as in view, whatever event arrives.
+
+Residual: the rule holds through any stall of the app's main thread. It does
+not help against a device or system layer that stamps an event later than it
+happened, against software that creates events dated now (Computer Use and
+other accessibility-driven actions, below), or against a stall between the
+commit leaving the app and the user's eyes: the flush is the last thing the
+app can know. Whether a flush in that block is ever deferred on macOS 26 is
+not verified.
+
 Not covered, by decision or by nature: a second card navigated into the same
 visible window (the sandbox's own arming applies, as in a browser); a present
 user who confirms without reading; a card displayed while nobody is at the Mac,
@@ -385,7 +422,14 @@ the sandbox's window goes to the browser with every other link.
     another window of the app and checks the same if AppKit then reports the
     card as hidden; on the CI runner it did not, so that case is not proven.
     Clicks must be logged afterwards, so the check cannot pass by never
-    delivering. A card displayed while another window of the app is in front
+    delivering. For the time an event was made: after both intervals have
+    passed, the probe hands a card a click, a Return key and a Command key
+    dated a tenth of a second after the card appeared, dated before it
+    appeared, and dated zero, and earlier, while the card is not yet live, the
+    same three dated an hour ahead; none may be logged; the same three dated
+    now must be. That the period starts only after the revealed card has been
+    committed is not probed (the probe cannot stall the reveal's turn); a unit
+    test covers that a displayed card whose block has not run is not in view. A card displayed while another window of the app is in front
     is the app's frontmost window and key, and neither changes when it starts
     to take input. With the Workbench's own web view hidden: its card is
     closed, a window it asks for is closed without ever being on screen, and

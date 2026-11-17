@@ -589,6 +589,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             }
 
             self.a_card_takes_no_input_until_it_has_been_seen();
+            self.an_event_is_judged_at_the_time_it_was_made();
 
             self.other_requests_keep_their_handler();
             self.reservations_are_bounded();
@@ -1085,6 +1086,71 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             cover.destroy().unwrap();
         }
 
+        /// A click or key is judged at the time it was made, not at the time
+        /// the window is handed it: an event waits while the main thread is
+        /// busy, and that wait must not count as time the user had the card.
+        /// The probe hands the window events dated as it chooses.
+        fn an_event_is_judged_at_the_time_it_was_made(&mut self) {
+            self.eval(&format!(
+                "probe.windows.card = window.open('http://localhost:{}/card')",
+                self.port
+            ));
+            self.wait_children("a card", |children| children.len() == 1 && children[0].shown());
+            // Read after the card was found displayed: no earlier than that.
+            let displayed = self.on_main(|_| uptime());
+            // Dated an hour ahead and handed over at once, inside the
+            // interval: a timestamp never makes an event later than now.
+            self.hand_the_card_input(Some(displayed + 3600.0));
+            // Well past both intervals: 0.75 s in view, and 2 s after the
+            // window was asked for.
+            std::thread::sleep(Duration::from_millis(3000));
+            // Handed over now, but made a tenth of a second after the card
+            // appeared; made before it appeared; and dated zero.
+            self.hand_the_card_input(Some(displayed + 0.1));
+            self.hand_the_card_input(Some(displayed - 1.0));
+            self.hand_the_card_input(Some(0.0));
+            std::thread::sleep(Duration::from_millis(300));
+            let log = self.card_log();
+            assert_eq!(
+                log.received().count(),
+                0,
+                "the card took input that was made before it could take any: {log:?}"
+            );
+            // Made now: taken, so the above did not pass by nothing arriving.
+            self.hand_the_card_input(None);
+            std::thread::sleep(Duration::from_millis(300));
+            let log = self.card_log();
+            assert!(
+                !log.clicks.is_empty(),
+                "no click made now reached the live card: {log:?}"
+            );
+            if self.focus {
+                assert!(
+                    !log.keys.is_empty() && !log.commands.is_empty(),
+                    "no key made now reached the live card: {log:?}"
+                );
+            }
+            self.eval("probe.windows.card.close()");
+            self.wait_children("the card to close", |children| children.is_empty());
+            println!(
+                "vault window probe: a click, a key and a command key made before the card was live and handed \
+                 to it afterwards were dropped (dated 0.1 s after it appeared, before it appeared, at zero, and \
+                 an hour ahead while it was not yet live); made now, they were taken"
+            );
+        }
+
+        /// One click, one Return key and one Command key for the card on
+        /// screen, dated `dated` on the uptime clock, or now.
+        fn hand_the_card_input(&self, dated: Option<f64>) {
+            self.on_main(move |mtm| {
+                let card = child_windows(mtm)
+                    .into_iter()
+                    .find(|window| window.isVisible())
+                    .expect("the card is on screen");
+                deliver_input(mtm, &card, dated);
+            });
+        }
+
         /// A card asked for right after the user arrived (`arrived` is taken
         /// before the arrival) is displayed at once and takes input no sooner
         /// than two seconds after the arrival.
@@ -1197,7 +1263,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                     let _ = app.run_on_main_thread(|| {
                         let mtm = MainThreadMarker::new().expect("main thread");
                         if let Some(window) = child_windows(mtm).into_iter().find(|window| window.isVisible()) {
-                            deliver_input(mtm, &window);
+                            deliver_input(mtm, &window, None);
                         }
                     });
                     std::thread::sleep(Duration::from_millis(30));
@@ -1545,8 +1611,13 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         }
     }
 
+    /// The system's uptime in seconds, the clock of an event's timestamp.
+    fn uptime() -> f64 {
+        objc2_foundation::NSProcessInfo::processInfo().systemUptime()
+    }
+
     /// One click and one Return key for `window`, handed to the application.
-    fn deliver_input(mtm: MainThreadMarker, window: &NSWindow) {
+    fn deliver_input(mtm: MainThreadMarker, window: &NSWindow, dated: Option<f64>) {
         use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
         use objc2_foundation::{ns_string, NSPoint, NSString};
         let Some(content) = window.contentView() else {
@@ -1563,7 +1634,9 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         // SAFETY: Main thread. The two class methods are AppKit's own event
         // constructors, called with the argument types their selectors declare.
         unsafe {
-            let uptime: f64 = objc2::msg_send![&*objc2_foundation::NSProcessInfo::processInfo(), systemUptime];
+            // An event says when it was made, on the clock of the system's
+            // uptime: now, unless the case dates it otherwise.
+            let uptime: f64 = dated.unwrap_or_else(uptime);
             for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
                 let event: Option<Retained<NSEvent>> = objc2::msg_send![
                     objc2::class!(NSEvent),
