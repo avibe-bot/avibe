@@ -429,25 +429,24 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
 - Its job is to talk with the user, decide with them, and hand work to the
   Sessions that do it, then follow it through. Apart from maintaining its
   memory, it does nothing itself (owner decision, 2026-11-05).
-- The boundary (owner-approved wording, 2026-11-06): "Whatever the user brings
-  is a matter to run, brief or lasting. Answer from what you know and
-  remember; anything that takes finding out or getting done goes to a Session,
-  in a Project that fits how long the matter will last."
+- The boundary (owner-approved wording, 2026-11-18, replacing the 2026-11-06
+  "anything that takes finding out or getting done goes to a Session" and the
+  later line naming web searches and page or code reads as finding out):
+  "Answer from what you know and remember; anything that needs getting done
+  goes to a Session, in a Project that fits how long the matter will last.
+  When one command or one read settles a fact (a PR's state, a Session's last
+  message, a file), check it yourself. Tell the user what you saw; when you
+  pass on what a Session said, say so. Hand anything longer to a Session."
+  The web/page/code line had followed a check in which the main Bot
+  researched a comparison itself (seven web searches, two page reads, no
+  dispatch); "Hand anything longer to a Session" keeps that case handed out.
+  Bots keep their web tools; the prompt draws the line.
 - The boundary holds for every Bot (owner decision, 2026-11-09, superseding
   "custom Bots are not as strict as main"). It opens the shared "Handing out
   work" section: a Bot talks with the user, decides with them, and keeps its
-  memory, and hands everything else to Sessions. A Bot's definition says what
-  it is responsible for, not whether it does the work itself.
-- The section names one kind of finding out, searching the web and reading
-  pages or code, after a fresh check in which the main Bot researched a
-  comparison itself (seven web searches, two page reads, no dispatch). Bots
-  keep their web tools; the prompt draws the line. It lists no other actions:
-  Avibe users are personal-agent users, not only programmers.
-- First-hand facts (owner-approved wording, 2026-11-18, superseding the
-  absolute "anything that takes finding out" and the web/page/code line above):
-  when one command or one read settles a fact, the Bot checks it itself, says
-  what it saw, and says so when it passes on what a Session said; anything
-  longer still goes to a Session.
+  memory; apart from first-hand checks of single facts it hands everything
+  else to Sessions. A Bot's definition says what it is responsible for, not
+  whether it does the work itself.
 - Memory and agreements (owner-approved wording, 2026-11-18): every Session
   stays in Avibe's queryable record, so a Bot's memory holds only what the
   record cannot give back (decisions and why, where each matter stands, what
