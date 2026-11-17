@@ -5,9 +5,15 @@
 //! Each Workbench stand-in is a child web view of one physical window, built
 //! the way `build_main_child` builds a Runtime document (about:blank, hidden,
 //! then navigated). Its page and an iframe in it ping the loopback server every
-//! 200 ms and hold an event stream open. A control view stays hidden and keeps
-//! running, which proves a hidden page is observable here. The others are
-//! retired through the shell's own helpers and must go silent.
+//! 200 ms, and the page holds an event stream open and answers each event with
+//! a ping. The views are retired through the shell's own helper. A retired view
+//! must be freed natively (macOS: a weak reference to its WKWebView goes nil),
+//! its event stream must close, and its page and iframe must go silent.
+//!
+//! WebKit throttles timers in a hidden page, possibly to nothing within
+//! seconds, so silence alone proves nothing. A hidden control view that is not
+//! retired must keep its WKWebView and its event stream; its ping counts are
+//! printed for the record.
 //!
 //! On macOS the probe also records what showing and focusing the Runtime does
 //! while an account web view covers it: the Runtime is un-hidden beneath the
@@ -38,7 +44,7 @@ fn page(name: &str) -> String {
     format!(
         "<!doctype html><title>{name}</title><script>\
          setInterval(() => fetch('/ping/{name}', {{cache: 'no-store'}}).catch(() => {{}}), 200);\
-         new EventSource('/events/{name}');\
+         new EventSource('/events/{name}').onmessage = () => fetch('/ping/{name}-stream', {{cache: 'no-store'}}).catch(() => {{}});\
          </script><iframe src='/frame/{name}'></iframe>"
     )
 }
@@ -102,7 +108,7 @@ fn serve(mut stream: TcpStream, seen: Shared) {
             let _ = stream.set_read_timeout(None);
             let mut reader = stream.try_clone().unwrap();
             let writer = std::thread::spawn(move || {
-                while stream.write_all(b": keepalive\n\n").is_ok() {
+                while stream.write_all(b"data: tick\n\n").is_ok() {
                     std::thread::sleep(Duration::from_millis(200));
                 }
             });
@@ -170,10 +176,26 @@ fn start(view: &Webview, address: SocketAddr, seen: &Shared) {
             && pings_since(seen, &format!("{name}-frame"), started) >= 3
             && seen.lock().unwrap().streams_open.get(&name).copied().unwrap_or(0) >= 1
     });
+    #[cfg(target_os = "macos")]
+    native::track(view);
 }
 
-/// After retirement returns, the page, its iframe and its event stream stop.
-fn assert_stopped(name: &str, seen: &Shared) {
+fn stream_open(seen: &Shared, name: &str) -> bool {
+    let seen = seen.lock().unwrap();
+    seen.streams_open.get(name).copied().unwrap_or(0) > seen.streams_closed.get(name).copied().unwrap_or(0)
+}
+
+/// After retirement returns, the web view is freed and its page, its iframe
+/// and its event stream stop.
+fn assert_stopped(app: &AppHandle, name: &str, seen: &Shared) {
+    #[cfg(target_os = "macos")]
+    wait_for(
+        &format!("{name}'s WKWebView to be freed"),
+        Duration::from_secs(5),
+        || native::freed(app, name),
+    );
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
     std::thread::sleep(GRACE);
     let quiet = Instant::now();
     std::thread::sleep(QUIET);
@@ -184,17 +206,59 @@ fn assert_stopped(name: &str, seen: &Shared) {
         (0, 0),
         "{name} kept running after retirement (page, iframe pings in {QUIET:?})"
     );
+    assert_eq!(
+        pings_since(seen, &format!("{name}-stream"), quiet),
+        0,
+        "{name} answered events after retirement"
+    );
     wait_for(&format!("{name} event stream to close"), Duration::from_secs(5), || {
-        let seen = seen.lock().unwrap();
-        seen.streams_closed.get(name).copied().unwrap_or(0) >= seen.streams_open.get(name).copied().unwrap_or(0)
+        !stream_open(seen, name)
     });
 }
 
 #[cfg(target_os = "macos")]
 mod native {
-    use objc2::{msg_send, rc::Retained, runtime::AnyObject};
+    use std::{cell::RefCell, collections::HashMap};
+
+    use objc2::{
+        msg_send,
+        rc::{Retained, Weak},
+        runtime::AnyObject,
+    };
     use objc2_app_kit::{NSView, NSWindow};
-    use tauri::Webview;
+    use tauri::{AppHandle, Webview};
+
+    thread_local! {
+        /// Main-thread only: weak references to each tracked WKWebView.
+        static TRACKED: RefCell<HashMap<String, Weak<NSView>>> = RefCell::new(HashMap::new());
+    }
+
+    /// Records a weak reference to the view's WKWebView. It goes nil only
+    /// once the last strong reference, wry's or WebKit's, is released.
+    pub fn track(view: &Webview) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let label = view.label().to_owned();
+        view.with_webview(move |platform| {
+            // SAFETY: Tauri hands out the live WKWebView on the main thread.
+            let view = unsafe { Retained::retain(platform.inner().cast::<NSView>()) }.unwrap();
+            TRACKED.with(|tracked| tracked.borrow_mut().insert(label, Weak::from_retained(&view)));
+            sender.send(()).unwrap();
+        })
+        .unwrap();
+        receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    }
+
+    /// Whether the tracked WKWebView has been deallocated.
+    pub fn freed(app: &AppHandle, label: &str) -> bool {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let label = label.to_owned();
+        app.run_on_main_thread(move || {
+            let freed = TRACKED.with(|tracked| tracked.borrow()[&label].load().is_none());
+            sender.send(freed).unwrap();
+        })
+        .unwrap();
+        receiver.recv_timeout(std::time::Duration::from_secs(10)).unwrap()
+    }
 
     pub struct Facts {
         pub hidden: bool,
@@ -327,33 +391,39 @@ fn main() {
                 // instance switch and a rebind retire it.
                 avibe_desktop_lib::instance_store::retire(&disposable).unwrap();
                 assert!(handle.get_webview("disposable").is_none());
-                assert_stopped("disposable", &seen);
-                println!("item 2: instance_store::retire stopped the page, its iframe and its event stream");
+                assert_stopped(&handle, "disposable", &seen);
+                println!("item 2: instance_store::retire freed the WKWebView and stopped the page, its iframe and its event stream");
 
                 // A persistent store goes through the same destruction
                 // (`destroy_completed`, which `retire` ends with and which the
                 // local Runtime and the account view use directly).
                 avibe_desktop_lib::instance_store::retire(&persistent).unwrap();
                 assert!(handle.get_webview("persistent").is_none());
-                assert_stopped("persistent", &seen);
-                println!("item 2: retiring a persistent-store view stopped the page, its iframe and its event stream");
+                assert_stopped(&handle, "persistent", &seen);
+                println!("item 2: retiring a persistent-store view freed the WKWebView and stopped the page, its iframe and its event stream");
 
-                // The silence above is not the server or WebKit going quiet:
-                // the hidden control page kept running throughout.
+                // The silence above is not WebKit idling a hidden page: the
+                // hidden control view, never retired, still has its WKWebView
+                // and its event stream, and its page still runs script.
+                #[cfg(target_os = "macos")]
+                assert!(!native::freed(&handle, "control"), "the control WKWebView was freed");
+                assert!(stream_open(&seen, "control"), "the control event stream closed");
+                let asked = Instant::now();
+                control
+                    .eval("fetch('/ping/control-eval', {cache: 'no-store'})")
+                    .unwrap();
+                wait_for("the hidden control page to run script", Duration::from_secs(10), || {
+                    pings_since(&seen, "control-eval", asked) >= 1
+                });
                 let since = Instant::now() - QUIET;
-                let (page, frame) = (
+                println!(
+                    "control: hidden and unretired, WKWebView alive, event stream open, script runs; in the last {QUIET:?} its timers pinged {} times (iframe {}) and it answered {} events",
                     pings_since(&seen, "control", since),
                     pings_since(&seen, "control-frame", since),
-                );
-                println!(
-                    "control: a hidden, unretired page pinged {page} times (iframe {frame}) in the last {QUIET:?}"
-                );
-                assert!(
-                    page >= 2 && frame >= 2,
-                    "the hidden control page stopped too; the probe cannot tell"
+                    pings_since(&seen, "control-stream", since),
                 );
                 avibe_desktop_lib::instance_store::retire(&control).unwrap();
-                assert_stopped("control", &seen);
+                assert_stopped(&handle, "control", &seen);
 
                 #[cfg(target_os = "macos")]
                 record_covered_focus(&handle, address, &seen);
