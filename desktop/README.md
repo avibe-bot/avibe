@@ -205,7 +205,16 @@ rules are stated at the top of that file. In short:
   without a break for 0.75 seconds the first time the card is seen and 2
   seconds every later time, and never sooner than 2 seconds after the user
   last arrived: Avibe became the active app, or the main window came back from
-  hidden, minimized or another Space. Until then every key for the window,
+  hidden, minimized or another Space. Each click and key is judged at the
+  time it was made, by its own timestamp, not at the time the window is
+  handed it: an event waits while the app's main thread is busy, and that
+  wait must not count as time the user had the card. The card must also still
+  be in view when the event is handed over. The time in view starts one turn
+  of the main run loop after the card is made opaque, once that change has
+  been committed to the window server. This holds through any stall of the
+  app's main thread; it does not help against a device or system layer that
+  stamps an event later than it happened, nor against a stall between the
+  commit leaving the app and the user's eyes. Until then every key for the window,
   and every click on its content, is dropped where the window receives it;
   none is passed to what is underneath. Clicks on the title bar are delivered,
   so the window can be moved or closed. The card is on screen the whole time.
