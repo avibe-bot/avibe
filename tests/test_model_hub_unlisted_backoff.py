@@ -7,7 +7,12 @@ from dataclasses import replace
 
 import pytest
 
-from config.v2_config import ModelHubModelConfig, ModelHubSourceStateConfig
+from config.v2_config import (
+    ModelHubModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
+    ModelHubSourceStateConfig,
+)
 
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import render_turn_outcome_copy
@@ -23,7 +28,13 @@ SOURCE = "src_recovery01"
 
 def unlisted_service(tmp_path, outcomes=None, sources=None):
     service, clock = clock_service(tmp_path, sources=sources, outcomes=outcomes)
-    service.store.config.agents["codex"].routes = {}
+    # Unknown targets require explicit manual intent; listed peers still inherit.
+    service.store.config.agents["codex"].routes = {
+        MODEL: ModelHubRouteConfig(hops=tuple(
+            ModelHubRouteHopConfig(source.id, MODEL)
+            for source in service.store.config.sources
+        )),
+    }
     return service, clock
 
 
@@ -159,6 +170,7 @@ def test_inventory_membership_is_frozen_at_admission(tmp_path, initially_listed)
         service.adapter.invoke = change_inventory
         with pytest.raises(ModelHubError):
             await service.resolve(backend="codex", model_id=MODEL, request={})
+        assert service.adapter.invocations == [(SOURCE, MODEL, "codex")]
         assert service.store.config.sources[0].state.status == ("cooldown" if initially_listed else "standby")
     asyncio.run(run())
 
@@ -170,6 +182,7 @@ def test_only_unlisted_server_503_is_exempt(tmp_path, status, expected):
         service, _clock = unlisted_service(tmp_path, outcomes=[replace(refusal(), http_status=status)])
         with pytest.raises(ModelHubError):
             await service.resolve(backend="codex", model_id=MODEL, request={})
+        assert service.adapter.invocations == [(SOURCE, MODEL, "codex")]
         assert service.store.config.sources[0].state.status == expected
     asyncio.run(run())
 
