@@ -506,6 +506,7 @@ export const AddSourceDialog: React.FC<{
                 keyLabel={keyPreset
                   ? t('onboarding.providers.addKeyLabelNamed', { name: keyPreset.label })
                   : undefined}
+                keyRefusalNamed={phase.kind === 'failed' && phase.messageKey === 'modelHub.errors.authentication_failed'}
                 onChange={editDraft}
                 onToggleReveal={() => setRevealed((value) => !value)}
                 // Enter is the footer button, so it obeys the footer button's rule:
