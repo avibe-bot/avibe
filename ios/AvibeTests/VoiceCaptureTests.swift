@@ -88,7 +88,7 @@ final class VoiceCaptureTests: XCTestCase {
         let outcome = await world.controller().toggle()
         XCTAssertEqual(outcome, .stopped)
         XCTAssertNil(world.audio)
-        XCTAssertEqual(world.activities.first?.ended?.reason, .updateAvibe)
+        XCTAssertEqual(world.activities.first?.states.first?.reason, .updateAvibe)
     }
 
     func testMissingPrerequisitesSendTheUserToTheApp() async {
