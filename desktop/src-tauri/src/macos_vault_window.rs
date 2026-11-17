@@ -86,9 +86,10 @@
 //!   closed popup. A committed navigation of the opener, its web view being
 //!   hidden, or its window being closed or destroyed, closes its children. The
 //!   shell hides a web view on each of its paths that retire one; closing a
-//!   web view does not hide it, and a closed web view is taken out of its
-//!   window but never freed, so wherever it matters the opener is also checked
-//!   to be still in the window it was installed in. The opener's web view
+//!   web view takes it out of its window without hiding it, and the shell
+//!   does not rely on a closed web view being freed or on a weak reference to
+//!   it clearing: wherever it matters the opener is also checked to be still
+//!   in the window it was installed in. The opener's web view
 //!   being shown again counts as an arrival for the input rule.
 //! - **Only the web view the app starts with.** The support is installed on
 //!   the main window's own web view. A Runtime replacement, which the shell
@@ -517,8 +518,8 @@ fn is_on_screen(window: &NSWindow) -> bool {
 }
 
 /// The native window an opener's web view was installed in, if the web view is
-/// still in it. A web view the shell has closed is taken out of its window but
-/// never freed, and its page keeps running; it is no longer an opener.
+/// still in it. A web view the shell has closed is out of its window and is
+/// no longer an opener, whether or not it has been freed by then.
 fn in_home_window(webview: &WKWebView) -> Option<Retained<NSWindow>> {
     let key = webview as *const WKWebView as usize;
     let home = ARRIVALS.with_borrow(|arrivals| {
@@ -1367,8 +1368,8 @@ unsafe extern "C-unwind" fn create_web_view(
     let url = unsafe { nsurl(action.request().URL()) };
     let key = opener as *const WKWebView as usize;
     // Only a web view the support was installed on, and only while it is still
-    // in the window it was installed in. A weak reference alone does not say
-    // so: a web view the shell has closed is never freed.
+    // in the window it was installed in. The weak reference alone is not
+    // relied on to say so: a closed web view need not have been freed yet.
     let in_place = in_home_window(opener).is_some();
     let admitted = STATE.with_borrow(|state| {
         let opener = state.openers.iter().find(|opener| opener.key == key)?;

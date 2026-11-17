@@ -227,10 +227,11 @@ hidden Workbench. Three things follow.
   commit, for every click and key, and for the arrival bookkeeping: the web
   view is still in the native window the support was installed for; it is not
   hidden and has no hidden view around it; and no other web view of that
-  window that is not hidden lies in front of it. The first matters because a
-  web view the shell closes is taken out of its window but never freed, its
-  page keeps running, and its `hidden` never changes; a weak reference to it
-  never clears, so admission at `window.open` uses the same read. The third
+  window that is not hidden lies in front of it. The first matters because
+  closing a web view takes it out of its window without changing its `hidden`,
+  and the shell does not rely on a closed web view being freed, on its page
+  having stopped, or on a weak reference to it clearing; admission at
+  `window.open` uses the same read. The third
   matters because the shell covers a Workbench by hiding it, but one path
   (bringing the main window forward while the account page reloads) can show
   the Workbench under the account screen.
