@@ -180,6 +180,26 @@ vite.messages.push('baseline:' + globalThis.__AVIBE_SHOW__.contentStamp);
     assert result["fetched"] == ["/show/ses123/", "/show/ses123/"]
 
 
+def test_a_baseline_refresh_cut_off_by_the_drop_does_not_hide_an_edit():
+    result = _run(
+        """
+globalThis.__AVIBE_SHOW__.contentStamp = '3-100';
+sockets[0].open();
+page.entryStamp = '4-200';
+sockets[0].deliver('{"type":"update","updates":[]}');
+setVisibility('hidden');
+sockets[0].drop();
+page.entryStamp = '5-300';
+await new Promise((resolve) => setTimeout(resolve, 400));
+setVisibility('visible');
+sockets[1]?.open();
+await settle(); await settle(); await settle();
+"""
+    )
+    assert result["pageReloads"] == 1
+    assert result["reloads"] == 0
+
+
 def test_content_stamp_follows_page_source_not_api_data(monkeypatch, tmp_path):
     monkeypatch.setattr(ui_server.paths, "get_show_page_dir", lambda _sid: tmp_path)
     (tmp_path / "src" / "components").mkdir(parents=True)

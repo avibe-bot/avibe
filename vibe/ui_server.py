@@ -18218,10 +18218,12 @@ _SHOW_HMR_RESUME_SCRIPT = """
     }
     // An update Vite applied live is source the page already shows: move the
     // baseline so the next return does not reload for it.
-    function refreshBaseline(){
+    function refreshBaseline(socket){
       clearTimeout(baselineTimer);
       baselineTimer=setTimeout(function(){
-        withSourceStamp(function(stamp){show.contentStamp=stamp;});
+        withSourceStamp(function(stamp){
+          if(current===socket&&socket.readyState===1)show.contentStamp=stamp;
+        });
       },300);
     }
     function connect(reconnecting){
@@ -18239,7 +18241,7 @@ _SHOW_HMR_RESUME_SCRIPT = """
       });
       socket.addEventListener('message',function(event){
         if(current!==socket)return;
-        if(typeof event.data==='string'&&event.data.indexOf('"type":"update"')>=0)refreshBaseline();
+        if(typeof event.data==='string'&&event.data.indexOf('"type":"update"')>=0)refreshBaseline(socket);
         self.dispatchEvent(new MessageEvent('message',{data:event.data}));
       });
       socket.addEventListener('error',function(){
@@ -18247,6 +18249,7 @@ _SHOW_HMR_RESUME_SCRIPT = """
       });
       socket.addEventListener('close',function(event){
         if(current!==socket)return;
+        clearTimeout(baselineTimer);
         // A background drop arrives while hidden or right after the return.
         // A reconnect that a second trip away dropped before it opened gets
         // another try; any other drop is Vite's to handle.
