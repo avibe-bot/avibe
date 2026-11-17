@@ -21,8 +21,8 @@ import { useInstanceAuthorization } from '../context/InstanceAuthorizationContex
 import { VersionBadge } from './VersionBadge';
 import { RunningStatus, SidebarStatusRow } from './SidebarStatusRow';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
-import { BotProfileDialogHost } from './workbench/bots/BotProfileDialog';
 import { lazyPage } from '../lib/lazyPage';
+import { useBots } from '../context/BotsContext';
 import { useVoiceConsentAsking } from '../lib/voiceConsent';
 import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
@@ -176,6 +176,18 @@ export type AppShellProps = {
   /** Replace the footer view while retaining the real Apps/Settings controls. */
   footer?: (slots: { tools: React.ReactNode; defaultView: React.ReactNode }) => React.ReactNode;
 };
+
+// The Bots add/edit dialog's code loads with the first request to open it; after that it stays
+// mounted, so its close animation and the next opening behave as before.
+const BotProfileDialogHost = lazyPage(() => import('./workbench/bots/BotProfileDialog').then((module) => module.BotProfileDialogHost));
+
+function BotProfileDialogSlot() {
+  const { enabled, profileRequest } = useBots();
+  const [requested, setRequested] = useState(false);
+  if (enabled && profileRequest && !requested) setRequested(true);
+  if (!requested) return null;
+  return <React.Suspense fallback={null}><BotProfileDialogHost /></React.Suspense>;
+}
 
 // The question's code loads when it is first put up; nothing on the first screen draws it.
 const VoiceConsentHost = lazyPage(() => import('./voice/VoiceConsent').then((module) => module.VoiceConsentHost));
@@ -708,7 +720,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
           shell, so any Settings placement suspends it with its form intact (the
           model picker's Add model exit opens Settings over it). */}
       <RouteSurfaceActivityBoundary active={!settingsOpen}>
-        <BotProfileDialogHost />
+        <BotProfileDialogSlot />
       </RouteSurfaceActivityBoundary>
 
       {/* Voice input's question (ui/design: composer/voice-consent/*): put up by any voice
