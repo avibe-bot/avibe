@@ -204,7 +204,9 @@ private final class SheetFixtureRootViewController: UIViewController,
         sheetController = controller
         publishReadiness()
         observeDocument(in: controller)
-        if realBundle { observePageRender(in: controller) }
+        // Only the plain sheet state: the selection and stall states time
+        // touches, and reading the page's text forces layout.
+        if realBundle, captureState == "default" { observePageRender(in: controller) }
         controller.overrideUserInterfaceStyle = overrideUserInterfaceStyle
         if showsFullPage {
             addChild(controller)
@@ -339,6 +341,7 @@ private final class SheetFixtureRootViewController: UIViewController,
             forMainFrameOnly: true
         ))
         let started = ProcessInfo.processInfo.systemUptime
+        pageReceiptTask?.cancel()
         pageReceiptTask = Task { @MainActor [weak self, weak webView] in
             var last = ""
             var rendered = false
@@ -358,7 +361,7 @@ private final class SheetFixtureRootViewController: UIViewController,
                 let elapsed = ProcessInfo.processInfo.systemUptime - started
                 if !rendered, probe.contains("\"youreIn\":true") {
                     rendered = true
-                    NSLog("[page receipt] first render %.2f s after presentation; documentReady=%d",
+                    NSLog("[page receipt] first render %.2f s after presentation; documentReady=%ld",
                           elapsed, (self?.documentReady ?? false) ? 1 : 0)
                 }
                 if probe != last {
@@ -521,6 +524,7 @@ private final class SheetFixtureRootViewController: UIViewController,
         geometryDisplayLink = nil
         lastGeometrySignature = nil
         runtimeRouteTask?.cancel()
+        pageReceiptTask?.cancel()
         runtimeWebView?.removeFromSuperview()
         runtimeWebView = nil
         guard let controller = sheetController else { return false }
