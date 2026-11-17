@@ -210,10 +210,10 @@ final class InstanceSheetGestureUITests: XCTestCase {
         // 0.7 s flick too little travel, so it snapped back. One tap on
         // static text, confirmed by its native touch receipt, takes that
         // first-touch cost before the flick; the flick itself is unchanged.
-        // Caveat: a regression that makes the first gesture after opening
-        // slow no longer fails here. Both latencies are logged (not
-        // asserted) as "[sheet gesture latency]" attachments, so one stays
-        // visible.
+        // Caveat: a first gesture after opening that the sheet picks up
+        // late no longer fails here. That handoff stays visible in the
+        // unwarmed slow drag below, whose "[sheet gesture latency]" line
+        // logs when its dismissal began (informational, not asserted).
         let warmed = SheetFixtureReadiness.warmTouchHandling(in: app)
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
@@ -274,11 +274,6 @@ enum SheetFixtureReadiness {
                        "Expected native rejection and rendered row error receipts; receipt=\(surface.label)")
     }
 
-    /// After a dismissing gesture: the sheet's Close button goes within
-    /// `timeout` and stays gone. `waitForExistence` cannot express this: it
-    /// requires the element to be gone at its first check and never waits
-    /// for it to go. If the sheet stays, the failure names what the gesture
-    /// did, from the fixture's native receipt.
     /// Taps the sheet's static scroll-state text and waits for the
     /// fixture's native touch-up receipt. Returns how many receipt stages
     /// that tap recorded, so a later gesture is judged on its own.
@@ -296,6 +291,7 @@ enum SheetFixtureReadiness {
             predicate: NSPredicate { _, _ in
                 stages = dismissalEvidence(in: app)["stages"] as? [String] ?? []
                 return stages.contains("native-touch-ended")
+                    || stages.contains("native-touch-cancelled")
             }, object: nil
         )
         XCTAssertEqual(
@@ -313,9 +309,16 @@ enum SheetFixtureReadiness {
                 delivered - stamp, upStamp - stamp
             ))
         }
+        // The fixture keeps the last 16 stages; slicing by count needs all.
+        XCTAssertLessThan(stages.count, 12, "Too many receipt stages before the gesture", file: file, line: line)
         return stages.count
     }
 
+    /// After a dismissing gesture: the sheet's Close button goes within
+    /// `timeout` and stays gone. `waitForExistence` cannot express this: it
+    /// requires the element to be gone at its first check and never waits
+    /// for it to go. If the sheet stays, the failure names what the gesture
+    /// did, from the fixture's native receipt.
     static func requireGestureDismissal(
         of close: XCUIElement,
         in app: XCUIApplication,
