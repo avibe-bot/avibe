@@ -660,6 +660,32 @@ def test_every_observable_entry_advances_unclaimed_expiry(isolated_state):
         assert _get(operation_id, now=later)["state"] == "expired"
 
 
+@pytest.mark.parametrize("state", [
+    "scheduled", "user_denied", "permission_denied", "unsupported",
+    "failed", "expired", "stale_context", "cancelled",
+])
+def test_receipted_attempts_leave_no_nonterminal_sticky_candidate(isolated_state, state):
+    _create()
+    claim = claim_next(instance_id="instance-a", device_id="device-a", now=NOW)
+    _record(
+        claim,
+        _receipt(
+            claim, state=state,
+            system_identifier="opaque-scheduled" if state == "scheduled" else None,
+        ),
+    )
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        attempt = conn.execute(select(system_schedule_attempts)).mappings().one()
+        assert attempt["claim_state"] == "settled"
+        assert attempt["terminal_state"] == state
+        assert attempt["receipt_json"] is not None
+        assert _sticky_attempt(
+            conn, action="create", instance_id="instance-a", device_id="device-a",
+            excluded=(),
+        ) is None
+
+
 def test_sticky_poll_work_is_bounded_by_live_attempts_not_cancelled_history(
     isolated_state,
 ):
@@ -686,9 +712,11 @@ def test_sticky_poll_work_is_bounded_by_live_attempts_not_cancelled_history(
             return " ".join(ddl.replace("IF NOT EXISTS ", "").split()).lower()
 
         assert normalize(migrated_ddl) == normalize(model_ddl)
-        assert migrated_ddl.endswith(
-            "WHERE terminal_state IS NULL AND receipt_json IS NULL"
-        )
+        assert "WHERE" not in migrated_ddl.upper()
+        assert [column.name for column in model_index.columns] == [
+            "action", "claim_state", "instance_id", "device_id",
+            "terminal_state", "updated_at", "request_id",
+        ]
         history = dict(
             conn.execute(
                 select(system_schedule_attempts).where(
@@ -737,6 +765,8 @@ def test_sticky_poll_work_is_bounded_by_live_attempts_not_cancelled_history(
                 )
             )
             assert "SEARCH system_schedule_attempts" in plan
+            assert index_name in plan
+            assert "terminal_state=?" in plan
             assert "SCAN system_schedule_attempts" not in plan
             assert "USE TEMP B-TREE" not in plan
             query_plans.append(plan)
@@ -751,6 +781,14 @@ def test_sticky_poll_work_is_bounded_by_live_attempts_not_cancelled_history(
                 request_id=f"history-request-{index}",
                 lease_token=f"history-lease-{index}",
             )
+            if index % 3 == 0:
+                row.update(
+                    claim_state="settled",
+                    terminal_state="scheduled",
+                    receipt_json='{"state":"scheduled"}',
+                )
+            elif index % 3 == 1:
+                row["terminal_state"] = "failed"
             rows.append(row)
         empty, single_steps = measure()
         assert empty is None

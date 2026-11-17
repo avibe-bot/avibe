@@ -76,10 +76,10 @@ def upgrade() -> None:
             "claim_state",
             "instance_id",
             "device_id",
+            "terminal_state",
             "updated_at",
             "request_id",
         ],
-        sqlite_where=sa.text("terminal_state IS NULL AND receipt_json IS NULL"),
         if_not_exists=True,
     )
     op.create_index(

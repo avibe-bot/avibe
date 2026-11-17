@@ -336,9 +336,9 @@ system_schedule_attempts = Table(
         "claim_state",
         "instance_id",
         "device_id",
+        "terminal_state",
         "updated_at",
         "request_id",
-        sqlite_where=text("terminal_state IS NULL AND receipt_json IS NULL"),
     ),
     Index(
         "idx_system_schedule_attempts_operation",

@@ -6,7 +6,7 @@ The initial store change targets `SystemSchedule.swift` and `AppModel.swift`.
 Main's 2026-11-17 route B decision additionally permits the existing
 `MobileAccount.swift` logout notification and the bundled mobile error mapping
 and en/zh catalogs. The H3 repair also changes the model and the unpublished
-0090 migration's sticky partial index; its revision, keys and name stay fixed.
+0090 migration's ordinary sticky composite index, including terminal_state in its equality prefix without changing the migration prover, revision, epoch or index name.
 
 ## Contract
 
