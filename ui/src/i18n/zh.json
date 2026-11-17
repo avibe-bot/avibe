@@ -323,8 +323,10 @@
       "switch": "切换实例",
       "choose": "选择实例",
       "privacy": "隐私政策",
-      "delete": "删除账号",
-      "deleteHint": "前往 avibe.bot，查看影响并确认删除。"
+      "delete": "删除账号"
+    },
+    "accountData": {
+      "title": "账号与数据"
     },
     "twoFactor": {
       "title": "确认是你本人。",
@@ -1299,7 +1301,7 @@
         "manageModels": "管理模型",
         "addModel": "添加模型",
         "switchToGateway": "交给模型网关管理",
-        "switchToDirect": "改为 Agent 管理",
+        "switchToDirect": "改为自己登录",
         "modeMenu": {
           "title": "运行模式",
           "gatewayCurrent": "托管（当前）",
@@ -1307,7 +1309,7 @@
           "directDescription": "改用 {{backend}} 自带的模型与凭据，路由与优先级不再生效"
         },
         "fail": {
-          "switchToDirect": "没能改为 Agent 管理",
+          "switchToDirect": "没能改为自己登录",
           "switchToGateway": "没能交给模型网关管理"
         },
         "modelCount_one": "{{count}} 个模型",
@@ -1339,7 +1341,11 @@
         },
         "row": {
           "current": "{{source}} → {{model}}",
-          "currentTakeover": "{{source}} → {{model}}（已自动切换）"
+          "currentTakeover": "{{source}} → {{model}}（已自动切换）",
+          "usedBy": "{{names}} 在用",
+          "usedByMore_one": "{{names}} 等 {{total}} 个在用",
+          "usedByMore_other": "{{names}} 等 {{total}} 个在用",
+          "usersSeparator": "、"
         },
         "group": {
           "subtitle": {
@@ -1347,7 +1353,7 @@
             "gateway": "{{mode}} · {{health}}"
           },
           "mode": {
-            "direct": "Agent 管理",
+            "direct": "自己登录",
             "gateway": "托管"
           },
           "status": {
@@ -1450,7 +1456,10 @@
             "placeholder": "可选，留空时列表显示模型 ID"
           },
           "lookupLoading": "正在搜索 models.dev…",
-          "useAsId": "把「{{query}}」作为模型 ID",
+          "useAsId": "把「<id>{{query}}</id>」作为模型 ID",
+          "useAsIdKeep": "使用「<id>{{query}}</id>」，保留当前参数",
+          "parametersFrom": "参数来自 {{name}}",
+          "clearParameters": "清空参数",
           "fillFailed": "没能访问 models.dev",
           "fillUnavailable": "models.dev 不可用",
           "matches": "models.dev 匹配结果",
@@ -1498,7 +1507,7 @@
         "chip": "已自动切换"
       },
       "legend": {
-        "native": "Agent 管理",
+        "native": "自己登录",
         "viaGateway": "模型网关管理",
         "passthrough": "原样转发",
         "connectedUnused": "已启用 · 当前未被使用",
@@ -1533,11 +1542,11 @@
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "Agent 管理 · 本机",
+          "native": "自己登录 · 本机",
           "hub": "模型网关管理"
         },
         "kind": {
-          "nativeCredential": "Agent 管理 · 本机登录",
+          "nativeCredential": "本机凭据",
           "subscription": "订阅",
           "apiKey": "API Key"
         },
@@ -1554,7 +1563,7 @@
         "hidePrivateDetails": "隐藏账号和 API 连接信息",
         "hiddenDetails": "已隐藏",
         "state": {
-          "supplyingNative": "{{backend}} 正在使用（Agent 管理）",
+          "supplyingNative": "{{backend}} 正在使用（自己登录）",
           "supplying": "{{backends}} 正在使用",
           "standby": "可用 · 当前未使用",
           "unavailableRetry": "暂不可用 · {{delay}} 后自动重试",
@@ -1576,7 +1585,7 @@
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "Agent 管理 · 本机",
+          "native": "自己登录 · 本机",
           "hub": "模型网关管理"
         },
         "subtitle": "管理全局共用的供应商和模型；供应商优先级在各 Agent 卡片中调整",
@@ -1589,7 +1598,7 @@
         "modelsEmptySubscription": "还没有发现可用模型。"
       },
       "source": {
-        "nativeSupply": "Agent 管理",
+        "nativeSupply": "自己登录",
         "hubHosted": "模型网关管理",
         "officialEndpoint": "官方地址",
         "customEndpoint": "自定义地址",
@@ -2059,7 +2068,7 @@
       },
       "mode": {
         "hub": "模型网关管理",
-        "direct": "Agent 管理"
+        "direct": "自己登录"
       },
       "errors": {
         "engineDown": "模型网关未就绪，请稍后重试",
@@ -2100,7 +2109,7 @@
         "cooldown": "等待重试（自动恢复）",
         "needsAction": "需要处理",
         "checking": "正在确认",
-        "direct": "Agent 管理",
+        "direct": "自己登录",
         "noSource": "没有可用供应商",
         "blocked": "当前供应商不可用",
         "currentSwitched": "已自动切换到 {{source}}",
@@ -2192,7 +2201,7 @@
         "field": {
           "vendor": "供应商",
           "vendor.custom": "其他供应商 · 自己填写地址",
-          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址和 API 格式",
+          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址",
           "vendor.search": "搜索供应商",
           "vendor.empty": "没有同名的供应商",
           "name": "名称(可选)",
@@ -2275,7 +2284,7 @@
         "opt": {
           "added": "已添加",
           "native": {
-            "label": "由 Agent 管理",
+            "label": "自己登录",
             "desc": {
               "claude": "本机 Claude Code 管理这份原生登录，凭据保存在它自己的存储中。"
             }
@@ -2373,9 +2382,9 @@
       "supplyMode": {
         "title": "模型管理方式",
         "currentHub": "当前：模型网关管理",
-        "currentDirect": "当前：Agent 管理",
+        "currentDirect": "当前：自己登录",
         "switchedHub": "已交给模型网关管理",
-        "switchedDirect": "已改为 Agent 管理",
+        "switchedDirect": "已改为自己登录",
         "switchFailed": "切换失败，请重试",
         "hub": {
           "title": "模型网关管理",
@@ -2384,7 +2393,7 @@
           "description": "登录、API Key 和模型路由都在「设置 → 模型」中管理。"
         },
         "direct": {
-          "title": "Agent 管理",
+          "title": "自己登录",
           "description": "{{backend}} 使用自己的配置，Avibe 不接管认证和模型路由。",
           "detected": "检测到现有配置：{{detail}}，可一键导入模型网关",
           "import": "导入模型网关…"
@@ -2435,7 +2444,7 @@
         "notes": {
           "customBaseUrl": "含自定义 Base URL",
           "keepNativeSanctioned": "保留在 Agent 自己的凭据库（受官方认可）",
-          "keepNativeReauthHint": "保留给 Agent 管理；需要模型网关管理时另行添加订阅",
+          "keepNativeReauthHint": "保留为助手自己登录；要交给模型网关时另行添加订阅",
           "fromOpencode": "来自 opencode 配置"
         },
         "source": {
@@ -7160,6 +7169,7 @@
       "addDescription": "添加一个供应商即可开始，由模型网关统一路由",
       "addDescriptionMore": "查看检测到的配置，确认后迁移，无需重新填写",
       "addDescriptionKey": "填写供应商的地址和 API Key",
+      "addDescriptionKeyPreset": "选择供应商，填写 API Key",
       "addMethodsLabel": "添加方式",
       "addMethodDetected": "已检测到",
       "addMethodSubscription": "订阅",

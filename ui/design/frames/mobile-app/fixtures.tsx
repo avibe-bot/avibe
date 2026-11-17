@@ -43,8 +43,8 @@ export function bilingual(name: string, title: string, render: () => ReactNode, 
           const copy = (lang === 'en' ? en : zh).appShell[key as keyof typeof en.appShell] as string;
           return [`appShell.${key}`, { zh: copy, en: copy }];
         })),
-        // Account's shipped About section and Delete account link.
-        ...Object.fromEntries((['account', 'licenses'] as const).flatMap(section =>
+        // Account's shipped rows, its Account and data page, and About.
+        ...Object.fromEntries((['account', 'accountData', 'licenses'] as const).flatMap(section =>
           Object.entries((lang === 'en' ? en : zh).mobileApp[section]).map(([key, text]) =>
             [`mobileApp.${section}.${key}`, { zh: text, en: text }]))),
       },

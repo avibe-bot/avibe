@@ -32,6 +32,7 @@ from config.v2_config import (
 from core.agent_auth_service import BackendLoginInProgressError
 from core.backend_restart import NativeMigrationBlockedError
 from core.handlers.model_hub.adapter import (
+    ApiKeyModelsCheck,
     DiscoveredModel,
     EngineEnsureResult,
     EngineHealth,
@@ -315,6 +316,19 @@ class FakeAdapter:
             DiscoveredModel(id="claude-opus-4-6"),
             DiscoveredModel(id="claude-sonnet-4-6"),
         )
+
+    async def check_api_key_models(
+        self, vendor, protocol, base_url, *, secret=None, credential_ref=None, timeout,
+    ):
+        try:
+            models = await asyncio.wait_for(
+                self.discover_models(vendor, protocol, base_url, credential_ref), timeout=timeout,
+            )
+        except ModelDiscoveryError as exc:
+            return ApiKeyModelsCheck(authenticated=False if exc.rejected_status is not None else None)
+        except (ModelHubError, asyncio.TimeoutError):
+            return ApiKeyModelsCheck(authenticated=None)
+        return ApiKeyModelsCheck(authenticated=None, models=tuple(models))
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
         self.observed_protocol_orders.append(tuple(protocol_order))

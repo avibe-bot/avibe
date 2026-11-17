@@ -405,6 +405,10 @@ describe('AgentCard', () => {
     expect(screen.getByText(instance.t('settings.models.gateway.group.emptyNoProviders'))).toBeTruthy();
     expect(screen.queryByText(instance.t('settings.models.gateway.group.emptyModels'))).toBeNull();
     expect(screen.queryByRole('button', { name: instance.t('settings.models.gateway.addModel') })).toBeNull();
+    // No provider: nothing to order anywhere; an empty catalog has nothing to manage,
+    // while a catalog that already lists a model can still be managed.
+    expect(screen.queryByRole('button', { name: new RegExp(instance.t('settings.models.gateway.sourceOrder')) })).toBeNull();
+    expect(screen.getAllByRole('button', { name: new RegExp(instance.t('settings.models.gateway.manageModels')) })).toHaveLength(1);
     expect(screen.queryByRole('button', { name: new RegExp(instance.t('settings.models.gateway.agentIssues.summary', { count: 1 })) })).toBeNull();
   });
 
@@ -518,7 +522,7 @@ describe('AgentCard', () => {
 
   it.each([
     ['en', 'Default routing', 'Use own login', 'Let Model Hub manage'],
-    ['zh', '默认路由', '改为 Agent 管理', '交给模型网关管理'],
+    ['zh', '默认路由', '改为自己登录', '交给模型网关管理'],
   ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,

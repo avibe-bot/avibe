@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Avibe.app as Developer ID signed by scripts/macos_signing.py, and only
+	     there: src-tauri/Entitlements.plist (what Tauri seals with) plus the
+	     restricted entitlements that the embedded Developer ID provisioning
+	     profile (Contents/embedded.provisionprofile) authorizes.
+
+	     macOS kills, at launch, code that claims a restricted entitlement no
+	     embedded profile authorizes. Every build without the profile (a manual
+	     build without credentials, the cache warm-up, a local tauri build) therefore
+	     keeps src-tauri/Entitlements.plist, and these keys never go there.
+
+	     audio-input: same key and evidence as src-tauri/Entitlements.plist.
+
+	     associated-domains: WKWebView offers WebAuthn only for a relying party
+	     the app is associated with through webcredentials. sandbox.avibe.bot is
+	     the Protected Vault passkey's relying party; avibe.bot is the account
+	     passkey's. Each host's apple-app-site-association file must name
+	     68B2SQ6YK3.bot.avibe.desktop.
+
+	     application-identifier and team-identifier: required with any
+	     profile-authorized entitlement, and equal to what the profile grants. -->
+	<key>com.apple.application-identifier</key>
+	<string>68B2SQ6YK3.bot.avibe.desktop</string>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:sandbox.avibe.bot</string>
+		<string>webcredentials:avibe.bot</string>
+	</array>
+	<key>com.apple.developer.team-identifier</key>
+	<string>68B2SQ6YK3</string>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

@@ -57,7 +57,16 @@ mod probe {
 
     use crate::macos_vault_window;
 
-    const RESERVE_DEADLINE: Duration = Duration::from_secs(5);
+    /// How long a window may stay hidden or empty here; the shell's own value
+    /// is 60 s. It is long enough that a case which expects a window to be
+    /// displayed is not undone by a slow moment on the runner: on hosted
+    /// runners the probe has stood still for a little over five seconds at a
+    /// time, and with a deadline of five seconds that closed windows the
+    /// cases were still waiting for. The cases that test the deadline itself
+    /// wait this long.
+    const RESERVE_DEADLINE: Duration = Duration::from_secs(15);
+    /// How much later than the deadline a window may be found closed.
+    const DEADLINE_SLACK: Duration = Duration::from_secs(15);
     const CHILD_CLASS: &std::ffi::CStr = c"AvibeVaultSandboxWebView";
     /// Stands in for the shell's own init scripts: it must run once per
     /// Workbench document and never in a child.
@@ -161,7 +170,7 @@ addEventListener('message', (event) => {
     /// The same page with a stylesheet that outlasts the shell's deadline.
     const STUCK_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>stuck</title>
 <link rel="stylesheet" href="/never.css"><body>"#;
-    const STUCK_HOLD: Duration = Duration::from_secs(8);
+    const STUCK_HOLD: Duration = Duration::from_secs(RESERVE_DEADLINE.as_secs() + 10);
 
     /// A sandbox page that behaves as the sandbox's card does where it matters
     /// here: it arms itself half a second after it starts running, whether or
@@ -313,6 +322,13 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                             probe.run_inactive();
                         }
                     }));
+                    if outcome.is_err() {
+                        println!(
+                            "vault window probe: the last requests for a window and the sandbox windows that \
+                             closed, with where each close came from:\n{}",
+                            trace::seen()
+                        );
+                    }
                     handle.exit(if outcome.is_ok() { 0 } else { 1 });
                 });
             }
@@ -591,6 +607,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             }
 
             self.a_card_takes_no_input_until_it_has_been_seen();
+            self.an_event_is_judged_at_the_time_it_was_made();
 
             self.other_requests_keep_their_handler();
             self.another_window_going_away_closes_nothing(10);
@@ -1272,6 +1289,71 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             cover.destroy().unwrap();
         }
 
+        /// A click or key is judged at the time it was made, not at the time
+        /// the window is handed it: an event waits while the main thread is
+        /// busy, and that wait must not count as time the user had the card.
+        /// The probe hands the window events dated as it chooses.
+        fn an_event_is_judged_at_the_time_it_was_made(&mut self) {
+            self.eval(&format!(
+                "probe.windows.card = window.open('http://localhost:{}/card')",
+                self.port
+            ));
+            self.wait_children("a card", |children| children.len() == 1 && children[0].shown());
+            // Read after the card was found displayed: no earlier than that.
+            let displayed = self.on_main(|_| uptime());
+            // Dated an hour ahead and handed over at once, inside the
+            // interval: a timestamp never makes an event later than now.
+            self.hand_the_card_input(Some(displayed + 3600.0));
+            // Well past both intervals: 0.75 s in view, and 2 s after the
+            // window was asked for.
+            std::thread::sleep(Duration::from_millis(3000));
+            // Handed over now, but made a tenth of a second after the card
+            // appeared; made before it appeared; and dated zero.
+            self.hand_the_card_input(Some(displayed + 0.1));
+            self.hand_the_card_input(Some(displayed - 1.0));
+            self.hand_the_card_input(Some(0.0));
+            std::thread::sleep(Duration::from_millis(300));
+            let log = self.card_log();
+            assert_eq!(
+                log.received().count(),
+                0,
+                "the card took input that was made before it could take any: {log:?}"
+            );
+            // Made now: taken, so the above did not pass by nothing arriving.
+            self.hand_the_card_input(None);
+            std::thread::sleep(Duration::from_millis(300));
+            let log = self.card_log();
+            assert!(
+                !log.clicks.is_empty(),
+                "no click made now reached the live card: {log:?}"
+            );
+            if self.focus {
+                assert!(
+                    !log.keys.is_empty() && !log.commands.is_empty(),
+                    "no key made now reached the live card: {log:?}"
+                );
+            }
+            self.eval("probe.windows.card.close()");
+            self.wait_children("the card to close", |children| children.is_empty());
+            println!(
+                "vault window probe: a click, a key and a command key made before the card was live and handed \
+                 to it afterwards were dropped (dated 0.1 s after it appeared, before it appeared, at zero, and \
+                 an hour ahead while it was not yet live); made now, they were taken"
+            );
+        }
+
+        /// One click, one Return key and one Command key for the card on
+        /// screen, dated `dated` on the uptime clock, or now.
+        fn hand_the_card_input(&self, dated: Option<f64>) {
+            self.on_main(move |mtm| {
+                let card = child_windows(mtm)
+                    .into_iter()
+                    .find(|window| window.isVisible())
+                    .expect("the card is on screen");
+                deliver_input(mtm, &card, dated);
+            });
+        }
+
         /// A card asked for right after the user arrived (`arrived` is taken
         /// before the arrival) is displayed at once and takes input no sooner
         /// than two seconds after the arrival.
@@ -1384,7 +1466,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     let _ = app.run_on_main_thread(|| {
                         let mtm = MainThreadMarker::new().expect("main thread");
                         if let Some(window) = child_windows(mtm).into_iter().find(|window| window.isVisible()) {
-                            deliver_input(mtm, &window);
+                            deliver_input(mtm, &window, None);
                         }
                     });
                     std::thread::sleep(Duration::from_millis(30));
@@ -1397,17 +1479,26 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// the unanswered window is closed at the deadline.
         fn a_redirect_never_shows(&mut self) {
             self.eval(&format!(
-                "probe.windows.redirect = window.open('http://localhost:{}/redirect')",
+                r#"probe.windows.redirect = window.open('http://localhost:{}/redirect');
+                   probe.report({{ case: 'redirect-asked', given: !!probe.windows.redirect }})"#,
                 self.port
             ));
-            let pending = self.wait_children("the redirecting window", |children| children.len() == 1);
-            assert!(!pending[0].visible, "{pending:?}");
-            std::thread::sleep(Duration::from_millis(1200));
+            let asked = self.report("redirect-asked");
+            assert_eq!(asked["given"], true, "{asked}");
+            // A refused navigation does not close the window: once the server
+            // has answered with the redirect and the page has had a turn
+            // since, the window is still there, hidden, and its opener does
+            // not see it closed. (The deadline is far off.)
+            self.report("redirect-served");
+            self.eval("probe.report({ case: 'redirect-refused', closed: probe.windows.redirect.closed })");
+            let refused = self.report("redirect-refused");
+            assert_eq!(refused["closed"], false, "{refused}");
             let pending = self.children();
             assert!(pending.len() == 1 && !pending[0].visible, "{pending:?}");
-            self.wait_children("the deadline to close an unanswered window", |children| {
-                children.is_empty()
-            });
+            // The rule: it is never on screen, and it is gone by the deadline.
+            // How long it stays before that is not promised; a window that
+            // goes early has only gone sooner.
+            self.gone_by_the_deadline("a window whose address redirected elsewhere");
             self.eval("probe.report({ case: 'redirect-closed', closed: probe.windows.redirect.closed })");
             let redirect = self.report("redirect-closed");
             assert_eq!(redirect["closed"], true, "{redirect}");
@@ -1463,8 +1554,9 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// and after them. Where it fell is counted from the record and said.
         fn another_window_going_away_closes_nothing(&mut self, rounds: usize) {
             let (mut before, mut between, mut after, mut unseen) = (0usize, 0usize, 0usize, 0usize);
-            for round in 0..rounds {
-                let other = self.another_window_of_the_app(&format!("other-{round}"));
+            let (mut round, mut stood_still) = (0usize, 0usize);
+            while round < rounds {
+                let other = self.another_window_of_the_app(&format!("other-{round}-{stood_still}"));
                 if self.focus {
                     // As in the case that failed: shown, and key for a moment.
                     other.show().unwrap();
@@ -1496,12 +1588,33 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 let kept = self.report("kept");
                 let held = self.child_windows();
                 let seen = trace::round_ends();
+                if seen.stood_still(RESERVE_DEADLINE) {
+                    // Not the rule under test: the round outlasted the
+                    // deadline, and the deadline alone closed windows. It is
+                    // said and the round is asked again.
+                    stood_still += 1;
+                    println!(
+                        "vault window probe: the probe stood still for {:?} in a round, longer than the reserve \
+                         deadline, which closed {} of its windows; the round is repeated",
+                        seen.lasted,
+                        seen.closed_from.len()
+                    );
+                    assert!(
+                        stood_still <= 3,
+                        "the probe stood still in four rounds: {seen:?}\n{}",
+                        trace::seen()
+                    );
+                    self.eval("probe.windows.kept.forEach((child) => child && !child.closed && child.close())");
+                    self.wait_children("the kept windows to close", |children| children.is_empty());
+                    continue;
+                }
                 assert!(
                     kept["opened"] == json!([true, true, true])
                         && kept["closed"] == json!([false, false, false])
                         && held == 3
+                        && seen.asked == 3
                         && seen.most_held == 3
-                        && seen.closed == 0,
+                        && seen.closed_from.is_empty(),
                     "round {round}: a reserved window was lost while another window of the app went away: \
                      {kept}, {held} windows held, {seen:?}\n{}",
                     trace::seen()
@@ -1516,6 +1629,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 }
                 self.eval("probe.windows.kept.forEach((child) => child.close())");
                 self.wait_children("the kept windows to close", |children| children.is_empty());
+                round += 1;
             }
             println!(
                 "vault window probe: three windows were reserved while another window of the app was destroyed, \
@@ -1529,39 +1643,67 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// and those do not outlive the deadline.
         fn reservations_are_bounded(&mut self) {
             // Nothing may close a reserved window while these are asked for,
-            // and never more than four may exist. What the web views
-            // announced, which sandbox windows closed and how many were held
-            // after each request, shortly before and during, is printed
-            // either way.
-            trace::round_begins();
-            self.eval(
-                r#"(() => {
-                    const at = [];
-                    const opened = [0, 1, 2, 3, 4, 5].map(() => {
-                        const opened = !!window.open('about:blank');
-                        at.push(Date.now());
-                        return opened;
-                    });
-                    probe.report({ case: 'many', opened, at });
-                })()"#,
-            );
-            let many = self.report("many");
-            let round = trace::round_ends();
-            let seen = trace::seen();
-            println!(
-                "vault window probe: six windows asked for at {}; {round:?}; the record up to then:\n{seen}",
-                many["at"]
-            );
-            assert!(
-                many["opened"] == json!([true, true, true, true, false, false])
-                    && round.most_held == 4
-                    && round.closed == 0,
-                "{many}, {round:?}\n{seen}"
-            );
+            // and never more than four may exist. If the probe stands still
+            // for longer than the deadline while they are asked for, the
+            // deadline closes some: that is said, and they are asked for
+            // again once those are gone.
+            for attempt in 0.. {
+                trace::round_begins();
+                self.eval(
+                    "probe.report({ case: 'many', opened: [0, 1, 2, 3, 4, 5].map(() => !!window.open('about:blank')) })",
+                );
+                let many = self.report("many");
+                let round = trace::round_ends();
+                if round.stood_still(RESERVE_DEADLINE) {
+                    println!(
+                        "vault window probe: the probe stood still for {:?} while six windows were asked for, \
+                         longer than the reserve deadline, which closed {}; they are asked for again",
+                        round.lasted,
+                        round.closed_from.len()
+                    );
+                    assert!(
+                        attempt < 3,
+                        "the probe stood still four times: {round:?}\n{}",
+                        trace::seen()
+                    );
+                    self.gone_by_the_deadline("the reserved windows");
+                    continue;
+                }
+                assert!(
+                    many["opened"] == json!([true, true, true, true, false, false])
+                        && round.asked == 6
+                        && round.most_held == 4
+                        && round.closed_from.is_empty(),
+                    "{many}, {round:?}\n{}",
+                    trace::seen()
+                );
+                break;
+            }
             let held = self.children();
             assert_eq!(held.len(), 4, "{held:?}");
             assert!(held.iter().all(|child| !child.visible), "{held:?}");
-            self.wait_children("the deadline to close reserved windows", |children| children.is_empty());
+            self.gone_by_the_deadline("the reserved windows");
+        }
+
+        /// The sandbox windows there are now are never on screen and are all
+        /// closed by the deadline.
+        fn gone_by_the_deadline(&mut self, what: &str) {
+            let started = Instant::now();
+            loop {
+                let children = self.children();
+                assert!(
+                    children.iter().all(|child| !child.visible),
+                    "{what} came on screen: {children:?}"
+                );
+                if children.is_empty() {
+                    return;
+                }
+                assert!(
+                    started.elapsed() < RESERVE_DEADLINE + DEADLINE_SLACK,
+                    "{what} outlived the deadline: {children:?}"
+                );
+                std::thread::sleep(Duration::from_millis(40));
+            }
         }
 
         fn the_main_window_takes_its_children_along(&mut self) {
@@ -1771,12 +1913,17 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         }
     }
 
-    /// A record of what the app's web views announced and which sandbox
-    /// windows closed, kept by the probe alone: it wraps the three methods the
-    /// module added to wry's web view class and listens for windows closing.
-    /// The module is not changed for it.
+    /// A record of what the app's web views announced, of every request for a
+    /// window and of every sandbox window that closes, with the call stack of
+    /// the close, kept by the probe alone. It wraps the three methods the
+    /// module added to wry's web view class and the module's answer to a
+    /// request, and listens for windows closing; the module is not changed
+    /// for it. It is printed when the probe fails, so a window that is gone
+    /// sooner than a case expects is explained by the failure itself, and it
+    /// counts what the cases that reserve windows assert.
     mod trace {
         use std::{
+            backtrace::Backtrace,
             cell::RefCell,
             collections::VecDeque,
             ptr::NonNull,
@@ -1784,6 +1931,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 atomic::{AtomicBool, AtomicUsize, Ordering},
                 Mutex, OnceLock,
             },
+            time::{Duration, Instant},
         };
 
         use objc2::{
@@ -1796,22 +1944,6 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         use objc2_web_kit::WKWebView;
 
         type Announce = unsafe extern "C-unwind" fn(&AnyObject, Sel);
-
-        const KEPT: usize = 60;
-        const NAMES: [&str; 3] = ["viewDidHide", "viewDidUnhide", "viewDidMoveToWindow"];
-        static ORIGINAL: [OnceLock<Imp>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
-        static ARMED: AtomicBool = AtomicBool::new(false);
-        /// With call stacks, while the case being looked at runs.
-        static CLOSELY: AtomicBool = AtomicBool::new(false);
-        /// The Workbench web view's address, to recognize it by.
-        static WORKBENCH: AtomicUsize = AtomicUsize::new(0);
-        thread_local! {
-            static WORKBENCH_VIEW: RefCell<Option<Weak<WKWebView>>> = const { RefCell::new(None) };
-        }
-        static LINES: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
-        static ROUND: Mutex<Round> = Mutex::new(Round::new());
-        static WRY_CREATE: OnceLock<Imp> = OnceLock::new();
-
         type Create = unsafe extern "C-unwind" fn(
             &AnyObject,
             Sel,
@@ -1821,79 +1953,127 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             &AnyObject,
         ) -> *mut AnyObject;
 
+        const KEPT: usize = 80;
+        const NAMES: [&str; 3] = ["viewDidHide", "viewDidUnhide", "viewDidMoveToWindow"];
+        static ANNOUNCE: [OnceLock<Imp>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+        static ANSWER: OnceLock<Imp> = OnceLock::new();
+        static ARMED: AtomicBool = AtomicBool::new(false);
+        /// The Workbench web view's address, to recognize it by.
+        static WORKBENCH: AtomicUsize = AtomicUsize::new(0);
+        thread_local! {
+            static WORKBENCH_VIEW: RefCell<Option<Weak<WKWebView>>> = const { RefCell::new(None) };
+        }
+        static LINES: Mutex<VecDeque<(f64, String, Option<Backtrace>)>> = Mutex::new(VecDeque::new());
+        static ROUND: Mutex<Option<Counting>> = Mutex::new(None);
+
+        struct Counting {
+            began: Instant,
+            asked: usize,
+            most_held: usize,
+            announced_after: Vec<usize>,
+            closed: Vec<Backtrace>,
+        }
+
         /// What was seen while one case asked for windows.
-        #[derive(Clone, Debug)]
+        #[derive(Debug)]
         pub struct Round {
+            /// How long the round took.
+            pub lasted: Duration,
             /// Requests for a new window that reached the app.
             pub asked: usize,
             /// The most sandbox windows that existed right after a request.
             pub most_held: usize,
-            /// Sandbox windows that closed.
-            pub closed: usize,
+            /// For each sandbox window that closed: the module's frames on the
+            /// stack of the close, innermost first.
+            pub closed_from: Vec<String>,
             /// For each announcement by a web view other than the Workbench's:
             /// how many windows had been asked for by then.
             pub announced_after: Vec<usize>,
         }
 
         impl Round {
-            const fn new() -> Self {
-                Self {
-                    asked: 0,
-                    most_held: 0,
-                    closed: 0,
-                    announced_after: Vec::new(),
-                }
+            /// The probe stood still for longer than the reserve deadline, and
+            /// every window that closed was closed by its deadline and by
+            /// nothing else. Hosted runners have blocked the app's main thread
+            /// for seconds inside WebKit while a web view was being created;
+            /// a case that reserves windows says so instead of failing, and
+            /// still fails on a close of any other origin.
+            pub fn stood_still(&self, deadline: Duration) -> bool {
+                !self.closed_from.is_empty()
+                    && self.lasted >= deadline
+                    && self
+                        .closed_from
+                        .iter()
+                        .all(|from| from.starts_with("close <- open_child::{closure"))
             }
         }
 
-        /// Starts counting, with call stacks for every close.
+        /// Starts counting.
         pub fn round_begins() {
-            *ROUND.lock().expect("the round") = Round::new();
-            closely(true);
+            *ROUND.lock().expect("the round") = Some(Counting {
+                began: Instant::now(),
+                asked: 0,
+                most_held: 0,
+                announced_after: Vec::new(),
+                closed: Vec::new(),
+            });
+            note("--- asking begins ---".to_owned(), None);
         }
 
         pub fn round_ends() -> Round {
-            closely(false);
-            ROUND.lock().expect("the round").clone()
+            note("--- answered ---".to_owned(), None);
+            let counted = ROUND.lock().expect("the round").take().expect("a round was begun");
+            Round {
+                lasted: counted.began.elapsed(),
+                asked: counted.asked,
+                most_held: counted.most_held,
+                closed_from: counted.closed.iter().map(origin).collect(),
+                announced_after: counted.announced_after,
+            }
         }
 
-        fn note(line: String) {
-            let mut lines = LINES.lock().expect("the trace");
+        fn counting(count: impl FnOnce(&mut Counting)) {
+            if let Some(round) = ROUND.lock().expect("the round").as_mut() {
+                count(round);
+            }
+        }
+
+        fn note(line: String, stack: Option<Backtrace>) {
+            let mut lines = LINES.lock().expect("the record");
             if lines.len() == KEPT {
                 lines.pop_front();
             }
-            lines.push_back(format!("  [{:.0}] {line}", super::now_ms()));
+            lines.push_back((super::now_ms(), line, stack));
         }
 
-        pub fn closely(on: bool) {
-            CLOSELY.store(on, Ordering::SeqCst);
-            note(
-                if on {
-                    "--- asking begins ---"
-                } else {
-                    "--- answered ---"
-                }
-                .to_owned(),
-            );
-        }
-
-        pub fn seen() -> String {
-            let lines = LINES.lock().expect("the trace");
-            lines.iter().cloned().collect::<Vec<_>>().join("\n")
-        }
-
-        /// The frames of this thread's call stack, innermost first.
-        fn stack() -> String {
-            std::backtrace::Backtrace::force_capture()
+        /// The module's frames on a stack, innermost first, by their last
+        /// names: `close <- open_child::{closure#5}::{closure#0}` is the
+        /// reserve deadline.
+        fn origin(stack: &Backtrace) -> String {
+            stack
                 .to_string()
                 .lines()
                 .map(str::trim)
-                .filter(|line| {
-                    line.split_once(": ")
-                        .is_some_and(|(number, _)| number.parse::<u32>().is_ok())
+                .filter_map(|frame| frame.split_once("macos_vault_window::"))
+                .map(|(_, name)| name.to_owned())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" <- ")
+        }
+
+        /// The record, oldest first, with the time since the entry before.
+        pub fn seen() -> String {
+            let lines = LINES.lock().expect("the record");
+            let mut before = None;
+            lines
+                .iter()
+                .map(|(at, line, stack)| {
+                    let since = before.replace(*at).map_or(0.0, |before: f64| at - before);
+                    let from = stack
+                        .as_ref()
+                        .map_or(String::new(), |stack| format!(", from {}", origin(stack)));
+                    format!("  [{at:.0}, +{since:.0} ms] {line}{from}")
                 })
-                .take(70)
-                .map(|line| format!("        {line}"))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -1941,15 +2121,10 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     found
                 }
             };
-            let frame = view.frame();
             format!(
-                "in a window: {}, hidden or in a hidden view: {}, frame {:.0},{:.0} {:.0}x{:.0}, views in front: {in_front:?}",
+                "in a window: {}, hidden or in a hidden view: {}, views in front: {in_front:?}",
                 view.window().is_some(),
-                view.isHiddenOrHasHiddenAncestor(),
-                frame.origin.x,
-                frame.origin.y,
-                frame.size.width,
-                frame.size.height
+                view.isHiddenOrHasHiddenAncestor()
             )
         }
 
@@ -1957,38 +2132,44 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             // SAFETY: The implementation the module added for this selector,
             // which takes no argument and returns nothing.
             let original: Announce =
-                unsafe { std::mem::transmute::<Imp, Announce>(*ORIGINAL[which].get().expect("armed")) };
+                unsafe { std::mem::transmute::<Imp, Announce>(*ANNOUNCE[which].get().expect("armed")) };
             let Some(mtm) = MainThreadMarker::new() else {
                 // SAFETY: As above.
                 return unsafe { original(this, selector) };
             };
             let before = windows(mtm);
-            let subject = format!(
-                "{} {:p}{}",
-                this.class().name().to_string_lossy(),
-                this,
-                if std::ptr::from_ref(this) as usize == WORKBENCH.load(Ordering::SeqCst) {
-                    " (the Workbench)"
-                } else {
-                    ""
-                }
-            );
+            let is_workbench = std::ptr::from_ref(this) as usize == WORKBENCH.load(Ordering::SeqCst);
             let read = workbench();
             // SAFETY: As above.
             unsafe { original(this, selector) };
             let after = windows(mtm);
-            if std::ptr::from_ref(this) as usize != WORKBENCH.load(Ordering::SeqCst) {
-                let mut round = ROUND.lock().expect("the round");
-                let asked = round.asked;
-                round.announced_after.push(asked);
+            if !is_workbench {
+                counting(|round| round.announced_after.push(round.asked));
             }
-            note(format!(
-                "{} on {subject}; the Workbench was {read}; sandbox windows {before:?} -> {after:?}",
-                NAMES[which]
-            ));
-            if before != after && CLOSELY.load(Ordering::SeqCst) {
-                note(format!("    the announcement came from:\n{}", stack()));
-            }
+            note(
+                format!(
+                    "{} on {}; the Workbench was {read}; sandbox windows {before:?} -> {after:?}",
+                    NAMES[which],
+                    if is_workbench {
+                        "the Workbench"
+                    } else {
+                        "another web view"
+                    }
+                ),
+                None,
+            );
+        }
+
+        unsafe extern "C-unwind" fn did_hide(this: &AnyObject, selector: Sel) {
+            announced(0, this, selector);
+        }
+
+        unsafe extern "C-unwind" fn did_unhide(this: &AnyObject, selector: Sel) {
+            announced(1, this, selector);
+        }
+
+        unsafe extern "C-unwind" fn did_move(this: &AnyObject, selector: Sel) {
+            announced(2, this, selector);
         }
 
         /// A page asked for a new window: the module's answer is passed on
@@ -2005,36 +2186,24 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             // SAFETY: The implementation this one replaced, for this selector,
             // called with the arguments WebKit passed.
             let given = unsafe {
-                let original = std::mem::transmute::<Imp, Create>(*WRY_CREATE.get().expect("armed"));
-                original(delegate, selector, opener, configuration, action, features)
+                let answer = std::mem::transmute::<Imp, Create>(*ANSWER.get().expect("armed"));
+                answer(delegate, selector, opener, configuration, action, features)
             };
             if let Some(mtm) = MainThreadMarker::new() {
                 let held = windows(mtm);
-                {
-                    let mut round = ROUND.lock().expect("the round");
+                counting(|round| {
                     round.asked += 1;
                     round.most_held = round.most_held.max(held.len());
-                }
-                if CLOSELY.load(Ordering::SeqCst) {
-                    note(format!(
+                });
+                note(
+                    format!(
                         "a window was asked for and {}; sandbox windows now {held:?}",
                         if given.is_null() { "refused" } else { "given" }
-                    ));
-                }
+                    ),
+                    None,
+                );
             }
             given
-        }
-
-        unsafe extern "C-unwind" fn did_hide(this: &AnyObject, selector: Sel) {
-            announced(0, this, selector);
-        }
-
-        unsafe extern "C-unwind" fn did_unhide(this: &AnyObject, selector: Sel) {
-            announced(1, this, selector);
-        }
-
-        unsafe extern "C-unwind" fn did_move(this: &AnyObject, selector: Sel) {
-            announced(2, this, selector);
         }
 
         /// Starts the record, once, for the Workbench's web view.
@@ -2063,19 +2232,11 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             for (which, (selector, wrapper)) in wrappers.into_iter().enumerate() {
                 // Only a method the class itself defines: one found on a
                 // superclass belongs to every view in the process.
-                match own.iter().find(|method| method.name() == selector) {
-                    Some(method) => {
-                        // SAFETY: The wrapper has the method's own signature
-                        // and calls what it replaces.
-                        let original =
-                            unsafe { method.set_implementation(std::mem::transmute::<Announce, Imp>(wrapper)) };
-                        let _ = ORIGINAL[which].set(original);
-                    }
-                    None => note(format!(
-                        "{} does not define {}",
-                        class.name().to_string_lossy(),
-                        NAMES[which]
-                    )),
+                if let Some(method) = own.iter().find(|method| method.name() == selector) {
+                    // SAFETY: The wrapper has the method's own signature and
+                    // calls what it replaces.
+                    let original = unsafe { method.set_implementation(std::mem::transmute::<Announce, Imp>(wrapper)) };
+                    let _ = ANNOUNCE[which].set(original);
                 }
             }
             // The answer to a page's request for a window: the module put its
@@ -2085,16 +2246,11 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 let delegate: &AnyObject = delegate.as_ref();
                 let selector = sel!(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:);
                 let own = delegate.class().instance_methods();
-                match own.iter().find(|method| method.name() == selector) {
-                    Some(method) => {
-                        // SAFETY: The wrapper has the method's own signature
-                        // and calls what it replaces.
-                        let original = unsafe {
-                            method.set_implementation(std::mem::transmute::<Create, Imp>(asked_for_a_window))
-                        };
-                        let _ = WRY_CREATE.set(original);
-                    }
-                    None => note("the UI delegate's class does not answer requests for a window itself".to_owned()),
+                if let Some(method) = own.iter().find(|method| method.name() == selector) {
+                    // SAFETY: As above.
+                    let answer =
+                        unsafe { method.set_implementation(std::mem::transmute::<Create, Imp>(asked_for_a_window)) };
+                    let _ = ANSWER.set(answer);
                 }
             }
             let closing = block2::RcBlock::new(|notification: NonNull<NSNotification>| {
@@ -2109,11 +2265,12 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 if super::child_view(window).is_none() {
                     return;
                 }
-                ROUND.lock().expect("the round").closed += 1;
-                note(format!("sandbox window {} is closing", window.windowNumber()));
-                if CLOSELY.load(Ordering::SeqCst) {
-                    note(format!("    closed from:\n{}", stack()));
-                }
+                // The frames are named only when the record is read.
+                counting(|round| round.closed.push(Backtrace::force_capture()));
+                note(
+                    format!("sandbox window {} is closing", window.windowNumber()),
+                    Some(Backtrace::force_capture()),
+                );
             });
             // SAFETY: Main thread; the name is AppKit's. The observation is
             // kept for the life of the process.
@@ -2128,7 +2285,6 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             std::mem::forget(observer);
         }
     }
-
     thread_local! {
         /// The card's web view the probe is asking about; main thread only.
         static KEPT_CARD: std::cell::RefCell<Option<Retained<WKWebView>>> = const { std::cell::RefCell::new(None) };
@@ -2207,8 +2363,13 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         }
     }
 
+    /// The system's uptime in seconds, the clock of an event's timestamp.
+    fn uptime() -> f64 {
+        objc2_foundation::NSProcessInfo::processInfo().systemUptime()
+    }
+
     /// One click and one Return key for `window`, handed to the application.
-    fn deliver_input(mtm: MainThreadMarker, window: &NSWindow) {
+    fn deliver_input(mtm: MainThreadMarker, window: &NSWindow, dated: Option<f64>) {
         use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
         use objc2_foundation::{ns_string, NSPoint, NSString};
         let Some(content) = window.contentView() else {
@@ -2225,7 +2386,9 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         // SAFETY: Main thread. The two class methods are AppKit's own event
         // constructors, called with the argument types their selectors declare.
         unsafe {
-            let uptime: f64 = objc2::msg_send![&*objc2_foundation::NSProcessInfo::processInfo(), systemUptime];
+            // An event says when it was made, on the clock of the system's
+            // uptime: now, unless the case dates it otherwise.
+            let uptime: f64 = dated.unwrap_or_else(uptime);
             for kind in [NSEventType::LeftMouseDown, NSEventType::LeftMouseUp] {
                 let event: Option<Retained<NSEvent>> = objc2::msg_send![
                     objc2::class!(NSEvent),
@@ -2411,11 +2574,22 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         assert!(child.own_preferences && !child.fullscreen, "{child:?}");
     }
 
+    /// Answers each connection on a thread of its own. WebKit opens
+    /// connections it does not use at once; read one after another, such a
+    /// connection held every later request up until its read timed out, and
+    /// with it every page load and report of the probe.
     fn serve(listener: TcpListener, port: u16, reports: Sender<Value>) {
         for stream in listener.incoming() {
-            let Ok(mut stream) = stream else {
+            let Ok(stream) = stream else {
                 continue;
             };
+            let reports = reports.clone();
+            std::thread::spawn(move || answer(stream, port, reports));
+        }
+    }
+
+    fn answer(mut stream: std::net::TcpStream, port: u16, reports: Sender<Value>) {
+        {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut request = Vec::new();
             let complete = loop {
@@ -2439,7 +2613,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 }
             };
             if !complete {
-                continue;
+                return;
             }
             let text = String::from_utf8_lossy(&request).into_owned();
             let path = text
@@ -2471,7 +2645,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                         .as_bytes(),
                     );
                 });
-                continue;
+                return;
             }
             let response = match path {
                 "/slow-window" => page(SLOW_PAGE),
@@ -2481,9 +2655,12 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 "/workbench" => page(&WORKBENCH_PAGE.replace("PORT", &port.to_string())),
                 "/frame" => page(FRAME_PAGE),
                 "/window" => page(&WINDOW_PAGE.replace("PORT", &port.to_string())),
-                "/redirect" => format!(
+                "/redirect" => {
+                    let _ = reports.send(json!({ "case": "redirect-served" }));
+                    format!(
                     "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                ),
+                    )
+                }
                 "/report" => {
                     let body = text.split_once("\r\n\r\n").map_or("", |(_, body)| body);
                     if let Ok(report) = serde_json::from_str::<Value>(body) {

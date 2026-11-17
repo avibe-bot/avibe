@@ -1,11 +1,14 @@
 // A backend's model menu (管理模型): the shipped BackendModelCatalogDialog, its picker for adding
 // models providers supply, and its editor for one model.
+// The custom-model-* frames past the first draw a custom model built on a catalog pick: picked,
+// then its ID edited, the parameters staying.
 import { BackendModelCatalogDialog } from '@/components/settings/models/BackendModelCatalogDialog';
 import { BackendModelEditorDialog } from '@/components/settings/models/BackendModelEditorDialog';
 import { BackendModelPickerDialog } from '@/components/settings/models/BackendModelPickerDialog';
-import type { AgentBackend, Source } from '@/components/settings/models/types';
+import type { AgentBackend, ModelsDevMatch, Source } from '@/components/settings/models/types';
 
 import { frames } from '../../frame';
+import { AfterMount } from '../../shell/AfterMount';
 import { backendModel, deepseek, demoAgents, demoSources, hubApi, ok, relayClaude, relayGpt, type AgentSpec } from './fixtures';
 
 const sourceNames = Object.fromEntries(demoSources.map((s) => [s.id, s.display_name]));
@@ -91,6 +94,33 @@ const editing = backendModel('claude-opus-4-8', { origin: 'provider', reasoning_
 const opencodeListed = new Set(['deepseek-v4', 'deepseek-v4-reasoner', 'claude-sonnet-5', 'gpt-5.6-sol']);
 const codexListed = new Set(['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']);
 const claudeTaken = new Set(['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5']);
+
+// A custom model built on a catalog pick: the user searches 「claude-fable-5-1」, picks Claude
+// Fable 5.1 as the base, then edits the ID to their relay's name for it.
+const fable51: ModelsDevMatch = {
+  provider_id: 'anthropic', provider_name: 'Anthropic', model_id: 'claude-fable-5-1', models_dev_id: 'anthropic/claude-fable-5-1', display_name: 'Claude Fable 5.1',
+  context_window: 400_000, max_output_tokens: 64_000, input_modalities: ['text', 'image'], output_modalities: ['text'],
+  supports_tools: true, supports_reasoning: true, reasoning_efforts: ['low', 'medium', 'high'], native_protocol: 'anthropic', first_party: true,
+};
+const fable5: ModelsDevMatch = { ...fable51, model_id: 'claude-fable-5', models_dev_id: 'anthropic/claude-fable-5', display_name: 'Claude Fable 5', context_window: 200_000 };
+const searched = 'claude-fable-5-1';
+const editedId = 'claude-fable-5-1-relay';
+const lookup = (query: string) => `/api/models/catalog/models-dev?query=${encodeURIComponent(query)}&refresh=if-stale`;
+const customApi = {
+  ...api,
+  [lookup(searched)]: ok({ matches: [fable51, fable5] }),
+  [lookup(editedId)]: ok({ matches: [fable51, fable5] }),
+};
+const vibeyTaken = new Set(['claude-opus-5', 'claude-sonnet-5']);
+/** Opened after mount, as the picker opens it, so a search it starts is not dropped by StrictMode's remount. */
+const customFromCatalog = () => (
+  <AfterMount>
+    {(open) => <BackendModelEditorDialog open={open} backend="vibey" model={null} takenIds={vibeyTaken} effortSuggestions={['low', 'medium', 'high']} onCancel={() => {}} onCommit={() => {}} />}
+  </AfterMount>
+);
+/** Searched and picked as the base; then the ID retyped as the relay names it. The list's reads are debounced. */
+const pickFable = { click: [{ fill: 'role=combobox', text: searched }, 'button[role=option]:has-text("Claude Fable 5.1")'], wait: 900 };
+const editId = { ...pickFable, click: [...pickFable.click, { fill: 'role=combobox', text: editedId }] };
 
 const designFrames = frames([
   {
@@ -184,6 +214,39 @@ const designFrames = frames([
         onCommit={() => {}}
       />
     ),
+  },
+  {
+    name: 'custom-model-from-catalog',
+    title: '添加自定义模型 · 选了 Claude Fable 5.1 作为基础：ID 下写参数来自哪里，可以清空',
+    width: 1000,
+    height: 900,
+    themes: ['light'],
+    status: 'shipped',
+    fixtures: { api: customApi },
+    ...pickFable,
+    render: customFromCatalog,
+  },
+  {
+    name: 'custom-model-id-edited',
+    title: '添加自定义模型 · 改了 ID：参数都留着，下拉第一行（回车）用输入的 ID 并保留参数',
+    width: 1000,
+    height: 900,
+    themes: ['light'],
+    status: 'shipped',
+    fixtures: { api: customApi },
+    ...editId,
+    render: customFromCatalog,
+  },
+  {
+    name: 'custom-model-id-edited-phone',
+    title: '添加自定义模型 · 改了 ID · 手机',
+    width: 390,
+    height: 844,
+    themes: ['light'],
+    status: 'shipped',
+    fixtures: { api: customApi },
+    ...editId,
+    render: customFromCatalog,
   },
 ]);
 

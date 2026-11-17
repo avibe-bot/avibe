@@ -56,6 +56,25 @@ export function modelHasOffOrderSupplier(agent: AgentSupply, sources: Source[], 
   );
 }
 
+/**
+ * Who runs each of a backend's models, by model id: every Agent whose model it
+ * is, a Bot's Agent under the Bot's own name, Bots first. Only the names: an
+ * Agent with a problem is still a user, and the problem stays in the footer.
+ */
+export function modelUsers(agent: AgentSupply, botName: (agentName: string) => string | undefined): Map<string, string[]> {
+  const bots = new Map<string, string[]>();
+  const others = new Map<string, string[]>();
+  for (const named of agent.named_agents ?? []) {
+    if (!named.effective_model_id) continue;
+    const asBot = botName(named.name);
+    const into = asBot === undefined ? others : bots;
+    into.set(named.effective_model_id, [...(into.get(named.effective_model_id) ?? []), asBot ?? named.name]);
+  }
+  const users = new Map(bots);
+  for (const [modelId, names] of others) users.set(modelId, [...(users.get(modelId) ?? []), ...names]);
+  return users;
+}
+
 export const COLLAPSED_MODEL_LIMIT = 6;
 
 export type CollapsedModelRows = {

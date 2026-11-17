@@ -22,6 +22,8 @@ describe('Models page vocabulary', () => {
     expect(copy).not.toMatch(/按量(?!付费)/);
     // 「透传」 is jargon; the page says 「原样转发」.
     expect(copy).not.toMatch(/透传/);
+    // The own-login mode reads 「自己登录」, matching English "Own login".
+    expect(copy).not.toMatch(/Agent 管理/);
     expect(leaves(en.settings.models).join('\n')).not.toMatch(/passthrough|pass through/i);
     expect(zh.settings.models.billing.monthly).toBe('订阅');
     expect(zh.settings.models.billing.metered).toBe('按量付费');

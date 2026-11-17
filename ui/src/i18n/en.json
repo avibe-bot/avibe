@@ -323,8 +323,10 @@
       "switch": "Switch instance",
       "choose": "Choose an instance",
       "privacy": "Privacy policy",
-      "delete": "Delete account",
-      "deleteHint": "Continue to avibe.bot to review the impact and confirm deletion."
+      "delete": "Delete account"
+    },
+    "accountData": {
+      "title": "Account and data"
     },
     "twoFactor": {
       "title": "Confirm it’s you.",
@@ -1339,7 +1341,11 @@
         },
         "row": {
           "current": "{{source}} → {{model}}",
-          "currentTakeover": "{{source}} → {{model}} (Taken over)"
+          "currentTakeover": "{{source}} → {{model}} (Taken over)",
+          "usedBy": "Used by {{names}}",
+          "usedByMore_one": "Used by {{names}} and {{count}} more",
+          "usedByMore_other": "Used by {{names}} and {{count}} more",
+          "usersSeparator": ", "
         },
         "group": {
           "subtitle": {
@@ -1450,7 +1456,10 @@
             "placeholder": "Optional — the list shows the model ID when this is empty"
           },
           "lookupLoading": "Searching models.dev…",
-          "useAsId": "Use \"{{query}}\" as the model ID",
+          "useAsId": "Use \"<id>{{query}}</id>\" as the model ID",
+          "useAsIdKeep": "Use \"<id>{{query}}</id>\", keep current parameters",
+          "parametersFrom": "Parameters from {{name}}",
+          "clearParameters": "Clear parameters",
           "fillFailed": "models.dev could not be reached",
           "fillUnavailable": "models.dev unavailable",
           "matches": "models.dev matches",
@@ -2192,7 +2201,7 @@
         "field": {
           "vendor": "Provider",
           "vendor.custom": "Other provider · enter its address",
-          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address and API format are filled in for you",
+          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address is filled in for you",
           "vendor.search": "Search providers",
           "vendor.empty": "No provider by that name",
           "name": "Name (optional)",
@@ -7160,6 +7169,7 @@
       "addDescription": "Add one provider to get started. Model Hub handles routing.",
       "addDescriptionMore": "Review detected configurations and confirm migration without retyping",
       "addDescriptionKey": "Enter the provider's address and API key.",
+      "addDescriptionKeyPreset": "Choose the provider and enter its API key.",
       "addMethodsLabel": "Add method",
       "addMethodDetected": "Detected",
       "addMethodSubscription": "Subscription",

@@ -932,29 +932,47 @@ describe('mobile onboarding', () => {
     expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
   });
 
-  describe('account deletion and privacy policy', () => {
-    it('opens the privacy policy in the App without touching the session', async () => {
+  describe('account and data: privacy policy and account deletion', () => {
+    const deleteButton = () => screen.getByRole('button', { name: 'mobileApp.account.delete' });
+    const privacyButton = () => screen.getByRole('button', { name: 'mobileApp.account.privacy' }) as HTMLButtonElement;
+    const openAccountData = async (hash: '#account' | '#runtime-account' = '#account') => {
+      await openAccount(hash);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.accountData.title' }));
+      await screen.findByRole('heading', { name: 'mobileApp.accountData.title' });
+    };
+
+    it('keeps deletion off Account: one level down, at the bottom, and Back returns to Account', async () => {
       await openAccount('#account');
-      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.privacy' }));
+      expect(screen.queryByRole('button', { name: 'mobileApp.account.delete' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'mobileApp.account.privacy' })).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.accountData.title' }));
+      await screen.findByRole('heading', { name: 'mobileApp.accountData.title' });
+      const buttons = screen.getAllByRole('button');
+      expect(buttons[buttons.length - 1]).toBe(deleteButton());
+
+      fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title' });
+    });
+
+    it('opens the privacy policy in the App without touching the session', async () => {
+      await openAccountData();
+      fireEvent.click(privacyButton());
       expect(mobile.openPage).toHaveBeenCalledWith('privacyPolicy');
       expect(mobile.refresh).not.toHaveBeenCalled();
     });
 
-    it('locks Account while the deletion page is open, then goes to Welcome once the session reads signed out', async () => {
-      await openAccount('#runtime-account');
+    it('locks the page while the deletion page is open, then goes to Welcome once the session reads signed out', async () => {
+      await openAccountData('#runtime-account');
       const page = deferred<{ completed: boolean }>();
       mobile.openPage.mockReturnValueOnce(page.promise);
       mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
-      fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+      fireEvent.click(deleteButton());
 
       await waitFor(() => expect(mobile.openPage).toHaveBeenCalledWith('accountDeletion'));
       await waitFor(() => {
-        expect(
-          (screen.getByRole('button', { name: 'mobileApp.account.signOut' }) as HTMLButtonElement).disabled,
-        ).toBe(true);
-        expect(
-          (screen.getByRole('button', { name: 'mobileApp.account.privacy' }) as HTMLButtonElement).disabled,
-        ).toBe(true);
+        expect(privacyButton().disabled).toBe(true);
+        expect((screen.getByRole('button', { name: 'common.back' }) as HTMLButtonElement).disabled).toBe(true);
       });
       expect(mobile.refresh).not.toHaveBeenCalled();
 
@@ -964,19 +982,15 @@ describe('mobile onboarding', () => {
       expect(mobile.logout).not.toHaveBeenCalled();
     });
 
-    it('reads the session after any close, and stays on Account while the account is still there', async () => {
-      await openAccount('#account');
+    it('reads the session after any close, and stays put while the account is still there', async () => {
+      await openAccountData();
       mobile.openPage.mockResolvedValueOnce({ completed: false });
       mobile.refresh.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' });
-      fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+      fireEvent.click(deleteButton());
 
       await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
-      await waitFor(() => {
-        expect(
-          (screen.getByRole('button', { name: 'mobileApp.account.signOut' }) as HTMLButtonElement).disabled,
-        ).toBe(false);
-      });
-      expect(screen.getByRole('heading', { name: 'mobileApp.account.title' })).toBeTruthy();
+      await waitFor(() => expect(privacyButton().disabled).toBe(false));
+      expect(screen.getByRole('heading', { name: 'mobileApp.accountData.title' })).toBeTruthy();
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.action' })).toBeNull();
     });
 
@@ -985,11 +999,11 @@ describe('mobile onboarding', () => {
         () => mobile.refresh.mockRejectedValueOnce({ code: 'busy', message: 'busy' }),
         () => mobile.refresh.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' }),
       ]) {
-        await openAccount('#account');
+        await openAccountData();
         mobile.openPage.mockResolvedValueOnce({ completed: true });
         readBack();
         mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
-        fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+        fireEvent.click(deleteButton());
 
         await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
         expect(mobile.logout).toHaveBeenCalledTimes(1);
@@ -998,16 +1012,12 @@ describe('mobile onboarding', () => {
       }
     });
 
-    it('keeps Account as it was when the deletion page cannot open', async () => {
-      await openAccount('#account');
+    it('stays as it was when the deletion page cannot open', async () => {
+      await openAccountData();
       mobile.openPage.mockRejectedValueOnce({ code: 'busy', message: 'busy' });
-      fireEvent.click(screen.getByRole('button', { name: /mobileApp\.account\.delete$/ }));
+      fireEvent.click(deleteButton());
 
-      await waitFor(() => {
-        expect(
-          (screen.getByRole('button', { name: 'mobileApp.account.signOut' }) as HTMLButtonElement).disabled,
-        ).toBe(false);
-      });
+      await waitFor(() => expect(privacyButton().disabled).toBe(false));
       expect(mobile.refresh).not.toHaveBeenCalled();
       expect(screen.queryByRole('alert')).toBeNull();
     });
@@ -2324,6 +2334,19 @@ describe('mobile instance sheet', () => {
       render(<MobileOnboarding />);
       await screen.findByText('mobileApp.account.signedInAs');
     };
+
+    it('pushes Account and data inside the sheet, whose Back names Account for the edge swipe', async () => {
+      await openAccountRoot();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.accountData.title' }));
+      await screen.findByRole('heading', { name: 'mobileApp.accountData.title', level: 1 });
+      const back = document.querySelector('[data-mobile-back]') as HTMLButtonElement;
+      expect(back.textContent).toBe('mobileApp.account.title');
+      expect(screen.getByRole('button', { name: 'mobileApp.account.delete' })).toBeTruthy();
+
+      fireEvent.click(back);
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+      expect(document.querySelector('[data-mobile-back]')).toBeNull();
+    });
 
     it('is the sheet\'s root: Account with Close, and no Back for the edge swipe to press', async () => {
       await openAccountRoot();

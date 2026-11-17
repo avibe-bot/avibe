@@ -14,6 +14,25 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         WebKitReadiness.webContentLaunch.components.seconds
     )
 
+    /// For a test about what happens after the control-plane document is
+    /// ready (a redirect the request must not follow): its readiness may
+    /// take as long as WebKit's web content launch, so a slow launch is not
+    /// mistaken for the network error the test expects. Requests keep the
+    /// App's own deadlines. The readiness deadline itself is tested by the
+    /// deadline tests, which keep theirs.
+    private static let readyAfterWebContentLaunch = MobileAuthTransportDeadlines(
+        readinessMilliseconds: Int(WebKitReadiness.webContentLaunch.components.seconds) * 1_000,
+        requestMilliseconds: MobileAuthTransportDeadlines.standard.requestMilliseconds,
+        logoutMilliseconds: MobileAuthTransportDeadlines.standard.logoutMilliseconds
+    )
+
+    /// How long an operation under `readyAfterWebContentLaunch` may take
+    /// before the transport itself ends it, plus a few seconds.
+    private static let readyAfterWebContentLaunchOperationTimeout = TimeInterval(
+        readyAfterWebContentLaunch.readinessMilliseconds
+            + readyAfterWebContentLaunch.requestMilliseconds
+    ) / 1_000 + 5
+
     func testFailureMappingIsStageAccurateForEveryOperation() {
         struct MappingCase {
             let name: String
@@ -1070,7 +1089,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
-            websiteDataStore: .nonPersistent()
+            websiteDataStore: .nonPersistent(),
+            deadlines: Self.readyAfterWebContentLaunch
         )
 
         let request = Task {
@@ -1079,12 +1099,16 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 code: "123456"
             )
         }
-        await assertNetworkError(from: request)
+        await assertNetworkError(
+            from: request,
+            timeout: Self.readyAfterWebContentLaunchOperationTimeout
+        )
 
         let callback = try XCTUnwrap(
             state.requests().last(where: {
                 $0.method == "POST" && $0.path == "/auth/callback"
-            })
+            }),
+            "The request ended before its callback; \(server.requests.summary())"
         )
         let callbackBody = try XCTUnwrap(
             String(data: callback.body, encoding: .utf8)
@@ -1500,7 +1524,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
-            websiteDataStore: .nonPersistent()
+            websiteDataStore: .nonPersistent(),
+            deadlines: Self.readyAfterWebContentLaunch
         )
 
         let request = Task {
@@ -1509,12 +1534,16 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 password: password
             )
         }
-        await assertNetworkError(from: request)
+        await assertNetworkError(
+            from: request,
+            timeout: Self.readyAfterWebContentLaunchOperationTimeout
+        )
 
         XCTAssertTrue(
             state.requests().contains(where: {
                 $0.method == "POST" && $0.path == "/auth/v1/token"
-            })
+            }),
+            "The sign-in ended before its grant; \(server.requests.summary())"
         )
         XCTAssertFalse(
             state.requests().contains(where: { $0.path == "/auth/callback" })
@@ -1729,6 +1758,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
     private func assertNetworkError<T>(
         from task: Task<T, Error>,
+        timeout: TimeInterval? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
@@ -1740,7 +1770,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         await fulfillment(
             of: [completed],
-            timeout: Self.fixtureEventTimeout
+            timeout: timeout ?? Self.fixtureEventTimeout
         )
         guard let result else {
             task.cancel()

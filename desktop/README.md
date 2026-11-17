@@ -205,7 +205,16 @@ rules are stated at the top of that file. In short:
   without a break for 0.75 seconds the first time the card is seen and 2
   seconds every later time, and never sooner than 2 seconds after the user
   last arrived: Avibe became the active app, or the main window came back from
-  hidden, minimized or another Space. Until then every key for the window,
+  hidden, minimized or another Space. Each click and key is judged at the
+  time it was made, by its own timestamp, not at the time the window is
+  handed it: an event waits while the app's main thread is busy, and that
+  wait must not count as time the user had the card. The card must also still
+  be in view when the event is handed over. The time in view starts one turn
+  of the main run loop after the card is made opaque, once that change has
+  been committed to the window server. This holds through any stall of the
+  app's main thread; it does not help against a device or system layer that
+  stamps an event later than it happened, nor against a stall between the
+  commit leaving the app and the user's eyes. Until then every key for the window,
   and every click on its content, is dropped where the window receives it;
   none is passed to what is underneath. Clicks on the title bar are delivered,
   so the window can be moved or closed. The card is on screen the whole time.
@@ -344,6 +353,11 @@ enters one step below the signature check, which no test executable can pass.
 For the same reason it must not use anything of the library: that would put a
 second copy of the module and of its Objective-C classes into the process.
 CI fails if the probe's binary contains any symbol of the library.
+When it fails it prints the last requests for a window and every sandbox
+window that closed, with the rule that closed it. Its reserve deadline is 15
+seconds (the shell's is 60), so that a slow moment on a runner does not close
+a window a case is still waiting for; the cases that test the deadline wait
+that long.
 It has three runs: with the app active (windows appear); with the app not
 active (a sandbox window is closed instead, and nothing takes the keyboard, so
 this is the run for a desktop in use); and through the shell's own install on
@@ -452,16 +466,20 @@ Every macOS tag build (`gh-vX.Y.ZrcN` TEST and `vX.Y.Z` stable) is Developer ID
 signed and notarized, and fails rather than publish an ad-hoc app. The
 `desktop-updater` Environment holds the Apple set: `APPLE_CERTIFICATE` (base64
 `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
-`APPLE_API_KEY`, `APPLE_API_ISSUER`, and `APPLE_API_PRIVATE_KEY` (the raw `.p8`
-App Store Connect key). `scripts/macos_signing.py` owns every step. Tauri seals
+`APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY` (the raw `.p8`
+App Store Connect key), and `APPLE_PROVISIONING_PROFILE` (base64 of the app's
+Developer ID provisioning profile, on one line). `scripts/macos_signing.py`
+owns every step. Tauri seals
 the bundle ad hoc and never receives Apple credentials, so it cannot sign or
 notarize on its own.
 
 1. **Credentials.** The identity goes into a temporary runner keychain and the
-   notary key into a `0600` file; both are deleted when the job ends. A tag build
-   with a missing or partial set fails before anything is built. A manual build
-   accepts the complete set or none of it. `APPLE_TEAM_ID` must equal the pinned
-   Team.
+   notary key and the provisioning profile into `0600` files; all are deleted
+   when the job ends. A tag build with a missing or partial set fails before
+   anything is built. A manual build accepts the complete set or none of it, so
+   no Developer ID app is ever signed without the profile. `APPLE_TEAM_ID` must
+   equal the pinned Team, and the profile must fit the imported identity (see
+   **Provisioning profile**).
 2. **Runtime.** `build-runtime-bundle.py` signs every Mach-O of the private
    Runtime with the hardened runtime and a secure timestamp after compiling its
    bytecode, and before the startup probe, `runtime.zip`, its manifest, and the
@@ -472,10 +490,21 @@ notarize on its own.
    without a reviewed identity fails the build. Signatures are embedded in each
    file, so first-launch extraction is unchanged: the archive and tree hashes
    simply cover the signed bytes.
-3. **App.** The Cua Driver helper and then Avibe.app are signed, the app is
+3. **App.** The Cua Driver helper is signed, the profile is copied to
+   `Avibe.app/Contents/embedded.provisionprofile`, and Avibe.app is signed with
+   `entitlements/app-developer-id.plist`; the signer then checks the exact
+   entitlements and that the embedded profile is byte-identical to the input
+   and lists the certificate the app is actually signed with. The app is
    notarized with `notarytool` through the API key, and its ticket is stapled.
    The launch smoke test, the DMG, and the updater archive all use this final
-   app. A notary request that times out, loses its connection, or meets a 5xx
+   app. Before launching a signed app, the smoke test checks that the runner
+   kills an ad-hoc program claiming the app's restricted entitlements without
+   a profile, as a user's Mac does, and fails otherwise; only then does a
+   launch that survives show that macOS accepted the embedded profile. The
+   `desktop-shell` pull request job runs the same check
+   (`scripts/check-restricted-entitlement-refusal.sh`) on the same hosted
+   image without credentials, so an image that stops refusing fails there
+   first. A notary request that times out, loses its connection, or meets a 5xx
    is tried up to three times; once the upload has an id, the retry waits on
    that submission rather than submitting again. A verdict such as `Invalid`
    fails at once.
@@ -505,7 +534,33 @@ Ad-hoc builds had a per-build DR, so macOS treats the first signed build as a ne
 program: users grant Computer Use permissions and Keychain access once more, and
 later signed updates keep them.
 
-**Entitlements.** The app keeps only microphone input (`src-tauri/Entitlements.plist`).
+**Provisioning profile.** WKWebView offers passkeys (WebAuthn) only for a site
+the app is associated with, through the `webcredentials:` associated domains
+`sandbox.avibe.bot` (the Protected Vault) and `avibe.bot` (the account).
+`com.apple.developer.associated-domains` is a restricted entitlement: macOS
+kills, at launch, an app that claims it without an embedded provisioning
+profile authorizing it. The profile is a Developer ID (direct distribution)
+profile for `68B2SQ6YK3.bot.avibe.desktop` with the Associated Domains
+capability, and it lists the Developer ID Application certificates allowed to
+sign the app. Before signing, the signer refuses a profile that is for another
+Team or application identifier, is not a macOS Developer ID profile for all
+devices, does not allow every restricted entitlement the app claims, has
+expired (it warns 30 days before), or does not list the certificate of the
+signing identity in use (compared by fingerprint). **A new signing certificate
+needs a new profile listing it, updated in `APPLE_PROVISIONING_PROFILE` in the
+same change**, or every signed build fails. The profile does not change the
+code identity below: the designated requirement depends only on the identifier
+and the certificate chain. Each host's `apple-app-site-association` file must
+also name `68B2SQ6YK3.bot.avibe.desktop` for macOS to associate the app.
+
+**Entitlements.** Only the Developer ID app signature claims the restricted
+keys: `entitlements/app-developer-id.plist` is `src-tauri/Entitlements.plist`
+plus `com.apple.developer.associated-domains`,
+`com.apple.application-identifier`, and `com.apple.developer.team-identifier`.
+Every build without the profile (a manual build without credentials, the cache
+warm-up, a local `tauri build`) keeps the entitlements Tauri seals the bundle
+with, `src-tauri/Entitlements.plist`, which must never hold a restricted key.
+That file keeps only microphone input.
 Node needs a code-generation exception (`allow-jit` on Apple silicon,
 `allow-unsigned-executable-memory` on Intel, whose V8 does not use `MAP_JIT`) and
 `disable-library-validation`, because the Show Runtime and npm-installed Agent
@@ -514,7 +569,10 @@ backends load native addons this Team did not sign. Python on Intel needs
 in writable executable memory without `MAP_JIT`, and without the entitlement the
 first callback hangs. Python on Apple silicon and the helper need none. GitHub's
 macOS runners enforce neither library validation nor the JIT restriction, so CI
-proves signing and notarization but not that entitlements are sufficient. Check
+proves signing and notarization but not that entitlements are sufficient. Whether
+they refuse a restricted entitlement no profile authorizes is a separate
+question, which that control answers in pull request CI and on every signed
+build. Check
 an entitlement change on a Mac with System Integrity Protection enabled, for
 example by running the release-signed `python` and `node` from an extracted
 `runtime.zip` in a scratch directory, the Intel ones under Rosetta

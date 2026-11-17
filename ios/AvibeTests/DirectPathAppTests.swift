@@ -1143,7 +1143,11 @@ final class DirectPathAppTests: XCTestCase {
         )
         controller.loadViewIfNeeded()
 
-        await fulfillment(of: [headersSent.expectation], timeout: 30)
+        // The WebView's first load waits for its web content process.
+        await fulfillment(
+            of: [headersSent.expectation],
+            timeout: WebKitReadiness.webContentLaunchSeconds
+        )
         try await eventually {
             events.contains {
                 $0.stage == .committed && $0.destination == .instance
@@ -1989,7 +1993,8 @@ final class DirectPathAppTests: XCTestCase {
             _ = await signOut.result
             signedOut.value = true
         }
-        try await eventually {
+        // Sign-out logs out through an account transport it may launch.
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
             notifications.providerPatches.releaseAll()
             return signedOut.value
         }
@@ -2340,7 +2345,11 @@ final class DirectPathAppTests: XCTestCase {
         app.showAccount()
         app.mobileSessionCoordinator.activateAccountSurface()
         let refresh = Task { try await app.mobileSessionCoordinator.refresh() }
-        await fulfillment(of: [fetched.expectation], timeout: 30)
+        // The refresh launches its own account transport first.
+        await fulfillment(
+            of: [fetched.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
         XCTAssertTrue(app.returnToRuntime())
         XCTAssertEqual(app.route, .browser(runtime))
         releaseFetch.signal()
@@ -2392,7 +2401,11 @@ final class DirectPathAppTests: XCTestCase {
                 code: "123456"
             )
         }
-        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
+        // The operation launches its own account transport first.
+        await fulfillment(
+            of: [hold.inFlight.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
         XCTAssertFalse(app.mobileSessionCoordinator.keepsSelectedRuntime(runtime))
         XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
@@ -3526,7 +3539,12 @@ final class DirectPathAppTests: XCTestCase {
                 )
             )
         }
-        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
+        // The request launches its own account transport first: the App
+        // itself allows that the readiness and request deadlines together.
+        await fulfillment(
+            of: [hold.inFlight.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
         return request
     }
 

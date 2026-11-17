@@ -483,8 +483,10 @@ windows, Show Pages, and iframes do not receive these handlers.
 
 ### avibe.bot pages in the App
 
-Account's 隐私政策 / Privacy policy and 删除账号 / Delete account
-(App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
+账号与数据 / Account and data, one page below Account, holds 隐私政策 /
+Privacy policy and, as one plain red line at its very bottom, 删除账号 /
+Delete account, so deletion is never on Account itself (owner, 2026-11-17).
+Both (App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
 is `privacyPolicy` or `accountDeletion` and nothing else; any other value or
 an extra parameter is `invalid_argument`. Native code owns the addresses:
 `/privacy` and `/account/delete` on the control-plane origin
@@ -1132,10 +1134,15 @@ The app and the Notification Service extension each carry a
 own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking;
 the app also declares system boot time (`35F9.1`), which the direct
 transport's deadlines read through `ProcessInfo.systemUptime`.
-The app also declares the data it collects, matching its App Privacy answers:
-the account's email address and user ID, linked to the user, for App
-Functionality only. The extension decrypts and shows notifications on the
-device and collects nothing.
+The app also declares the data it collects, matching its App Privacy answers
+(owner-approved, 2026-11-17): the account's email address and user ID, the
+device's push token, which the avibe.bot relay stores (Device ID),
+hold-to-talk recordings, which avibe.bot relays to the speech service (Audio
+Data), and the voice usage records avibe.bot keeps (Other Usage Data). Each is linked to the user, for App Functionality only, and not used
+for tracking. The extension decrypts and shows notifications on the device and
+collects nothing. `verify-archive` checks that each manifest exists and
+declares no tracking; it does not compare the collected types with App Store
+Connect, so change both together.
 
 `Info.plist` declares `ITSAppUsesNonExemptEncryption = false`: the app uses
 only the system's HTTPS and passkey cryptography, so builds need no export

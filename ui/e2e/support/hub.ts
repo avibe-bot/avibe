@@ -422,6 +422,9 @@ export const fillApiKeyForm = async (
     }
     await format.click();
   }
-  await dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true }).fill(values.baseUrl);
+  // A preset's address waits under 「More settings」.
+  const baseUrl = dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true });
+  if (!(await baseUrl.isVisible())) await dialog.getByRole('button', { name: hub('addKey.more'), exact: true }).click();
+  await baseUrl.fill(values.baseUrl);
   await dialog.getByLabel(hub('addKey.field.apiKey'), { exact: true }).fill(values.apiKey);
 };

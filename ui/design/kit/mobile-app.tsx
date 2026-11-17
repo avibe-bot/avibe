@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Eye, EyeOff, Globe, KeyRound, Laptop, Mail, MonitorDown, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
+import { AlertTriangle, Database, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Eye, EyeOff, Globe, KeyRound, Laptop, Mail, MonitorDown, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label';
 import { MoreAccountSection } from '@/components/workbench/MorePage';
 import { MobileAppHeader } from '@/components/apps/MobileAppHeader';
 import type { AppLicenses } from '@/mobile/appLicenses';
-import { AboutSection, DeleteAccount, LicensesContent } from '@/mobile/LicensesPage';
+import { AboutSection, AccountLinkRow, LicensesContent } from '@/mobile/LicensesPage';
 import logo from '@/assets/logo.png';
 import mailMascot from '@/assets/pet/vibey-message.png';
 import heroMascot from '../../../assets/mascot/cloud-tuanzi-v2.png';
@@ -147,7 +147,7 @@ export function EmptyInstancesPage({ cli = false }: { cli?: boolean }) {
 }
 export function AccountPage({ instance, licenses = false }: { instance?: MobileInstance; licenses?: boolean }) {
   const t = useCopy();
-  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section><AboutSection licenses={licenses} onPrivacy={noop} /><DeleteAccount onDelete={noop} /></CloudScreen>;
+  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section><div className="mt-8"><AccountLinkRow icon={Database} label={t('账号与数据', 'Account and data')} onClick={noop} /></div><AboutSection licenses={licenses} /></CloudScreen>;
 }
 /** The shipped Open-source licenses page (`LicensesContent`) in the A screen. */
 export function LicensesScreen({ licenses, openGroup }: { licenses: AppLicenses; openGroup?: number }) {

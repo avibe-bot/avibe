@@ -427,7 +427,7 @@ export const AddSourceDialog: React.FC<{
             <DialogPrimitive.Description className="setup-add-subtitle">
               {/* The line describes the method in view: the import note belongs to what was
                   detected, not to a key the person is typing. */}
-              {t(active === 'apiKey' ? 'onboarding.providers.addDescriptionKey'
+              {t(active === 'apiKey' ? keyPreset ? 'onboarding.providers.addDescriptionKeyPreset' : 'onboarding.providers.addDescriptionKey'
                 : active === 'detected' ? 'onboarding.providers.addDescriptionMore' : 'onboarding.providers.addDescription')}
             </DialogPrimitive.Description>
             {/* A segmented group rather than a tablist: these buttons state which

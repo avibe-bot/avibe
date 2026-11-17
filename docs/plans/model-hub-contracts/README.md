@@ -304,10 +304,12 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    normally repeats observation before committed credential provisioning. Explicit
    `save_unverified: true` permits a catalog pin or declaration without observation;
    custom Auto still cannot be guessed. Completed Hub OAuth consent can retain its
-   bound credential under the fixed vendor protocol. A newly stored Hub credential
-   that no add-time observation authenticated — an explicit unverified save, a
-   native-config import, Hub OAuth admission, any credential or endpoint replacement —
-   carries an opaque `verification_pending` identity. Model Sources keep the
+   bound credential under the fixed vendor protocol. API-key save, key replacement
+   and Base URL changes check the owned models witness: gated acceptance clears
+   the new pending marker, explicit credential rejection refuses the mutation,
+   and unknown evidence saves pending while retaining usable inventory. A newly
+   stored Hub credential with no authentication evidence — including native-config
+   import and Hub OAuth admission — carries an opaque `verification_pending` identity. Model Sources keep the
    matching-credential model-call rule: a successful model call with the same current
    credential and marker may clear it. A tool-only `search` Source never makes a model call.
    For every search-capable Source, including an official DeepSeek model Source
@@ -317,7 +319,7 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    are empty or its body is unreadable. Clearing requires the same current credential
    and marker and is a fresh cross-process field mutation; `credential_generation`
    does not change. Free-check `unknown` and `invalid` leave it unchanged.
-   Model discovery never clears it.
+   Plain model discovery never clears it.
    A typed Base URL never supplies protocol ownership. For model observation,
    model-free validation, altered-credential controls and publicly readable model
    lists do not prove authentication; on a protocol that

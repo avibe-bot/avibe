@@ -1010,8 +1010,9 @@ Push to APNs (section 8).
   microphone capture, WebKit's file-picker camera path, and activity-sheet
   photo saving.
 - **Privacy**: a privacy manifest (`PrivacyInfo.xcprivacy`) and App Store
-  privacy labels covering the account email and audio sent for transcription
-  through avibe.bot.
+  privacy labels covering the account email and user ID, the push token the
+  avibe.bot relay stores, audio sent for transcription through avibe.bot, and
+  its voice usage records (`ios/README.md`, TestFlight).
 - **Export compliance**: standard HTTPS and CryptoKit only.
 
 ### Apple account and team access
