@@ -14,6 +14,7 @@ const designFrames = frames(['default', 'reduced-motion'].map((name) => ({
   ...IPHONE_17_PRO,
   status: 'shipped' as const,
   themes: ['light', 'dark'],
+  fixtures: { bots: [] },
   reducedMotion: name === 'reduced-motion',
   click: ['img.cursor-zoom-in'],
   render: () => (
