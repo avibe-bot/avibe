@@ -5815,15 +5815,15 @@ def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes
                                       "reasoning_efforts": []}),
     ],
 )
-def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_path, model_id, origin, row):
-    """AUTH-SETUP-166: unlisted pick -> catalog write with no supplier promise -> Agent model -> unsupplied route -> explicit manual hop -> runnable route -> completion.
+def test_setup_cannot_finish_on_a_model_no_provider_lists(monkeypatch, tmp_path, model_id, origin, row):
+    """AUTH-SETUP-166: setup offers no model that no provider lists, so it cannot finish on one.
 
-    The setup picker also offers what no provider lists: a catalog model, or the ID the
-    user typed. Neither showed a supplier, so the catalog write states no expectation for
-    it. No Source lists the ID, so nothing forwards it automatically: the built-in Agent
-    keeps the chosen model but its route is unconfigured. An explicit manual hop to the
-    API-key Source forwards the ID as it is, which makes the Agent runnable and lets setup
-    finish on it. Every step is an HTTP route the Web client calls.
+    Setup's picker offers only supplied candidates: never a catalog model or a typed ID
+    that no Source lists (the picker case the row cites). This is the server half. The
+    candidates read setup draws from gives neither ID a supplier, and an Agent made to
+    select one anyway (the Settings write path) keeps the model but has an unconfigured,
+    interrupted named route, which the entry gate refuses. Nothing forwards the ID
+    without an explicit manual route.
     """
     from core.vibe_agents import VibeAgentStore
     from tests.test_model_hub_api import _service
@@ -5858,8 +5858,11 @@ def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_pa
         listed = client.get("/api/agents").get_json()
         vibey = next(row for row in listed["agents"] if row["backend"] == "vibey" and row["bot"] is None)
         candidates = client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]
-        offered = {row["id"] for group in candidates.values() for row in group}
-        assert model_id not in offered
+        rows = [row for group in candidates.values() for row in group]
+        # Setup offers the supplied rows: the Source's models, never the unlisted ID.
+        supplied = {row["id"] for row in rows if row["suppliers"]}
+        assert {"mock-large", "mock-mini"} <= supplied
+        assert model_id not in {row["id"] for row in rows}
 
         def vibey_supply():
             rows = client.get("/api/models/agents").get_json()["agents"]
@@ -5873,36 +5876,14 @@ def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_pa
             headers=headers,
         )
         assert written.status_code == 200, written.get_json()
-        saved = next(row for row in vibey_supply()["catalog_models"] if row["id"] == model_id)
-        assert saved["origin"] == origin
-        assert saved["context_window"] == row["context_window"]
-
         named = client.patch(f"/api/agents/{vibey['name']}", json={"model": model_id}, headers=headers)
         assert named.status_code == 200, named.get_json()
         route = next(row for row in vibey_supply()["named_agents"] if row["name"] == vibey["name"])
-        # No inventory match: the pick stands, but nothing forwards it on its own.
+        # The selection stands, but no inventory match supplies it: nothing to enter on.
         assert route["effective_model_id"] == model_id
         assert route["supply_status"] == "interrupted"
         assert route["route_reason"] == "route_unconfigured"
         assert model_id not in store.config.agents["vibey"].routes
-
-        hop = {"source_id": source.id, "model_id": model_id}
-        manual = client.put(
-            f"/api/models/agents/vibey/chain?model={model_id}", json={"hops": [hop]}, headers=headers,
-        )
-        assert manual.status_code == 200, manual.get_json()
-        assert manual.get_json()["chain"]["route_origin"] == "manual"
-        assert [model.id for model in store.config.sources[0].models] == ["mock-large", "mock-mini"]
-        route = next(row for row in vibey_supply()["named_agents"] if row["name"] == vibey["name"])
-        assert route["effective_model_id"] == model_id
-        assert route["supply_status"] in {"ok", "degraded"}
-        assert route["route_reason"] != "route_unconfigured"
-
-        chosen = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
-        assert chosen.status_code == 200, chosen.get_json()
-        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
-        assert completed.status_code == 200, completed.get_json()
-        assert V2Config.load().setup_completed
     finally:
         agents.close()
 

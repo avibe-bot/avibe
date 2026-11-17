@@ -271,6 +271,32 @@ describe('BackendModelPickerDialog', () => {
     expect(onCustom).toHaveBeenLastCalledWith('', []);
   });
 
+  it('AUTH-SETUP-166 offers only supplied models when asked to (setup), with no catalog rows or typed ID', async () => {
+    const user = userEvent.setup();
+    answers({
+      builtin: [candidate('unsupplied-builtin', { origin: 'builtin' })],
+      providers: [candidate('claude-fable-5', { suppliers: [{ source_id: 'src_a', source_name: 'Relay', model_id: 'claude-fable-5' }] })],
+    });
+    const lookup = vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    renderPicker({ suppliedOnly: true, onCustom: undefined, choose: 'one' });
+
+    expect(await screen.findByRole('radio', { name: /claude-fable-5/ })).toBeTruthy();
+    expect(screen.queryByRole('radio', { name: /unsupplied-builtin/ })).toBeNull();
+    await user.type(search(), 'not-listed-anywhere');
+    expect(await screen.findByText(/None of your providers lists this model/)).toBeTruthy();
+    // Past the catalog's debounce, so a lookup that was going to be asked would have been.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
+    expect(screen.queryByRole('button', { name: /as a custom model/ })).toBeNull();
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('says no provider supplies a model yet when setup has nothing to offer, before any search', async () => {
+    answers({ builtin: [candidate('unsupplied-builtin', { origin: 'builtin' })] });
+    renderPicker({ suppliedOnly: true, onCustom: undefined, choose: 'one' });
+    expect(await screen.findByText('No provider supplies a model yet.')).toBeTruthy();
+    expect(screen.queryByText(/None of your providers lists this model/)).toBeNull();
+  });
+
   it('offers a catalog model no provider lists as a pick described by the catalog', async () => {
     const user = userEvent.setup();
     const fable: ModelsDevMatch = {

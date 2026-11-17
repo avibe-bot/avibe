@@ -831,20 +831,23 @@ scenarios:
       - ui/src/components/onboarding/useSetupModelChoice.test.ts
       - ui/e2e/onboarding-fidelity/pm-main-flow.spec.ts
   - id: AUTH-SETUP-166
-    name: Setup picks a model no provider lists (a catalog model or a typed ID) and completes on it
+    name: Setup offers no model that no provider lists (a catalog model or a typed ID), so it cannot finish on one
     status: covered
-    kind: happy_path
+    kind: negative_path
     layer: scenario
     backend: vibey
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_picks_a_model_no_provider_lists_and_completes
-    # The scenario owns the server boundary for an unlisted pick: the catalog write
-    # with no supplier promise, the Agent's model, the unsupplied named route (no
-    # automatic forwarding), the explicit manual hop that makes it runnable, and
-    # completion. The browser side (which rows the picker offers for a search, the
-    # row a catalog or typed pick carries, and that it promises no suppliers) is the
-    # supporting tests.
+    test:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_cannot_finish_on_a_model_no_provider_lists
+      - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::AUTH-SETUP-166 offers only supplied models when asked to (setup), with no catalog rows or typed ID
+      - "ui/src/components/onboarding/BuiltinAssistant.test.tsx::AUTH-SETUP-166 offers only supplied candidates behind All models: no catalog row and no typed ID"
+    # Setup's picker is supplied-only: it offers no catalog row and no typed ID, since
+    # setup has no step to route a model no Source lists. The picker case proves the
+    # offer and the setup card case proves setup wires it; the server case proves such
+    # a selection is unsupplied (route_unconfigured, interrupted) with no automatic
+    # forwarding, which the entry gate refuses. Settings
+    # still offers both, where the model's route is set by hand.
     supporting_tests:
-      - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx
+      - ui/src/components/onboarding/entryGate.test.ts::still needs its applied connection and a runnable route
       - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
       - ui/src/components/onboarding/useSetupModelChoice.test.ts
   - id: AUTH-SETUP-132
