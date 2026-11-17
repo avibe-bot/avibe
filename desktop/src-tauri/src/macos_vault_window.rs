@@ -619,7 +619,10 @@ fn look_at_opener(webview: &WKWebView) -> Option<Retained<NSWindow>> {
     let shown = window.is_some();
     ARRIVALS.with_borrow_mut(|arrivals| {
         if let Some(sight) = arrivals.openers.iter_mut().find(|sight| sight.key == key) {
-            if shown && !std::mem::replace(&mut sight.shown, shown) {
+            // Remember what is seen every time, hidden included, so that the
+            // next time it is shown counts as coming back.
+            let was_shown = std::mem::replace(&mut sight.shown, shown);
+            if shown && !was_shown {
                 arrivals.last = Some(Instant::now());
             }
         }
