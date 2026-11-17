@@ -8,8 +8,10 @@ import OSLog
 protocol VoiceCaptureInstance: AnyObject {
     func status() async throws -> VoiceCaptureInstanceClient.Status
     func transcribe(audio: Data, name: String, mime: String) async throws -> String
-    func sendToMainBot(_ text: String) async throws
+    func mainBotMessagesPath() async throws -> String
+    func postMessage(_ text: String, to sessionPath: String) async throws
     func close()
+    var releaseBarrier: WebsiteDataStoreReleaseBarrier? { get }
 }
 
 extension VoiceCaptureInstanceClient: VoiceCaptureInstance {}
@@ -117,8 +119,7 @@ final class VoiceCaptureController {
         let activity: VoiceCaptureActivityHandle
         let startedAt: Date
         var endedAt: Date?
-        /// Kept once transcribed, so Retry after a failed send does not
-        /// transcribe the audio again.
+        /// Kept once transcribed, so Retry does not transcribe again.
         var text: String?
     }
 
@@ -141,6 +142,9 @@ final class VoiceCaptureController {
 
     private let environment: VoiceCaptureEnvironment
     private var state: State = .idle
+    /// Raised by an account change; a start that was waiting on the
+    /// instance when it changed gives up instead of recording.
+    private var generation = 0
     private var maximumDurationTask: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
 
@@ -208,6 +212,32 @@ final class VoiceCaptureController {
         await deliver(take)
     }
 
+    /// The account is signing out or changing: stop and discard any take,
+    /// release its WebView, and keep nothing for Retry. Returns the WebViews
+    /// the store transition waits for.
+    func cancelForAccountTransition() -> [WebsiteDataStoreReleaseBarrier] {
+        generation += 1
+        maximumDurationTask?.cancel()
+        maximumDurationTask = nil
+        stopObservingInterruptions()
+        let take: Take?
+        switch state {
+        case .listening(let current), .sending(let current), .failed(let current):
+            take = current
+        case .idle, .preparing:
+            take = nil
+        }
+        state = .idle
+        guard let take else { return [] }
+        let barrier = take.instance.releaseBarrier
+        take.audio.stop()
+        take.instance.close()
+        take.audio.discard()
+        let activity = take.activity
+        Task { await activity.end(nil, dismissal: .immediate) }
+        return barrier.map { [$0] } ?? []
+    }
+
     /// Opens the main Bot's conversation, where the Web UI asks for
     /// whatever is missing (voice consent, the microphone, sign-in).
     func openMainBotChat() {
@@ -224,6 +254,7 @@ final class VoiceCaptureController {
 
     private func start() async -> Outcome {
         state = .preparing
+        let startGeneration = generation
         guard let target = environment.target() else {
             state = .idle
             record("start: no selected instance")
@@ -246,8 +277,13 @@ final class VoiceCaptureController {
         let instance = environment.makeInstance(target)
         if let refusal = await checkStatus(instance) {
             instance.close()
-            state = .idle
+            if generation == startGeneration { state = .idle }
             return refusal
+        }
+        guard generation == startGeneration else {
+            // The account changed while the instance answered.
+            instance.close()
+            return .stopped
         }
 
         let id = UUID()
@@ -340,18 +376,28 @@ final class VoiceCaptureController {
 
     private func deliver(_ initial: Take) async {
         var take = initial
+        let deliverGeneration = generation
         state = .sending(take)
         await take.activity.update(content(for: take, phase: .sending))
+        // Once the message POST has been made, its outcome may be unknown
+        // (a lost response): it is never repeated, so Retry cannot send the
+        // same spoken instruction twice.
+        var posted = false
         do {
             if take.text == nil {
                 let audio = try Data(contentsOf: take.audio.url)
                 take.text = try await take.instance.transcribe(
                     audio: audio, name: "voice.m4a", mime: "audio/mp4"
                 )
-                state = .sending(take)
             }
+            guard generation == deliverGeneration else { return }
+            state = .sending(take)
             guard let text = take.text else { throw VoiceCaptureInstanceClient.Failure.nothingHeard }
-            try await take.instance.sendToMainBot(text)
+            let path = try await take.instance.mainBotMessagesPath()
+            guard generation == deliverGeneration else { return }
+            posted = true
+            try await take.instance.postMessage(text, to: path)
+            guard generation == deliverGeneration else { return }
             record("deliver: sent")
             state = .idle
             let heard = String(text.prefix(VoiceCaptureAttributes.ContentState.heardLimit))
@@ -361,7 +407,15 @@ final class VoiceCaptureController {
                 final: content(for: take, phase: .sent, heard: heard)
             )
         } catch let failure as VoiceCaptureInstanceClient.Failure {
-            record("deliver: failed \(failure)")
+            record("deliver: failed \(failure) posted=\(posted)")
+            guard generation == deliverGeneration else { return }
+            if posted, failure != .consentRequired, failure != .signIn {
+                // It may have arrived; the chat shows whether it did.
+                state = .idle
+                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
+                          final: content(for: take, phase: .failed, reason: .sendFailed))
+                return
+            }
             switch failure {
             case .nothingHeard:
                 state = .idle
@@ -377,14 +431,21 @@ final class VoiceCaptureController {
                 await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
                           final: content(for: take, phase: .needsApp, reason: .signIn))
             default:
+                // Nothing was posted yet, so Retry is safe.
                 let reason: VoiceCaptureAttributes.Reason =
-                    failure == .offline ? .offline
-                    : take.text == nil ? .transcriptionFailed : .sendFailed
+                    take.text == nil && failure != .offline ? .transcriptionFailed : .offline
                 await keepForRetry(take, reason: reason)
             }
         } catch {
             record("deliver: failed \(error)")
-            await keepForRetry(take, reason: .transcriptionFailed)
+            guard generation == deliverGeneration else { return }
+            if posted {
+                state = .idle
+                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
+                          final: content(for: take, phase: .failed, reason: .sendFailed))
+            } else {
+                await keepForRetry(take, reason: .transcriptionFailed)
+            }
         }
     }
 

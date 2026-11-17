@@ -127,9 +127,9 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(slip.instance.transcribed, 0)
     }
 
-    func testAFailedSendIsKeptForRetryWithoutTranscribingAgain() async {
+    func testAFailureBeforeTheMessageIsPostedIsKeptForRetryWithoutTranscribingAgain() async {
         let world = World()
-        world.instance.sendFailures = 1
+        world.instance.pathFailures = 1
         let controller = world.controller()
         _ = await controller.toggle()
         world.audio?.duration = 2
@@ -143,6 +143,47 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.instance.transcribed, 1)
         XCTAssertEqual(world.instance.sent, ["hello"])
         XCTAssertEqual(world.activities.first?.ended?.phase, .sent)
+    }
+
+    func testAMessageWhosePostFailedIsNeverSentAgain() async {
+        let world = World()
+        world.instance.postFailures = 1
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        // The POST may have reached the instance; Retry would send it twice.
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.activities.first?.ended?.reason, .sendFailed)
+        XCTAssertFalse(VoiceCaptureDetail.retryable(.sendFailed))
+        XCTAssertEqual(world.instance.posts, 1)
+        XCTAssertEqual(world.audio?.discarded, true)
+    }
+
+    func testAnAccountChangeStopsTheTakeAndKeepsNothing() async {
+        let world = World()
+        let controller = world.controller()
+        _ = await controller.toggle()
+        _ = controller.cancelForAccountTransition()
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.audio?.discarded, true)
+        XCTAssertEqual(world.instance.closed, true)
+        await controller.retry()
+        XCTAssertTrue(world.instance.sent.isEmpty)
+
+        // A start still waiting on the instance gives up.
+        let waiting = World()
+        waiting.instance.holdStatus = true
+        let other = waiting.controller()
+        let start = Task { await other.toggle() }
+        while other.phase != .preparing { await Task.yield() }
+        for _ in 0..<5 { await Task.yield() }
+        _ = other.cancelForAccountTransition()
+        waiting.instance.release()
+        let outcome = await start.value
+        XCTAssertEqual(outcome, .stopped)
+        XCTAssertNil(waiting.audio, "nothing recorded for the old account")
+        XCTAssertEqual(other.phase, .idle)
     }
 
     func testANoGivenSinceStopsWithoutRetry() async {
@@ -217,14 +258,22 @@ private final class FakeInstance: VoiceCaptureInstance {
     var statusResult: Result<VoiceCaptureInstanceClient.Status, Error> =
         .success(.init(available: true, consent: .granted))
     var transcribeResult: Result<String, Error> = .success("hello")
-    var sendFailures = 0
+    var pathFailures = 0
+    var postFailures = 0
+    var posts = 0
     var holdTranscribe = false
+    var holdStatus = false
     var transcribed = 0
     var sent: [String] = []
     var closed = false
     private var held: CheckedContinuation<Void, Never>?
 
-    func status() async throws -> VoiceCaptureInstanceClient.Status { try statusResult.get() }
+    func status() async throws -> VoiceCaptureInstanceClient.Status {
+        if holdStatus {
+            await withCheckedContinuation { held = $0 }
+        }
+        return try statusResult.get()
+    }
 
     func transcribe(audio: Data, name: String, mime: String) async throws -> String {
         if holdTranscribe {
@@ -239,15 +288,25 @@ private final class FakeInstance: VoiceCaptureInstance {
         held = nil
     }
 
-    func sendToMainBot(_ text: String) async throws {
-        if sendFailures > 0 {
-            sendFailures -= 1
+    func mainBotMessagesPath() async throws -> String {
+        if pathFailures > 0 {
+            pathFailures -= 1
+            throw VoiceCaptureInstanceClient.Failure.offline
+        }
+        return "/api/sessions/ses_main"
+    }
+
+    func postMessage(_ text: String, to sessionPath: String) async throws {
+        posts += 1
+        if postFailures > 0 {
+            postFailures -= 1
             throw VoiceCaptureInstanceClient.Failure.offline
         }
         sent.append(text)
     }
 
     func close() { closed = true }
+    var releaseBarrier: WebsiteDataStoreReleaseBarrier? { nil }
 }
 
 private final class FakeAudio: VoiceCaptureAudio {

@@ -330,8 +330,15 @@ the main Bot acts on the user's computer.
 - The take is sent as `POST /api/asr/transcribe` (the whole AAC take), then
   `GET /api/sessions/main` and `POST /api/sessions/<id>/messages` with
   `metadata.input = "voice"`. The reply arrives as the instance's usual
-  notification. A failed transcription or send keeps the take, and its text
-  once transcribed, for Retry for ten minutes.
+  notification. A failure before the message `POST` keeps the take, and its
+  text once transcribed, for Retry for ten minutes. Once the `POST` was made
+  its outcome may be unknown, so a failure there is reported and never
+  retried: an instruction is never sent twice. An ordinary submission clears
+  the Session's composer draft, so an unsent draft is read first and put back
+  after, unless one was written meanwhile.
+- An account sign-out or change (`AppModel.prepareForAccountTransition`)
+  stops and discards any take, releases its WebView, and makes a start still
+  waiting on the instance give up.
 - `VoiceCaptureInstanceClient` makes these requests as the signed-in user
   without the runtime WebView: a hidden `WKWebView` on the account's own
   named store (the selection and store identifier the account coordinator

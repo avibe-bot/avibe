@@ -148,24 +148,49 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         return text
     }
 
-    /// Ensures the main Bot's Session (`GET /api/sessions/main` creates it on
-    /// first use) and posts the words to it as a spoken message. The reply
-    /// arrives over the instance's usual notifications.
-    func sendToMainBot(_ text: String) async throws {
+    /// The main Bot's Session messages path. `GET /api/sessions/main`
+    /// creates the Session on first use.
+    func mainBotMessagesPath() async throws -> String {
         let main = try await request("GET", "/api/sessions/main")
         try Self.check(main)
         let sessionID = (main.json?["session"] as? [String: Any])?["id"] as? String
-            ?? main.json?["id"] as? String
             ?? Self.mainSessionID
-        let path = "/api/sessions/"
+        return "/api/sessions/"
             + (sessionID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
                 ?? Self.mainSessionID)
-            + "/messages"
+    }
+
+    /// Posts the words as a spoken message. The reply arrives over the
+    /// instance's usual notifications.
+    ///
+    /// An ordinary submission clears the Session's composer draft, which
+    /// this message never came from, so an unsent draft is put back: read
+    /// before, restored after, only if nobody has written one since.
+    func postMessage(_ text: String, to sessionPath: String) async throws {
+        let before = try? await request("GET", sessionPath + "/draft")
+        let draft = (before?.status == 200 ? before?.json?["text"] as? String : nil) ?? ""
         let response = try await request(
-            "POST", path,
+            "POST", sessionPath + "/messages",
             json: ["text": text, "metadata": ["input": "voice"]]
         )
         try Self.check(response)
+        guard !draft.isEmpty else { return }
+        guard
+            let after = try? await request("GET", sessionPath + "/draft"),
+            after.status == 200,
+            (after.json?["text"] as? String ?? "").isEmpty
+        else {
+            return
+        }
+        _ = try? await request(
+            "PUT", sessionPath + "/draft",
+            json: ["text": draft, "expected_updated_at": after.json?["updated_at"] ?? NSNull()]
+        )
+    }
+
+    /// The WebView a store transition must wait for.
+    var releaseBarrier: WebsiteDataStoreReleaseBarrier? {
+        webView.map { WebsiteDataStoreReleaseBarrier(webViews: [$0]) }
     }
 
     /// Releases the hidden WebView. Call when a take is finished.

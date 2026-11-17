@@ -232,7 +232,8 @@ struct VoiceCaptureDetail: View {
 
     static func retryable(_ reason: VoiceCaptureAttributes.Reason) -> Bool {
         switch reason {
-        case .offline, .transcriptionFailed, .sendFailed: return true
+        // A message that may have arrived is never sent again.
+        case .offline, .transcriptionFailed: return true
         default: return false
         }
     }
