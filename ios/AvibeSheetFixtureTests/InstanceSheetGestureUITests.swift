@@ -210,6 +210,10 @@ final class InstanceSheetGestureUITests: XCTestCase {
         // 0.7 s flick too little travel, so it snapped back. One tap on
         // static text, confirmed by its native touch receipt, takes that
         // first-touch cost before the flick; the flick itself is unchanged.
+        // Caveat: a regression that makes the first gesture after opening
+        // slow no longer fails here. Both latencies are logged (not
+        // asserted) as "[sheet gesture latency]" attachments, so one stays
+        // visible.
         let warmed = SheetFixtureReadiness.warmTouchHandling(in: app)
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
@@ -298,6 +302,17 @@ enum SheetFixtureReadiness {
             XCTWaiter.wait(for: [received], timeout: 10), .completed,
             "The warm-up tap never reached the window", file: file, line: line
         )
+        let evidence = dismissalEvidence(in: app)
+        if let began = evidence["native-touch-began"] as? [String: Any],
+           let ended = evidence["native-touch-ended"] as? [String: Any],
+           let stamp = began["timestamp"] as? Double,
+           let delivered = began["uptime"] as? Double,
+           let upStamp = ended["timestamp"] as? Double {
+            logLatency(String(
+                format: "warm-up tap: touch-down delivered %.3f s after its timestamp; held %.3f s",
+                delivered - stamp, upStamp - stamp
+            ))
+        }
         return stages.count
     }
 
@@ -324,6 +339,15 @@ enum SheetFixtureReadiness {
             XCTFail(dismissalFailure(from: last), file: file, line: line)
             return
         }
+        if let began = last["native-touch-began"] as? [String: Any],
+           let willDismiss = last["sheet-will-dismiss"] as? [String: Any],
+           let down = began["uptime"] as? Double,
+           let start = willDismiss["uptime"] as? Double {
+            logLatency(String(
+                format: "dismissing gesture: the sheet began to dismiss %.3f s after touch-down",
+                start - down
+            ))
+        }
         // Gone, and it does not come back (waitForExistence waits for
         // appearance, which is what this checks).
         XCTAssertFalse(
@@ -331,6 +355,17 @@ enum SheetFixtureReadiness {
             "The sheet's Close button came back after the gesture",
             file: file, line: line
         )
+    }
+
+    /// Informational only, never asserted: a slow first gesture shows here.
+    private static func logLatency(_ text: String) {
+        print("[sheet gesture latency] \(text)")
+        XCTContext.runActivity(named: "[sheet gesture latency] \(text)") { activity in
+            let note = XCTAttachment(string: text)
+            note.name = "sheet-gesture-latency"
+            note.lifetime = .keepAlways
+            activity.add(note)
+        }
     }
 
     /// The fixture's dismissal receipt: on the root view once the sheet is
