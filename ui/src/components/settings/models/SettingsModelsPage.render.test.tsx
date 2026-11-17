@@ -300,7 +300,7 @@ const renderPage = (
 const switchFirstGatewayAgentToDirect = async () => {
   await userEvent.click((await screen.findAllByRole('button', { name: /Runtime mode:|运行模式[:：]/i }))[0]);
   const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
-  await userEvent.click(within(modeGroup).getByRole('button', { name: /Use own login|改为 Agent 管理|Retry|重试/i }));
+  await userEvent.click(within(modeGroup).getByRole('button', { name: /Use own login|改为自己登录|Retry|重试/i }));
 };
 
 const closeSourceDetails = async () => {
@@ -982,7 +982,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(within(vibeyCard).queryAllByRole('button', { name: /^Manage models$|^管理模型$/i })).toHaveLength(configured ? 1 : 0);
     await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
-    expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为 Agent 管理/i })).toBeNull();
+    expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为自己登录/i })).toBeNull();
     await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));
     expect(screen.queryByRole('switch')).toBeNull();
     if (!configured) {

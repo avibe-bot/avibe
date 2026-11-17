@@ -522,7 +522,7 @@ describe('AgentCard', () => {
 
   it.each([
     ['en', 'Default routing', 'Use own login', 'Let Model Hub manage'],
-    ['zh', '默认路由', '改为 Agent 管理', '交给模型网关管理'],
+    ['zh', '默认路由', '改为自己登录', '交给模型网关管理'],
   ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,
