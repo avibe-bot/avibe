@@ -155,6 +155,31 @@ def test_a_quiet_reconnect_keeps_the_page_when_the_source_is_unchanged():
     assert result["reloads"] == 0
 
 
+def test_an_update_applied_live_moves_the_baseline():
+    # An Agent edit Vite already applied while visible is not a reason to
+    # reload on the next return.
+    result = _run(
+        """
+globalThis.__AVIBE_SHOW__.contentStamp = '3-100';
+sockets[0].open();
+page.entryStamp = '4-200';
+sockets[0].deliver('{"type":"update","updates":[]}');
+await new Promise((resolve) => setTimeout(resolve, 400));
+await settle(); await settle();
+setVisibility('hidden');
+sockets[0].drop();
+setVisibility('visible');
+sockets[1]?.open();
+await settle(); await settle(); await settle();
+vite.messages.push('baseline:' + globalThis.__AVIBE_SHOW__.contentStamp);
+"""
+    )
+    assert result["pageReloads"] == 0
+    assert result["reloads"] == 0
+    assert result["messages"][-1] == "baseline:4-200"
+    assert result["fetched"] == ["/show/ses123/", "/show/ses123/"]
+
+
 def test_content_stamp_follows_page_source_not_api_data(monkeypatch, tmp_path):
     monkeypatch.setattr(ui_server.paths, "get_show_page_dir", lambda _sid: tmp_path)
     (tmp_path / "src" / "components").mkdir(parents=True)
@@ -212,6 +237,40 @@ sockets[0].drop();
     )
     assert result["reloads"] == 1
     assert result["sockets"] == 1
+
+
+def test_a_visible_drop_long_after_a_tab_switch_still_reaches_vite():
+    # Desktop sockets survive a tab switch; a later visible drop is a restart.
+    result = _run(
+        """
+sockets[0].open();
+setVisibility('hidden');
+setVisibility('visible');
+const realNow = Date.now;
+Date.now = () => realNow() + 20000;
+sockets[0].drop();
+"""
+    )
+    assert result["reloads"] == 1
+    assert result["sockets"] == 1
+
+
+def test_leaving_again_before_the_reconnect_opens_retries_on_return():
+    result = _run(
+        """
+sockets[0].open();
+setVisibility('hidden');
+sockets[0].drop();
+setVisibility('visible');
+setVisibility('hidden');
+sockets[1].drop();
+setVisibility('visible');
+sockets[2]?.open();
+"""
+    )
+    assert result["reloads"] == 0
+    assert result["sockets"] == 3
+    assert result["hmrOpen"] is True
 
 
 def test_a_reconnect_that_does_not_open_hands_the_drop_to_vite():

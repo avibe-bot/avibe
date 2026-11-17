@@ -18165,9 +18165,10 @@ _SHOW_HMR_RESUME_SCRIPT = """
   var Native=globalThis.WebSocket;
   if(typeof Native!=='function'||Native.__avibeShowHmrResume)return;
   var hides=0;
+  var shownAt=0;
   function hidden(){return document.visibilityState==='hidden';}
   function noteHide(){hides+=1;}
-  document.addEventListener('visibilitychange',function(){if(hidden())noteHide();});
+  document.addEventListener('visibilitychange',function(){if(hidden())noteHide();else shownAt=Date.now();});
   window.addEventListener('pagehide',noteHide);
   document.addEventListener('freeze',noteHide);
   function whenVisible(run){
@@ -18200,16 +18201,28 @@ _SHOW_HMR_RESUME_SCRIPT = """
       else pending.push(data);
     };
     self.close=function(code,reason){closedByPage=true;if(current)current.close(code,reason);};
-    function reloadIfSourceChanged(){
-      var show=globalThis.__AVIBE_SHOW__||{};
+    var show=globalThis.__AVIBE_SHOW__||{};
+    var baselineTimer=null;
+    function withSourceStamp(run){
       if(!show.contentStamp||!show.basePath||typeof fetch!=='function')return;
       fetch(show.basePath,{cache:'no-store',credentials:'same-origin'})
         .then(function(response){return response.ok?response.text():'';})
         .then(function(html){
           var match=/"contentStamp":"([^"]*)"/.exec(html);
-          if(match&&match[1]!==show.contentStamp)location.reload();
+          if(match)run(match[1]);
         })
         .catch(function(){});
+    }
+    function reloadIfSourceChanged(){
+      withSourceStamp(function(stamp){if(stamp!==show.contentStamp)location.reload();});
+    }
+    // An update Vite applied live is source the page already shows: move the
+    // baseline so the next return does not reload for it.
+    function refreshBaseline(){
+      clearTimeout(baselineTimer);
+      baselineTimer=setTimeout(function(){
+        withSourceStamp(function(stamp){show.contentStamp=stamp;});
+      },300);
     }
     function connect(reconnecting){
       var socket=new Native(url,protocols);
@@ -18225,14 +18238,20 @@ _SHOW_HMR_RESUME_SCRIPT = """
         else reloadIfSourceChanged();
       });
       socket.addEventListener('message',function(event){
-        if(current===socket)self.dispatchEvent(new MessageEvent('message',{data:event.data}));
+        if(current!==socket)return;
+        if(typeof event.data==='string'&&event.data.indexOf('"type":"update"')>=0)refreshBaseline();
+        self.dispatchEvent(new MessageEvent('message',{data:event.data}));
       });
       socket.addEventListener('error',function(){
         if(current===socket&&!reconnecting)self.dispatchEvent(new Event('error'));
       });
       socket.addEventListener('close',function(event){
         if(current!==socket)return;
-        if(opened&&!closedByPage&&(hides!==hidesAtOpen||hidden())){
+        // A background drop arrives while hidden or right after the return.
+        // A reconnect that a second trip away dropped before it opened gets
+        // another try; any other drop is Vite's to handle.
+        var away=hidden()||(hides!==hidesAtOpen&&Date.now()-shownAt<10000);
+        if((opened||reconnecting)&&!closedByPage&&away){
           whenVisible(function(){if(current===socket)connect(true);});
           return;
         }
