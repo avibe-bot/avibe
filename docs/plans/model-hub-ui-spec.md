@@ -3239,6 +3239,11 @@ line in the 路由 info hint. Before any model provider exists (search services 
 count), routes cards offer no 添加模型 and no Agent attention footer; an empty catalog says
 providers come first (`gateway.group.emptyNoProviders`).
 
+**2026-11-17 amendment — 自己登录** (owner, via Product). The Chinese name of the
+own-login mode is 「自己登录」 everywhere it appeared as 「Agent 管理」 (mode labels, the
+provider group and kind badge, 「改为自己登录」, the supply-mode panel, the subscription
+choice), matching the English "Own login". 「模型网关管理」 and 「交给模型网关管理」 stay.
+
 **2026-11-17 amendment — plain words on Providers** (Product, first-time-user review).
 A provider card names its kind only; the API format stays in the provider's details. The route
 origin 「透传」 / Passthrough reads 「原样转发」 / Forwarded as is, in every string.
