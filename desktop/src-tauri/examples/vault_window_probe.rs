@@ -190,6 +190,7 @@ addEventListener('message', (event) => {
   if (event.data === 'log-later') setTimeout(() => fetch('/report', { method: 'POST', body: JSON.stringify(log) }), 3000);
 });
 if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slow.css">');
+if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe=' + Date.now() + '; path=/'; }, 20);
 </script>
 <body style="margin:0"><button style="position:fixed;inset:0;width:100%;height:100%">Confirm</button>"#;
 
@@ -280,16 +281,16 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                     })
                     .on_page_load(|window, payload| {
                         if payload.event() == tauri::webview::PageLoadEvent::Started {
-                            macos_vault_window::opener_navigated(&window);
+                            macos_vault_window::opener_navigated(window.as_ref());
                         }
                     })
                     .build()
                     .unwrap();
                 if shipping {
-                    macos_vault_window::install(&main);
+                    macos_vault_window::install(main.as_ref());
                 } else {
                     macos_vault_window::install_with(
-                        &main,
+                        main.as_ref(),
                         macos_vault_window::Policy {
                             origin: macos_vault_window::Origin {
                                 scheme: "http".to_owned(),
@@ -609,6 +610,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             self.an_event_is_judged_at_the_time_it_was_made();
 
             self.other_requests_keep_their_handler();
+            self.another_window_going_away_closes_nothing(10);
             self.reservations_are_bounded();
 
             // No child outlives the main window: not when the user closes it,
@@ -625,54 +627,25 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 children.is_empty()
             });
 
-            // The Workbench's web view is closed without being hidden first,
-            // as a web view is when the shell is done with it. It is out of
-            // its window, so its card takes no more input. (While the card is
-            // up the shell holds the web view, so this says nothing about a
-            // web view being freed.) From here the probe cannot ask the
-            // Workbench page anything, so the card reports by itself.
-            self.eval(&format!("probe.windows.card = window.open('{sandbox}/card')"));
-            self.wait_children("a card", |children| children.len() == 1 && children[0].shown());
-            let input = self.start_input();
-            std::thread::sleep(Duration::from_millis(3000));
-            // A reserved window too, so that both kinds are there at the end.
-            self.eval("window.open('about:blank'); probe.windows.card.postMessage('log-later', '*')");
-            std::thread::sleep(Duration::from_millis(300));
-            let workbench: &tauri::Webview = self.main.as_ref();
-            workbench.close().unwrap();
-            self.on_main(|_| ());
-            let closed = now_ms();
-            let log = self.report("card-log");
-            input.stop();
-            let received = |from: f64, until: f64| {
-                ["clicks", "keys", "commands"]
-                    .iter()
-                    .flat_map(|kind| log[*kind].as_array().expect("a list of times").iter())
-                    .filter(|at| at.as_f64().is_some_and(|at| at > from && at < until))
-                    .count()
-            };
-            assert!(
-                received(0.0, closed) > 0,
-                "the card was to be live before its opener was closed: {log}"
-            );
-            assert_eq!(
-                received(closed, f64::MAX),
-                0,
-                "a card took input after its opener's web view was closed: {log}"
-            );
-            assert!(self.child_windows() >= 1, "the card is still there");
-            println!("vault window probe: a card whose opener was closed without being hidden took no more input");
+            self.replacement_workbenches();
 
-            // No child outlives the main window: the card, and the reserved
-            // window if its deadline has not passed, go when it is destroyed.
+            // No child outlives the main window when it is destroyed.
+            self.eval(&format!(
+                "window.open('about:blank'); window.open('{sandbox}/window#case=destroyed')"
+            ));
+            self.a_window_opened_by_the_workbench_loaded("destroyed");
+            self.wait_children("a shown and a reserved window", |children| {
+                children.len() == 2 && children.iter().filter(|child| child.shown()).count() == 1
+            });
             self.the_main_window_takes_its_children_along();
 
             println!(
                 "vault window probe (app active{}): marker scope, hidden reservation, reveal only after the \
                  sandbox document is presented, opener link, empty content controller and own preferences, \
-                 URL scheme guard, navigation refusals, one window at a time, hidden main window, hidden, \
-                 covered and closed Workbench, no input before a card has been seen, a displayed card in front and key, size \
-                 bounds, close paths, \
+                 URL scheme guard, navigation refusals, one window at a time, hidden main window, hidden \
+                 and covered Workbench, no input before a card has been seen, a displayed card in front and \
+                 key, replacement Workbenches retired, hidden and closed with a card up, size bounds, close \
+                 paths, \
                  deadline, cap, reload and main-window teardown passed",
                 if self.focus { ", with focus" } else { "" }
             );
@@ -697,6 +670,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
 
             self.a_redirect_never_shows();
             self.other_requests_keep_their_handler();
+            self.another_window_going_away_closes_nothing(10);
             self.reservations_are_bounded();
 
             self.eval("window.open('about:blank'); window.open('about:blank')");
@@ -727,6 +701,174 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             assert_eq!(heard["origin"], sandbox, "{heard}");
             let reply = self.report("child-reply");
             assert_eq!(reply["origin"], sandbox, "{reply}");
+        }
+
+        /// After the user switches instance the shell shows the Workbench in a
+        /// replacement web view inside the same native window, with a data
+        /// store of its own, and later retires it. Such a Workbench opens the
+        /// sandbox's window as the first one does, and however it goes (retired
+        /// as the shell retires one, hidden, or closed without being hidden)
+        /// its card is closed and the card's page destroyed at that moment,
+        /// before anything else happens to its data store.
+        fn replacement_workbenches(&mut self) {
+            let sandbox = format!("http://localhost:{}", self.port);
+            // The shell hides the Workbench it replaces.
+            let first: &tauri::Webview = self.main.as_ref();
+            first.hide().unwrap();
+            for ending in ["retired", "hidden", "closed"] {
+                let port = self.port;
+                let view = self
+                    .main
+                    .as_ref()
+                    .window()
+                    .add_child(
+                        tauri::webview::WebviewBuilder::new(
+                            format!("replacement-{ending}"),
+                            WebviewUrl::External("about:blank".parse().unwrap()),
+                        )
+                        .incognito(true)
+                        .initialization_script(SHELL_SCRIPT)
+                        .on_new_window(|_url, _features| NewWindowResponse::Deny)
+                        .on_page_load(|view, payload| {
+                            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                                macos_vault_window::opener_navigated(&view);
+                            }
+                        }),
+                        tauri::LogicalPosition::new(0., 0.),
+                        tauri::LogicalSize::new(4000., 4000.),
+                    )
+                    .unwrap();
+                macos_vault_window::install_with(
+                    &view,
+                    macos_vault_window::Policy {
+                        origin: macos_vault_window::Origin {
+                            scheme: "http".to_owned(),
+                            host: "localhost".to_owned(),
+                            port: Some(port),
+                        },
+                        reserve_deadline: RESERVE_DEADLINE,
+                    },
+                );
+                self.on_main(|_| ());
+                view.navigate(format!("http://127.0.0.1:{port}/workbench").parse().unwrap())
+                    .unwrap();
+                let ready = self.report("workbench-ready");
+                assert_eq!(ready["marker"], true, "a replacement Workbench is told too: {ready}");
+                assert_eq!(ready["shell"], 1, "{ready}");
+                self.report("frame-ready");
+
+                // Its card keeps writing to the data store it shares with it.
+                view.eval(format!("probe.windows.card = window.open('{sandbox}/card#cookies')"))
+                    .unwrap();
+                self.wait_children("a replacement Workbench's card", |children| {
+                    children.len() == 1 && children[0].shown()
+                });
+                assert!(
+                    self.keep_the_card_of(&view),
+                    "the card does not share its replacement Workbench's data store"
+                );
+
+                // A retirement begins by hiding the web view.
+                match ending {
+                    "closed" => view.close().unwrap(),
+                    _ => view.hide().unwrap(),
+                }
+                // Asked on the main thread right behind the hide or the close.
+                let (windows, destroyed) = self.on_main(|mtm| (child_windows(mtm).len(), kept_card_is_destroyed()));
+                assert_eq!(windows, 0, "a card outlived its {ending} Workbench");
+                assert_ne!(
+                    destroyed,
+                    Some(false),
+                    "the card's page outlived its {ending} Workbench"
+                );
+                match ending {
+                    // The rest of a retirement, in the order of the shell's
+                    // `instance_store::retire`: erase the store, read its
+                    // cookies back, close the web view. The probe does not
+                    // link the library, so the steps are made here.
+                    "retired" => {
+                        self.erase_the_store_of(&view);
+                        // Time for a page that was still alive to write again.
+                        std::thread::sleep(Duration::from_millis(200));
+                        let cookies = view.cookies().expect("the erased store's cookies are read back");
+                        assert!(
+                            cookies.is_empty(),
+                            "a cookie was written to a retired Workbench's store after it was erased: {} left",
+                            cookies.len()
+                        );
+                        view.close().unwrap();
+                        self.on_main(|_| ());
+                    }
+                    "hidden" => {
+                        view.close().unwrap();
+                        self.on_main(|_| ());
+                    }
+                    _ => {}
+                }
+                println!(
+                    "vault window probe: a replacement Workbench was {ending} with a card up; the card was closed{}",
+                    if destroyed == Some(true) {
+                        " and its page destroyed at once"
+                    } else {
+                        " (WebKit does not say whether its page is destroyed)"
+                    }
+                );
+            }
+            let first: &tauri::Webview = self.main.as_ref();
+            first.show().unwrap();
+            self.on_main(|_| ());
+        }
+
+        /// Erases everything in a web view's data store, as the shell does
+        /// when it retires a Workbench, and waits until WebKit says it is done.
+        fn erase_the_store_of(&self, view: &tauri::Webview) {
+            let (tx, rx) = mpsc::channel();
+            view.with_webview(move |platform| {
+                let mtm = MainThreadMarker::new().expect("main thread");
+                // SAFETY: Tauri hands out the live web view on the main thread.
+                unsafe {
+                    let view = Retained::retain(platform.inner().cast::<WKWebView>()).expect("the web view");
+                    view.stopLoading();
+                    let store = view.configuration().websiteDataStore();
+                    let types = objc2_web_kit::WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+                    let since = objc2_foundation::NSDate::dateWithTimeIntervalSince1970(0.0);
+                    let erased = block2::RcBlock::new(move || {
+                        let _ = tx.send(());
+                    });
+                    store.removeDataOfTypes_modifiedSince_completionHandler(&types, &since, &erased);
+                }
+            })
+            .unwrap();
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("the data store was erased");
+        }
+
+        /// Keeps a reference to the one card's web view for a later question,
+        /// and says whether it has the data store of `opener`.
+        fn keep_the_card_of(&self, opener: &tauri::Webview) -> bool {
+            let (tx, rx) = mpsc::channel();
+            opener
+                .with_webview(move |platform| {
+                    let mtm = MainThreadMarker::new().expect("main thread");
+                    // SAFETY: Tauri hands out the live web view on the main thread.
+                    let shared = unsafe {
+                        let opener = Retained::retain(platform.inner().cast::<WKWebView>()).expect("the opener");
+                        let card = child_windows(mtm)
+                            .iter()
+                            .find_map(|window| child_view(window))
+                            .and_then(|view| Retained::retain(Retained::as_ptr(&view) as *mut WKWebView))
+                            .expect("the card's web view");
+                        let shared = std::ptr::eq(
+                            &*card.configuration().websiteDataStore(),
+                            &*opener.configuration().websiteDataStore(),
+                        );
+                        KEPT_CARD.set(Some(card));
+                        shared
+                    };
+                    let _ = tx.send(shared);
+                })
+                .unwrap();
+            rx.recv_timeout(Duration::from_secs(10)).expect("main thread answered")
         }
 
         fn activate(&self) {
@@ -811,6 +953,17 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             ));
             let refused = self.report("refused");
             assert_eq!(refused["closed"], true, "{what}: {refused}");
+        }
+
+        /// The Workbench asks for a window and is refused at once: `window.open`
+        /// returns `null` and nothing was created, on screen or off.
+        fn refused_at_open(&mut self, what: &str, address: &str) {
+            self.eval(&format!(
+                "probe.report({{ case: 'refused-at-open', none: window.open('{address}') === null }})"
+            ));
+            let refused = self.report("refused-at-open");
+            assert_eq!(refused["none"], true, "{what} was not refused: {refused}");
+            assert_eq!(self.child_windows(), 0, "{what} was created");
         }
 
         /// Makes the Finder the active app, as a user clicking its window would.
@@ -913,7 +1066,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             // Another window of the app covers the card completely and goes
             // away again: the same two seconds, from AppKit's own word on
             // whether the card can be seen.
-            let cover = self.another_window_of_the_app();
+            let cover = self.another_window_of_the_app("other");
             let card = self.children()[0].number;
             self.on_main({
                 let cover = cover.clone();
@@ -990,8 +1143,8 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
 
             // The Workbench's own web view is hidden while its page keeps
             // running, as under the app's account screen. Its card is closed,
-            // it cannot bring up another, and when it is shown again a card is
-            // not live for two seconds.
+            // it is refused another when it asks, and when it is shown again a
+            // card is not live for two seconds.
             let workbench: &tauri::Webview = self.main.as_ref();
             workbench.hide().unwrap();
             self.wait_children("the card of a hidden Workbench to close", |children| {
@@ -1015,8 +1168,11 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 "vault window probe: a hidden Workbench saw its card closed {} ms after it asked",
                 hidden["after"]
             );
-            self.eval(&format!("probe.windows.unseen = window.open('{sandbox}/quiet')"));
-            self.never_on_screen("a sandbox window asked for by a hidden Workbench", "unseen", 0);
+            self.refused_at_open(
+                "a sandbox window asked for by a hidden Workbench",
+                &format!("{sandbox}/quiet"),
+            );
+            self.refused_at_open("a reserved window asked for by a hidden Workbench", "about:blank");
             let back = now_ms();
             let workbench: &tauri::Webview = self.main.as_ref();
             workbench.show().unwrap();
@@ -1024,7 +1180,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
 
             // Another web view of the main window is shown in front of the
             // Workbench, which is not hidden: the Workbench is covered all the
-            // same, and gets no card. Uncovered, the user has arrived.
+            // same, and is refused a window when it asks.
             let in_front = self
                 .main
                 .as_ref()
@@ -1040,8 +1196,37 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 )
                 .unwrap();
             self.on_main(|_| ());
-            self.eval(&format!("probe.windows.covered = window.open('{sandbox}/quiet')"));
-            self.never_on_screen("a sandbox window asked for by a covered Workbench", "covered", 0);
+            self.refused_at_open(
+                "a sandbox window asked for by a covered Workbench",
+                &format!("{sandbox}/quiet"),
+            );
+
+            // The web view in front is moved aside, which nothing announces:
+            // the Workbench is in place again and reserves a window. Then the
+            // web view is moved back over it, which nothing announces either,
+            // so the reserved window is still there when the sandbox document
+            // commits. The Workbench is read again there, and the window is
+            // closed without ever being on screen.
+            in_front.set_position(tauri::LogicalPosition::new(20000., 0.)).unwrap();
+            self.on_main(|_| ());
+            self.eval("probe.windows.covered = window.open('about:blank')");
+            self.wait_children("a window reserved by an uncovered Workbench", |children| {
+                children.len() == 1
+            });
+            in_front.set_position(tauri::LogicalPosition::new(0., 0.)).unwrap();
+            self.on_main(|_| ());
+            assert_eq!(
+                self.child_windows(),
+                1,
+                "moving a web view is not announced, so the reserved window stays until its commit"
+            );
+            self.eval(&format!("probe.windows.covered.location.replace('{sandbox}/quiet')"));
+            self.never_on_screen(
+                "a sandbox window whose Workbench was covered before the commit",
+                "covered",
+                0,
+            );
+            // Uncovered, the user has arrived.
             let back = now_ms();
             in_front.close().unwrap();
             self.on_main(|_| ());
@@ -1206,8 +1391,8 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         }
 
         /// A plain second window of this app, as a native app window is.
-        fn another_window_of_the_app(&self) -> WebviewWindow {
-            WebviewWindowBuilder::new(&self.app, "other", WebviewUrl::External("about:blank".parse().unwrap()))
+        fn another_window_of_the_app(&self, label: &str) -> WebviewWindow {
+            WebviewWindowBuilder::new(&self.app, label, WebviewUrl::External("about:blank".parse().unwrap()))
                 .title("another window")
                 .visible(false)
                 .incognito(true)
@@ -1300,6 +1485,16 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             ));
             let asked = self.report("redirect-asked");
             assert_eq!(asked["given"], true, "{asked}");
+            // A refused navigation does not close the window: once the server
+            // has answered with the redirect and the page has had a turn
+            // since, the window is still there, hidden, and its opener does
+            // not see it closed. (The deadline is far off.)
+            self.report("redirect-served");
+            self.eval("probe.report({ case: 'redirect-refused', closed: probe.windows.redirect.closed })");
+            let refused = self.report("redirect-refused");
+            assert_eq!(refused["closed"], false, "{refused}");
+            let pending = self.children();
+            assert!(pending.len() == 1 && !pending[0].visible, "{pending:?}");
             // The rule: it is never on screen, and it is gone by the deadline.
             // How long it stays before that is not promised; a window that
             // goes early has only gone sooner.
@@ -1346,14 +1541,144 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             assert!(self.children().is_empty());
         }
 
+        /// Windows are reserved while another window of the app is being taken
+        /// down. Every web view the shell builds announces its leaving, the
+        /// other window's too; that must close nothing of a Workbench that is
+        /// in place. (On its first CI run the probe lost one reserved window
+        /// right after such a window was destroyed, once, and nothing was
+        /// recording by what.)
+        ///
+        /// Three windows are asked for 20, 35 and 50 ms after the script
+        /// starts, and the other window is destroyed between 0 and 54 ms after
+        /// it, later each round, so that its leaving falls before, between
+        /// and after them. Where it fell is counted from the record and said.
+        fn another_window_going_away_closes_nothing(&mut self, rounds: usize) {
+            let (mut before, mut between, mut after, mut unseen) = (0usize, 0usize, 0usize, 0usize);
+            let (mut round, mut stood_still) = (0usize, 0usize);
+            while round < rounds {
+                let other = self.another_window_of_the_app(&format!("other-{round}-{stood_still}"));
+                if self.focus {
+                    // As in the case that failed: shown, and key for a moment.
+                    other.show().unwrap();
+                    self.on_main({
+                        let other = other.clone();
+                        move |_| ns_window(&other).makeKeyAndOrderFront(None)
+                    });
+                } else {
+                    self.on_main(|_| ());
+                }
+                trace::round_begins();
+                self.eval(
+                    r#"(() => {
+                        const kept = probe.windows.kept = [];
+                        const open = () => {
+                            kept.push(window.open('about:blank'));
+                            if (kept.length < 3) return setTimeout(open, 15);
+                            setTimeout(() => probe.report({
+                                case: 'kept',
+                                opened: kept.map((child) => !!child),
+                                closed: kept.map((child) => !child || child.closed),
+                            }), 150);
+                        };
+                        setTimeout(open, 20);
+                    })()"#,
+                );
+                std::thread::sleep(Duration::from_millis(6 * (round % 10) as u64));
+                other.destroy().unwrap();
+                let kept = self.report("kept");
+                let held = self.child_windows();
+                let seen = trace::round_ends();
+                if seen.stood_still(RESERVE_DEADLINE) {
+                    // Not the rule under test: the round outlasted the
+                    // deadline, and the deadline alone closed windows. It is
+                    // said and the round is asked again.
+                    stood_still += 1;
+                    println!(
+                        "vault window probe: the probe stood still for {:?} in a round, longer than the reserve \
+                         deadline, which closed {} of its windows; the round is repeated",
+                        seen.lasted,
+                        seen.closed_from.len()
+                    );
+                    assert!(
+                        stood_still <= 3,
+                        "the probe stood still in four rounds: {seen:?}\n{}",
+                        trace::seen()
+                    );
+                    self.eval("probe.windows.kept.forEach((child) => child && !child.closed && child.close())");
+                    self.wait_children("the kept windows to close", |children| children.is_empty());
+                    continue;
+                }
+                assert!(
+                    kept["opened"] == json!([true, true, true])
+                        && kept["closed"] == json!([false, false, false])
+                        && held == 3
+                        && seen.asked == 3
+                        && seen.most_held == 3
+                        && seen.closed_from.is_empty(),
+                    "round {round}: a reserved window was lost while another window of the app went away: \
+                     {kept}, {held} windows held, {seen:?}\n{}",
+                    trace::seen()
+                );
+                // Where the other window's web view announced its leaving,
+                // counted in windows asked for by then.
+                match seen.announced_after.as_slice() {
+                    [] => unseen += 1,
+                    asked if asked.iter().any(|asked| (1..3).contains(asked)) => between += 1,
+                    asked if asked.iter().all(|asked| *asked == 0) => before += 1,
+                    _ => after += 1,
+                }
+                self.eval("probe.windows.kept.forEach((child) => child.close())");
+                self.wait_children("the kept windows to close", |children| children.is_empty());
+                round += 1;
+            }
+            println!(
+                "vault window probe: three windows were reserved while another window of the app was destroyed, \
+                 {rounds} times, and none was lost; its web view announced its leaving before the first was \
+                 asked for {before} times, between the first and the last {between} times, after the last \
+                 {after} times, and not during the round {unseen} times"
+            );
+        }
+
         /// The main webview's pages cannot hold more than a few hidden windows,
         /// and those do not outlive the deadline.
         fn reservations_are_bounded(&mut self) {
-            self.eval(
-                "probe.report({ case: 'many', opened: [0, 1, 2, 3, 4, 5].map(() => !!window.open('about:blank')) })",
-            );
-            let many = self.report("many");
-            assert_eq!(many["opened"], json!([true, true, true, true, false, false]), "{many}");
+            // Nothing may close a reserved window while these are asked for,
+            // and never more than four may exist. If the probe stands still
+            // for longer than the deadline while they are asked for, the
+            // deadline closes some: that is said, and they are asked for
+            // again once those are gone.
+            for attempt in 0.. {
+                trace::round_begins();
+                self.eval(
+                    "probe.report({ case: 'many', opened: [0, 1, 2, 3, 4, 5].map(() => !!window.open('about:blank')) })",
+                );
+                let many = self.report("many");
+                let round = trace::round_ends();
+                if round.stood_still(RESERVE_DEADLINE) {
+                    println!(
+                        "vault window probe: the probe stood still for {:?} while six windows were asked for, \
+                         longer than the reserve deadline, which closed {}; they are asked for again",
+                        round.lasted,
+                        round.closed_from.len()
+                    );
+                    assert!(
+                        attempt < 3,
+                        "the probe stood still four times: {round:?}\n{}",
+                        trace::seen()
+                    );
+                    self.gone_by_the_deadline("the reserved windows");
+                    continue;
+                }
+                assert!(
+                    many["opened"] == json!([true, true, true, true, false, false])
+                        && round.asked == 6
+                        && round.most_held == 4
+                        && round.closed_from.is_empty(),
+                    "{many}, {round:?}\n{}",
+                    trace::seen()
+                );
+                break;
+            }
             let held = self.children();
             assert_eq!(held.len(), 4, "{held:?}");
             assert!(held.iter().all(|child| !child.visible), "{held:?}");
@@ -1588,33 +1913,37 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         }
     }
 
-    /// A record of every request for a window and of every sandbox window
-    /// that closes, with the call stack of the close, kept by the probe alone
-    /// and printed when the probe fails. It wraps the module's answer to a
-    /// request and listens for windows closing; the module is not changed
-    /// for it. A window that is gone sooner than a case expects is then
-    /// explained by the failure itself: which rule closed it, and how long
-    /// after it was asked for.
+    /// A record of what the app's web views announced, of every request for a
+    /// window and of every sandbox window that closes, with the call stack of
+    /// the close, kept by the probe alone. It wraps the three methods the
+    /// module added to wry's web view class and the module's answer to a
+    /// request, and listens for windows closing; the module is not changed
+    /// for it. It is printed when the probe fails, so a window that is gone
+    /// sooner than a case expects is explained by the failure itself, and it
+    /// counts what the cases that reserve windows assert.
     mod trace {
         use std::{
             backtrace::Backtrace,
+            cell::RefCell,
             collections::VecDeque,
             ptr::NonNull,
             sync::{
-                atomic::{AtomicBool, Ordering},
+                atomic::{AtomicBool, AtomicUsize, Ordering},
                 Mutex, OnceLock,
             },
+            time::{Duration, Instant},
         };
 
         use objc2::{
-            rc::Retained,
-            runtime::{AnyObject, Imp, Sel},
-            sel, MainThreadMarker,
+            rc::{Retained, Weak},
+            runtime::{AnyClass, AnyObject, Imp, Sel},
+            sel, ClassType, MainThreadMarker,
         };
-        use objc2_app_kit::{NSWindow, NSWindowWillCloseNotification};
+        use objc2_app_kit::{NSView, NSWindow, NSWindowWillCloseNotification};
         use objc2_foundation::{NSNotification, NSNotificationCenter};
         use objc2_web_kit::WKWebView;
 
+        type Announce = unsafe extern "C-unwind" fn(&AnyObject, Sel);
         type Create = unsafe extern "C-unwind" fn(
             &AnyObject,
             Sel,
@@ -1625,9 +1954,89 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         ) -> *mut AnyObject;
 
         const KEPT: usize = 80;
-        static ARMED: AtomicBool = AtomicBool::new(false);
+        const NAMES: [&str; 3] = ["viewDidHide", "viewDidUnhide", "viewDidMoveToWindow"];
+        static ANNOUNCE: [OnceLock<Imp>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
         static ANSWER: OnceLock<Imp> = OnceLock::new();
+        static ARMED: AtomicBool = AtomicBool::new(false);
+        /// The Workbench web view's address, to recognize it by.
+        static WORKBENCH: AtomicUsize = AtomicUsize::new(0);
+        thread_local! {
+            static WORKBENCH_VIEW: RefCell<Option<Weak<WKWebView>>> = const { RefCell::new(None) };
+        }
         static LINES: Mutex<VecDeque<(f64, String, Option<Backtrace>)>> = Mutex::new(VecDeque::new());
+        static ROUND: Mutex<Option<Counting>> = Mutex::new(None);
+
+        struct Counting {
+            began: Instant,
+            asked: usize,
+            most_held: usize,
+            announced_after: Vec<usize>,
+            closed: Vec<Backtrace>,
+        }
+
+        /// What was seen while one case asked for windows.
+        #[derive(Debug)]
+        pub struct Round {
+            /// How long the round took.
+            pub lasted: Duration,
+            /// Requests for a new window that reached the app.
+            pub asked: usize,
+            /// The most sandbox windows that existed right after a request.
+            pub most_held: usize,
+            /// For each sandbox window that closed: the module's frames on the
+            /// stack of the close, innermost first.
+            pub closed_from: Vec<String>,
+            /// For each announcement by a web view other than the Workbench's:
+            /// how many windows had been asked for by then.
+            pub announced_after: Vec<usize>,
+        }
+
+        impl Round {
+            /// The probe stood still for longer than the reserve deadline, and
+            /// every window that closed was closed by its deadline and by
+            /// nothing else. Hosted runners have blocked the app's main thread
+            /// for seconds inside WebKit while a web view was being created;
+            /// a case that reserves windows says so instead of failing, and
+            /// still fails on a close of any other origin.
+            pub fn stood_still(&self, deadline: Duration) -> bool {
+                !self.closed_from.is_empty()
+                    && self.lasted >= deadline
+                    && self
+                        .closed_from
+                        .iter()
+                        .all(|from| from.starts_with("close <- open_child::{closure"))
+            }
+        }
+
+        /// Starts counting.
+        pub fn round_begins() {
+            *ROUND.lock().expect("the round") = Some(Counting {
+                began: Instant::now(),
+                asked: 0,
+                most_held: 0,
+                announced_after: Vec::new(),
+                closed: Vec::new(),
+            });
+            note("--- asking begins ---".to_owned(), None);
+        }
+
+        pub fn round_ends() -> Round {
+            note("--- answered ---".to_owned(), None);
+            let counted = ROUND.lock().expect("the round").take().expect("a round was begun");
+            Round {
+                lasted: counted.began.elapsed(),
+                asked: counted.asked,
+                most_held: counted.most_held,
+                closed_from: counted.closed.iter().map(origin).collect(),
+                announced_after: counted.announced_after,
+            }
+        }
+
+        fn counting(count: impl FnOnce(&mut Counting)) {
+            if let Some(round) = ROUND.lock().expect("the round").as_mut() {
+                count(round);
+            }
+        }
 
         fn note(line: String, stack: Option<Backtrace>) {
             let mut lines = LINES.lock().expect("the record");
@@ -1635,6 +2044,21 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 lines.pop_front();
             }
             lines.push_back((super::now_ms(), line, stack));
+        }
+
+        /// The module's frames on a stack, innermost first, by their last
+        /// names: `close <- open_child::{closure#5}::{closure#0}` is the
+        /// reserve deadline.
+        fn origin(stack: &Backtrace) -> String {
+            stack
+                .to_string()
+                .lines()
+                .map(str::trim)
+                .filter_map(|frame| frame.split_once("macos_vault_window::"))
+                .map(|(_, name)| name.to_owned())
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" <- ")
         }
 
         /// The record, oldest first, with the time since the entry before.
@@ -1645,18 +2069,9 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 .iter()
                 .map(|(at, line, stack)| {
                     let since = before.replace(*at).map_or(0.0, |before: f64| at - before);
-                    // The module's frames on the stack of a close, innermost first.
-                    let from = stack.as_ref().map_or(String::new(), |stack| {
-                        let frames: Vec<String> = stack
-                            .to_string()
-                            .lines()
-                            .map(str::trim)
-                            .filter(|frame| frame.contains("macos_vault_window::"))
-                            .map(|frame| frame.split_once(": ").map_or(frame, |(_, name)| name).to_owned())
-                            .take(4)
-                            .collect();
-                        format!(", from {}", frames.join(" <- "))
-                    });
+                    let from = stack
+                        .as_ref()
+                        .map_or(String::new(), |stack| format!(", from {}", origin(stack)));
                     format!("  [{at:.0}, +{since:.0} ms] {line}{from}")
                 })
                 .collect::<Vec<_>>()
@@ -1670,8 +2085,96 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 .collect()
         }
 
+        /// The three things the module reads about the Workbench's web view.
+        fn workbench() -> String {
+            let view = WORKBENCH_VIEW
+                .try_with(|view| view.borrow().as_ref().and_then(Weak::load))
+                .ok()
+                .flatten();
+            let Some(view) = view else {
+                return "gone".to_owned();
+            };
+            let view: &WKWebView = &view;
+            // SAFETY: Main thread; a view's superview lives while the view is in it.
+            let in_front: Vec<String> = match unsafe { view.superview() } {
+                None => vec!["no superview".to_owned()],
+                Some(parent) => {
+                    let mut after = false;
+                    let mut found = Vec::new();
+                    for sibling in parent.subviews().iter() {
+                        if std::ptr::addr_eq(&*sibling as *const NSView, view as *const WKWebView) {
+                            after = true;
+                        } else if after {
+                            let frame = sibling.frame();
+                            let object: &AnyObject = sibling.as_ref();
+                            found.push(format!(
+                                "{}{} at {:.0},{:.0} {:.0}x{:.0}",
+                                object.class().name().to_string_lossy(),
+                                if sibling.isHidden() { " (hidden)" } else { "" },
+                                frame.origin.x,
+                                frame.origin.y,
+                                frame.size.width,
+                                frame.size.height
+                            ));
+                        }
+                    }
+                    found
+                }
+            };
+            format!(
+                "in a window: {}, hidden or in a hidden view: {}, views in front: {in_front:?}",
+                view.window().is_some(),
+                view.isHiddenOrHasHiddenAncestor()
+            )
+        }
+
+        fn announced(which: usize, this: &AnyObject, selector: Sel) {
+            // SAFETY: The implementation the module added for this selector,
+            // which takes no argument and returns nothing.
+            let original: Announce =
+                unsafe { std::mem::transmute::<Imp, Announce>(*ANNOUNCE[which].get().expect("armed")) };
+            let Some(mtm) = MainThreadMarker::new() else {
+                // SAFETY: As above.
+                return unsafe { original(this, selector) };
+            };
+            let before = windows(mtm);
+            let is_workbench = std::ptr::from_ref(this) as usize == WORKBENCH.load(Ordering::SeqCst);
+            let read = workbench();
+            // SAFETY: As above.
+            unsafe { original(this, selector) };
+            let after = windows(mtm);
+            if !is_workbench {
+                counting(|round| round.announced_after.push(round.asked));
+            }
+            note(
+                format!(
+                    "{} on {}; the Workbench was {read}; sandbox windows {before:?} -> {after:?}",
+                    NAMES[which],
+                    if is_workbench {
+                        "the Workbench"
+                    } else {
+                        "another web view"
+                    }
+                ),
+                None,
+            );
+        }
+
+        unsafe extern "C-unwind" fn did_hide(this: &AnyObject, selector: Sel) {
+            announced(0, this, selector);
+        }
+
+        unsafe extern "C-unwind" fn did_unhide(this: &AnyObject, selector: Sel) {
+            announced(1, this, selector);
+        }
+
+        unsafe extern "C-unwind" fn did_move(this: &AnyObject, selector: Sel) {
+            announced(2, this, selector);
+        }
+
         /// A page asked for a new window: the module's answer is passed on
-        /// untouched.
+        /// untouched, and the sandbox windows that exist right after it are
+        /// counted.
         unsafe extern "C-unwind" fn asked_for_a_window(
             delegate: &AnyObject,
             selector: Sel,
@@ -1687,11 +2190,15 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 answer(delegate, selector, opener, configuration, action, features)
             };
             if let Some(mtm) = MainThreadMarker::new() {
+                let held = windows(mtm);
+                counting(|round| {
+                    round.asked += 1;
+                    round.most_held = round.most_held.max(held.len());
+                });
                 note(
                     format!(
-                        "a window was asked for and {}; sandbox windows now {:?}",
-                        if given.is_null() { "refused" } else { "given" },
-                        windows(mtm)
+                        "a window was asked for and {}; sandbox windows now {held:?}",
+                        if given.is_null() { "refused" } else { "given" }
                     ),
                     None,
                 );
@@ -1704,6 +2211,34 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             if ARMED.swap(true, Ordering::SeqCst) {
                 return;
             }
+            WORKBENCH.store(std::ptr::from_ref(workbench) as usize, Ordering::SeqCst);
+            // SAFETY: Tauri hands out the live web view on the main thread.
+            let held = unsafe { Retained::retain(std::ptr::from_ref(workbench).cast_mut()) };
+            WORKBENCH_VIEW.with_borrow_mut(|view| *view = held.as_ref().map(Weak::from_retained));
+            // wry's class: the direct subclass of `WKWebView`.
+            let mut class: &'static AnyClass = workbench.class();
+            while let Some(parent) = class.superclass() {
+                if std::ptr::eq(parent, WKWebView::class()) {
+                    break;
+                }
+                class = parent;
+            }
+            let wrappers: [(Sel, Announce); 3] = [
+                (sel!(viewDidHide), did_hide),
+                (sel!(viewDidUnhide), did_unhide),
+                (sel!(viewDidMoveToWindow), did_move),
+            ];
+            let own = class.instance_methods();
+            for (which, (selector, wrapper)) in wrappers.into_iter().enumerate() {
+                // Only a method the class itself defines: one found on a
+                // superclass belongs to every view in the process.
+                if let Some(method) = own.iter().find(|method| method.name() == selector) {
+                    // SAFETY: The wrapper has the method's own signature and
+                    // calls what it replaces.
+                    let original = unsafe { method.set_implementation(std::mem::transmute::<Announce, Imp>(wrapper)) };
+                    let _ = ANNOUNCE[which].set(original);
+                }
+            }
             // The answer to a page's request for a window: the module put its
             // own in front of wry's on the UI delegate's class.
             // SAFETY: Main thread; the delegate is a live object.
@@ -1712,8 +2247,7 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 let selector = sel!(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:);
                 let own = delegate.class().instance_methods();
                 if let Some(method) = own.iter().find(|method| method.name() == selector) {
-                    // SAFETY: The wrapper has the method's own signature and
-                    // calls what it replaces.
+                    // SAFETY: As above.
                     let answer =
                         unsafe { method.set_implementation(std::mem::transmute::<Create, Imp>(asked_for_a_window)) };
                     let _ = ANSWER.set(answer);
@@ -1731,7 +2265,8 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 if super::child_view(window).is_none() {
                     return;
                 }
-                // The frames are named only if the record is printed.
+                // The frames are named only when the record is read.
+                counting(|round| round.closed.push(Backtrace::force_capture()));
                 note(
                     format!("sandbox window {} is closing", window.windowNumber()),
                     Some(Backtrace::force_capture()),
@@ -1748,6 +2283,22 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 )
             };
             std::mem::forget(observer);
+        }
+    }
+    thread_local! {
+        /// The card's web view the probe is asking about; main thread only.
+        static KEPT_CARD: std::cell::RefCell<Option<Retained<WKWebView>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Whether the kept card's page has been destroyed, as WebKit says it;
+    /// `None` when WebKit has no word for it.
+    fn kept_card_is_destroyed() -> Option<bool> {
+        use objc2_foundation::NSObjectProtocol;
+        let card = KEPT_CARD.take()?;
+        // SAFETY: Main thread; the selector is checked to exist and returns a BOOL.
+        unsafe {
+            card.respondsToSelector(objc2::sel!(_isClosed))
+                .then(|| objc2::msg_send![&*card, _isClosed])
         }
     }
 
@@ -2104,9 +2655,12 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 "/workbench" => page(&WORKBENCH_PAGE.replace("PORT", &port.to_string())),
                 "/frame" => page(FRAME_PAGE),
                 "/window" => page(&WINDOW_PAGE.replace("PORT", &port.to_string())),
-                "/redirect" => format!(
+                "/redirect" => {
+                    let _ = reports.send(json!({ "case": "redirect-served" }));
+                    format!(
                     "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                ),
+                    )
+                }
                 "/report" => {
                     let body = text.split_once("\r\n\r\n").map_or("", |(_, body)| body);
                     if let Ok(report) = serde_json::from_str::<Value>(body) {

@@ -1927,7 +1927,7 @@ fn build_main_window(
         if payload.event() == tauri::webview::PageLoadEvent::Started {
             // The document that opened a Vault sandbox window is gone.
             #[cfg(target_os = "macos")]
-            macos_vault_window::opener_navigated(&webview);
+            macos_vault_window::opener_navigated(webview.as_ref());
             if let Some(window) = document_window {
                 instance_client::document_started(webview.app_handle(), window, payload.url());
             }
@@ -1962,10 +1962,7 @@ fn build_main_window(
     #[cfg(target_os = "macos")]
     {
         macos_new_context::install(window.as_ref());
-        // Only this web view, the one the app starts with. A Runtime
-        // replacement (`build_main_child`) has no Vault sandbox window yet and
-        // keeps the browser hand-off.
-        macos_vault_window::install(&window);
+        macos_vault_window::install(window.as_ref());
     }
     Some(window)
 }
@@ -2003,6 +2000,9 @@ fn build_main_child(
             .on_new_window(|url, _features| handle_new_window_request(url))
             .on_page_load(move |view, payload| {
                 if payload.event() == tauri::webview::PageLoadEvent::Started {
+                    // The document that opened a Vault sandbox window is gone.
+                    #[cfg(target_os = "macos")]
+                    macos_vault_window::opener_navigated(&view);
                     instance_client::runtime_document_started(view.app_handle(), view.label(), payload.url());
                 } else {
                     instance_client::navigation_loaded(view.app_handle(), view.label(), generation, payload.url());
@@ -2039,7 +2039,12 @@ fn build_main_child(
         return None;
     }
     #[cfg(target_os = "macos")]
-    macos_new_context::install(&view);
+    {
+        macos_new_context::install(&view);
+        // A Workbench in a replacement web view opens the Vault sandbox's
+        // window as the first one does.
+        macos_vault_window::install(&view);
+    }
     Some(view)
 }
 

@@ -234,10 +234,15 @@ rules are stated at the top of that file. In short:
   minimized, and Avibe the active app. All of that is read afresh each time it
   matters, at the commit and for every click and key. The shell hides a Workbench's
   web view under its account screen and before it retires one, while the page
-  keeps running; such a page gets no window, and a window it already has is
-  closed. The shell watches the web view's hidden state for this only while
-  it has a sandbox window, so without one it does not know how long the
-  Workbench has been in front of the user, and does not assume: the first
+  keeps running; such a page is refused a window when it asks (`window.open`
+  returns `null`), and a window it already has is closed. The same goes for a
+  Workbench that is out of its window or behind another web view: a sandbox
+  window exists only for a Workbench in its place. The Workbench page takes a
+  `null` as "the app could not open the window" and moves its passkey steps
+  to the browser until it reloads; every request it makes comes from a click
+  on the page, so a hidden or covered Workbench has no path to one. Being told that a web view was hidden or shown only ever closes
+  windows; the shell does not take it as word of how long the Workbench has
+  been in front of the user, and does not assume: the first
   window a Workbench asks for when it has none counts as an arrival, from the
   moment it is asked for. In practice Confirm takes clicks no sooner than two
   seconds after the step's window was asked for (after the Approve click), and
@@ -245,8 +250,8 @@ rules are stated at the top of that file. In short:
   from that click as well. Only one sandbox window is on screen over the main window at a time.
   A window that may not appear when its sandbox document is ready is closed,
   never shown later. Its size is
-  clamped to between 360 x 400 and 900 x 1000 points. The main webview's pages
-  can hold at most four windows, hidden ones included. The title bar shows the
+  clamped to between 360 x 400 and 900 x 1000 points. The app's Workbenches
+  can hold at most four windows between them, hidden ones included. The title bar shows the
   host and ignores the page's title, but it is not proof of what a window is:
   the Workbench can open other native windows with any title.
 - **What the input rule does not cover.** A second card navigated into the
@@ -277,21 +282,32 @@ rules are stated at the top of that file. In short:
 - **Opener, data and lifetime.** The window keeps the opener link and the
   opener's website data store, including the disposable store of a remote
   instance. `window.close()` closes it; the user closing it destroys the page,
-  which the opener sees as a closed popup. Reloading the Workbench, hiding its
-  web view, or closing or destroying the main window closes it. It becomes the
-  key window when its content is revealed, and the main window is key again
-  when it closes.
-- **Only the web view the app starts with, for now.** The support is installed
-  on the main window's own web view, which holds the Workbench the app starts
-  with. After the user switches instance, the Workbench runs in a replacement
-  web view inside the same window; that one, and the account screen, are not
-  openers: their requests for a window go to wry as before (web links open in
-  the browser, the rest are dropped) and their pages get no marker. So after
-  switching instance, or while connected to another computer, this version
-  still opens the browser for the passkey step. In general the start-up web
-  view is retired whenever the shell replaces the Workbench instead of
-  navigating it in place; a main window that is built again gets the support
-  again.
+  which the opener sees as a closed popup. Reloading the Workbench, or closing
+  or destroying the main window, closes it. So does the Workbench's web view
+  leaving its place: being hidden, being closed (with or without being hidden
+  first), or another web view being created in front of it. Every web view
+  the shell builds tells the module when it is hidden, shown, or moved into or
+  out of a window; the module then reads every Workbench again and, for one
+  that is no longer in place, closes its sandbox windows and destroys their
+  pages before it returns. (It reads nothing only if its own registry is in
+  use at that instant, which no known path reaches; the reads at
+  `window.open`, at the commit, at the reveal and for every click and key do
+  not depend on it.) The shell erases a retired Workbench's data store after
+  hiding its web view, so by then the pages of that Workbench's sandbox
+  windows have been destroyed, and a hidden Workbench is refused any new
+  window. The Workbench's own page, and the sandbox frame inside it, live
+  through the erase, as the retirement was designed. A web view moved or
+  resized over a Workbench without being created or shown there is not
+  announced; the reads above still keep a window from appearing or taking
+  input. A sandbox window becomes the key window when its content is
+  revealed, and the main window is key again when it closes.
+- **Every Workbench web view.** The support is installed on the web view the
+  app starts with and on each replacement: after the user switches instance,
+  or connects to another computer, the Workbench runs in a replacement web
+  view inside the same window, with a data store of its own. The account
+  screen is not an opener: its requests for a window go to wry as before (web
+  links open in the browser, the rest are dropped) and its page gets no
+  marker.
 
 The passkey prompt, the review and the cryptography stay in sandbox code. None
 of the shell's own code handles the passkey result. WebKit's passkey code does
@@ -315,9 +331,9 @@ Three rules rest on WebKit methods outside its public API: the presentation
 update, destroying a page at once, and turning off the picture-in-picture
 features. Each is checked to exist before anything is installed; if one is
 missing there is no window and no marker. That a method exists says nothing
-about what it does. The same goes for AppKit announcing a web view's `hidden`
-to an observer, which the shell relies on to close a hidden Workbench's cards
-at once. Their behaviour is checked only by the probe, on the macOS
+about what it does. The same goes for AppKit telling a view that it was
+hidden, shown or moved to a window, which the shell relies on to close a
+Workbench's cards at once. Their behaviour is checked only by the probe, on the macOS
 versions CI runs it on, which is why the marker is limited to those versions
 (`PROBED_MACOS` in the module). When CI moves to a new macOS, add it there.
 macOS 15 has passkey PRF and would be the natural floor, but it is not on the
@@ -334,6 +350,9 @@ and keys to the window through the application's own event dispatch to check
 that none reaches a card before the interval is over. It compiles the
 module's source file into itself, so the library exports nothing for it, and
 enters one step below the signature check, which no test executable can pass.
+For the same reason it must not use anything of the library: that would put a
+second copy of the module and of its Objective-C classes into the process.
+CI fails if the probe's binary contains any symbol of the library.
 When it fails it prints the last requests for a window and every sandbox
 window that closed, with the rule that closed it. Its reserve deadline is 15
 seconds (the shell's is 60), so that a slow moment on a runner does not close
@@ -353,17 +372,27 @@ python3 src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_p
 Add `--set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` for the active run, which takes
 the keyboard, or `--set AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1` for the third.
 
-The two calls that connect the module to the main window (`install` after the
-window is built, `opener_navigated` when its page starts loading) are in
-`build_main_window` and have no automated check of their own. Without the
-first there is no marker and the browser hand-off stays; without the second a
-sandbox window stays open across a Workbench reload.
+The two calls that connect the module to a Workbench's web view (`install`
+after it is built, `opener_navigated` when its page starts loading) are in
+`build_main_window` and `build_main_child` and have no automated check of
+their own. Without the first there is no marker and the browser hand-off
+stays; without the second a sandbox window stays open across a Workbench
+reload. The probe makes its replacement web views itself, with the same two
+calls, and retires one with the same sequence as `instance_store::retire`
+(hide, erase the data store, read its cookies back, close); it does not link
+the library, so the sequence is written out in the probe.
 
 Only a signed build can show the rest: the shell's install passing its own
 admission; the real origin and how long its first paint takes; the passkey
 sheet from this window and passkey PRF from the sandbox iframe; focus with a
 real system sheet on screen, including the two-second wait after the sheet
 closes; a release build; and the association being fetched after first launch.
+For replacement web views, also: the marker and the window on a Workbench after
+a real instance switch, and back on the local instance afterwards; a remote
+instance (a card from a remote HTTPS Workbench, the passkey sheet, and passkey
+PRF from the sandbox frame there); the shell's own `instance_store::retire`
+with a card up; signing out with a card up; and the account screen opened
+while a card is up.
 
 ## Product packages
 
