@@ -290,6 +290,19 @@ struct Views {
     terminal: Option<u64>,
     account: Option<AccountDocument>,
 }
+impl Views {
+    /// The role on screen in the main window. An account document is on
+    /// screen from the moment `open_account` shows it, including while it
+    /// reloads (`loaded` is false from commit to finish). Until then, even when
+    /// it replaces a shown account document, the Runtime is the visible role.
+    fn displayed(&self) -> Option<&str> {
+        self.account
+            .as_ref()
+            .filter(|account| account.shown)
+            .map(|account| account.label.as_str())
+            .or(self.runtime.as_ref().map(|runtime| runtime.label.as_str()))
+    }
+}
 struct RuntimeDocument {
     label: String,
     window: u64,
@@ -315,6 +328,8 @@ struct AccountDocument {
     document: u64,
     admitted: bool,
     loaded: bool,
+    /// Set once `open_account` has shown this document; never cleared.
+    shown: bool,
     token: Option<String>,
     returning: Option<(String, u64)>,
     owner: u64,
@@ -751,6 +766,18 @@ pub fn active_webview(app: &AppHandle) -> Option<Webview> {
         .filter(|view| view.loaded)
         .map(|view| &view.label)
         .or(views.runtime.as_ref().map(|view| &view.label))?;
+    app.get_webview(label)
+}
+/// The web view the user sees, for showing and focusing. Unlike
+/// `active_webview`, a shown account document that is reloading is still the
+/// answer: revealing or focusing the Runtime under it would send keystrokes to
+/// a covered Workbench.
+pub(crate) fn displayed_webview(app: &AppHandle) -> Option<Webview> {
+    let Some(client) = app.try_state::<Client>() else {
+        return app.get_webview(MAIN_WINDOW);
+    };
+    let views = client.view.views.lock().expect("views");
+    let label = views.displayed()?;
     app.get_webview(label)
 }
 pub(crate) fn runtime_webview(app: &AppHandle) -> Option<Webview> {
@@ -1655,6 +1682,7 @@ impl NativeView {
                 document: 0,
                 admitted: false,
                 loaded: false,
+                shown: false,
                 token: None,
                 returning,
                 owner: epoch.value,
@@ -1758,6 +1786,16 @@ impl NativeView {
                 runtime.hide().map_err(failure)?;
             }
             view.show().map_err(failure)?;
+            if let Some(account) = self
+                .views
+                .lock()
+                .expect("views")
+                .account
+                .as_mut()
+                .filter(|account| account.label == label)
+            {
+                account.shown = true;
+            }
             view.set_focus().map_err(failure)?;
             let mut state = self.presentation.lock().expect("presentation");
             state.account = true;
@@ -2352,6 +2390,52 @@ impl ClientView for NativeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Showing or focusing main must target what covers the window. A shown
+    /// account page reloads with `loaded == false`; the Runtime under it must
+    /// not be revealed and made first responder.
+    #[test]
+    fn a_reloading_account_page_stays_the_displayed_view() {
+        let url = Url::parse("tauri://localhost/account/index.html?view=account").unwrap();
+        let views = |account: Option<(bool, bool)>| Views {
+            runtime: Some(RuntimeDocument {
+                label: "main-runtime-1".into(),
+                window: 1,
+                destination: Url::parse("https://studio.avibe.bot/").unwrap(),
+                disposable: true,
+                directory: None,
+                owner: 1,
+                document: 1,
+            }),
+            account: account.map(|(loaded, shown)| AccountDocument {
+                label: "main-account-2".into(),
+                window: 1,
+                destination: url.clone(),
+                document: 2,
+                admitted: false,
+                loaded,
+                shown,
+                token: None,
+                returning: None,
+                owner: 1,
+            }),
+            ..Views::default()
+        };
+        // (account document (loaded, shown), displayed)
+        for (account, displayed) in [
+            (None, "main-runtime-1"),
+            // A new document loading hidden, including one that replaces a
+            // shown account page while the presentation still says account.
+            (Some((false, false)), "main-runtime-1"),
+            // Loaded but not yet shown by `open_account`.
+            (Some((true, false)), "main-runtime-1"),
+            (Some((true, true)), "main-account-2"),
+            // Shown, then reloading: it still covers the Runtime.
+            (Some((false, true)), "main-account-2"),
+        ] {
+            assert_eq!(views(account).displayed(), Some(displayed), "{account:?}");
+        }
+    }
 
     /// The popup only opens while main shows another computer, so the updater's
     /// own check must admit it there; otherwise Update, Check and both switches

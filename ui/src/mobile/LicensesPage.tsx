@@ -2,7 +2,6 @@ import { ChevronRight, ExternalLink, type LucideIcon, ScrollText, ShieldCheck } 
 import type { MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 import { type AppLicenseComponent, type AppLicenses, licenseBlocks } from './appLicenses';
@@ -12,9 +11,10 @@ const raised = 'rounded-3xl border border-edge bg-surface/80 p-5 shadow-elevatio
 const textLink =
   'inline-flex min-h-11 items-center gap-1 text-sm font-medium text-foreground underline underline-offset-4';
 
-type AboutRowProps = { icon: LucideIcon; label: string; disabled?: boolean; onClick?: () => void };
+type AccountLinkRowProps = { icon: LucideIcon; label: string; disabled?: boolean; onClick?: () => void };
 
-function AboutRow({ icon: Icon, label, disabled, onClick }: AboutRowProps) {
+/** One row on Account and its pages that opens another page. */
+export function AccountLinkRow({ icon: Icon, label, disabled, onClick }: AccountLinkRowProps) {
   return (
     <button
       type="button"
@@ -35,56 +35,58 @@ function AboutRow({ icon: Icon, label, disabled, onClick }: AboutRowProps) {
 }
 
 /**
- * Account's About section: the App's own information, not the instance's. The privacy policy is
- * always there; the licenses once their notices have loaded. Design: mobile-app/licenses/entry.
+ * Account's About section: the App's own information, not the instance's. Shown once the license
+ * notices have loaded. Design: mobile-app/licenses/entry.
  */
 export function AboutSection({
   disabled,
   licenses,
   onLicenses,
-  onPrivacy,
 }: {
   disabled?: boolean;
   licenses: boolean;
   onLicenses?: () => void;
-  onPrivacy?: () => void;
 }) {
   const { t } = useTranslation();
+  if (!licenses) return null;
   return (
     <section className="mt-8">
       <h2 className="mb-4 text-sm font-semibold">{t('mobileApp.licenses.about')}</h2>
-      <div className="flex flex-col gap-3">
-        {onPrivacy ? (
-          <AboutRow icon={ShieldCheck} label={t('mobileApp.account.privacy')} disabled={disabled} onClick={onPrivacy} />
-        ) : null}
-        {licenses ? (
-          <AboutRow icon={ScrollText} label={t('mobileApp.licenses.title')} disabled={disabled} onClick={onLicenses} />
-        ) : null}
-      </div>
+      <AccountLinkRow icon={ScrollText} label={t('mobileApp.licenses.title')} disabled={disabled} onClick={onLicenses} />
     </section>
   );
 }
 
 /**
- * The last thing on Account: deleting the account on avibe.bot, which the App shows over this
- * page with the App's sign-in.
+ * Account and data, one page below Account: the privacy policy, and at the very bottom deleting
+ * the account as one plain red line, so it is not tapped by mistake yet reads as a warning
+ * (owner, 2026-11-17). Deletion
+ * opens avibe.bot's page over this page with the App's sign-in. Design: mobile-app/switcher/account-data, mobile-app/account/data.
  */
-export function DeleteAccount({ disabled, onDelete }: { disabled?: boolean; onDelete: () => void }) {
+export function AccountDataContent({
+  disabled,
+  onPrivacy,
+  onDelete,
+}: {
+  disabled?: boolean;
+  onPrivacy: () => void;
+  onDelete: () => void;
+}) {
   const { t } = useTranslation();
   return (
-    <div className="mt-auto pt-9 pb-3">
-      <Button
-        type="button"
-        variant="link"
-        disabled={disabled}
-        className="px-0 text-destructive-ink"
-        onClick={onDelete}
-      >
-        {t('mobileApp.account.delete')}
-        <ExternalLink className="size-4" aria-hidden="true" />
-      </Button>
-      <p className="mt-2 text-xs leading-6 text-muted">{t('mobileApp.account.deleteHint')}</p>
-    </div>
+    <>
+      <AccountLinkRow icon={ShieldCheck} label={t('mobileApp.account.privacy')} disabled={disabled} onClick={onPrivacy} />
+      <div className="mt-auto pt-9 pb-3">
+        <button
+          type="button"
+          disabled={disabled}
+          className="min-h-11 text-sm text-destructive-ink disabled:opacity-60"
+          onClick={onDelete}
+        >
+          {t('mobileApp.account.delete')}
+        </button>
+      </div>
+    </>
   );
 }
 

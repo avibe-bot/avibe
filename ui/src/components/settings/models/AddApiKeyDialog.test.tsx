@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { pressOutside } from '@/lib/testing/pressOutside';
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { ApiKeySourceForm } from './ApiKeySourceForm';
+import { EMPTY_API_KEY_DRAFT } from './apiKeySourceDraft';
 import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
@@ -129,6 +131,10 @@ const fillCredentials = async () => {
  *  continues with whichever vendor is currently chosen. */
 const vendorField = () => screen.getByRole('combobox', { name: /^(Provider|供应商)(\s|$)/ });
 const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
+/** A preset's address waits under More settings. */
+const revealBaseUrl = async (user: ReturnType<typeof userEvent.setup>) => {
+  if (!screen.queryByRole('textbox', { name: /^Base URL$/i })) await user.click(screen.getByRole('button', { name: 'More settings' }));
+};
 
 /** A catalog row read from the shipped file, so the case does not restate an id,
  *  a URL, or a pin that the backend owns. Chosen by protocol rather than by name:
@@ -261,9 +267,38 @@ describe('AddApiKeyDialog · save reconciliation', () => {
     expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'anthropic', save_unverified: true });
   });
 
+  it('says a refused key once, without a format question; after a refused save only the save line remains', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation('rejected'));
+    vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(
+      new ApiCallError('discovery_failed', 'modelHub.errors.authentication_failed', true, [], [], [], 422),
+    );
+    renderDialog();
+    const user = await fillCredentials();
+    await waitFor(() => expect(observe).toHaveBeenCalledOnce(), DETECTION_WAIT);
+    // Before saving: one line about the key; no format line and no formats forced open.
+    expect(await screen.findByText('This address refused the key. Check or replace it.', undefined, DETECTION_WAIT)).toBeTruthy();
+    expect(screen.queryByText(/Couldn't recognise the format/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'OpenAI Chat Completions' })).toBeNull();
+    await clickConfirm(user);
+    expect(await screen.findByText('API key invalid or lacks permission. Check or replace it.')).toBeTruthy();
+    expect(screen.queryByText('This address refused the key. Check or replace it.')).toBeNull();
+  });
+
+  it('keeps the format choice reachable after a refused detection, and saves a picked format', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation('rejected'));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({ source, added_to: [], adopted_by: [] });
+    renderDialog();
+    const user = await fillCredentials();
+    await screen.findByText('This address refused the key. Check or replace it.', undefined, DETECTION_WAIT);
+    await user.click(screen.getByRole('button', { name: 'Choose the API format manually' }));
+    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
+    await clickConfirm(user);
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0][0]).toMatchObject({ protocol: 'openai_responses' });
+  });
+
   it.each([
     ['unknown', /Couldn't recognise the format, so OpenAI Chat Completions is used/],
-    ['rejected', /The endpoint rejected this key/],
   ] as const)('keeps the default when nothing answers (%s) and still saves a picked format', async (authenticated, note) => {
     vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(unrecognisedObservation(authenticated));
     const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
@@ -327,10 +362,29 @@ describe('AddApiKeyDialog · save reconciliation', () => {
   it('asks no format for a preset vendor', async () => {
     renderDialog();
     const user = userEvent.setup();
+    expect(screen.getByText("Enter the provider's address and API key.")).toBeTruthy();
     await selectVendor(user, API_KEY_VENDOR_PRESETS[0].id);
+    // The address is filled in, so the dialog no longer asks for it.
+    expect(screen.getByText('Choose the provider and enter its API key.')).toBeTruthy();
     expect(screen.queryByText('API format')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Choose the API format manually' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Anthropic Messages' })).toBeNull();
+    // Its address is filled in, so it waits under More settings with the name.
+    expect(screen.queryByRole('textbox', { name: /^Base URL$/i })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'More settings' }));
+    expect((screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement).value).toBe(API_KEY_VENDOR_PRESETS[0].official_base_url);
+  });
+
+  it('opens 更多设置 on its own when a preset address was edited before the form mounted', async () => {
+    const entry = API_KEY_VENDOR_PRESETS[0];
+    render(<I18nextProvider i18n={i18n}><ApiKeySourceForm draft={{ ...EMPTY_API_KEY_DRAFT, vendor: entry.id, baseUrl: 'https://edited.example/v1' }} disabled={false} revealed={false} onChange={vi.fn()} onToggleReveal={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByRole('textbox', { name: /^Base URL$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'More settings' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps the address in view for a custom provider', async () => {
+    renderDialog();
+    expect(screen.getByRole('textbox', { name: /^Base URL$/i })).toBeTruthy();
   });
 
   it('lets the user choose a custom protocol and keeps validation failures editable', async () => {
@@ -851,6 +905,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     expect(highlighted()?.getAttribute('role')).toBe('option');
     await user.keyboard('{Enter}');
     await waitFor(() => expect(vendorField().textContent).toContain(vendorOptionName(next)));
+    await revealBaseUrl(user);
     expect(baseUrlInput().value).toBe(reached?.official_base_url);
   });
 
@@ -885,6 +940,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     const user = userEvent.setup();
 
     await selectVendor(user, entry.id);
+    await revealBaseUrl(user);
     await user.type(baseUrlInput(), '/edge');
     const edited = baseUrlInput().value;
     expect(edited).not.toBe(entry.official_base_url);

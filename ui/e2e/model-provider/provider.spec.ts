@@ -10,16 +10,17 @@ for (const lang of ['en', 'zh'] as const) {
       const cards = page.getByTestId('identity-cards');
       const detail = page.getByTestId('identity-detail');
       const pills = cards.locator('[data-source-id] .model-hub-pill');
+      // The card names the kind only; the API format is in the provider's details.
       await expect(pills).toHaveText([
-        text('upstream.kind.subscription'), 'OpenAI Responses',
-        text('upstream.kind.subscription'), 'OpenAI Responses',
-        text('upstream.kind.apiKey'), 'OpenAI Chat Completions',
+        text('upstream.kind.subscription'),
+        text('upstream.kind.subscription'),
+        text('upstream.kind.apiKey'),
       ]);
       await expect(cards.getByText('first@example.com', { exact: true })).toBeVisible();
       const accountCard = cards.locator('[data-source-id="src_identity001"]');
       const apiCard = cards.locator('[data-source-id="src_fixture001"]');
       await expect(accountCard).toHaveAccessibleName(/first@example\.com/);
-      await expect(apiCard).toHaveAccessibleName(/API [kK]ey.*OpenAI Chat Completions.*relay\.example\/v1.*sk-…1234/);
+      await expect(apiCard).toHaveAccessibleName(/API [kK]ey.*relay\.example\/v1.*sk-…1234/);
       await expect(detail.getByRole('heading', { name: 'OpenAI', exact: true })).toBeVisible();
       await cards.screenshot({ path: info.outputPath('identity-visible.png') });
       // One header control covers every source; no per-row or per-field eyes.
@@ -30,7 +31,7 @@ for (const lang of ['en', 'zh'] as const) {
       await expect(cards.locator('[data-source-id] .lucide-eye-off[aria-hidden="true"]')).toHaveCount(3);
       await expect(accountCard).not.toHaveAccessibleName(/first@example\.com/);
       await expect(apiCard).not.toHaveAccessibleName(/relay\.example|sk-…1234/);
-      await expect(apiCard).toHaveAccessibleName(/API [kK]ey.*OpenAI Chat Completions.*(?:Hidden|已隐藏)/);
+      await expect(apiCard).toHaveAccessibleName(/API [kK]ey.*(?:Hidden|已隐藏)/);
       await expect(detail.getByRole('heading', { name: 'OpenAI', exact: true })).toBeVisible();
       await expect(page.getByText('first@example.com', { exact: true })).toHaveCount(0);
       await expect(page.locator('[title*="@example.com"]')).toHaveCount(0);

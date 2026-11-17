@@ -384,14 +384,9 @@ def effective_model_route(
             include_manual=True,
         )) is not None
     )
-    if matches:
-        return EffectiveModelRoute(None, "automatic", matches)
-    hops = tuple(
-        ModelHubRouteHopConfig(source.id, requested_model)
-        for source in sources
-        if source_supports_passthrough(source) and not source_model_retired(source, requested_model)
-    )
-    return EffectiveModelRoute(None, "passthrough" if hops else None, hops)
+    # Inventory absence is not evidence of supply. Unlisted API-key targets
+    # remain available only through an explicit manual override above.
+    return EffectiveModelRoute(None, "automatic" if matches else None, matches)
 
 
 def inspect_exact_hop(

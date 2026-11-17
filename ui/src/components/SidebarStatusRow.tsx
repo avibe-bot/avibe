@@ -22,13 +22,15 @@ export function StatusGlyph({ children }: { children: ReactNode }) {
   return <span className="flex size-2.5 shrink-0 items-center justify-start [&>svg]:size-2.5">{children}</span>;
 }
 
-/** The dot that leads a status: running or stopped. */
-export function StatusDot({ tone, label }: { tone: 'running' | 'stopped'; label?: string }) {
+/** The dot that leads a status, shared with the App instance list. */
+export function StatusDot({ tone, label }: { tone: 'running' | 'stopped' | 'connecting'; label?: string }) {
   return (
     <span
       data-status-indicator
+      role={label ? 'img' : undefined}
       aria-label={label}
-      className={cn('size-2 shrink-0 rounded-full', tone === 'running' ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted')}
+      aria-hidden={label ? undefined : true}
+      className={cn('size-2 shrink-0 rounded-full', tone === 'running' ? 'bg-mint shadow-glow-dot-mint' : tone === 'connecting' ? 'bg-gold shadow-glow-dot-gold' : 'bg-muted')}
     />
   );
 }

@@ -864,7 +864,10 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         )
 
     def contract_manifest(self) -> dict[str, Any]:
-        manifest = self._load_manifest(allow_network=False)
+        return self._contract_manifest(self._load_manifest(allow_network=False))
+
+    def _contract_manifest(self, manifest: ManagedRuntimeManifest | None) -> dict[str, Any]:
+        """Project one already resolved identity, without re-reading selection."""
         if manifest is None:
             return {
                 "name": "cliproxyapi",

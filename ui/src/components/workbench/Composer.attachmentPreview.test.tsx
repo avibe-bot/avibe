@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.hoisted(() => {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
-    value: vi.fn().mockReturnValue({ matches: false }),
+    value: vi.fn().mockReturnValue({ matches: false, addEventListener() {}, removeEventListener() {} }),
   });
 });
 

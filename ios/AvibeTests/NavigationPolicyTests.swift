@@ -1192,7 +1192,7 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(action["openAppWhenRun"] as? Bool, true)
         XCTAssertEqual(
             (action["title"] as? [String: Any])?["key"] as? String,
-            "Talk to Main Bot"
+            "Open Main Bot"
         )
         let shortcuts = try XCTUnwrap(
             metadata["autoShortcuts"] as? [[String: Any]]
@@ -1204,24 +1204,32 @@ final class NavigationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             (shortcut["shortTitle"] as? [String: Any])?["key"] as? String,
-            "Talk to Main Bot"
+            "Open Main Bot"
         )
         XCTAssertEqual(
             shortcut["systemImageName"] as? String,
             "bubble.left.and.bubble.right"
+        )
+        // Talking to the main Bot is the background voice shortcut.
+        let voice = try XCTUnwrap(
+            shortcuts.first {
+                $0["actionIdentifier"] as? String == "SpeakToMainBotIntent"
+            }
+        )
+        XCTAssertEqual(
+            (voice["shortTitle"] as? [String: Any])?["key"] as? String,
+            "Talk to Main Bot"
+        )
+        XCTAssertEqual(
+            Set((voice["phraseTemplates"] as? [[String: Any]] ?? []).compactMap { $0["key"] as? String }),
+            ["Talk to Main Bot in ${applicationName}"]
         )
         let phrases = Set(
             (shortcut["phraseTemplates"] as? [[String: Any]] ?? []).compactMap {
                 $0["key"] as? String
             }
         )
-        XCTAssertEqual(
-            phrases,
-            [
-                "Talk to Main Bot in ${applicationName}",
-                "Open Main Bot in ${applicationName}",
-            ]
-        )
+        XCTAssertEqual(phrases, ["Open Main Bot in ${applicationName}"])
 
         let chinese = try XCTUnwrap(
             Bundle.main.path(forResource: "zh-Hans", ofType: "lproj")
@@ -1229,13 +1237,17 @@ final class NavigationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             chinese.localizedString(
-                forKey: "Talk to Main Bot",
+                forKey: "Open Main Bot",
                 value: nil,
                 table: nil
             ),
+            "打开主伙伴"
+        )
+        XCTAssertEqual(
+            chinese.localizedString(forKey: "Talk to Main Bot", value: nil, table: nil),
             "和主伙伴说话"
         )
-        for phrase in phrases {
+        for phrase in phrases.union(["Talk to Main Bot in ${applicationName}"]) {
             let localized = chinese.localizedString(
                 forKey: phrase,
                 value: nil,

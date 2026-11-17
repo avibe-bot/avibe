@@ -167,6 +167,233 @@ may; Windows foreground rules), it asks for attention instead: a Dock bounce or
 a taskbar flash. A Workbench on a remote instance has no grant and simply stays
 where it is.
 
+### The Vault sandbox window (macOS)
+
+A protected Vault step ends in a top-level window of the Vault sandbox,
+`https://sandbox.avibe.bot`, which finds its request through `window.opener`.
+Every other request for a new window goes to the system browser, where that
+link does not exist. On macOS the shell therefore opens this one window itself,
+as a native child window of the main window. `src-tauri/src/macos_vault_window.rs`
+answers WebKit's request before wry does and builds the window by hand; the
+rules are stated at the top of that file. In short:
+
+- **Only the sandbox origin.** A window is opened for a request to exactly
+  `https://sandbox.avibe.bot` (that scheme and host, default port), or for the
+  `about:blank` the Workbench reserves before it points the window there. Inside
+  the window every navigation that leaves that origin is refused: by the
+  opener, by the page, by a redirect, or as another window. Requests for any
+  other address are untouched: web links open in the browser, the rest are
+  dropped. The shell enforces the origin, not which sandbox release loads: as
+  in a browser tab, an older retained release or the origin's root would load
+  too. Pinning the release is the Workbench's check before it navigates.
+- **Never the opener's pixels.** The Workbench origin also serves Show Pages,
+  and an opener can draw in the blank page it reserved. The native window stays
+  off screen until a sandbox document has committed in it. It then appears
+  empty, and its content is revealed only by the first presentation update
+  WebKit delivers after that commit; until then WebKit would still be
+  displaying the previous page. The empty window stays until the sandbox's
+  first paint. A window that has displayed no sandbox document 60 seconds
+  after it was created is closed.
+- **No input before the user has seen the card.** On macOS WebKit lets scripts
+  open windows without a user gesture, which a browser would require. So a
+  page of the Workbench origin can make the sandbox's real window, showing a
+  real pending request, appear at a moment it chooses; it cannot put content
+  of its own into that window. The sandbox arms its Confirm half a second
+  after it builds the card, whether or not the card is on screen. So a
+  displayed window does not yet take input. It takes clicks and keys only
+  while Avibe is the active app and the window is visible, and that has held
+  without a break for 0.75 seconds the first time the card is seen and 2
+  seconds every later time, and never sooner than 2 seconds after the user
+  last arrived: Avibe became the active app, or the main window came back from
+  hidden, minimized or another Space. Each click and key is judged at the
+  time it was made, by its own timestamp, not at the time the window is
+  handed it: an event waits while the app's main thread is busy, and that
+  wait must not count as time the user had the card. The card must also still
+  be in view when the event is handed over. The time in view starts one turn
+  of the main run loop after the card is made opaque, once that change has
+  been committed to the window server. This holds through any stall of the
+  app's main thread; it does not help against a device or system layer that
+  stamps an event later than it happened, nor against a stall between the
+  commit leaving the app and the user's eyes. Until then every key for the window,
+  and every click on its content, is dropped where the window receives it;
+  none is passed to what is underneath. Clicks on the title bar are delivered,
+  so the window can be moved or closed. The card is on screen the whole time.
+  When it is displayed it is put in front of Avibe's other windows and given
+  the keyboard, and the shell never moves it or gives it the keyboard again,
+  so nothing changes on screen when it starts to take input. Another Avibe
+  window can be put in front of it later, by the user or by a page. There is
+  no visual cue: a user who clicks too early clicks again, and keys typed in
+  the two seconds after the user comes back to a card are dropped silently.
+  In the seed-wallet window that can shorten a typed passphrase without
+  notice; entering it twice catches that when a wallet is created, and
+  comparing the address when one is imported.
+- **Only for the Workbench the user is looking at.** A sandbox window comes on
+  screen only if the web view that asked for it is the one in front of the
+  user: still in the main window, not hidden, with no other web view of that
+  window in front of it, the window visible, on the current Space and not
+  minimized, and Avibe the active app. All of that is read afresh each time it
+  matters, at the commit and for every click and key. The shell hides a Workbench's
+  web view under its account screen and before it retires one, while the page
+  keeps running; such a page is refused a window when it asks (`window.open`
+  returns `null`), and a window it already has is closed. The same goes for a
+  Workbench that is out of its window or behind another web view: a sandbox
+  window exists only for a Workbench in its place. The Workbench page takes a
+  `null` as "the app could not open the window" and moves its passkey steps
+  to the browser until it reloads; every request it makes comes from a click
+  on the page, so a hidden or covered Workbench has no path to one. Being told that a web view was hidden or shown only ever closes
+  windows; the shell does not take it as word of how long the Workbench has
+  been in front of the user, and does not assume: the first
+  window a Workbench asks for when it has none counts as an arrival, from the
+  moment it is asked for. In practice Confirm takes clicks no sooner than two
+  seconds after the step's window was asked for (after the Approve click), and
+  approving a second request after the first card closed waits two seconds
+  from that click as well. Only one sandbox window is on screen over the main window at a time.
+  A window that may not appear when its sandbox document is ready is closed,
+  never shown later. Its size is
+  clamped to between 360 x 400 and 900 x 1000 points. The app's Workbenches
+  can hold at most four windows between them, hidden ones included. The title bar shows the
+  host and ignores the page's title, but it is not proof of what a window is:
+  the Workbench can open other native windows with any title.
+- **What the input rule does not cover.** A second card navigated into the
+  same visible window (the sandbox's own arming applies, as in a browser). A
+  present user who confirms without reading. A card displayed while nobody is
+  at the Mac is live when they return: "present" means active app and visible
+  window, not eyes. A card fully covered by another Avibe window and brought
+  forward again may be live at once: in the probe AppKit did not report a
+  fully covered card as hidden. The main window merely raised
+  from behind another Avibe window is not an arrival; the first 0.75 seconds
+  cover a card shown then. A window counts as visible when any part of it
+  shows, so a card mostly covered by another Avibe window and brought forward
+  again is live at once; only its first click, made while it is not the key
+  window, is not delivered. Menu commands and system input panels (Paste, the emoji picker,
+  dictation) still reach a key window; none can confirm. Computer Use and
+  other accessibility-driven actions do not pass the window's event entry, as
+  in a browser. Drag and drop onto the window is neither click nor key.
+- **Nothing of the shell inside it.** The window has an empty
+  `WKUserContentController`: no init script, no marker, no `ipc` message
+  handler, and closing it removes nothing from the main window. It has default
+  `WKPreferences` of its own, with element fullscreen, picture in picture and
+  video presentation modes off, and it is refused camera and microphone.
+  WebKit copies the main webview's custom URL schemes (`ipc`, `tauri`) into the
+  window and offers no way to remove them, so each scheme handler is guarded: a
+  request from the window fails before wry's handler runs. Tauri never learns
+  the window exists, so it has no label, no capability, and no page Tauri could
+  take for the shell's own or the Workbench's.
+- **Opener, data and lifetime.** The window keeps the opener link and the
+  opener's website data store, including the disposable store of a remote
+  instance. `window.close()` closes it; the user closing it destroys the page,
+  which the opener sees as a closed popup. Reloading the Workbench, or closing
+  or destroying the main window, closes it. So does the Workbench's web view
+  leaving its place: being hidden, being closed (with or without being hidden
+  first), or another web view being created in front of it. Every web view
+  the shell builds tells the module when it is hidden, shown, or moved into or
+  out of a window; the module then reads every Workbench again and, for one
+  that is no longer in place, closes its sandbox windows and destroys their
+  pages before it returns. (It reads nothing only if its own registry is in
+  use at that instant, which no known path reaches; the reads at
+  `window.open`, at the commit, at the reveal and for every click and key do
+  not depend on it.) The shell erases a retired Workbench's data store after
+  hiding its web view, so by then the pages of that Workbench's sandbox
+  windows have been destroyed, and a hidden Workbench is refused any new
+  window. The Workbench's own page, and the sandbox frame inside it, live
+  through the erase, as the retirement was designed. A web view moved or
+  resized over a Workbench without being created or shown there is not
+  announced; the reads above still keep a window from appearing or taking
+  input. A sandbox window becomes the key window when its content is
+  revealed, and the main window is key again when it closes.
+- **Every Workbench web view.** The support is installed on the web view the
+  app starts with and on each replacement: after the user switches instance,
+  or connects to another computer, the Workbench runs in a replacement web
+  view inside the same window, with a data store of its own. The account
+  screen is not an opener: its requests for a window go to wry as before (web
+  links open in the browser, the rest are dropped) and its page gets no
+  marker.
+
+The passkey prompt, the review and the cryptography stay in sandbox code. None
+of the shell's own code handles the passkey result. WebKit's passkey code does
+run in the app's process, so the result, including the PRF output, crosses that
+process as it crosses a browser's; the app, like a browser, is trusted to run
+the sandbox unmodified.
+
+The Workbench learns that passkey steps can stay in the app from
+`window.__AVIBE_DESKTOP_VAULT_PASSKEY__`, which the same code defines on the
+top-level document only when all of this holds: the hooks above are installed
+on that webview; the system is a macOS version on which the probe below has
+passed in CI, today only 26; and the running
+app's own code signature carries
+`com.apple.developer.associated-domains` with
+`webcredentials:sandbox.avibe.bot`, read from the process with `SecTask`. A
+development or ad-hoc build, or one signed without that entitlement, installs
+nothing and behaves exactly as before. Windows and Linux do not compile the
+module.
+
+Three rules rest on WebKit methods outside its public API: the presentation
+update, destroying a page at once, and turning off the picture-in-picture
+features. Each is checked to exist before anything is installed; if one is
+missing there is no window and no marker. That a method exists says nothing
+about what it does. The same goes for AppKit telling a view that it was
+hidden, shown or moved to a window, which the shell relies on to close a
+Workbench's cards at once. Their behaviour is checked only by the probe, on the macOS
+versions CI runs it on, which is why the marker is limited to those versions
+(`PROBED_MACOS` in the module). When CI moves to a new macOS, add it there.
+macOS 15 has passkey PRF and would be the natural floor, but it is not on the
+list: run once on a hosted macOS 15 runner, the probe passed every step up to
+the pixel check and then could not read the sandbox page back from the window.
+Until that is understood, macOS 15 to 25 keep the browser hand-off.
+
+The pure rules are unit-tested in the module. The behavior is checked with
+real WebKit windows by `src-tauri/examples/vault_window_probe.rs`, which CI runs
+on macOS 26. The probe plays the Workbench and the sandbox from two loopback
+origins with a disposable data store. It reads back what a window's own views
+draw to check that an opener's page is never displayed, and it delivers clicks
+and keys to the window through the application's own event dispatch to check
+that none reaches a card before the interval is over. It compiles the
+module's source file into itself, so the library exports nothing for it, and
+enters one step below the signature check, which no test executable can pass.
+For the same reason it must not use anything of the library: that would put a
+second copy of the module and of its Objective-C classes into the process.
+CI fails if the probe's binary contains any symbol of the library.
+When it fails it prints the last requests for a window and every sandbox
+window that closed, with the rule that closed it. Its reserve deadline is 15
+seconds (the shell's is 60), so that a slow moment on a runner does not close
+a window a case is still waiting for; the cases that test the deadline wait
+that long.
+It has three runs: with the app active (windows appear); with the app not
+active (a sandbox window is closed instead, and nothing takes the keyboard, so
+this is the run for a desktop in use); and through the shell's own install on
+the unsigned executable (no marker, no window). Locally:
+
+```sh
+cargo build -p avibe-desktop --example vault_window_probe
+python3 src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_probe \
+  --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log /tmp/vault-window-probe.log
+```
+
+Add `--set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1` for the active run, which takes
+the keyboard, or `--set AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1` for the third.
+
+The two calls that connect the module to a Workbench's web view (`install`
+after it is built, `opener_navigated` when its page starts loading) are in
+`build_main_window` and `build_main_child` and have no automated check of
+their own. Without the first there is no marker and the browser hand-off
+stays; without the second a sandbox window stays open across a Workbench
+reload. The probe makes its replacement web views itself, with the same two
+calls, and retires one with the same sequence as `instance_store::retire`
+(hide, erase the data store, read its cookies back, close); it does not link
+the library, so the sequence is written out in the probe.
+
+Only a signed build can show the rest: the shell's install passing its own
+admission; the real origin and how long its first paint takes; the passkey
+sheet from this window and passkey PRF from the sandbox iframe; focus with a
+real system sheet on screen, including the two-second wait after the sheet
+closes; a release build; and the association being fetched after first launch.
+For replacement web views, also: the marker and the window on a Workbench after
+a real instance switch, and back on the local instance afterwards; a remote
+instance (a card from a remote HTTPS Workbench, the passkey sheet, and passkey
+PRF from the sandbox frame there); the shell's own `instance_store::retire`
+with a card up; signing out with a card up; and the account screen opened
+while a card is up.
+
 ## Product packages
 
 The consumer DMG/NSIS build is self-contained. It embeds target-specific
@@ -239,16 +466,20 @@ Every macOS tag build (`gh-vX.Y.ZrcN` TEST and `vX.Y.Z` stable) is Developer ID
 signed and notarized, and fails rather than publish an ad-hoc app. The
 `desktop-updater` Environment holds the Apple set: `APPLE_CERTIFICATE` (base64
 `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
-`APPLE_API_KEY`, `APPLE_API_ISSUER`, and `APPLE_API_PRIVATE_KEY` (the raw `.p8`
-App Store Connect key). `scripts/macos_signing.py` owns every step. Tauri seals
+`APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY` (the raw `.p8`
+App Store Connect key), and `APPLE_PROVISIONING_PROFILE` (base64 of the app's
+Developer ID provisioning profile, on one line). `scripts/macos_signing.py`
+owns every step. Tauri seals
 the bundle ad hoc and never receives Apple credentials, so it cannot sign or
 notarize on its own.
 
 1. **Credentials.** The identity goes into a temporary runner keychain and the
-   notary key into a `0600` file; both are deleted when the job ends. A tag build
-   with a missing or partial set fails before anything is built. A manual build
-   accepts the complete set or none of it. `APPLE_TEAM_ID` must equal the pinned
-   Team.
+   notary key and the provisioning profile into `0600` files; all are deleted
+   when the job ends. A tag build with a missing or partial set fails before
+   anything is built. A manual build accepts the complete set or none of it, so
+   no Developer ID app is ever signed without the profile. `APPLE_TEAM_ID` must
+   equal the pinned Team, and the profile must fit the imported identity (see
+   **Provisioning profile**).
 2. **Runtime.** `build-runtime-bundle.py` signs every Mach-O of the private
    Runtime with the hardened runtime and a secure timestamp after compiling its
    bytecode, and before the startup probe, `runtime.zip`, its manifest, and the
@@ -259,10 +490,21 @@ notarize on its own.
    without a reviewed identity fails the build. Signatures are embedded in each
    file, so first-launch extraction is unchanged: the archive and tree hashes
    simply cover the signed bytes.
-3. **App.** The Cua Driver helper and then Avibe.app are signed, the app is
+3. **App.** The Cua Driver helper is signed, the profile is copied to
+   `Avibe.app/Contents/embedded.provisionprofile`, and Avibe.app is signed with
+   `entitlements/app-developer-id.plist`; the signer then checks the exact
+   entitlements and that the embedded profile is byte-identical to the input
+   and lists the certificate the app is actually signed with. The app is
    notarized with `notarytool` through the API key, and its ticket is stapled.
    The launch smoke test, the DMG, and the updater archive all use this final
-   app. A notary request that times out, loses its connection, or meets a 5xx
+   app. Before launching a signed app, the smoke test checks that the runner
+   kills an ad-hoc program claiming the app's restricted entitlements without
+   a profile, as a user's Mac does, and fails otherwise; only then does a
+   launch that survives show that macOS accepted the embedded profile. The
+   `desktop-shell` pull request job runs the same check
+   (`scripts/check-restricted-entitlement-refusal.sh`) on the same hosted
+   image without credentials, so an image that stops refusing fails there
+   first. A notary request that times out, loses its connection, or meets a 5xx
    is tried up to three times; once the upload has an id, the retry waits on
    that submission rather than submitting again. A verdict such as `Invalid`
    fails at once.
@@ -292,7 +534,33 @@ Ad-hoc builds had a per-build DR, so macOS treats the first signed build as a ne
 program: users grant Computer Use permissions and Keychain access once more, and
 later signed updates keep them.
 
-**Entitlements.** The app keeps only microphone input (`src-tauri/Entitlements.plist`).
+**Provisioning profile.** WKWebView offers passkeys (WebAuthn) only for a site
+the app is associated with, through the `webcredentials:` associated domains
+`sandbox.avibe.bot` (the Protected Vault) and `avibe.bot` (the account).
+`com.apple.developer.associated-domains` is a restricted entitlement: macOS
+kills, at launch, an app that claims it without an embedded provisioning
+profile authorizing it. The profile is a Developer ID (direct distribution)
+profile for `68B2SQ6YK3.bot.avibe.desktop` with the Associated Domains
+capability, and it lists the Developer ID Application certificates allowed to
+sign the app. Before signing, the signer refuses a profile that is for another
+Team or application identifier, is not a macOS Developer ID profile for all
+devices, does not allow every restricted entitlement the app claims, has
+expired (it warns 30 days before), or does not list the certificate of the
+signing identity in use (compared by fingerprint). **A new signing certificate
+needs a new profile listing it, updated in `APPLE_PROVISIONING_PROFILE` in the
+same change**, or every signed build fails. The profile does not change the
+code identity below: the designated requirement depends only on the identifier
+and the certificate chain. Each host's `apple-app-site-association` file must
+also name `68B2SQ6YK3.bot.avibe.desktop` for macOS to associate the app.
+
+**Entitlements.** Only the Developer ID app signature claims the restricted
+keys: `entitlements/app-developer-id.plist` is `src-tauri/Entitlements.plist`
+plus `com.apple.developer.associated-domains`,
+`com.apple.application-identifier`, and `com.apple.developer.team-identifier`.
+Every build without the profile (a manual build without credentials, the cache
+warm-up, a local `tauri build`) keeps the entitlements Tauri seals the bundle
+with, `src-tauri/Entitlements.plist`, which must never hold a restricted key.
+That file keeps only microphone input.
 Node needs a code-generation exception (`allow-jit` on Apple silicon,
 `allow-unsigned-executable-memory` on Intel, whose V8 does not use `MAP_JIT`) and
 `disable-library-validation`, because the Show Runtime and npm-installed Agent
@@ -301,7 +569,10 @@ backends load native addons this Team did not sign. Python on Intel needs
 in writable executable memory without `MAP_JIT`, and without the entitlement the
 first callback hangs. Python on Apple silicon and the helper need none. GitHub's
 macOS runners enforce neither library validation nor the JIT restriction, so CI
-proves signing and notarization but not that entitlements are sufficient. Check
+proves signing and notarization but not that entitlements are sufficient. Whether
+they refuse a restricted entitlement no profile authorizes is a separate
+question, which that control answers in pull request CI and on every signed
+build. Check
 an entitlement change on a Mac with System Integrity Protection enabled, for
 example by running the release-signed `python` and `node` from an extracted
 `runtime.zip` in a scratch directory, the Intel ones under Rosetta
@@ -658,8 +929,8 @@ Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
 `.github/workflows/desktop-shell.yml` runs on macOS and Windows whenever
 `desktop/**` or the two central bootstrap locale sections change: `npm ci`,
 `npm run test:i18n`, `npm run build`, `cargo fmt --check`,
-`cargo clippy -D warnings`, `cargo test`, `cargo build`. It does not bundle or
-sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
+`cargo clippy -D warnings`, `cargo test`, `cargo build`, and on macOS the
+Vault sandbox window probe. It does not bundle or sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
 self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
 build unit for `.github/workflows/release_ai.yml`. Its signing policy is
 described above. Release builds restore the Rust dependency cache and the

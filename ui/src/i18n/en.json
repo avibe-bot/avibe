@@ -323,8 +323,10 @@
       "switch": "Switch instance",
       "choose": "Choose an instance",
       "privacy": "Privacy policy",
-      "delete": "Delete account",
-      "deleteHint": "Continue to avibe.bot to review the impact and confirm deletion."
+      "delete": "Delete account"
+    },
+    "accountData": {
+      "title": "Account and data"
     },
     "twoFactor": {
       "title": "Confirm it’s you.",
@@ -1294,7 +1296,7 @@
       "gateway": {
         "heading": "Routes",
         "infoLabel": "What routes are",
-        "info": "Models follow default routing unless they have a saved manual route. Matching providers take priority; unmatched models pass through to eligible API-key providers.",
+        "info": "Models follow default routing unless they have a saved manual route. A model goes to the providers that list it; a model no provider lists needs a manual route.",
         "address": "Local address: {{address}} (for connecting other tools to the gateway)",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
@@ -1320,7 +1322,7 @@
         "routeStatus": {
           "empty": "No models",
           "unknown": "Unknown",
-          "unconfigured": "No routes",
+          "unconfigured": "No supplier",
           "available": "Ready",
           "partial": "Partial",
           "unavailable": "Unavailable"
@@ -1329,7 +1331,7 @@
           "summary_one": "{{count}} Agent needs attention",
           "summary_other": "{{count}} Agents need attention",
           "modelMissing": "No model selected",
-          "routeMissing": "{{model}} is not a known model name. Change this Agent's model, or add a route for {{model}}.",
+          "routeMissing": "No provider supplies {{model}}. Pick another model, or add a provider that supplies it.",
           "degraded": "Some providers are unavailable; requests fall back to the next one",
           "waiting": "Waiting for a provider to recover",
           "interrupted": "No provider is available for this model"
@@ -1340,7 +1342,11 @@
         },
         "row": {
           "current": "{{source}} → {{model}}",
-          "currentTakeover": "{{source}} → {{model}} (Taken over)"
+          "currentTakeover": "{{source}} → {{model}} (Taken over)",
+          "usedBy": "Used by {{names}}",
+          "usedByMore_one": "Used by {{names}} and {{count}} more",
+          "usedByMore_other": "Used by {{names}} and {{count}} more",
+          "usersSeparator": ", "
         },
         "group": {
           "subtitle": {
@@ -1356,7 +1362,7 @@
             "degraded": "Degraded",
             "waiting": "Supply unavailable for now",
             "interrupted": "No provider is available",
-            "unconfigured": "No model route configured",
+            "unconfigured": "No provider supplies it",
             "unused": "No Agent uses this backend"
           },
           "emptyModels": "This backend's model list is empty",
@@ -1425,7 +1431,8 @@
           "confirm_one": "Add {{count}} model",
           "confirm_other": "Add {{count}} models",
           "groupCatalog": "Model catalog",
-          "catalogNote": "No provider lists these. Once added, the ID is sent to your provider as is; the chat tells you if the provider doesn't serve it.",
+          "catalogNote": "No provider lists these. After adding one, choose a provider for it in its route before you use it.",
+          "noSuppliedMatch": "None of your providers lists this model. Pick one they list; you can add others later in Settings › Models.",
           "notListed": "Not listed by a provider",
           "customFromQueryNote": "Uses the ID exactly as typed, with default parameters. You can change them later in Manage models.",
           "searchingCatalog": "Searching the model catalog"
@@ -1451,7 +1458,10 @@
             "placeholder": "Optional — the list shows the model ID when this is empty"
           },
           "lookupLoading": "Searching models.dev…",
-          "useAsId": "Use \"{{query}}\" as the model ID",
+          "useAsId": "Use \"<id>{{query}}</id>\" as the model ID",
+          "useAsIdKeep": "Use \"<id>{{query}}</id>\", keep current parameters",
+          "parametersFrom": "Parameters from {{name}}",
+          "clearParameters": "Clear parameters",
           "fillFailed": "models.dev could not be reached",
           "fillUnavailable": "models.dev unavailable",
           "matches": "models.dev matches",
@@ -1501,7 +1511,7 @@
       "legend": {
         "native": "Own login",
         "viaGateway": "Managed by Model Hub",
-        "passthrough": "Passthrough",
+        "passthrough": "Forwarded as is",
         "connectedUnused": "Enabled · not currently used",
         "takeover": "Taken over · temporarily rerouted",
         "unavailable": "Supply paused",
@@ -1617,13 +1627,13 @@
         "origin": {
           "automatic": "Automatic",
           "manual": "Manual",
-          "passthrough": "Passthrough",
+          "passthrough": "Forwarded as is",
           "unconfigured": "Unconfigured"
         },
         "help": {
           "automatic": "Matched by model name.\nProvider order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
-          "passthrough": "No matching model was found in the provider lists.\nThe original model name is sent to eligible API-key providers in default order for the provider to handle.",
+          "passthrough": "No provider lists this model.\nIts name is forwarded as is to eligible API-key providers, which try it in default order.",
           "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
         },
         "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
@@ -1641,13 +1651,13 @@
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
           "automatic": "After restore: automatic matching",
-          "passthrough": "After restore: original-name passthrough",
-          "unconfigured": "After restore: unconfigured"
+          "passthrough": "After restore: forwarded as is",
+          "unconfigured": "After restore: no provider supplies it"
         },
         "previewLoading": "Reading inherited routing...",
         "previewFailed": "Could not preview inherited routing. Nothing has been saved. Retry or undo the restore.",
         "draftEmpty": "No route entries in this draft.",
-        "noDefaults": "No default provider can route this model. Add a matching provider or an eligible API-key provider.",
+        "noDefaults": "No provider in default routing lists this model. Add one that lists it or put an existing one in default routing; if your provider does serve it, choose it under Custom.",
         "inventoryNotProvided": "Model list not provided",
         "configureDefaults": "Configure default routing",
         "close": "Close",
@@ -1661,12 +1671,12 @@
       },
       "order": {
         "title": "{{backend}} · Default routing",
-        "subtitle": "Applies to automatic and passthrough routes. Saved manual routes stay unchanged.",
+        "subtitle": "Applies to automatic routes. Saved manual routes stay unchanged.",
         "infoLabel": "About default routing",
         "reorder": "Reorder provider",
         "section": {
           "ordered": "Provider priority",
-          "ordered.note": "Match model names first; otherwise pass through to eligible API-key providers in this order.",
+          "ordered.note": "A model goes to the providers that list it, in this order. A model no provider lists needs a manual route.",
           "heldOut": "Not in default routing",
           "heldOut.note": "Available for manual routes."
         },
@@ -2193,7 +2203,7 @@
         "field": {
           "vendor": "Provider",
           "vendor.custom": "Other provider · enter its address",
-          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address and API format are filled in for you",
+          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address is filled in for you",
           "vendor.search": "Search providers",
           "vendor.empty": "No provider by that name",
           "name": "Name (optional)",
@@ -2249,8 +2259,8 @@
           "catalogPinned.hint": "Interface supplied by the built-in catalog; credential verification is separate",
           "declared": "Manually specified",
           "detected": "Recognised as {{format}}",
-          "unrecognised": "Couldn't recognise the format, so {{format}} is used. Pick another if it's wrong.",
-          "unrecognisedRejected": "The endpoint rejected this key, so the format couldn't be recognised; {{format}} is used."
+          "keyRefused": "This address refused the key. Check or replace it.",
+          "unrecognised": "Couldn't recognise the format, so {{format}} is used. Pick another if it's wrong."
         },
         "inventory": {
           "title": "The interface is identified — but its model list did not come back this time"
@@ -3179,6 +3189,7 @@
   },
   "errors": {
     "sandbox_integrity_failed": "Protected Vault was not opened because its security code could not be verified. Check your connection and update Avibe, then retry. Do not bypass verification or recreate your passkey.",
+    "sandbox_unreachable": "The network is too slow; the secure code didn’t finish loading.",
     "sandbox_build_mismatch": "The protected Vault sandbox does not match this Avibe release. Update Avibe or contact support; your existing secrets and passkey are unchanged.",
     "sandbox_entry_unavailable": "Protected Vault cannot run from this address or browser context. Use a compatible browser at your HTTPS avibe.bot address via Settings → Remote Access, or localhost / 127.0.0.1 on the computer running Avibe.",
     "sandbox_browser_unavailable": "Protected Vault needs a secure browser context with Web Crypto. Open Avibe directly in an up-to-date compatible browser, not inside another page or embedded browser.",
@@ -6312,6 +6323,7 @@
         "prfUnavailableUnlock": "This browser couldn't unlock Protected with your passkey, so it is still locked. Try again in a current Chrome or Safari, on a device where this passkey is saved."
       }
     },
+    "sandboxLoading": "Loading the secure code…",
     "dialog": {
       "title": "Add a secret",
       "subtitle": "Stored encrypted; the value never reaches the chat or the model.",
@@ -7161,6 +7173,7 @@
       "addDescription": "Add one provider to get started. Model Hub handles routing.",
       "addDescriptionMore": "Review detected configurations and confirm migration without retyping",
       "addDescriptionKey": "Enter the provider's address and API key.",
+      "addDescriptionKeyPreset": "Choose the provider and enter its API key.",
       "addMethodsLabel": "Add method",
       "addMethodDetected": "Detected",
       "addMethodSubscription": "Subscription",
@@ -7395,9 +7408,6 @@
       "allow": "Allow",
       "deny": "Don't allow",
       "saveFailed": "Couldn't save your choice. Try again.",
-      "offTitle": "Voice input is off",
-      "offBody": "Type instead, or turn it on in Settings › General.",
-      "turnOn": "Turn on",
       "settingTitle": "Voice input",
       "settingDescription": "A third-party AI speech service turns what you say into text; avibe.bot doesn't keep your recordings. Applies to your account on this Avibe."
     }

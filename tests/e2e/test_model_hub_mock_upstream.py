@@ -265,7 +265,6 @@ def _send_through_opencode_gateway_engine(
     prompt_start_delay_seconds: float = 0,
     require_terminal_result: bool = False,
     inventory_models: list[dict[str, Any]] | None = None,
-    automatic_route: bool = False,
     isolated_upstream: MockLLMUpstream | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     binary = shutil.which("opencode")
@@ -354,15 +353,15 @@ def _send_through_opencode_gateway_engine(
         )
         assert mode.status == 200, mode.json()
         route_path = f"/api/models/agents/opencode/chain?model={menu_model}"
-        chain = app.client.get(route_path) if automatic_route else app.client.put(
+        chain = app.client.put(
             route_path, {"hops": [{"source_id": source["id"], "model_id": stored_model}]},
         )
         assert chain.status == 200, chain.json()
         if inventory_models is not None:
-            assert chain.json()["chain"]["route_origin"] == ("passthrough" if automatic_route else "manual")
-            assert chain.json()["chain"]["manual_override"] == (
-                None if automatic_route else {"hops": [{"source_id": source["id"], "model_id": stored_model}]}
-            )
+            assert chain.json()["chain"]["route_origin"] == "manual"
+            assert chain.json()["chain"]["manual_override"] == {
+                "hops": [{"source_id": source["id"], "model_id": stored_model}]
+            }
 
         options = app.client.post(
             "/api/opencode/options",
@@ -550,19 +549,19 @@ def _send_through_opencode_gateway_engine(
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
 @pytest.mark.parametrize("inventory", [[], [{"id": "unrelated-listed-model"}]], ids=["empty", "incomplete"])
-@pytest.mark.parametrize("automatic", [True, False], ids=["passthrough", "manual"])
+@pytest.mark.parametrize("mapped", [False, True], ids=["manual-same-id", "manual-mapped"])
 def test_mh_routing_005_real_opencode_gateway_cpa_preserves_unknown_model_and_source_isolation(
-    model_hub_app_factory, mock_llm_upstream, protocol, inventory, automatic,
+    model_hub_app_factory, mock_llm_upstream, protocol, inventory, mapped,
 ):
     """MH-ROUTING-005: real backend -> gateway -> pinned CPA forwards an unlisted exact model only to its source."""
     native = "anthropic" if protocol == "anthropic" else "openai_responses"
     menu = "claude-opus-5" if native == "anthropic" else "deepseek-v3.2"
-    target = menu if automatic else "vendor/unlisted-route-target"
+    target = "vendor/unlisted-route-target" if mapped else menu
     variant = {"effort": "high"} if native == "anthropic" else {"reasoningEffort": "high"}
     with MockLLMUpstream() as other:
         captured, result = _send_through_opencode_gateway_engine(
             model_hub_app_factory, mock_llm_upstream, upstream_protocol=protocol, native_protocol=native,
-            stored_model=target, variant=variant, inventory_models=inventory, automatic_route=automatic,
+            stored_model=target, variant=variant, inventory_models=inventory,
             isolated_upstream=other, require_terminal_result=True,
         )
     assert captured["model"] == target

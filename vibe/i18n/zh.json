@@ -1127,7 +1127,7 @@
       "adapter_error": "无法确认服务是否可连接，请重试。",
       "credential_replacement_unverified": "暂时无法验证新密钥，原密钥未改动，请稍后重试",
       "native_login_in_progress": "另一个 Agent 登录正在进行中，请先完成或取消后再重试。",
-      "native_subscription_exists": "该供应商已经有一个由 Agent 管理的订阅。",
+      "native_subscription_exists": "该供应商已经有一个后端自己登录的订阅。",
       "source_timeout": "连接超时，请检查网络后重试。",
       "invalid_source_order": "供应商优先级包含不可用、不适用或重复的供应商。",
       "mode_switch_blocked": "当前模型管理方式或选择阻止了此操作。",

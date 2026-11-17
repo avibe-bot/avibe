@@ -15,6 +15,7 @@ const mock = vi.hoisted(() => ({ api: {
   mutateConfig: vi.fn(), listVibeAgents: vi.fn(), getVibeAgent: vi.fn(), updateVibeAgent: vi.fn(),
 }, showToast: vi.fn(), models: {
   getAgentChains: vi.fn(), listSources: vi.fn(), getAgentModelCandidates: vi.fn(), putAgentModels: vi.fn(),
+  searchModelsDev: vi.fn(),
 } }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => mock.api }));
 vi.mock('../settings/models/modelsApi', async (importOriginal) => {
@@ -224,6 +225,28 @@ describe('the built-in assistant card', () => {
     expect(mock.models.putAgentModels).toHaveBeenCalledOnce();
     expect(mock.models.putAgentModels.mock.calls[0][1].models.map((row: { id: string }) => row.id)).toEqual(['gpt-5.6-nano']);
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('AUTH-SETUP-166 offers only supplied candidates behind All models: no catalog row and no typed ID', async () => {
+    // A catalog answer the setup picker must never ask for: were it asked, this row would show.
+    mock.models.searchModelsDev.mockResolvedValue([{
+      provider_id: 'lab', provider_name: 'Lab', model_id: 'not-listed-anywhere', models_dev_id: 'lab/not-listed-anywhere',
+      display_name: 'Not Listed', context_window: null, max_output_tokens: null, input_modalities: ['text'],
+      output_modalities: ['text'], supports_tools: true, supports_reasoning: false, reasoning_efforts: [],
+      native_protocol: 'openai_chat', first_party: true,
+    }]);
+    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    fireEvent.click(await card().findByRole('button', { name: en.onboarding.setup.allModels }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Choose a Vibey model' }));
+    expect(await dialog.findByRole('radio', { name: /gpt-5\.6-pro/ })).toBeTruthy();
+    expect(dialog.queryByRole('radio', { name: /gpt-5\.6-unsupplied/ })).toBeNull();
+    fireEvent.change(dialog.getByRole('textbox', { name: en.settings.models.gateway.picker.search }), { target: { value: 'not-listed-anywhere' } });
+    expect(await dialog.findByText(en.settings.models.gateway.picker.noSuppliedMatch)).toBeTruthy();
+    // Past the catalog's debounce: nothing asked it, and nothing offers what was typed.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
+    expect(mock.models.searchModelsDev).not.toHaveBeenCalled();
+    expect(dialog.queryByRole('group', { name: en.settings.models.gateway.picker.groupCatalog })).toBeNull();
+    expect(dialog.queryByRole('button', { name: /as a custom model/ })).toBeNull();
   });
 
   it('lets All models choose a model the list already holds, without adding it again', async () => {

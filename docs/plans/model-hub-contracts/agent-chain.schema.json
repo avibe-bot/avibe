@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-chain.schema.json",
   "title": "AgentChain",
-  "description": "Canonical output of the shared effective route plan. A nonempty sparse manual override wins verbatim; absent or valid empty values inherit matching evidence or exact-id passthrough on Hub API-key sources in backend default order. Live inspection adds health, runnability, blocker, retry annotations, and current position without changing plan membership or origin. Output-only minimum hop counts do not restrict accepted empty PUT/preview input or supported configuration before normalization.",
+  "description": "Canonical output of the shared effective route plan. A nonempty sparse manual override wins verbatim; absent or valid empty values inherit matching inventory evidence only, in backend default order. Unlisted Hub API-key targets require a manual override. Live inspection adds health, runnability, blocker, retry annotations, and current position without changing plan membership or origin. Output-only minimum hop counts do not restrict accepted empty PUT/preview input or supported configuration before normalization.",
   "type": "object",
   "required": ["contract_version", "backend", "model_id", "manual_override", "route_origin", "chain", "current", "supply_state"],
   "additionalProperties": false,
@@ -42,7 +42,7 @@
     },
     "route_origin": {
       "enum": ["automatic", "manual", "passthrough", null],
-      "description": "Origin of the nonempty effective plan, independent of health and native process readiness. Passthrough is restricted to Hub API-key Sources; unmatched subscription-only defaults yield an empty plan. Null exactly when the inherited effective chain is empty. Empty input inherits and does not force null origin."
+      "description": "Origin of the nonempty effective plan, independent of health and native process readiness. Passthrough is retained for wire compatibility with older producers but is no longer generated. Automatic requires matching non-retired inventory; unlisted targets require an explicit API-key manual hop. Null exactly when the inherited effective chain is empty. Empty input inherits and does not force null origin."
     },
     "current": {
       "anyOf": [
@@ -61,7 +61,7 @@
     },
     "chain": {
       "type": "array",
-      "description": "Effective hops in planner order. Manual hops retain the exact saved order; generated hops follow matching evidence or passthrough defaults. Empty is a first-class unconfigured route.",
+      "description": "Effective hops in planner order. Manual hops retain the exact saved order; generated hops follow matching inventory evidence only. Empty is a first-class unconfigured route.",
       "items": {
         "type": "object",
         "required": ["source_id", "model_id", "channel", "health", "runnable", "reason", "retry_at"],
@@ -262,8 +262,8 @@
       "contract_version": 23,
       "backend": "codex",
       "model_id": "unlisted-model",
-      "manual_override": null,
-      "route_origin": "passthrough",
+      "manual_override": { "hops": [{ "source_id": "src_relay9c1x", "model_id": "unlisted-model" }] },
+      "route_origin": "manual",
       "chain": [{ "source_id": "src_relay9c1x", "model_id": "unlisted-model", "channel": "hub", "health": "healthy", "runnable": true, "reason": null, "retry_at": null }],
       "current": { "source_id": "src_relay9c1x", "model_id": "unlisted-model" },
       "supply_state": "ok"

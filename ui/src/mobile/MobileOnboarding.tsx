@@ -17,6 +17,7 @@ import {
   Sparkles,
   UserRound,
   Loader2,
+  Database,
 } from 'lucide-react';
 import {
   createContext,
@@ -80,7 +81,7 @@ import {
 } from './InstanceList';
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
 import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
-import { AboutSection, DeleteAccount, LicensesContent } from './LicensesPage';
+import { AboutSection, AccountDataContent, AccountLinkRow, LicensesContent } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
 type Screen =
@@ -97,6 +98,7 @@ type Screen =
   | 'cli'
   | 'account'
   | 'licenses'
+  | 'accountData'
   | 'sheet';
 
 type BusyAction =
@@ -283,10 +285,17 @@ const DocumentScroll = createContext(false);
 function CloudScreen({
   children,
   onPull,
+  fill = false,
 }: {
   children: ReactNode;
   /** Pull to refresh at the top (full-screen pages only). */
   onPull?: () => void;
+  /**
+   * In the sheet too, the column is at least the sheet high, so `mt-auto` reaches the bottom.
+   * `cqh` is the sheet's own viewport in the App (no container there) and the drawn sheet's
+   * height in design frames, which make it a size container.
+   */
+  fill?: boolean;
 }) {
   const { t } = useTranslation();
   const documentScroll = useContext(DocumentScroll);
@@ -296,7 +305,7 @@ function CloudScreen({
   if (documentScroll) {
     return (
       <main className="min-h-dvh w-full bg-bg text-foreground">
-        <div className="mx-auto flex w-full max-w-xl flex-col px-4 pt-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+        <div className={cn('mx-auto flex w-full max-w-xl flex-col px-4 pt-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]', fill && 'min-h-[100cqh]')}>
           {children}
         </div>
       </main>
@@ -1837,8 +1846,7 @@ function Account({
   onSwitch,
   onLogout,
   onLicenses,
-  onPrivacy,
-  onDeleteAccount,
+  onAccountData,
   inSheet = false,
   showCurrent = !inSheet,
   onClose,
@@ -1864,9 +1872,8 @@ function Account({
   onSwitch: () => void;
   onLogout: () => void;
   onLicenses: () => void;
-  onPrivacy: () => void;
-  /** Opens avibe.bot's account deletion page over Account, with the App's sign-in. */
-  onDeleteAccount: () => void;
+  /** Account and data: the privacy policy and, at its bottom, deleting the account. */
+  onAccountData: () => void;
 }) {
   const { t } = useTranslation();
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id);
@@ -1942,8 +1949,10 @@ function Account({
           <ChevronRight className="size-4" />
         </Button>
       </section> : null}
-      <AboutSection disabled={locked} licenses={licenses} onLicenses={onLicenses} onPrivacy={onPrivacy} />
-      <DeleteAccount disabled={locked} onDelete={onDeleteAccount} />
+      <div className="mt-8">
+        <AccountLinkRow icon={Database} label={t('mobileApp.accountData.title')} disabled={locked} onClick={onAccountData} />
+      </div>
+      <AboutSection disabled={locked} licenses={licenses} onLicenses={onLicenses} />
     </CloudScreen>
   );
 }
@@ -1956,6 +1965,69 @@ export function AccountSheetPage(props: Omit<Parameters<typeof Account>[0], 'inS
   return (
     <DocumentScroll.Provider value>
       <Account {...props} inSheet />
+    </DocumentScroll.Provider>
+  );
+}
+
+/**
+ * Account and data, pushed from Account in the sheet and on the full page alike, with Back to
+ * Account (ui/design: mobile-app/switcher/account-data, mobile-app/account/data).
+ */
+function AccountData({
+  locked,
+  inSheet = false,
+  onBack,
+  onPrivacy,
+  onDelete,
+}: {
+  locked: boolean;
+  /** Pushed inside the sheet: Back names Account, as Account's own Back names the list. */
+  inSheet?: boolean;
+  onBack: () => void;
+  onPrivacy: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <CloudScreen fill>
+      {inSheet ? (
+        <header className="pb-4">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={locked}
+            // The App's left-edge swipe presses this button (MobileOnboardingBridge).
+            data-mobile-back=""
+            className="-ml-2 gap-1 px-2 text-mint-ink"
+            onClick={onBack}
+          >
+            <ChevronLeft className="size-4" />
+            {t('mobileApp.account.title')}
+          </Button>
+          <h1 className="mt-2 text-xl font-semibold">{t('mobileApp.accountData.title')}</h1>
+        </header>
+      ) : (
+        <>
+          <Brand back disabled={locked} onBack={onBack} />
+          <PageTitle title={t('mobileApp.accountData.title')} />
+        </>
+      )}
+      <AccountDataContent disabled={locked} onPrivacy={onPrivacy} onDelete={onDelete} />
+    </CloudScreen>
+  );
+}
+
+/** Account and data as a full page (`#account`, `#runtime-account`), as a view; design frames draw it. */
+export function AccountDataPage(props: Omit<Parameters<typeof AccountData>[0], 'inSheet'>) {
+  return <AccountData {...props} />;
+}
+
+/** Account and data inside the sheet, as a view; design frames draw it. */
+export function AccountDataSheetPage(props: Omit<Parameters<typeof AccountData>[0], 'inSheet'>) {
+  return (
+    <DocumentScroll.Provider value>
+      <AccountData {...props} inSheet />
     </DocumentScroll.Provider>
   );
 }
@@ -2810,8 +2882,25 @@ function MobileOnboardingScreens() {
             setScreen('licenses');
           }
         }}
+        onAccountData={() => {
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('accountData');
+          }
+        }}
+      />
+    );
+  }
+  if (screen === 'accountData') {
+    return (
+      <AccountData
+        locked={locked}
+        inSheet={inSheet}
+        onBack={() => {
+          if (!isOperationLocked()) setScreen('account');
+        }}
         onPrivacy={openPrivacyPolicy}
-        onDeleteAccount={() => void deleteAccount()}
+        onDelete={() => void deleteAccount()}
       />
     );
   }

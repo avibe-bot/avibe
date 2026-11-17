@@ -55,7 +55,9 @@ const api = {
 const listed = new Set(['claude-fable-5']);
 const dialog = (query = '', choose: 'many' | 'one' = 'many') => () => (
   <BackendModelPickerDialog open backend="vibey" listedIds={listed} initialQuery={query} choose={choose}
-    onCancel={() => {}} onAdd={() => {}} onCustom={choose === 'many' ? () => {} : undefined} />
+    onCancel={() => {}} onAdd={() => {}} onCustom={choose === 'many' ? () => {} : undefined}
+    // `one` is setup's choice, which offers only what a provider lists.
+    suppliedOnly={choose === 'one'} />
 );
 /** The catalog is asked once typing pauses; a frame waits it out. */
 const searched = 900;
@@ -119,7 +121,7 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: { api },
     wait: searched,
-    render: dialog('Fable 5.2', 'one'),
+    render: dialog('Fable', 'one'),
   },
   {
     name: 'search-catalog-phone',

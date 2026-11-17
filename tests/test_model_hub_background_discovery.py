@@ -346,7 +346,7 @@ def test_stale_sources_catch_up_together_then_refresh_at_different_times(tmp_pat
     assert len(set(refreshed_at.values())) > 1
 
 
-def test_listing_that_would_strand_a_menu_model_is_left_to_manual_refresh(tmp_path):
+def test_listing_on_a_blocked_source_does_not_remove_nonexistent_supply(tmp_path):
     clock = Clock()
     healthy = _listed(_hub_source("src_healthy1", ("claude-other-a",)), clock, hours_ago=1)
     blocked = _listed(_hub_source("src_blocked2", ("claude-other-b",)), clock, hours_ago=7)
@@ -357,16 +357,23 @@ def test_listing_that_would_strand_a_menu_model_is_left_to_manual_refresh(tmp_pa
     service, store, adapter, _ = _background(
         tmp_path, [healthy, blocked], ListingAdapter(("claude-other-b", MENU_MODEL)),
     )
-    # Without an exact Route the menu model passes through to the healthy key.
-    # Listing it on the blocked Source alone would narrow it onto that Source.
+    # An unlisted automatic model has no supply to lose. Discovering it on a
+    # blocked Source may add an inherited hop, but does not make it runnable.
     store.load().agents["claude"].routes.pop(MENU_MODEL)
-    before = copy.deepcopy(store.load().to_payload())
+    before = service.agent_chain("claude", MENU_MODEL)
+    assert before["chain"] == []
+    assert before["route_origin"] is None
+    assert before["supply_state"] == "interrupted"
 
     _refresh(service)
 
     assert adapter.listed == ["cred_src_blocked2"]
-    assert store.load().to_payload() == before
-    assert adapter.synced == []
+    assert MENU_MODEL in {model.id for model in store.load().sources[1].models}
+    after = service.agent_chain("claude", MENU_MODEL)
+    assert after["route_origin"] == "automatic"
+    assert [hop["source_id"] for hop in after["chain"]] == [blocked.id]
+    assert after["current"] is None
+    assert after["supply_state"] == "interrupted"
 
 
 @pytest.mark.parametrize("read", ["list_sources", "agent_model_candidates"])

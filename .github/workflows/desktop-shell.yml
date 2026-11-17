@@ -53,6 +53,15 @@ jobs:
           xcrun --sdk macosx --show-sdk-version
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
 
+      # Release builds rely on this image killing code that claims restricted
+      # entitlements without a provisioning profile: their launch smoke test
+      # only proves the Developer ID profile if it does. Checked here, without
+      # credentials, so an image that stops refusing fails a pull request
+      # instead of a release.
+      - name: Verify the runner refuses unauthorized restricted entitlements
+        if: runner.os == 'macOS'
+        run: sh scripts/check-restricted-entitlement-refusal.sh
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -127,6 +136,36 @@ jobs:
 
       - name: Test Rust
         run: cargo test --locked --workspace --all-features
+
+      # Real WebKit windows on loopback pages, with disposable browsing data.
+      # The first run activates the app, as a user in the Workbench has: sandbox
+      # windows may appear, and everything a window on screen must satisfy is
+      # checked. The second leaves the app inactive, where a sandbox window must
+      # be closed instead. The third runs the shell's own install on this
+      # unsigned build.
+      - name: Verify the Vault sandbox window boundary in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example vault_window_probe --all-features
+          # The probe compiles macos_vault_window.rs into itself. If it also
+          # links the library, the process holds two copies of the module and
+          # of its Objective-C classes, and what it then shows is not the
+          # module's behavior. Nothing of the library may be in the binary.
+          nm target/debug/examples/vault_window_probe > "$RUNNER_TEMP/vault-window-probe-symbols.txt"
+          library_symbols="$(grep -c 'avibe_desktop_lib' "$RUNNER_TEMP/vault-window-probe-symbols.txt" || true)"
+          if [ "$library_symbols" != "0" ]; then
+            echo "::error::vault_window_probe links avibe_desktop_lib next to its own copy of macos_vault_window.rs ($library_symbols symbols)"
+            exit 1
+          fi
+          probe() {
+            python src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_probe \
+              --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log "$RUNNER_TEMP/vault-window-probe-$1.log" "${@:2}"
+          }
+          probe active --set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1
+          probe inactive
+          probe shipping --set AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1
 
       # Hosted Windows runs elevated. Prove ordinary-user admission refuses
       # that token; this does not substitute for non-elevated lifecycle tests.
@@ -204,3 +243,15 @@ jobs:
           python ../scripts/desktop_release.py verify-macos-build-version
           --binary target/debug/avibe-desktop=11.0
           --minimum-sdk 26.0
+
+      # Real WebViews on loopback pages, with disposable browsing data: a
+      # Workbench web view retired through the shell's own helpers must stop its
+      # page, its iframe and its event stream, while a hidden control page runs on.
+      - name: Verify retired Workbench web views stop in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example retired_workbench_probe --all-features
+          python src-tauri/tests/run_cookie_probe.py target/debug/examples/retired_workbench_probe \
+            --log "$RUNNER_TEMP/retired-workbench-probe.log"

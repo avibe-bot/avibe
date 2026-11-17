@@ -24,6 +24,7 @@ COMPLETE = {
     "IOS_DISTRIBUTION_P12_PASSWORD": " pass word ",
     "IOS_APP_STORE_PROFILE_BASE64": "cHJvZmlsZQ==",
     "IOS_NOTIFICATION_SERVICE_PROFILE_BASE64": "bm90aWZpY2F0aW9uLXByb2ZpbGU=",
+    "IOS_LIVE_ACTIVITY_PROFILE_BASE64": "bGl2ZS1hY3Rpdml0eS1wcm9maWxl",
     "IOS_APPLE_TEAM_ID": testflight.TEAM_ID,
     "IOS_APP_STORE_CONNECT_KEY_ID": "ABCDE12345",
     "IOS_APP_STORE_CONNECT_ISSUER_ID": "01234567-89ab-cdef-0123-456789abcdef",
@@ -359,16 +360,102 @@ def _write_extension(path: Path, bundle_id: str) -> None:
 
 def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
     app = tmp_path / "Avibe.app"
-    valid = app / "PlugIns" / "Nested" / "NotificationService.appex"
-    _write_extension(valid, testflight.NOTIFICATION_SERVICE_BUNDLE_ID)
-    assert testflight.archived_notification_service_extensions(app) == [valid]
+    service = app / "PlugIns" / "Nested" / "NotificationService.appex"
+    _write_extension(service, testflight.NOTIFICATION_SERVICE_BUNDLE_ID)
+    with pytest.raises(testflight.TestFlightError, match="exactly one each"):
+        testflight.archived_extensions(app)
+
+    live = app / "PlugIns" / "AvibeLiveActivity.appex"
+    _write_extension(live, testflight.LIVE_ACTIVITY_BUNDLE_ID)
+    assert testflight.archived_extensions(app) == {
+        testflight.NOTIFICATION_SERVICE_BUNDLE_ID: service,
+        testflight.LIVE_ACTIVITY_BUNDLE_ID: live,
+    }
 
     _write_extension(
         app / "PlugIns" / "Unexpected.appex",
         "bot.avibe.ios.unexpected-service",
     )
-    with pytest.raises(testflight.TestFlightError, match="exactly one"):
-        testflight.archived_notification_service_extensions(app)
+    with pytest.raises(testflight.TestFlightError, match="exactly one each"):
+        testflight.archived_extensions(app)
+
+    duplicate = tmp_path / "Duplicate.app"
+    _write_extension(duplicate / "PlugIns" / "A.appex", testflight.LIVE_ACTIVITY_BUNDLE_ID)
+    _write_extension(duplicate / "PlugIns" / "B.appex", testflight.LIVE_ACTIVITY_BUNDLE_ID)
+    with pytest.raises(testflight.TestFlightError, match="exactly one each"):
+        testflight.archived_extensions(duplicate)
+
+
+def _live_activity_signed(entitlements: dict | None = None) -> tuple[dict, dict]:
+    info, signed_entitlements = signed(
+        info={"CFBundleIdentifier": testflight.LIVE_ACTIVITY_BUNDLE_ID},
+        entitlements={
+            "application-identifier": testflight.LIVE_ACTIVITY_APPLICATION_IDENTIFIER,
+        },
+    )
+    for key in ("aps-environment", "com.apple.developer.associated-domains",
+                "com.apple.security.application-groups", "keychain-access-groups"):
+        signed_entitlements.pop(key, None)
+    signed_entitlements.update(entitlements or {})
+    return info, signed_entitlements
+
+
+def _check_live_activity(info: dict, entitlements: dict) -> None:
+    testflight.check_signed_bundle(
+        info,
+        entitlements,
+        bundle_id=testflight.LIVE_ACTIVITY_BUNDLE_ID,
+        application_identifier=testflight.LIVE_ACTIVITY_APPLICATION_IDENTIFIER,
+        required_entitlements=testflight.LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS,
+        build="7.1",
+    )
+
+
+def test_the_live_activity_extension_is_signed_with_nothing_shared():
+    _check_live_activity(*_live_activity_signed())
+    # Its own keychain group (Xcode may add it) is harmless.
+    _check_live_activity(*_live_activity_signed(
+        {"keychain-access-groups": [testflight.LIVE_ACTIVITY_APPLICATION_IDENTIFIER]}
+    ))
+    for extra, message in [
+        ({"aps-environment": "production"}, "forbidden entitlements"),
+        ({"com.apple.security.application-groups": ["group.bot.avibe.ios"]}, "forbidden entitlements"),
+        ({"keychain-access-groups": [testflight.SHARED_KEYCHAIN_ACCESS_GROUP]}, "keychain groups"),
+        ({"keychain-access-groups": [f"{testflight.TEAM_ID}.*"]}, "keychain groups"),
+        ({"application-identifier": testflight.APPLICATION_IDENTIFIER}, "not signed for"),
+        ({"get-task-allow": True}, "development signature"),
+    ]:
+        with pytest.raises(testflight.TestFlightError, match=message):
+            _check_live_activity(*_live_activity_signed(extra))
+
+
+def test_a_live_activity_profile_is_checked_by_what_it_grants():
+    profile = app_store_profile()
+    profile["Entitlements"] = {
+        "application-identifier": testflight.LIVE_ACTIVITY_APPLICATION_IDENTIFIER,
+        # Apple's standard allowlist; the signed bundle is checked separately.
+        "keychain-access-groups": [f"{testflight.TEAM_ID}.*"],
+        "get-task-allow": False,
+    }
+    testflight.check_profile(
+        profile,
+        bundle_id=testflight.LIVE_ACTIVITY_BUNDLE_ID,
+        required_entitlements=testflight.LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS,
+        now=NOW,
+    )
+    for key, value in [
+        ("aps-environment", "production"),
+        ("com.apple.security.application-groups", ["group.bot.avibe.ios"]),
+    ]:
+        bad = app_store_profile()
+        bad["Entitlements"] = {**profile["Entitlements"], key: value}
+        with pytest.raises(testflight.TestFlightError, match="forbidden entitlements"):
+            testflight.check_profile(
+                bad,
+                bundle_id=testflight.LIVE_ACTIVITY_BUNDLE_ID,
+                required_entitlements=testflight.LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS,
+                now=NOW,
+            )
 
 
 def test_the_notification_service_ships_with_the_apps_version():
@@ -385,7 +472,7 @@ def test_the_notification_service_ships_with_the_apps_version():
 
 def test_each_shipped_bundle_needs_its_own_privacy_manifest(tmp_path: Path):
     repo = Path(__file__).resolve().parents[1]
-    for source in ["ios/Avibe/Resources", "ios/NotificationService"]:
+    for source in ["ios/Avibe/Resources", "ios/NotificationService", "ios/AvibeLiveActivity"]:
         bundle = tmp_path / source.replace("/", "-")
         bundle.mkdir()
         (bundle / "PrivacyInfo.xcprivacy").write_bytes(
@@ -619,12 +706,14 @@ def test_the_testflight_workflow_runs_by_hand_from_master_and_scopes_its_secrets
     assert with_secrets == ["Import Apple Distribution identity and App Store profile"]
     assert 'APP_PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_NAME"' in workflow_text
     assert 'NOTIFICATION_SERVICE_PROFILE_SPECIFIER="$IOS_NOTIFICATION_SERVICE_PROFILE_NAME"' in workflow_text
+    assert 'LIVE_ACTIVITY_PROFILE_SPECIFIER="$IOS_LIVE_ACTIVITY_PROFILE_NAME"' in workflow_text
     assert '\n            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_NAME"' not in workflow_text
     app_release = project_text.split(
         "C00000000000000000000004 /* Release */ = {", 1
     )[1].split("C00000000000000000000005 /* Debug */ =", 1)[0]
     assert 'PROVISIONING_PROFILE_SPECIFIER = "$(APP_PROVISIONING_PROFILE_SPECIFIER)";' in app_release
     assert 'PROVISIONING_PROFILE_SPECIFIER = "$(NOTIFICATION_SERVICE_PROFILE_SPECIFIER)";' in project_text
+    assert 'PROVISIONING_PROFILE_SPECIFIER = "$(LIVE_ACTIVITY_PROFILE_SPECIFIER)";' in project_text
     cleanup = steps[-1]
     assert cleanup["name"] == "Remove Apple signing material"
     assert cleanup["if"] == "always()"

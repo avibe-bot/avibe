@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
+import i18next from 'i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import en from '@/i18n/en.json';
 import {
   getActiveVaultSandboxClient, getVaultSandboxClient, openVaultAuthorizationWindow,
   resetVaultSandboxClient, verifyVaultSandboxIntegrity,
 } from './vaultSandboxClient';
 import {
-  VAULT_SANDBOX_EXPECTED_BUILD_HASH, VAULT_SANDBOX_IFRAME_URL, VAULT_SANDBOX_MANIFEST_PATH,
+  VAULT_SANDBOX_EXPECTED_BUILD_HASH, VAULT_SANDBOX_IFRAME_RESOURCE_PATH, VAULT_SANDBOX_IFRAME_URL, VAULT_SANDBOX_MANIFEST_PATH,
   VAULT_SANDBOX_ORIGIN, VAULT_SANDBOX_PINNED_MANIFEST, VAULT_SANDBOX_VERSION,
 } from './vaultSandboxManifest';
 import { releaseBytes, releaseResponse, sandboxMessage, stubBlankPopup, stubReleaseFetch } from './__fixtures__/vaultSandboxTransport';
@@ -49,18 +52,39 @@ describe('fail-closed local release authority', () => {
     expect(fetch).toHaveBeenCalledTimes(count);
     for (const [url, options] of vi.mocked(fetch).mock.calls) {
       expect(String(url)).toMatch(/^https:\/\/sandbox\.avibe\.bot\/v\/[a-f0-9]{64}\//);
-      expect(options).toMatchObject({ credentials: 'omit', cache: 'no-store', mode: 'cors', redirect: 'error' });
+      // The manifest and the document are never answered from a cache; what the document loads under
+      // SRI is revalidated with the host (no-cache), and every byte is hashed either way.
+      const path = new URL(String(url)).pathname;
+      const cached = path !== VAULT_SANDBOX_MANIFEST_PATH && path !== VAULT_SANDBOX_IFRAME_RESOURCE_PATH;
+      expect(options).toMatchObject({ credentials: 'omit', cache: cached ? 'no-cache' : 'no-store', mode: 'cors', redirect: 'manual' });
     }
+    // The manifest is fetched before anything that may come from a cache.
+    expect(new URL(String(vi.mocked(fetch).mock.calls[0][0])).pathname).toBe(VAULT_SANDBOX_MANIFEST_PATH);
     await verifyVaultSandboxIntegrity();
     expect(fetch).toHaveBeenCalledTimes(count * 2);
   });
 
-  it.each(['missing', 'malformed', 'stale-manifest', 'tampered-html', 'tampered-js', 'tampered-css', 'redirect', 'origin', 'cors', 'network'])(
+  it('revalidates from the cache only what the pinned document loads under its own SRI', () => {
+    const resources: Record<string, string> = VAULT_SANDBOX_PINNED_MANIFEST.resources;
+    const html = new TextDecoder().decode(releaseBytes(VAULT_SANDBOX_IFRAME_URL));
+    const sri = [...html.matchAll(/<(?:script|link)\b[^>]*>/g)].map(([tag]) => ({
+      path: /\b(?:src|href)="([^"]+)"/.exec(tag)?.[1], integrity: /\bintegrity="([^"]+)"/.exec(tag)?.[1],
+    }));
+    for (const path of Object.keys(resources).filter((path) => path !== VAULT_SANDBOX_IFRAME_RESOURCE_PATH)) {
+      expect(sri).toContainEqual({ path, integrity: resources[path] });
+    }
+  });
+
+  it.each(['missing', 'malformed', 'stale-manifest', 'tampered-html', 'tampered-js', 'tampered-css', 'redirect', 'opaque-redirect', 'origin', 'cors'])(
     'rejects %s before frame creation (the old disabled gate fails this regression)', async (failure) => {
       vi.mocked(fetch).mockImplementation(async (input) => {
         const url = String(input);
-        if (failure === 'network') throw new TypeError('CORS or offline');
         if (failure === 'missing') return new Response('not found', { status: 404 });
+        if (failure === 'opaque-redirect') {
+          const response = new Response(null, { status: 200 });
+          Object.defineProperties(response, { status: { value: 0 }, url: { value: url }, type: { value: 'opaqueredirect' } });
+          return response;
+        }
         if (failure === 'redirect') {
           const response = releaseResponse(url);
           Object.defineProperty(response, 'redirected', { value: true });
@@ -84,6 +108,48 @@ describe('fail-closed local release authority', () => {
       expect(getActiveVaultSandboxClient()).toBeNull();
     },
   );
+
+  it.each([
+    ['a lost connection or CORS failure', () => Promise.reject(new TypeError('offline'))],
+    ['a body cut off mid-download', (url: string) => {
+      const response = releaseResponse(url);
+      Object.defineProperty(response, 'arrayBuffer', { value: () => Promise.reject(new TypeError('network error')) });
+      return Promise.resolve(response);
+    }],
+  ])('reports %s as unreachable and retryable, never as tampering', async (_label, answer) => {
+    vi.mocked(fetch).mockImplementation((input) => answer(String(input)));
+    await expect(getVaultSandboxClient()).rejects.toMatchObject({ code: 'sandbox_unreachable', retryable: true });
+    expect(document.querySelector('iframe')).toBeNull();
+    // Trying again verifies afresh and opens the frame once the release downloads.
+    stubReleaseFetch();
+    const { promise } = await creation();
+    await expect(promise).resolves.toBeTruthy();
+  });
+
+  it('gives the download a full minute, then reports it unreachable', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation((_input, init) => new Promise((_done, fail) => {
+      init?.signal?.addEventListener('abort', () => fail(new DOMException('aborted', 'AbortError')));
+    }));
+    const verification = verifyVaultSandboxIntegrity();
+    let outcome: unknown = 'pending';
+    verification.then(() => { outcome = 'ok'; }, (error: unknown) => { outcome = error; });
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(outcome).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(outcome).toMatchObject({ code: 'sandbox_unreachable', retryable: true });
+  });
+
+  it('keeps a mismatch found before the deadline a mismatch', async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('.js')) return new Promise<Response>(() => undefined);
+      const bytes = releaseBytes(url);
+      if (url.endsWith('.css')) bytes[0] ^= 1;
+      return releaseResponse(url, bytes);
+    });
+    await expect(verifyVaultSandboxIntegrity()).rejects.toMatchObject({ code: 'sandbox_integrity_failed' });
+  });
 
   it('refuses missing Web Crypto at the entry gate and does not fetch or create a frame', async () => {
     vi.stubGlobal('crypto', { getRandomValues: vi.fn() });
@@ -161,6 +227,15 @@ describe('inert parent preopen', () => {
     expect(popup.closed).toBe(true);
   });
 
+  it('says it is loading the secure code while the reserved window waits for verification', async () => {
+    await i18next.init({ lng: 'en', resources: { en: { translation: en } } });
+    const popup = Object.assign(stubBlankPopup(), { document: document.implementation.createHTMLDocument('') });
+    const handle = openVaultAuthorizationWindow()!;
+    expect(popup.document.body.textContent).toBe(en.vaults.sandboxLoading);
+    await vi.waitFor(() => expect(popup.location.replace).toHaveBeenCalledOnce());
+    handle.close();
+  });
+
   it.each(['failure', 'close', 'reset', 'user-close'])('never navigates after %s and cleans only its popup', async (mode) => {
     let resolve!: (response: Response) => void;
     vi.mocked(fetch).mockImplementationOnce(() => new Promise<Response>((done) => { resolve = done; }));
@@ -183,7 +258,7 @@ describe('inert parent preopen', () => {
     stubBlankPopup();
     vi.mocked(fetch).mockRejectedValueOnce(new TypeError('offline'));
     const handle = openVaultAuthorizationWindow()!;
-    await expect(client.approveRelease({ items: [] }, handle.id)).rejects.toMatchObject({ code: 'sandbox_integrity_failed' });
+    await expect(client.approveRelease({ items: [] }, handle.id)).rejects.toMatchObject({ code: 'sandbox_unreachable' });
     expect(post.mock.calls.some(([message]) => message.op === 'approveRelease')).toBe(false);
     handle.close();
   });

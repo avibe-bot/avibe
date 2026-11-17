@@ -21,7 +21,7 @@ import i18n from '@/i18n';
 import { apiKeyVendorPreset } from '@/components/settings/models/apiKeyVendors';
 import { createSourceCollectionReadAuthority } from '@/components/settings/models/collectionReadAuthority';
 import { SUBSCRIPTION_VENDORS } from '@/components/settings/models/subscriptionOptions';
-import type { Source } from '@/components/settings/models/types';
+import { CONTRACT_VERSION, type Source } from '@/components/settings/models/types';
 
 const showToast = vi.hoisted(() => vi.fn());
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
@@ -487,6 +487,28 @@ describe('AddSourceDialog — the one write it owns', () => {
 
     release();
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it('names a refused key instead of asking to retry the connection', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue({
+      contract_version: CONTRACT_VERSION, outcome: 'ambiguous', reachable: true, authenticated: 'rejected',
+      protocol: null, discovery: 'not_attempted', models: [],
+    });
+    vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValue(new ApiCallError('discovery_failed', 'modelHub.errors.authentication_failed', true, [], [], [], 422));
+    renderDialog();
+    const user = userEvent.setup();
+    await fill(user);
+    // Detection speaks first: the handoff below is only meaningful once it has.
+    await screen.findByText('This address refused the key. Check or replace it.', undefined, { timeout: 3000 });
+
+    await user.click(primary());
+
+    expect(await screen.findByText('API key invalid or lacks permission. Check or replace it.')).toBeTruthy();
+    expect(screen.queryByText(/Your entries are preserved/)).toBeNull();
+    // One line for one refusal: detection's own hint steps aside once the save named it.
+    expect(screen.queryByText('This address refused the key. Check or replace it.')).toBeNull();
+    expect((within(body()).getByLabelText('API key') as HTMLInputElement).value).toBe('sk-live-1');
   });
 
   it('keeps the entries when the server refuses, and sends again on retry', async () => {

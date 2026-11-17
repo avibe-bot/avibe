@@ -19,7 +19,7 @@ for (const lang of ['en', 'zh'] as const) {
       await expect(toggle).toHaveAttribute('aria-expanded', 'true');
       await expect(issues.locator('ul')).toBeVisible();
       await expect(issues).toContainText(long ? 'long-model-id-' : 'grok/grok-4.6');
-      await expect(issues).toContainText(lang === 'zh' ? '模型名不存在' : 'is not a known model name');
+      await expect(issues).toContainText(lang === 'zh' ? '没有供应商提供' : 'No provider supplies');
       expect(await head.boundingBox()).toEqual(headBefore);
       const overflow = await card.evaluate((element) => {
         const box = element.getBoundingClientRect();

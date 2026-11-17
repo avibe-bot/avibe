@@ -378,7 +378,7 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
 
 @pytest.mark.parametrize("public", [False, True])
 async def test_google_observation_uses_paginated_credential_witness_without_inference(tmp_path, public):
-    """Only a declared, credential-gated listing proves auth; every page is truthful inventory."""
+    """Keep all keyed inventory pages, but the auth control needs only one keyless GET."""
     requests = []
 
     async def handle(request):
@@ -399,6 +399,8 @@ async def test_google_observation_uses_paginated_credential_witness_without_infe
         credential = store.store_api_key("synthetic-key", vendor="custom", protocol="google", base_url=base)
         adapter = CLIProxyEngineAdapter(supervisor=SimpleNamespace(), state_store=store)
         observed = await adapter.observe_source("custom", base, credential, ("google",))
+        assert [key is not None for _, _, _, key in requests] == [True, True, False]
+        assert requests[-1][2] == {}
         if public:
             assert observed.outcome != ObservationOutcome.OBSERVED
         else:

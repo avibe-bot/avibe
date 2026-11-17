@@ -1240,6 +1240,7 @@ async def probe_models(
     secret: str | None,
     auth_scheme: str | None = None,
     timeout: float = 15.0,
+    first_page_only: bool = False,
 ) -> tuple[DiscoveredModel, ...]:
     """Probe the one allowlisted models path without redirecting credentials.
 
@@ -1247,6 +1248,8 @@ async def probe_models(
     fabricated one -- there is no token to guess wrong and no other valid key to
     collide with -- so what it answers is unambiguous: a listing that still
     arrives belongs to anyone who asks and therefore attests to no credential.
+    ``first_page_only`` bounds that control to one request on paginated protocols;
+    credential-bearing inventory still reads every page.
     """
     normalized_vendor = vendor.strip().lower()
     validate_api_key_auth_scheme(normalized_vendor, protocol, base_url, secret, auth_scheme)
@@ -1258,6 +1261,7 @@ async def probe_models(
         # endpoint, so its saved routes and sessions name the same models on either surface.
         return await _probe_google_models(
             root, secret=secret, timeout=timeout, full_names=normalized_vendor == "gemini",
+            first_page_only=first_page_only,
         )
     try:
         url = upstream_api_url(root, "/v1/models", protocol)
@@ -1273,7 +1277,7 @@ async def probe_models(
         # stays on the uncredentialed request: it must differ in exactly one way.
         headers["anthropic-version"] = "2023-06-01"
     deadline = time.monotonic() + timeout
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
+    client_timeout = aiohttp.ClientTimeout(total=timeout, ceil_threshold=float("inf"))
     try:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.get(url, headers=headers, allow_redirects=False) as response:
@@ -1362,6 +1366,7 @@ def _project_google_inventory(
 
 async def _probe_google_models(
     root: str, *, secret: str | None, timeout: float, full_names: bool = False,
+    first_page_only: bool = False,
 ) -> tuple[DiscoveredModel, ...]:
     """Follow only page tokens on the same declared, credential-gated endpoint."""
     try:
@@ -1383,7 +1388,8 @@ async def _probe_google_models(
                     raise asyncio.TimeoutError
                 async with session.get(
                     url, headers=headers, params={"pageToken": page_token} if page_token else {},
-                    allow_redirects=False, timeout=aiohttp.ClientTimeout(total=remaining),
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=remaining, ceil_threshold=float("inf")),
                 ) as response:
                     if response.status >= 300:
                         raise await _model_discovery_http_error(response, secret)
@@ -1396,7 +1402,7 @@ async def _probe_google_models(
                             functools.partial(_project_google_inventory, full_names=full_names), deadline=deadline,
                         )
                 models.update((model.id, model) for model in page)
-                if page_token is None:
+                if first_page_only or page_token is None:
                     return tuple(models.values())
                 if page_token in seen_tokens:
                     raise EngineClientError("model discovery repeated a Google page token")

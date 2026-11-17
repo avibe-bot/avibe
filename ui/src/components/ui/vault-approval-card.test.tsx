@@ -319,6 +319,48 @@ describe('VaultApprovalCard protected signing completion', () => {
   });
 });
 
+// The secure code did not finish downloading: the card says the network was too slow and offers a
+// Retry that runs the same step again; a real mismatch keeps the tamper warning and no Retry.
+describe('VaultApprovalCard secure code that did not load', () => {
+  const evmContext = { kind: 'evm-transaction', chainId: '1', unsignedTransaction: {}, digestAlgorithm: 'keccak256', digest: '00'.repeat(32) };
+  const request = {
+    ...protectedAccess, id: 'vrq_slow', request_type: 'sign', secret_name: 'SIGNING_KEY',
+    delivery: { scheme: 'ecdsa-secp256k1-recoverable', digest: '00'.repeat(32), signing_context: evmContext, operation_context: { v: 2, purpose: 'sign', requestId: 'vrq_slow' } },
+    card: { request_type: 'sign', secret_name: 'SIGNING_KEY', kind: 'keypair', protection: 'protected', secret_unlock_material: { name: 'SIGNING_KEY', kind: 'keypair', envelope } },
+  } as unknown as VaultRequest;
+  const fail = (code: string) => Object.assign(new Error(code), { code });
+  const start = async () => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    openWindow();
+    const onResolved = vi.fn();
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={onResolved} onCancel={vi.fn()} /></I18nextProvider>);
+    const sign = screen.getByRole('button', { name: en.vaults.approval.sign }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(sign.disabled).toBe(false));
+    fireEvent.click(sign);
+    return onResolved;
+  };
+
+  it('says the network was too slow and retries the same step in place', async () => {
+    vault.signProtectedRequest
+      .mockRejectedValueOnce(fail('sandbox_unreachable'))
+      .mockResolvedValueOnce({ scheme: 'ecdsa-secp256k1-recoverable', signature: 'cd'.repeat(64), recovery_id: 1 });
+    const onResolved = await start();
+    expect(await screen.findByText(en.errors.sandbox_unreachable)).toBeTruthy();
+    expect(screen.queryByText(en.errors.sandbox_integrity_failed)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.requests.retry }));
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    expect(vault.signProtectedRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the tamper warning, with no Retry, for a real mismatch', async () => {
+    vault.signProtectedRequest.mockRejectedValueOnce(fail('sandbox_integrity_failed'));
+    await start();
+    expect(await screen.findByText(en.errors.sandbox_integrity_failed)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.vaults.requests.retry })).toBeNull();
+  });
+});
+
 // A protected seed-phrase wallet account (contract rev0.7 §5): the sandbox signs with the account
 // the signed release names, which must be the persisted one; the completion repeats it exactly.
 // A protected Bitcoin request names its input from the persisted, daemon-validated context: the type
@@ -569,6 +611,27 @@ describe('VaultApprovalCard protected access approval', () => {
       deks: [{ name: 'PROTON_BRIDGE_SMTP_PASSWORD', approval: { nonce: `nonce-${duration}` } }],
     });
     expect(popup.close).toHaveBeenCalledOnce();
+  });
+
+  it('retries an access approval that could not load the secure code with the duration the card shows now', async () => {
+    api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: 300 } });
+    vault.approveProtectedRelease.mockRejectedValueOnce(Object.assign(new Error('slow'), { code: 'sandbox_unreachable' }));
+    openWindow();
+    render(card());
+    await vi.waitFor(() => expect(api.createVaultAgentBindingsBatch).toHaveBeenCalled());
+    await approveWhenReady();
+    expect(await screen.findByText(en.errors.sandbox_unreachable)).toBeTruthy();
+    // Changed after the failure: Retry grants what the card shows now, not the first click's choice.
+    vault.approveProtectedRelease.mockResolvedValueOnce([blindBox]);
+    fireEvent.click(await screen.findByRole('radio', { name: /^15 min$/ }));
+    await vi.waitFor(() =>
+      expect(api.createVaultAgentBindingsBatch).toHaveBeenLastCalledWith({ request_id: 'vrq_access', grant_duration: 900 }),
+    );
+    const retry = screen.getByRole('button', { name: en.vaults.requests.retry }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(retry.disabled).toBe(false));
+    fireEvent.click(retry);
+    await vi.waitFor(() => expect(api.fulfillVaultAccessRequest).toHaveBeenCalledOnce());
+    expect(api.fulfillVaultAccessRequest.mock.calls[0][1]).toMatchObject({ grant_duration: 900 });
   });
 
   it('shows a single custom field label in an access approval', () => {

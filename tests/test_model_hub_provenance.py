@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from config.v2_config import ModelHubRouteConfig, ModelHubRouteHopConfig
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES, ResolutionDecision, classify_outcome
 from core.handlers.model_hub.provenance import (
@@ -29,14 +30,20 @@ from vibe import model_hub_client, ui_server
 @pytest.mark.parametrize('status', [400, 503])
 @pytest.mark.parametrize('has_detail', [True, False])
 def test_failed_passthrough_names_inventory_and_preserves_failure_outcome(tmp_path, language, listed, status, has_detail):
-    """Unlisted 503 keeps the failure copy without cooling the provider; listed 503 still does."""
-    source = _source('src_hint0001', (MODEL,) if listed else ())
+    """Unlisted 503 ends this request at once with the hint and cools nothing; listed 503 falls back and cools."""
+    # Both rows are the same manual hop to a mapped target: the hint follows the
+    # target's absence from this Source's list, never the Route's origin.
+    target = 'relay-opus-4-6'
+    source = _source('src_hint0001', (target,) if listed else ())
     config = _loaded_catalog_config('claude', MODEL, source)
+    config.agents['claude'].routes[MODEL] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, target),)
+    )
     service, store, adapter = _service(tmp_path, config)
     adapter.outcomes.append(RawCallOutcome(
         kind=RawOutcomeKind.HTTP_ERROR, http_status=status,
         error_code='model_not_found' if status == 400 else None,
-        redacted_message=None, stream_started=False, model_id=MODEL, source_id=source.id,
+        redacted_message=None, stream_started=False, model_id=target, source_id=source.id,
         upstream_detail=('No available accounts' if status == 503 else 'Model does not exist') if has_detail else None,
     ))
     with pytest.raises(ModelHubError) as raised:
@@ -44,24 +51,61 @@ def test_failed_passthrough_names_inventory_and_preserves_failure_outcome(tmp_pa
     projection = raised.value.turn_outcome
     text = render_turn_outcome_copy(projection, language)
     hint = "The provider doesn't list" if language == 'en' else '供应商的模型列表里没有'
+    # Only a listed 503 is a Source-level failure the walk falls back from; every other
+    # row is a request refusal, answered with a status the caller does not retry.
+    source_failure = status == 503 and listed
+    assert raised.value.status == (503 if source_failure else 400)
+    assert len(adapter.invocations) == 1
     assert (hint in text) is not listed
     detail = ('No available accounts' if status == 503 else 'Model does not exist') if has_detail else ''
     if not listed:
         assert text == (
-            f"The provider doesn't list {MODEL}; try another model."
-            if language == 'en' else f'供应商的模型列表里没有 {MODEL}，换一个模型试试。'
+            f"The provider doesn't list {target}; try another model."
+            if language == 'en' else f'供应商的模型列表里没有 {target}，换一个模型试试。'
         )
     else:
         assert (('No available accounts' if status == 503 else 'Model does not exist') in text) is has_detail
     # Shortening the summary must not discard the diagnostic projection.
-    if status == 503:
+    if source_failure:
         assert projection.last_upstream_failure.http_status == status
         assert projection.last_upstream_failure.detail == detail
     else:
+        assert projection.last_upstream_failure is None
         assert (projection.upstream_detail or '') == detail
     assert 'None' not in text
-    assert store.config.sources[0].state.status == ('cooldown' if status == 503 and listed else 'standby')
-    assert projection.outcome == ('exhausted' if status == 503 else 'failed_terminal')
+    assert store.config.sources[0].state.status == ('cooldown' if source_failure else 'standby')
+    assert projection.outcome == ('exhausted' if source_failure else 'failed_terminal')
+
+
+@pytest.mark.parametrize('last_listed', [True, False])
+def test_unlisted_hint_names_the_hop_that_failed_last(tmp_path, last_listed):
+    """A fallback chain is attributed to its last failing hop, not to any unlisted hop.
+
+    Both hops fail with a rate limit, which falls back whether or not the target is
+    listed, so the walk reaches the last hop; an unlisted 5xx would end it at once.
+    """
+    first = _source('src_first001', () if last_listed else ('first-target',))
+    last = _source('src_last0001', ('last-target',) if last_listed else ())
+    config = _loaded_catalog_config('claude', MODEL, first, last)
+    config.agents['claude'].routes[MODEL] = ModelHubRouteConfig(hops=(
+        ModelHubRouteHopConfig(first.id, 'first-target'),
+        ModelHubRouteHopConfig(last.id, 'last-target'),
+    ))
+    service, _store, adapter = _service(tmp_path, config)
+    for source, target in ((first, 'first-target'), (last, 'last-target')):
+        adapter.outcomes.append(RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR, http_status=429, error_code=None, redacted_message=None,
+            stream_started=False, model_id=target, source_id=source.id, upstream_detail='Too many requests',
+        ))
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.resolve(backend='claude', model_id=MODEL, request={}))
+    assert adapter.invocations == [(first.id, 'first-target'), (last.id, 'last-target')]
+    assert raised.value.turn_outcome.outcome == 'exhausted'
+    text = render_turn_outcome_copy(raised.value.turn_outcome, 'en')
+    if last_listed:
+        assert "doesn't list" not in text and 'src_last0001, HTTP 429' in text
+    else:
+        assert text == "The provider doesn't list last-target; try another model."
 
 
 @pytest.mark.parametrize('language, phrase', [

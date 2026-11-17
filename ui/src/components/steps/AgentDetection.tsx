@@ -1090,7 +1090,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       </div>
       {providerDialog}
       {pickerFor && (
-        <BackendModelPickerDialog open backend={pickerFor} listedIds={NOTHING_LISTED} choose="one"
+        <BackendModelPickerDialog open backend={pickerFor} listedIds={NOTHING_LISTED} choose="one" suppliedOnly
           onCancel={() => setPickerFor(null)}
           onAdd={(chosen) => {
             const backend = pickerFor;

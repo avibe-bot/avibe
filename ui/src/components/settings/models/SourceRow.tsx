@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { getBackendUiMeta } from '@/lib/agentBackends';
-import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
 import { sourceDetail } from './sourcePresentation';
 import { SourcePrivateValue } from './SourcePrivacy';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
@@ -26,7 +25,6 @@ export const SourceRow: React.FC<{
   const detail = sourceDetail(source);
   const service = source.protocol === 'search' && serviceVendorForSource(searchTool, source.id);
   const candidate = service && searchTool?.executor_candidates.find((row) => row.source_id === source.id);
-  const interfaceLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
   const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
   const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => getBackendUiMeta(backend).label))];
   const state = sourceStatePresentation(source.state, 'card', i18n.language, now, {
@@ -61,12 +59,6 @@ export const SourceRow: React.FC<{
         <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
           <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : accent])}>
             {t(`settings.models.upstream.kind.${kindKey}`)}
-          </span>
-          <span
-            className="model-hub-pill model-hub-source-interface-pill border"
-            title={interfaceLabel}
-          >
-            <span className="truncate">{interfaceLabel}</span>
           </span>
         </span>
         {source.account_label && <span data-source-account><SourcePrivateValue value={source.account_label} className="model-hub-upstream-detail mt-1 text-[10.5px] leading-[14px]" /></span>}

@@ -173,7 +173,7 @@
           },
           "route_origin": {
             "enum": ["automatic", "manual", "passthrough", null],
-            "description": "Shared planner origin, independent of transient health. Passthrough uses Hub API-key defaults only; subscriptions remain subject to known-model admission. Null exactly when chain_length is zero."
+            "description": "Shared planner origin, independent of transient health. Passthrough remains a compatible legacy enum but is no longer generated. Automatic includes only matching non-retired inventory; no match means chain_length zero, has_runnable_hop false, and null origin. Manual API-key hops can target unlisted models."
           },
           "chain_length": {
             "type": "integer",
@@ -221,7 +221,7 @@
           },
           "route_reason": {
             "enum": ["route_unconfigured", null],
-            "description": "Why this Agent has no usable route before Source health is considered. route_unconfigured means the selected model has no configured hops; null covers configured routes, Direct mode, and Agents without an explicit model."
+            "description": "Why this Agent has no usable route before Source health is considered. route_unconfigured means the selected model has no configured hops, including an inherited model absent from every eligible default inventory after upgrade; null covers configured routes, Direct mode, and Agents without an explicit model."
           }
         },
         "allOf": [

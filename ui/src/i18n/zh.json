@@ -323,8 +323,10 @@
       "switch": "切换实例",
       "choose": "选择实例",
       "privacy": "隐私政策",
-      "delete": "删除账号",
-      "deleteHint": "前往 avibe.bot，查看影响并确认删除。"
+      "delete": "删除账号"
+    },
+    "accountData": {
+      "title": "账号与数据"
     },
     "twoFactor": {
       "title": "确认是你本人。",
@@ -1294,13 +1296,13 @@
       "gateway": {
         "heading": "路由",
         "infoLabel": "什么是路由",
-        "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
+        "info": "模型跟随默认路由，已保存手动路由的模型除外。模型交给列出它的供应商；没有供应商列出的模型，需要设置手动路由。",
         "address": "本机地址：{{address}}（把其他工具接到网关时使用）",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
         "addModel": "添加模型",
         "switchToGateway": "交给模型网关管理",
-        "switchToDirect": "改为 Agent 管理",
+        "switchToDirect": "改为自己登录",
         "modeMenu": {
           "title": "运行模式",
           "gatewayCurrent": "托管（当前）",
@@ -1308,7 +1310,7 @@
           "directDescription": "改用 {{backend}} 自带的模型与凭据，路由与优先级不再生效"
         },
         "fail": {
-          "switchToDirect": "没能改为 Agent 管理",
+          "switchToDirect": "没能改为自己登录",
           "switchToGateway": "没能交给模型网关管理"
         },
         "modelCount_one": "{{count}} 个模型",
@@ -1320,7 +1322,7 @@
         "routeStatus": {
           "empty": "未配置模型",
           "unknown": "路由状态待确认",
-          "unconfigured": "未配置模型路由",
+          "unconfigured": "没有供应商提供",
           "available": "路由可用",
           "partial": "部分路由不可用",
           "unavailable": "路由不可用"
@@ -1329,7 +1331,7 @@
           "summary_one": "{{count}} 个 Agent 需关注",
           "summary_other": "{{count}} 个 Agent 需关注",
           "modelMissing": "未选择模型",
-          "routeMissing": "{{model}} 模型名不存在，请修改此 agent 的模型名或添加 {{model}} 模型的路由",
+          "routeMissing": "没有供应商提供 {{model}}。请换一个模型，或添加提供它的供应商。",
           "degraded": "部分供应商不可用，请求已自动切换到其他供应商",
           "waiting": "等待供应商恢复",
           "interrupted": "此模型没有可用供应商"
@@ -1340,7 +1342,11 @@
         },
         "row": {
           "current": "{{source}} → {{model}}",
-          "currentTakeover": "{{source}} → {{model}}（已自动切换）"
+          "currentTakeover": "{{source}} → {{model}}（已自动切换）",
+          "usedBy": "{{names}} 在用",
+          "usedByMore_one": "{{names}} 等 {{total}} 个在用",
+          "usedByMore_other": "{{names}} 等 {{total}} 个在用",
+          "usersSeparator": "、"
         },
         "group": {
           "subtitle": {
@@ -1348,7 +1354,7 @@
             "gateway": "{{mode}} · {{health}}"
           },
           "mode": {
-            "direct": "Agent 管理",
+            "direct": "自己登录",
             "gateway": "托管"
           },
           "status": {
@@ -1356,7 +1362,7 @@
             "degraded": "降级",
             "waiting": "等待供应商恢复",
             "interrupted": "没有可用供应商",
-            "unconfigured": "未配置模型路由",
+            "unconfigured": "没有供应商提供",
             "unused": "暂无 Agent 使用"
           },
           "emptyModels": "这个后端的模型列表是空的",
@@ -1425,7 +1431,8 @@
           "confirm_one": "添加 {{count}} 个模型",
           "confirm_other": "添加 {{count}} 个模型",
           "groupCatalog": "模型目录",
-          "catalogNote": "你的供应商没有列出这些模型。添加后按原 ID 发给供应商；供应商不支持时，对话里会告诉你。",
+          "catalogNote": "你的供应商没有列出这些模型。添加后，要在这个模型的路由里指定一个供应商才能使用。",
+          "noSuppliedMatch": "你的供应商没有列出这个模型。先选一个列出的；其他模型可以之后在「设置 › 模型」里添加。",
           "notListed": "供应商未列出",
           "customFromQueryNote": "模型 ID 按你输入的原样使用，参数取默认值，以后可以在「管理模型」里改。",
           "searchingCatalog": "正在搜索模型目录"
@@ -1451,7 +1458,10 @@
             "placeholder": "可选，留空时列表显示模型 ID"
           },
           "lookupLoading": "正在搜索 models.dev…",
-          "useAsId": "把「{{query}}」作为模型 ID",
+          "useAsId": "把「<id>{{query}}</id>」作为模型 ID",
+          "useAsIdKeep": "使用「<id>{{query}}</id>」，保留当前参数",
+          "parametersFrom": "参数来自 {{name}}",
+          "clearParameters": "清空参数",
           "fillFailed": "没能访问 models.dev",
           "fillUnavailable": "models.dev 不可用",
           "matches": "models.dev 匹配结果",
@@ -1499,9 +1509,9 @@
         "chip": "已自动切换"
       },
       "legend": {
-        "native": "Agent 管理",
+        "native": "自己登录",
         "viaGateway": "模型网关管理",
-        "passthrough": "透传",
+        "passthrough": "原样转发",
         "connectedUnused": "已启用 · 当前未被使用",
         "takeover": "已自动切换 · 临时使用备用供应商",
         "unavailable": "当前不可用",
@@ -1534,11 +1544,11 @@
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "Agent 管理 · 本机",
+          "native": "自己登录 · 本机",
           "hub": "模型网关管理"
         },
         "kind": {
-          "nativeCredential": "Agent 管理 · 本机登录",
+          "nativeCredential": "本机凭据",
           "subscription": "订阅",
           "apiKey": "API Key"
         },
@@ -1555,7 +1565,7 @@
         "hidePrivateDetails": "隐藏账号和 API 连接信息",
         "hiddenDetails": "已隐藏",
         "state": {
-          "supplyingNative": "{{backend}} 正在使用（Agent 管理）",
+          "supplyingNative": "{{backend}} 正在使用（自己登录）",
           "supplying": "{{backends}} 正在使用",
           "standby": "可用 · 当前未使用",
           "unavailableRetry": "暂不可用 · {{delay}} 后自动重试",
@@ -1577,7 +1587,7 @@
         "count_one": "{{count}} 个",
         "count_other": "{{count}} 个",
         "group": {
-          "native": "Agent 管理 · 本机",
+          "native": "自己登录 · 本机",
           "hub": "模型网关管理"
         },
         "subtitle": "管理全局共用的供应商和模型；供应商优先级在各 Agent 卡片中调整",
@@ -1590,7 +1600,7 @@
         "modelsEmptySubscription": "还没有发现可用模型。"
       },
       "source": {
-        "nativeSupply": "Agent 管理",
+        "nativeSupply": "自己登录",
         "hubHosted": "模型网关管理",
         "officialEndpoint": "官方地址",
         "customEndpoint": "自定义地址",
@@ -1617,13 +1627,13 @@
         "origin": {
           "automatic": "自动",
           "manual": "手动",
-          "passthrough": "透传",
+          "passthrough": "原样转发",
           "unconfigured": "未配置"
         },
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
-          "passthrough": "未在供应商列表中匹配到此模型。\n按默认顺序向符合条件的 API Key 供应商透传原模型名，由上游处理。",
+          "passthrough": "供应商的模型列表里都没有这个模型。\n会按默认顺序，把这个模型名原样转发给符合条件的 API Key 供应商试试。",
           "unconfigured": "此模型暂无路由。可在路由设置中配置默认路由或恢复自动。"
         },
         "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
@@ -1641,13 +1651,13 @@
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "preview": {
           "automatic": "恢复后：自动匹配",
-          "passthrough": "恢复后：原名透传",
-          "unconfigured": "恢复后：未配置"
+          "passthrough": "恢复后：原样转发",
+          "unconfigured": "恢复后：没有供应商提供"
         },
         "previewLoading": "正在读取继承路由…",
         "previewFailed": "无法预览继承路由，尚未保存任何更改。请重试或撤销恢复。",
         "draftEmpty": "草稿中暂无路由条目。",
-        "noDefaults": "暂无可路由此模型的默认供应商。请加入匹配的供应商或符合条件的 API Key 供应商。",
+        "noDefaults": "默认路由里没有列出这个模型的供应商。可以添加一个列出它的供应商，或把已有的加入默认路由；如果你的供应商其实提供它，在「自定义」里为它指定。",
         "inventoryNotProvided": "模型列表未提供",
         "configureDefaults": "设置默认路由",
         "close": "关闭",
@@ -1661,12 +1671,12 @@
       },
       "order": {
         "title": "{{backend}} · 默认路由",
-        "subtitle": "作用于自动和透传路由，已保存的手动路由保持不变。",
+        "subtitle": "作用于自动路由，已保存的手动路由保持不变。",
         "infoLabel": "关于默认路由",
         "reorder": "调整供应商顺序",
         "section": {
           "ordered": "供应商优先级",
-          "ordered.note": "先匹配同名模型；无匹配时按此顺序向符合条件的 API Key 供应商透传。",
+          "ordered.note": "模型按这个顺序交给列出它的供应商；没有供应商列出的模型，需要设置手动路由。",
           "heldOut": "未加入默认路由",
           "heldOut.note": "可用于手动路由。"
         },
@@ -2060,7 +2070,7 @@
       },
       "mode": {
         "hub": "模型网关管理",
-        "direct": "Agent 管理"
+        "direct": "自己登录"
       },
       "errors": {
         "engineDown": "模型网关未就绪，请稍后重试",
@@ -2101,7 +2111,7 @@
         "cooldown": "等待重试（自动恢复）",
         "needsAction": "需要处理",
         "checking": "正在确认",
-        "direct": "Agent 管理",
+        "direct": "自己登录",
         "noSource": "没有可用供应商",
         "blocked": "当前供应商不可用",
         "currentSwitched": "已自动切换到 {{source}}",
@@ -2193,7 +2203,7 @@
         "field": {
           "vendor": "供应商",
           "vendor.custom": "其他供应商 · 自己填写地址",
-          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址和 API 格式",
+          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址",
           "vendor.search": "搜索供应商",
           "vendor.empty": "没有同名的供应商",
           "name": "名称(可选)",
@@ -2249,8 +2259,8 @@
           "catalogPinned.hint": "接口由内置目录指定；凭证是否有效仍需单独验证",
           "declared": "手动指定",
           "detected": "已识别为 {{format}}",
-          "unrecognised": "没能识别 API 格式，先用 {{format}}；不对的话可以换一个。",
-          "unrecognisedRejected": "这个地址拒绝了这个 Key，没能识别 API 格式；先用 {{format}}。"
+          "keyRefused": "这个地址拒绝了这把 Key，请检查或更换。",
+          "unrecognised": "没能识别 API 格式，先用 {{format}}；不对的话可以换一个。"
         },
         "inventory": {
           "title": "接口已经识别，但这次没有拿到模型清单"
@@ -2276,7 +2286,7 @@
         "opt": {
           "added": "已添加",
           "native": {
-            "label": "由 Agent 管理",
+            "label": "自己登录",
             "desc": {
               "claude": "本机 Claude Code 管理这份原生登录，凭据保存在它自己的存储中。"
             }
@@ -2374,9 +2384,9 @@
       "supplyMode": {
         "title": "模型管理方式",
         "currentHub": "当前：模型网关管理",
-        "currentDirect": "当前：Agent 管理",
+        "currentDirect": "当前：自己登录",
         "switchedHub": "已交给模型网关管理",
-        "switchedDirect": "已改为 Agent 管理",
+        "switchedDirect": "已改为自己登录",
         "switchFailed": "切换失败，请重试",
         "hub": {
           "title": "模型网关管理",
@@ -2385,7 +2395,7 @@
           "description": "登录、API Key 和模型路由都在「设置 → 模型」中管理。"
         },
         "direct": {
-          "title": "Agent 管理",
+          "title": "自己登录",
           "description": "{{backend}} 使用自己的配置，Avibe 不接管认证和模型路由。",
           "detected": "检测到现有配置：{{detail}}，可一键导入模型网关",
           "import": "导入模型网关…"
@@ -2436,7 +2446,7 @@
         "notes": {
           "customBaseUrl": "含自定义 Base URL",
           "keepNativeSanctioned": "保留在 Agent 自己的凭据库（受官方认可）",
-          "keepNativeReauthHint": "保留给 Agent 管理；需要模型网关管理时另行添加订阅",
+          "keepNativeReauthHint": "保留为助手自己登录；要交给模型网关时另行添加订阅",
           "fromOpencode": "来自 opencode 配置"
         },
         "source": {
@@ -3179,6 +3189,7 @@
   },
   "errors": {
     "sandbox_integrity_failed": "无法验证受保护保险库的安全代码，已阻止打开。请检查网络并更新 Avibe 后重试，不要绕过验证或重新创建通行密钥。",
+    "sandbox_unreachable": "网络太慢，安全代码没有加载完。",
     "sandbox_build_mismatch": "受保护保险库沙箱与当前 Avibe 版本不匹配。请更新 Avibe 或联系支持；现有密钥和通行密钥未改变。",
     "sandbox_entry_unavailable": "当前地址或浏览器环境无法使用受保护的 Vault。请使用兼容的浏览器，通过「设置 → 远程访问」提供的 HTTPS avibe.bot 地址打开，或在运行 Avibe 的电脑上使用 localhost / 127.0.0.1。",
     "sandbox_browser_unavailable": "受保护的 Vault 需要具备 Web Crypto 的安全浏览器环境。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
@@ -6312,6 +6323,7 @@
         "prfUnavailableUnlock": "这个浏览器没能用你的 Passkey 解锁保护档，保护档仍是锁定的。请换用最新版 Chrome 或 Safari，并在保存了这个 Passkey 的设备上再试一次。"
       }
     },
+    "sandboxLoading": "正在加载安全代码…",
     "dialog": {
       "title": "添加密钥",
       "subtitle": "加密存储，值不会进入聊天或模型。",
@@ -7161,6 +7173,7 @@
       "addDescription": "添加一个供应商即可开始，由模型网关统一路由",
       "addDescriptionMore": "查看检测到的配置，确认后迁移，无需重新填写",
       "addDescriptionKey": "填写供应商的地址和 API Key",
+      "addDescriptionKeyPreset": "选择供应商，填写 API Key",
       "addMethodsLabel": "添加方式",
       "addMethodDetected": "已检测到",
       "addMethodSubscription": "订阅",
@@ -7395,9 +7408,6 @@
       "allow": "允许",
       "deny": "不允许",
       "saveFailed": "没能保存你的选择，请再试一次。",
-      "offTitle": "语音输入已关闭",
-      "offBody": "可以直接打字，或在设置 › 常规里开启。",
-      "turnOn": "开启",
       "settingTitle": "语音输入",
       "settingDescription": "用第三方 AI 语音服务把你说的话转成文字，avibe.bot 不保存录音。只对你的账号在这个 Avibe 上生效。"
     }

@@ -338,19 +338,41 @@ with failed inventory discovery produces no Source unless this request explicitl
 existing uncertain health projection.
 
 The add dialog always uses `save_unverified: true`: it saves the catalog-pinned or user-declared
-interface without upstream observation as an admission gate. It attempts one bounded
-inventory discovery with the provisioned credential before committing the new Source;
-failure preserves manual entries and does not block saving. Custom Auto without a declaration
-is rejected before credential provisioning. Manual models remain manual; no inventory
-is invented. The Source carries an opaque `verification_pending` marker, independently of its
-routing health, and may be configured and invoked. List/detail surfaces label it
+interface without protocol observation as an admission gate. Before provisioning a new
+credential it runs the owned interface's models witness: list with the supplied key,
+then (only if listing succeeds) without a key. The three outcomes reuse the existing wire:
+
+- **Confirmed:** save and omit `source.verification_pending`; keep the new
+  `source.credential_generation` and the discovered models. This proves credential
+  admission, not support for every model or operation.
+- **Rejected:** an authenticated listing's `401`/`403` returns HTTP 422,
+  `error: "discovery_failed"`, `detail: "modelHub.errors.authentication_failed"`.
+  No Source or credential is persisted; the create nonce reservation is released.
+- **Unknown:** a public list, missing/invalid listing, transport error or timeout
+  saves with `source.verification_pending` equal to its new `credential_generation`.
+  Keep usable discovered inventory even if the keyless control fails or times out;
+  missing/invalid inventory preserves manual entries. No inference request is made.
+
+Each listing uses `_SOURCE_DISCOVERY_TIMEOUT_SECONDS` (15 seconds), so the extra
+keyless listing adds at most one such request budget. No extra inventory fetch follows
+this check. API-key replacement and Base URL changes use the same witness against the
+replacement credential/target: rejection refuses the whole change, preserves the old
+Source and credential, and rolls back the uncommitted replacement through the existing
+cleanup lifecycle. Unknown saves the change; unavailable inventory preserves existing
+models and their discovery timestamp. Valid inventory still passes the existing
+canonical-model and route-mutation guards. Tool-only search and Hub OAuth are unchanged.
+
+Custom Auto without a declaration is rejected before credential provisioning. Manual
+models remain manual; no inventory is invented. A Source still carrying the opaque
+`verification_pending` marker is independently routable and may be configured and invoked.
+List/detail surfaces label it
 Saved / 已保存 in neutral styling, not unverified, healthy or in use; real error,
 needs-action and cooldown states retain precedence. The accessible hint describes
 stored configuration, not a guaranteed connection or a universally available Test action.
-Successful inventory discovery never clears this flag.
-A newly stored Hub credential starts pending unless an add-time observation
-authenticated it, so an explicit unverified save and a native-config import always
-start pending while an observed api-key create does not. A call captures the persisted marker before invocation; any
+Plain inventory refresh never clears this flag.
+A newly stored Hub credential starts pending unless an add-time observation or the
+save-time gated models witness authenticated it. Native-config imports start pending
+while an observed api-key create does not. A call captures the persisted marker before invocation; any
 successful call using the same current credential and marker clears it through a
 fresh cross-process config transaction. Newer same-credential attempts do not negate
 success. Credential/endpoint replacement generates a new marker, including same-handle
@@ -696,9 +718,41 @@ Source order, sparse manual Routes, and effective supply summaries.
 
 ### Manual Route configuration and preview
 
-Owner decision `c1d398d5f` scopes unknown-model passthrough and inventory-independent
-manual invocation to Hub API-key Sources. Subscriptions retain known-model admission and
-automatic matching; unmatched subscription-only defaults yield an empty/null-origin plan.
+The 2026-11-17 routing amendment removes automatic unknown-model forwarding.
+Inherited routes contain only matching non-retired inventory from eligible defaults.
+No match yields `manual_override: null`, `route_origin: null`, `chain: []`,
+`current: null`, and `supply_state: interrupted`. The `passthrough` enum remains
+accepted for compatibility with older producers, but is no longer produced.
+`contract_version` and stored Route shapes are unchanged.
+
+Forwarding an unlisted id requires an explicit Hub API-key manual hop. Subscriptions
+retain known-model admission. For example, send:
+
+```http
+PUT /api/models/agents/codex/chain?model=gpt-6-astra
+Content-Type: application/json
+
+{"hops":[{"source_id":"src_relay9c1x","model_id":"gpt-6-astra"}]}
+```
+
+Preview sends `{"manual_override":{"hops":[{"source_id":"src_relay9c1x","model_id":"gpt-6-astra"}]}}`
+to the corresponding `/chain/preview?model=gpt-6-astra` endpoint. The result has
+`route_origin: manual` and the exact submitted `manual_override`; an otherwise
+healthy hop is runnable even when the Source does not list that id. No Source
+inventory mutation or provider-default membership change is required.
+
+Upgrade never rewrites a saved nonempty manual Route. Inherited results recompute:
+a previously passthrough-only model now has `chain_length: 0`,
+`has_runnable_hop: false`, and null origin. Its selected enabled Agents appear in
+`named_agents` with their unchanged `effective_model_id`,
+`route_reason: route_unconfigured`, and `supply_status: interrupted`. This includes
+the enabled Agent definition used by the main Bot; `named_agents` lists Agents,
+not Bot names. A different model override on a Bot's permanent Session is an
+existing reporting limitation: this callback reads the Agent model, not the Session
+override. Effective Bot-Session selection reporting (and its supply-guard consequences)
+is a separate follow-up; controller/store are unchanged here. For the reported
+Agent selections, existing issue reporting identifies the unsupplied selection
+instead of counting the relay as a supplier. No automatic model replacement is performed.
 
 `AgentSupply.routes` is the canonical sparse map of nonempty `{hops: RouteHop[]}`
 overrides. Missing and valid empty values both inherit. Nonempty PUT creates a manual
@@ -737,13 +791,41 @@ same pure planner with isolated draft configuration,
 returns the existing chain success envelope, and performs no persistent mutation,
 event, runtime startup/sync, credential access or upstream request. The returned
 `manual_override` describes normalized draft intent, not persisted intent. Empty input
-may therefore return Automatic or Passthrough; only an empty inherited plan has null
-origin. Removing the final manual hop uses this Restore preview and its existing
+may therefore return Automatic or an empty/null-origin plan. Removing the final manual hop uses this Restore preview and its existing
 Undo/Save/guard/Done flow; the old nonempty override stays saved until success. Preview is available
 while runtime is stopped. Save responses remain authoritative, and failed/ambiguous
 writes follow existing reconciliation using intent as well as effective hops.
 
-<!-- authority-consumer: route_plan.manual route_plan.automatic route_plan.passthrough route_plan.empty -->
+<!-- authority-consumer: route_plan.manual route_plan.automatic route_plan.empty -->
+
+## Request-scoped opaque HTTP failures
+
+An HTTP 4xx whose body yields no recognized classification, except 401/403/429,
+ends only that request: `upstream_request_invalid`, downstream status 400, terminal
+`request_nonfallback`. This includes HTML, plain text, empty bodies and unknown JSON
+codes at 400/404/422 and also opaque 402/408. It neither falls through to another
+provider nor writes Source health, cooldown, live backoff or a Source-state event.
+The route and the Source's prior state stay unchanged; another model on that Source
+can run immediately. The existing unlisted-model hint uses the failing hop's exact
+target and its admission-time inventory membership, not route origin; a mapped
+manual target therefore receives the unchanged hint, while a listed manual target
+does not. Raw HTML/text is not promoted into a code, detail key or log.
+
+Recognized machine codes retain precedence (including a named billing error and the
+existing 408 plus recognized request-code timeout rule). 401/403 retain credential
+handling; 429, 5xx, and actual network failures retain their existing recovery policy,
+except the unlisted-target server refusal below.
+`unclassified_error` remains for residual Source-level unknown failures outside this
+request-status rule. Unrecognized error frames inside 2xx still follow the existing
+turn-only rule. A request refusal alone is not evidence that every model supplied by
+the credential is broken, regardless of whether this particular target is listed.
+
+An HTTP 5xx classified as `server_error` on a hop whose actual target was absent from
+its Source's listed inventory at admission ends the same way: `upstream_request_invalid`,
+downstream 400, terminal `request_nonfallback`, with no fallback to another hop of the
+Route, no retry or recovery wait, and no Source health, cooldown, backoff or event
+(2026-11-17 amendment; supersedes the 2026-11-12 request-private 503 wait). Named
+auth, quota and rate-limit codes and transport failures keep their existing policy.
 
 ## Source creation outcome
 
@@ -842,12 +924,12 @@ state. It counts only runnable exact hops in that model's effective Route chain,
 eligible inventory or the backend Source order by itself. A pair with no runnable hop
 appears once in `would_interrupt` or `interrupted`.
 
-Inventory updates that refine an inherited `passthrough` plan into `automatic`
-matching do not report displaced speculative candidates as `would_remove_hops` or
-`removed_hops`, in either Hub or Direct mode. They leave saved route intent unchanged.
+Inventory updates may add matching inherited hops to a previously empty plan;
+there are no speculative candidates to displace. Saved route intent stays unchanged.
 Explicit manual-hop invalidations, lost inventory matches, and newly introduced
-protected-supply gaps still use the exact-plan guard. This exception does not apply
-to Source deletion, default-membership changes, or Restore.
+protected-supply gaps use the exact-plan guard. Losing the final automatic inventory
+match is now a real removal even when that API-key Source could still accept a
+manually forwarded target.
 
 **Model-list save.** For `PUT /api/models/agents/<backend>/models`, the producer
 `ModelHubService.set_agent_models` reports in `would_interrupt` exactly the removed menu
@@ -1144,7 +1226,8 @@ reference is created.
 
 In Hub mode, `AgentChain.chain` is the shared effective per-model route in planner
 order. `manual_override` reports a normalized nonempty manual override or null and
-`route_origin` reports `automatic | manual | passthrough | null`, independently of live
+`route_origin` reports `automatic | manual | passthrough | null` (`passthrough` is
+legacy-compatible and no longer generated), independently of live
 health. Valid empty input inherits; an empty effective chain therefore has both null
 manual_override and null origin. Live inspection annotates it: cooling, missing, model-unsupported,
 source-blocked, live connection-backoff, and process-unavailable native CLI hops stay at their effective-plan
@@ -1881,6 +1964,19 @@ runtime. Failure settles at `not_installed` with
 `error_key: "settings.models.install.fail.detail"`. The key is the closed presentation
 carrier for the persisted failure; raw downloader or verifier text remains only in
 scrubbed logs. `/start` never performs installation.
+
+For a lifecycle-owned engine that the owner publishes as a settled running
+generation, `status.installed_version`, `status.verified` and `manifest` describe
+the exact launch. The owner verified those bytes against the manifest
+synchronously before spawn. `verified: true` therefore means the running
+process's input binary matched its exact manifest at launch. It is not a
+continuous disk audit or a memory attestation, and a later file change or a
+transient read obstruction does not turn a running `ok` into
+`installed_version: null` / `verified: false`. Every other state, including
+`not_started`, `down`, provisional, recovering and blocked, reports a fresh disk
+inspection. Every fresh start re-verifies. `installing` keeps its asynchronous
+shape above. There is no eventual-verification field; the Dependencies
+inspection is where on-disk drift is reported.
 
 On service bootstrap, persisted `installing` with no worker owned by the reconstructed
 process is an orphaned install, never a live-job proof. Recovery atomically replaces the

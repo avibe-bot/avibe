@@ -327,8 +327,10 @@ describe('AgentCard', () => {
 
     expect(screen.getByText('1 个模型')).toBeTruthy();
     expect(screen.getByText(modelId)).toBeTruthy();
-    expect(screen.getByText('未配置模型路由')).toBeTruthy();
+    // The row and the backend's status both say no provider supplies it; no origin badge repeats it.
+    expect(screen.getAllByText('没有供应商提供').length).toBeGreaterThan(0);
     expect(screen.queryByText('没有可用供应商')).toBeNull();
+    expect(screen.queryByRole('button', { name: '未配置' })).toBeNull();
   });
 
   it.each([
@@ -405,6 +407,10 @@ describe('AgentCard', () => {
     expect(screen.getByText(instance.t('settings.models.gateway.group.emptyNoProviders'))).toBeTruthy();
     expect(screen.queryByText(instance.t('settings.models.gateway.group.emptyModels'))).toBeNull();
     expect(screen.queryByRole('button', { name: instance.t('settings.models.gateway.addModel') })).toBeNull();
+    // No provider: nothing to order anywhere; an empty catalog has nothing to manage,
+    // while a catalog that already lists a model can still be managed.
+    expect(screen.queryByRole('button', { name: new RegExp(instance.t('settings.models.gateway.sourceOrder')) })).toBeNull();
+    expect(screen.getAllByRole('button', { name: new RegExp(instance.t('settings.models.gateway.manageModels')) })).toHaveLength(1);
     expect(screen.queryByRole('button', { name: new RegExp(instance.t('settings.models.gateway.agentIssues.summary', { count: 1 })) })).toBeNull();
   });
 
@@ -420,8 +426,8 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={instance}><AgentCard agents={[agent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} onOpenAgent={onOpenAgent} /></I18nextProvider>);
     await userEvent.click(screen.getByRole('button', { name: instance.t('settings.models.gateway.agentIssues.summary', { count: 1 }) }));
 
-    const reason = screen.getByText(/grok\/grok-4\.6 模型名不存在/);
-    expect(reason.textContent).toContain('添加 grok/grok-4.6 模型的路由');
+    const reason = screen.getByText(/没有供应商提供 grok\/grok-4\.6/);
+    expect(reason.textContent).toContain('添加提供它的供应商');
     await userEvent.click(reason);
 
     expect(onOpenAgent).toHaveBeenCalledWith('opencode');
@@ -518,7 +524,7 @@ describe('AgentCard', () => {
 
   it.each([
     ['en', 'Default routing', 'Use own login', 'Let Model Hub manage'],
-    ['zh', '默认路由', '改为 Agent 管理', '交给模型网关管理'],
+    ['zh', '默认路由', '改为自己登录', '交给模型网关管理'],
   ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,

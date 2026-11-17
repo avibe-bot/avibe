@@ -34,8 +34,14 @@
 	<string>Lets Avibe connect directly to the computer running Avibe when it's on the same network. If you don't allow it, Avibe still works over the internet.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Avibe uses the microphone for hold-to-talk and voice transcription.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Avibe saves images to your photo library when you choose Save Image.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

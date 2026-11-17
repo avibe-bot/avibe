@@ -16,10 +16,21 @@ a retained older version. Docker explicitly copies this shared JSON before the
 UI build. The stable origin/RP is still `https://sandbox.avibe.bot`.
 
 Each new frame and parent-created authorization window independently verifies the
-exact manifest SHA-256 and every runtime resource before navigation. Requests use
-CORS, omitted credentials, no-store and redirect:error; response URLs must match
-exactly. HTTP/CORS/network/parse/identity/hash failures and unavailable Web Crypto
-fail closed. No live manifest can become the expected pin. There is no opt-out,
+exact manifest SHA-256 and every runtime resource before navigation, hashing every
+byte against the pin. Requests use CORS, omitted credentials and redirect:manual
+(a redirect is never followed and is refused as a mismatch); response URLs must
+match exactly. The manifest is fetched first. The manifest and the document are
+always `no-store`: that is what keeps a build that is not published yet, or a
+changed document, from being answered by a cached copy, so do not widen the cache
+to them. The resources that document loads under browser-enforced SRI (its script
+and stylesheet; a test over the pinned release checks each carries the pin's
+integrity there) use `no-cache`: the host is still asked on every open and answers
+304, so the bytes are not downloaded again, and they are still hashed. HTTP status,
+redirect, CORS-type, parse, identity and hash failures and unavailable Web Crypto
+fail closed as `sandbox_integrity_failed`. A download that fails, or does not
+finish within 60 seconds (its own bound, separate from RPC timeouts), fails closed
+as retryable `sandbox_unreachable`: nothing was verified or opened, and a retry
+verifies afresh. No live manifest can become the expected pin. There is no opt-out,
 mutable/latest fallback, standard-tier downgrade or successful trust cache.
 
 An approval gesture synchronously reserves only `about:blank`. After its own

@@ -25,6 +25,7 @@ from config.v2_config import (
     model_hub_fixed_menu_ids,
 )
 from core.handlers.model_hub.adapter import (
+    ApiKeyModelsCheck,
     DiscoveredModel,
     EngineEnsureResult,
     EngineHealth,
@@ -217,6 +218,12 @@ class ModelHubScenarioAdapter:
     ) -> tuple[DiscoveredModel, ...]:
         self.discovery_calls.append((vendor, protocol, base_url, credential_ref))
         return tuple(DiscoveredModel(id=model_id) for model_id in self.refresh_models)
+
+    async def check_api_key_models(
+        self, vendor, protocol, base_url, *, secret=None, credential_ref=None, timeout,
+    ) -> ApiKeyModelsCheck:
+        models = await self.discover_models(vendor, protocol, base_url, credential_ref)
+        return ApiKeyModelsCheck(authenticated=None, models=tuple(models))
 
     async def credential_supports_refresh(self, credential_ref: str) -> bool:
         return credential_ref in self.refreshable_credential_refs

@@ -2144,7 +2144,9 @@ final class AppModel: ObservableObject {
         case .onboarding:
             break
         }
+        // A background voice take belongs to the account that is going.
         let barriers = pendingRuntimeReleaseBarriers
+            + VoiceCaptureController.shared.cancelForAccountTransition()
         pendingRuntimeReleaseBarriers.removeAll()
         return barriers
     }

@@ -8,6 +8,8 @@ export type DesignLang = 'zh' | 'en';
 export type FrameStatus = 'proposed' | 'approved' | 'shipped';
 /** Where a frame's router starts. */
 export type FrameRoute = string | { pathname: string; search?: string; state?: unknown };
+/** One `click` step: a selector to click, or a field to type into. */
+export type FrameStep = string | { fill: string; text: string };
 /** A phone's safe-area insets in CSS px: the status bar or Dynamic Island above, the home indicator below. */
 export type FrameSafeArea = { top: number; bottom: number };
 
@@ -31,8 +33,10 @@ export interface FrameSpec {
    *  confirmation, an expanded section). Playwright selectors (CSS, `role=…`, `text=…`); `{t:<key>}`
    *  stands for that copy in the frame's language, so a selector by name works in zh and en:
    *  `role=button[name="{t:settings.models.upstream.addSubscription}"]`. Prefer a fixture or the
-   *  page's URL state when the product offers one. */
-  click?: string[];
+   *  page's URL state when the product offers one. An entry `{ fill, text }` types instead: it replaces
+   *  the value of the field the selector `fill` names with `text`, as one edit, for a state only typing
+   *  reaches (a field retyped after a choice filled it). */
+  click?: FrameStep[];
   /** Milliseconds the frame waits, once its reads have settled, before it is ready: for a read that starts
    *  on a timer (a debounced search), so the screenshot shows its result rather than its spinner. The
    *  screenshot waits it out again after each `click`, for a click that starts a timed transition (setup's

@@ -169,16 +169,39 @@ def test_bot_prompts_match_their_plan_drafts(source, heading):
 
 @pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
 def test_every_bot_keeps_the_boundary_once_in_the_shared_section(bot):
-    """Owner decision 2026-11-09 (bots.md D9): no Bot does the work itself, and web lookups are finding out."""
+    """Owner decisions (bots.md D9): no Bot does the work itself (2026-11-09); a fact one command or read settles
+    is checked first-hand and anything longer is handed out (2026-11-18)."""
     blocks = _blocks(enabled_agents=_ROSTER, bot=bot)
     shared = blocks["bot-harness-prompt"]
+    assert "finding out" not in shared
     for line in (
         "apart from that you do no work yourself.",
-        "anything that takes finding out or getting done goes to a Session",
-        "Searching the web and reading pages or code count as finding out.",
+        "anything that needs getting done goes to a Session",
+        "When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it"
+        " yourself. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer"
+        " to a Session.",
     ):
         assert shared.index(line) < shared.index("`vibe agent run` hands work")
         assert "".join(text for module, text in blocks.items() if module.startswith("bot-")).count(line) == 1
+
+
+@pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
+def test_every_bot_keeps_the_record_based_memory_and_agreement_rules_once(bot):
+    """Owner-approved wording 2026-11-18 (bots.md D9): memory holds what the record cannot give back."""
+    blocks = _blocks(enabled_agents=_ROSTER, bot=bot)
+    memory = blocks["bot-memory-prompt"]
+    bot_text = "".join(text for module, text in blocks.items() if module.startswith("bot-"))
+    for line in (
+        "- Everything said in any Session stays in Avibe's record and can be queried, so do not copy it. Write down"
+        " what the record cannot give back: what was decided and why, where each matter stands now, and what you"
+        " have learned about the user, the work and yourself. Rewrite a note when things change instead of adding"
+        " to it; drop what is finished.\n",
+        "- Record an agreement with its reason. When following it, or the way you are working, costs the user more"
+        " than it saves, tell them with the evidence and propose the change instead of carrying on.\n",
+    ):
+        assert bot_text.count(line) == 1 and line in memory
+    for superseded in ("lasts only if you write it here", "Keep what you cannot look up", "Keep it true"):
+        assert superseded not in bot_text
 
 
 def test_bot_harness_prompt_teaches_read_receipts():

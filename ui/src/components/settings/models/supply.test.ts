@@ -105,7 +105,8 @@ describe('gatewayRouteStatus', () => {
     [[], 'empty'],
     [[model('one', 0, false)], 'unconfigured'],
     [[model('one', 1, true), model('two', 2, true)], 'available'],
-    [[model('one', 1, true), model('two', 0, false)], 'partial'],
+    // An unsupplied model is stated on its own row, not in the backend's status.
+    [[model('one', 1, true), model('two', 0, false)], 'available'],
     [[model('one', 1, true), model('two', 2, false)], 'partial'],
     [[model('one', 1, false), model('two', 0, false)], 'unavailable'],
   ] as const)('summarizes complete catalog supply %j as %s', (supply, expected) => {

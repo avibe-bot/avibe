@@ -4445,7 +4445,7 @@ def test_api_key_setup_does_not_schedule_a_model(
     service, store, adapter = _service(tmp_path)
     # Keep engine lifecycle simulated; exercise real credential custody, HTTP
     # observation, inventory discovery, and Source admission together.
-    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models"):
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models", "check_api_key_models"):
         monkeypatch.setattr(adapter, method, getattr(transport, method))
 
     async def scenario():
@@ -4550,10 +4550,9 @@ def test_api_key_setup_does_not_schedule_a_model(
                     })
                 before = len(requests)
                 await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
-                # The explicit save observes nothing. Its one request is the
-                # best-effort inventory, which fills the Source without
-                # answering the credential question the listing left open.
-                assert requests[before:] == [("GET", listing_path, None)]
+                # Save reuses the models witness, without a model-less POST or
+                # an inference call. A public catalogue still cannot verify it.
+                assert requests[before:] == [("GET", listing_path, None)] * 2
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
@@ -4605,10 +4604,9 @@ def test_api_key_setup_does_not_schedule_a_model(
 def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-164
 
-    The wizard's key, carried through real credential custody and real model
-    listing: saved unverified, checked and refused with the provider's 401,
-    replaced by another refused key without losing the stored one, replaced by
-    the right key, checked again, and removed.
+    The service refuses a known-bad key at save, permits an offline pending save,
+    later names its refusal, preserves it on a rejected replacement, then accepts
+    the right replacement and removes the Source.
     """
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -4621,7 +4619,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
     # Engine lifecycle stays simulated; custody, listing and replacement are real.
     for method in (
         "provision_credential", "credential_auth_scheme", "revoke_credential",
-        "revoke_api_key_credential", "discover_models",
+        "revoke_api_key_credential", "discover_models", "check_api_key_models",
     ):
         monkeypatch.setattr(adapter, method, getattr(transport, method))
 
@@ -4629,10 +4627,13 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
 
     async def scenario():
         presented = []
+        listing_available = True
 
         async def models(request):
             supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
             presented.append(supplied)
+            if not listing_available:
+                return web.Response(status=503)
             if supplied != right_key:
                 return web.json_response({"error": {
                     "code": "invalid_api_key", "message": "This key cannot list models.",
@@ -4653,12 +4654,27 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             [source] = store.config.sources
             return state_store.read_api_key(source.credential_ref)
 
+        draft = {
+            "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
+            "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
+        }
+
+        async def refuse_known_wrong_key(h):
+            with pytest.raises(ModelHubError) as refused:
+                await service.create_source(draft)
+            assert refused.value.status == 422
+            assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert not store.config.sources
+
         async def save_wrong_key(h):
-            # What the wizard's key form sends: saved without verification.
-            created = (await service.create_source({
-                "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
-                "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
-            }))["source"]
+            # An unavailable listing cannot reject a key; the saved Source stays
+            # pending until a later check or real invocation can answer it.
+            nonlocal listing_available
+            listing_available = False
+            try:
+                created = (await service.create_source(draft))["source"]
+            finally:
+                listing_available = True
             h.source_id = created["id"]
             assert created["state"]["status"] == "standby"
             assert created["verification_pending"]
@@ -4676,13 +4692,15 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             with pytest.raises(ModelHubError) as refused:
                 await service.replace_credential(h.source_id, {"key": other_wrong_key})
             assert refused.value.detail == "modelHub.errors.authentication_failed"
-            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
+            assert refused.value.status == 422
+            assert refused.value.data == {}
             assert stored_key(h) == wrong_key
 
         async def right_replacement_lists_models(h):
             replaced = (await service.replace_credential(h.source_id, {"key": right_key}))["source"]
             assert [model["id"] for model in replaced["models"]] == ["relay-model-a", "relay-model-b"]
             assert replaced["state"]["status"] == "standby"
+            assert "verification_pending" not in replaced
             assert stored_key(h) == right_key
 
         async def check_passes(h):
@@ -4702,6 +4720,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             assert store.config.sources == []
 
         steps = [
+            ("refuse_known_wrong_key", refuse_known_wrong_key),
             ("save_wrong_key", save_wrong_key),
             ("check_names_the_refusal", check_names_the_refusal),
             ("refused_replacement_keeps_the_key", refused_replacement_keeps_the_key),
@@ -4712,7 +4731,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
         try:
             await runner.run(*(ScenarioStep(name, action) for name, action in steps))
             ScenarioExpect.step_history(runner, [name for name, _ in steps])
-            assert set(presented) == {wrong_key, other_wrong_key, right_key}
+            assert set(presented) == {wrong_key, other_wrong_key, right_key, ""}
         finally:
             await web_runner.cleanup()
 
@@ -5815,13 +5834,15 @@ def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes
                                       "reasoning_efforts": []}),
     ],
 )
-def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_path, model_id, origin, row):
-    """AUTH-SETUP-166: unlisted pick -> catalog write with no supplier promise -> Agent model -> runnable route -> completion.
+def test_setup_cannot_finish_on_a_model_no_provider_lists(monkeypatch, tmp_path, model_id, origin, row):
+    """AUTH-SETUP-166: setup offers no model that no provider lists, so it cannot finish on one.
 
-    The setup picker also offers what no provider lists: a catalog model, or the ID the
-    user typed. Neither showed a supplier, so the catalog write states no expectation for
-    it; the API-key provider receives the ID as it is, which makes the built-in Agent
-    runnable and lets setup finish on it. Every step is the HTTP route the picker calls.
+    Setup's picker offers only supplied candidates: never a catalog model or a typed ID
+    that no Source lists (the picker case the row cites). This is the server half. The
+    candidates read setup draws from gives neither ID a supplier, and an Agent made to
+    select one anyway (the Settings write path) keeps the model but has an unconfigured,
+    interrupted named route, which the entry gate refuses. Nothing forwards the ID
+    without an explicit manual route.
     """
     from core.vibe_agents import VibeAgentStore
     from tests.test_model_hub_api import _service
@@ -5856,8 +5877,11 @@ def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_pa
         listed = client.get("/api/agents").get_json()
         vibey = next(row for row in listed["agents"] if row["backend"] == "vibey" and row["bot"] is None)
         candidates = client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]
-        offered = {row["id"] for group in candidates.values() for row in group}
-        assert model_id not in offered
+        rows = [row for group in candidates.values() for row in group]
+        # Setup offers the supplied rows: the Source's models, never the unlisted ID.
+        supplied = {row["id"] for row in rows if row["suppliers"]}
+        assert {"mock-large", "mock-mini"} <= supplied
+        assert model_id not in {row["id"] for row in rows}
 
         def vibey_supply():
             rows = client.get("/api/models/agents").get_json()["agents"]
@@ -5871,22 +5895,14 @@ def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_pa
             headers=headers,
         )
         assert written.status_code == 200, written.get_json()
-        saved = next(row for row in vibey_supply()["catalog_models"] if row["id"] == model_id)
-        assert saved["origin"] == origin
-        assert saved["context_window"] == row["context_window"]
-
         named = client.patch(f"/api/agents/{vibey['name']}", json={"model": model_id}, headers=headers)
         assert named.status_code == 200, named.get_json()
         route = next(row for row in vibey_supply()["named_agents"] if row["name"] == vibey["name"])
+        # The selection stands, but no inventory match supplies it: nothing to enter on.
         assert route["effective_model_id"] == model_id
-        assert route["supply_status"] in {"ok", "degraded"}
-        assert route["route_reason"] != "route_unconfigured"
-
-        chosen = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
-        assert chosen.status_code == 200, chosen.get_json()
-        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
-        assert completed.status_code == 200, completed.get_json()
-        assert V2Config.load().setup_completed
+        assert route["supply_status"] == "interrupted"
+        assert route["route_reason"] == "route_unconfigured"
+        assert model_id not in store.config.agents["vibey"].routes
     finally:
         agents.close()
 

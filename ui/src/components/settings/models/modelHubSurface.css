@@ -277,15 +277,6 @@
   white-space: nowrap;
 }
 
-.model-hub-source-interface-pill {
-  min-width: 0;
-  max-width: 100%;
-  flex: 0 1 auto;
-  border-color: var(--model-hub-wash-14);
-  background: var(--model-hub-wash-0a);
-  color: var(--muted);
-}
-
 .model-hub-ink-mint { color: var(--mint-ink); }
 .model-hub-ink-gold { color: var(--gold-ink); }
 .model-hub-ink-violet { color: var(--violet-ink); }
@@ -3683,7 +3674,7 @@ a.model-hub-order-price:hover { text-decoration: underline; }
  * values the user is about to check. Same metrics, overlay layering. */
 .model-hub-model-match-list {
   /* Nine rows: the ranked read returns at most eight matches, and the 「use what
-   * I typed」 escape is always the last one, so the cap is reached rather than
+   * I typed」 escape is always one more, so the cap is reached rather than
    * guessed — and a shorter list is still exactly as tall as its rows. */
   max-height: calc(var(--model-hub-model-match-height) * 9);
   overflow: hidden auto;
@@ -3700,8 +3691,9 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-match:last-child { border-bottom: none; }
 .model-hub-model-match:hover { background: var(--model-hub-wash-05); }
 .model-hub-model-match.is-selected { background: var(--model-hub-mint-14); }
-/* The 「use what I typed」 row is an escape, not a suggestion: no fill, so it
- * reads as the plain sentence the frame draws. */
+/* The 「use what I typed」 row as the escape under the suggestions: no fill, so it
+ * reads as the plain sentence the frame draws. (First in the list, once a
+ * catalog model is the base, it is drawn as a plain match row instead.) */
 .model-hub-model-match--literal { border-bottom: none; }
 .model-hub-model-match--literal.is-selected { background: var(--model-hub-wash-08); }
 .model-hub-model-match-name {

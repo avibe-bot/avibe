@@ -90,7 +90,8 @@ export type OpencodeCatalog = {
  *
  * "Manage models" is on the card only in Gateway mode (`AgentCard.tsx`), so the
  * mode is arranged rather than assumed, and put back only if this fixture is
- * what changed it.
+ * what changed it. Before the first model provider it is also offered only for
+ * a catalog that already lists a model, so an instance with neither is a skip.
  */
 const test = gatewayTest.extend<{ opencode: OpencodeCatalog }>({
   opencode: async ({ api }, provide, testInfo) => {
@@ -105,6 +106,11 @@ const test = gatewayTest.extend<{ opencode: OpencodeCatalog }>({
       !agent?.cli_present,
       `${BACKEND} is not installed on this instance, so it has no model list to manage and no `
       + 'card to open one from.',
+    );
+    const modelSources = (await api.sources()).filter((source) => source.protocol !== 'search');
+    testInfo.skip(
+      modelSources.length === 0 && ((agent as { catalog_models?: unknown[] | null } | undefined)?.catalog_models?.length ?? 0) === 0,
+      'No model provider and an empty OpenCode list: the card offers no "Manage models" until a provider exists.',
     );
 
     let switched = false;

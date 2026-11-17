@@ -104,6 +104,24 @@
 		100000000000000000000142 /* DirectIrohInteropEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000142 /* DirectIrohInteropEngine.swift */; };
 		100000000000000000000143 /* DirectIrohInteropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000143 /* DirectIrohInteropTests.swift */; };
 		100000000000000000000144 /* DirectIrohInteropProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000144 /* DirectIrohInteropProtocolTests.swift */; };
+		16000000000000000000000001 /* VoiceCaptureActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000001 /* VoiceCaptureActivity.swift */; };
+		16000000000000000000000002 /* VoiceCaptureIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000002 /* VoiceCaptureIntent.swift */; };
+		16000000000000000000000003 /* VoiceCaptureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000003 /* VoiceCaptureController.swift */; };
+		16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */; };
+		16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000005 /* VoiceCaptureRecorder.swift */; };
+		16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
+		16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000001 /* VoiceCaptureActivity.swift */; };
+		16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000012 /* Localizable.xcstrings */; };
+		16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000013 /* PrivacyInfo.xcprivacy */; };
+		16000000000000000000000020 /* AvibeLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000020 /* AvibeLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000014 /* AvibeLiveActivityBundle.swift */; };
+		16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
+		16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
+		16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
+		16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
+		16000000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
+		16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000030 /* VoiceCaptureTests.swift */; };
+		16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000031 /* VoiceCaptureAlert.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -141,6 +159,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 500000000000000000000005;
 			remoteInfo = AvibeSheetFixture;
+		};
+		36000000000000000000000001 /* AvibeLiveActivity dependency proxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 400000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 56000000000000000000000001;
+			remoteInfo = AvibeLiveActivity;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -233,6 +258,21 @@
 		200000000000000000000142 /* DirectIrohInteropEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropEngine.swift; sourceTree = "<group>"; };
 		200000000000000000000143 /* DirectIrohInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropTests.swift; sourceTree = "<group>"; };
 		200000000000000000000144 /* DirectIrohInteropProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropProtocolTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000001 /* VoiceCaptureActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureActivity.swift; sourceTree = "<group>"; };
+		26000000000000000000000002 /* VoiceCaptureIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureIntent.swift; sourceTree = "<group>"; };
+		26000000000000000000000003 /* VoiceCaptureController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureController.swift; sourceTree = "<group>"; };
+		26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureInstanceClient.swift; sourceTree = "<group>"; };
+		26000000000000000000000005 /* VoiceCaptureRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureRecorder.swift; sourceTree = "<group>"; };
+		26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureLiveActivity.swift; sourceTree = "<group>"; };
+		26000000000000000000000011 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		26000000000000000000000012 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		26000000000000000000000013 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		26000000000000000000000020 /* AvibeLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AvibeLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		26000000000000000000000014 /* AvibeLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeLiveActivityBundle.swift; sourceTree = "<group>"; };
+		26000000000000000000000015 /* VoiceCapture.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = VoiceCapture.xcstrings; sourceTree = "<group>"; };
+		26000000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		26000000000000000000000030 /* VoiceCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000031 /* VoiceCaptureAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureAlert.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -285,6 +325,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		66000000000000000000000001 /* Live Activity Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -295,6 +342,7 @@
 				700000000000000000000009 /* AvibeSheetFixture */,
 				70000000000000000000000A /* AvibeSheetFixtureTests */,
 				700000000000000000000004 /* AvibeTests */,
+				76000000000000000000000001 /* AvibeLiveActivity */,
 				700000000000000000000006 /* NotificationService */,
 				700000000000000000000007 /* PushFixtures */,
 				700000000000000000000005 /* Products */,
@@ -331,6 +379,12 @@
 				200000000000000000000005 /* WebOrigin.swift */,
 				200000000000000000000006 /* WebViewContainer.swift */,
 				200000000000000000000007 /* WebViewController.swift */,
+				26000000000000000000000001 /* VoiceCaptureActivity.swift */,
+				26000000000000000000000002 /* VoiceCaptureIntent.swift */,
+				26000000000000000000000003 /* VoiceCaptureController.swift */,
+				26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */,
+				26000000000000000000000005 /* VoiceCaptureRecorder.swift */,
+				26000000000000000000000031 /* VoiceCaptureAlert.swift */,
 				200000000000000000000120 /* DirectIrohByteStream.swift */,
 				200000000000000000000121 /* DirectIrohEngine.swift */,
 				200000000000000000000136 /* DirectIrohBinding.swift */,
@@ -368,6 +422,7 @@
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
+				26000000000000000000000030 /* VoiceCaptureTests.swift */,
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
 				200000000000000000000146 /* SystemScheduleTests.swift */,
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
@@ -425,6 +480,7 @@
 				20000000000000000000000D /* Avibe.app */,
 				20000000000000000000000E /* AvibeTests.xctest */,
 				2000000000000000000000B6 /* NotificationService.appex */,
+				26000000000000000000000020 /* AvibeLiveActivity.appex */,
 				200000000000000000000132 /* libIrohLib.a */,
 				920000000000000000000004 /* AvibeSheetFixture.app */,
 				930000000000000000000002 /* AvibeSheetFixtureTests.xctest */,
@@ -453,6 +509,20 @@
 			path = AvibeSheetFixtureTests;
 			sourceTree = "<group>";
 		};
+		76000000000000000000000001 /* AvibeLiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				26000000000000000000000011 /* Info.plist */,
+				26000000000000000000000014 /* AvibeLiveActivityBundle.swift */,
+				26000000000000000000000018 /* Assets.xcassets */,
+				26000000000000000000000012 /* Localizable.xcstrings */,
+				26000000000000000000000013 /* PrivacyInfo.xcprivacy */,
+				26000000000000000000000015 /* VoiceCapture.xcstrings */,
+				26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */,
+			);
+			path = AvibeLiveActivity;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -471,6 +541,7 @@
 			);
 			dependencies = (
 				B00000000000000000000002 /* NotificationService dependency */,
+				B6000000000000000000000001 /* AvibeLiveActivity dependency */,
 				B00000000000000000000003 /* IrohLib dependency */,
 			);
 			name = Avibe;
@@ -566,6 +637,23 @@
 			productReference = 930000000000000000000002 /* AvibeSheetFixtureTests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		56000000000000000000000001 /* AvibeLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 86000000000000000000000001 /* Build configuration list for PBXNativeTarget "AvibeLiveActivity" */;
+			buildPhases = (
+				96000000000000000000000001 /* Live Activity Sources */,
+				66000000000000000000000001 /* Live Activity Frameworks */,
+				A6000000000000000000000001 /* Live Activity Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AvibeLiveActivity;
+			productName = AvibeLiveActivity;
+			productReference = 26000000000000000000000020 /* AvibeLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -584,6 +672,9 @@
 						TestTargetID = 500000000000000000000001;
 					};
 					500000000000000000000003 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					56000000000000000000000001 = {
 						CreatedOnToolsVersion = 26.6;
 					};
 					500000000000000000000005 = {
@@ -613,6 +704,7 @@
 				500000000000000000000002 /* AvibeTests */,
 				500000000000000000000003 /* NotificationService */,
 				500000000000000000000004 /* IrohLib */,
+				56000000000000000000000001 /* AvibeLiveActivity */,
 				500000000000000000000005 /* AvibeSheetFixture */,
 				500000000000000000000006 /* AvibeSheetFixtureTests */,
 			);
@@ -628,6 +720,8 @@
 				10000000000000000000000C /* Assets.xcassets in Resources */,
 				100000000000000000000009 /* InfoPlist.xcstrings in Resources */,
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
+				16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */,
+				16000000000000000000000019 /* Assets.xcassets in Resources */,
 				10000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */,
 				100000000000000000000012 /* MobileApp in Resources */,
 			);
@@ -668,6 +762,17 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A6000000000000000000000001 /* Live Activity Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */,
+				16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */,
+				16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */,
+				16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -678,6 +783,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				1000000000000000000000AD /* NotificationService.appex in Embed Foundation Extensions */,
+				16000000000000000000000020 /* AvibeLiveActivity.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -826,6 +932,13 @@
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
 				100000000000000000000006 /* WebViewContainer.swift in Sources */,
 				100000000000000000000007 /* WebViewController.swift in Sources */,
+				16000000000000000000000001 /* VoiceCaptureActivity.swift in Sources */,
+				16000000000000000000000002 /* VoiceCaptureIntent.swift in Sources */,
+				16000000000000000000000003 /* VoiceCaptureController.swift in Sources */,
+				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
+				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
+				16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */,
+				16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
 				100000000000000000000136 /* DirectIrohBinding.swift in Sources */,
@@ -847,6 +960,7 @@
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
+				16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */,
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
 				100000000000000000000146 /* SystemScheduleTests.swift in Sources */,
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
@@ -912,6 +1026,16 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		96000000000000000000000001 /* Live Activity Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */,
+				16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */,
+				16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -939,6 +1063,11 @@
 			isa = PBXTargetDependency;
 			target = 500000000000000000000005 /* AvibeSheetFixture */;
 			targetProxy = 300000000000000000000005 /* AvibeSheetFixture UI test host proxy */;
+		};
+		B6000000000000000000000001 /* AvibeLiveActivity dependency */ = {
+			isa = PBXTargetDependency;
+			target = 56000000000000000000000001 /* AvibeLiveActivity */;
+			targetProxy = 36000000000000000000000001 /* AvibeLiveActivity dependency proxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1065,7 +1194,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -1097,7 +1226,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -1122,7 +1251,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1139,7 +1268,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1159,7 +1288,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotificationService/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1179,7 +1308,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotificationService/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1198,7 +1327,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AvibeSheetFixture/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1216,7 +1345,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AvibeSheetFixture/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1232,7 +1361,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1248,7 +1377,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1264,7 +1393,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				DEFINES_MODULE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MACH_O_TYPE = staticlib;
 				PRODUCT_MODULE_NAME = IrohLib;
 				PRODUCT_NAME = IrohLib;
@@ -1281,7 +1410,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				DEFINES_MODULE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MACH_O_TYPE = staticlib;
 				PRODUCT_MODULE_NAME = IrohLib;
 				PRODUCT_NAME = IrohLib;
@@ -1290,6 +1419,61 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C6000000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AvibeLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.live-activity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) AVIBE_LIVE_ACTIVITY_EXTENSION";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		C6000000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AvibeLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.live-activity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(LIVE_ACTIVITY_PROFILE_SPECIFIER)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) AVIBE_LIVE_ACTIVITY_EXTENSION";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -1355,6 +1539,15 @@
 			buildConfigurations = (
 				C0000000000000000000000D /* Fixture UI Test Debug */,
 				C0000000000000000000000E /* Fixture UI Test Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		86000000000000000000000001 /* Build configuration list for PBXNativeTarget "AvibeLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C6000000000000000000000001 /* Debug */,
+				C6000000000000000000000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

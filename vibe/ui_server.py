@@ -18178,7 +18178,172 @@ def _show_runtime_config_payload(
     }
     if include_write_token:
         payload["writeToken"] = show_event_write_token(session_id)
+        content_stamp = _show_page_content_stamp(session_id)
+        if content_stamp:
+            payload["contentStamp"] = content_stamp
     return payload
+
+
+def _show_page_content_stamp(session_id: str) -> str | None:
+    """Changes when the page's source changes: index.html or anything in src/.
+
+    A page that reconnects its HMR socket after the background compares this
+    with a fresh entry document and reloads once if the source moved meanwhile.
+    Data the page's own API writes elsewhere in the workspace does not count.
+    """
+    root = paths.get_show_page_dir(session_id)
+    count = 0
+    latest = 0
+    pending = [root / "src"]
+    try:
+        latest = (root / "index.html").stat().st_mtime_ns
+        count = 1
+    except OSError:
+        pass
+    while pending and count < 5000:
+        directory = pending.pop()
+        try:
+            latest = max(latest, directory.stat().st_mtime_ns)
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                    continue
+                latest = max(latest, entry.stat(follow_symlinks=False).st_mtime_ns)
+            except OSError:
+                continue
+            count += 1
+    return f"{count}-{latest}" if count else None
+
+
+# Vite's HMR client reloads the page whenever its socket closes and the server
+# answers a ping again. A phone drops every socket when the App or browser goes
+# to the background, so each return reloaded an already-loaded Show Page and
+# lost its state. This wraps only the `vite-hmr` socket: a drop after the page
+# has been hidden reconnects quietly, so Vite never sees it. A drop while the
+# page stayed visible (a runtime restart), or a reconnect that does not open,
+# still reaches Vite, which then pings and reloads as before. After a quiet
+# reconnect the page reloads once only if its source changed while it was
+# away (see _show_page_content_stamp), so an Agent's edit is not missed. Runs
+# before the page's first module script, so it is in place when Vite opens
+# its socket.
+_SHOW_HMR_RESUME_SCRIPT = """
+(function(){
+  var Native=globalThis.WebSocket;
+  if(typeof Native!=='function'||Native.__avibeShowHmrResume)return;
+  var hides=0;
+  var shownAt=0;
+  function hidden(){return document.visibilityState==='hidden';}
+  function noteHide(){hides+=1;}
+  document.addEventListener('visibilitychange',function(){if(hidden())noteHide();else shownAt=Date.now();});
+  window.addEventListener('pagehide',noteHide);
+  document.addEventListener('freeze',noteHide);
+  function whenVisible(run){
+    if(!hidden()){run();return;}
+    document.addEventListener('visibilitychange',function wait(){
+      if(hidden())return;
+      document.removeEventListener('visibilitychange',wait);
+      run();
+    });
+  }
+  function isHmr(protocols){
+    return protocols==='vite-hmr'||(Array.isArray(protocols)&&protocols.indexOf('vite-hmr')>=0);
+  }
+  function closeEvent(source){
+    var init={code:source.code,reason:source.reason,wasClean:source.wasClean};
+    if(typeof CloseEvent==='function')return new CloseEvent('close',init);
+    return Object.assign(new Event('close'),init);
+  }
+  function resumable(url,protocols){
+    var self=new EventTarget();
+    var current=null;
+    var pending=[];
+    var closedByPage=false;
+    self.CONNECTING=0;self.OPEN=1;self.CLOSING=2;self.CLOSED=3;
+    Object.defineProperty(self,'readyState',{get:function(){return current?current.readyState:3;}});
+    Object.defineProperty(self,'url',{get:function(){return current?current.url:String(url);}});
+    Object.defineProperty(self,'protocol',{get:function(){return current?current.protocol:'';}});
+    self.send=function(data){
+      if(current&&current.readyState===1)current.send(data);
+      else pending.push(data);
+    };
+    self.close=function(code,reason){closedByPage=true;if(current)current.close(code,reason);};
+    var show=globalThis.__AVIBE_SHOW__||{};
+    var baselineTimer=null;
+    function withSourceStamp(run){
+      if(!show.contentStamp||!show.basePath||typeof fetch!=='function')return;
+      fetch(show.basePath,{cache:'no-store',credentials:'same-origin'})
+        .then(function(response){return response.ok?response.text():'';})
+        .then(function(html){
+          var match=/"contentStamp":"([^"]*)"/.exec(html);
+          if(match)run(match[1]);
+        })
+        .catch(function(){});
+    }
+    function reloadIfSourceChanged(){
+      withSourceStamp(function(stamp){if(stamp!==show.contentStamp)location.reload();});
+    }
+    // An update Vite applied live is source the page already shows: move the
+    // baseline so the next return does not reload for it.
+    function refreshBaseline(socket){
+      clearTimeout(baselineTimer);
+      baselineTimer=setTimeout(function(){
+        withSourceStamp(function(stamp){
+          if(current===socket&&socket.readyState===1)show.contentStamp=stamp;
+        });
+      },300);
+    }
+    function connect(reconnecting){
+      var socket=new Native(url,protocols);
+      var opened=false;
+      var hidesAtOpen=hides;
+      current=socket;
+      socket.addEventListener('open',function(){
+        opened=true;
+        hidesAtOpen=hides;
+        var queued=pending;pending=[];
+        queued.forEach(function(data){socket.send(data);});
+        if(!reconnecting)self.dispatchEvent(new Event('open'));
+        else reloadIfSourceChanged();
+      });
+      socket.addEventListener('message',function(event){
+        if(current!==socket)return;
+        if(typeof event.data==='string'&&event.data.indexOf('"type":"update"')>=0)refreshBaseline(socket);
+        self.dispatchEvent(new MessageEvent('message',{data:event.data}));
+      });
+      socket.addEventListener('error',function(){
+        if(current===socket&&!reconnecting)self.dispatchEvent(new Event('error'));
+      });
+      socket.addEventListener('close',function(event){
+        if(current!==socket)return;
+        clearTimeout(baselineTimer);
+        // A background drop arrives while hidden or right after the return.
+        // A reconnect that a second trip away dropped before it opened gets
+        // another try; any other drop is Vite's to handle.
+        var away=hidden()||(hides!==hidesAtOpen&&Date.now()-shownAt<10000);
+        if((opened||reconnecting)&&!closedByPage&&away){
+          whenVisible(function(){if(current===socket)connect(true);});
+          return;
+        }
+        self.dispatchEvent(closeEvent(event));
+      });
+    }
+    connect(false);
+    return self;
+  }
+  function ShowWebSocket(url,protocols){
+    if(isHmr(protocols))return resumable(url,protocols);
+    return arguments.length>1?new Native(url,protocols):new Native(url);
+  }
+  ShowWebSocket.prototype=Native.prototype;
+  ShowWebSocket.CONNECTING=0;ShowWebSocket.OPEN=1;ShowWebSocket.CLOSING=2;ShowWebSocket.CLOSED=3;
+  ShowWebSocket.__avibeShowHmrResume=true;
+  globalThis.WebSocket=ShowWebSocket;
+}());
+"""
 
 
 def _show_runtime_config_script(
@@ -18231,6 +18396,7 @@ def _show_runtime_config_script(
         "window.location.assign(path);"
         "},true);"
         "}());"
+        f"{_SHOW_HMR_RESUME_SCRIPT}"
         "</script>"
     )
 

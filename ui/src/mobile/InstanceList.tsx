@@ -2,10 +2,11 @@
 // mobile-app/switcher/*): one row per instance, the current instance in its own block, offline
 // explained in place, an open failure reported on its row, Add an instance, and the account row.
 import { AlertTriangle, Check, ChevronDown, ChevronRight, Laptop, Loader2, Plus, RotateCw, Users, X } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
+import { StatusDot } from '@/components/SidebarStatusRow';
 import { Button } from '@/components/ui/button';
 import type { TranslationKey } from '@/i18n/types';
 import { cn } from '@/lib/utils';
@@ -70,22 +71,29 @@ export function CurrentInstance({
   onRefresh?: () => void;
 }) {
   const { t } = useTranslation();
+  const statusId = useId();
   const subline = useSubline();
   const offline = !instance.available;
+  const opening = status.kind === 'opening';
   const body = (
     <>
       <InstanceIcon instance={instance} current />
-      <span className="min-w-0 flex-1">
-        <span className="block break-words text-base font-semibold leading-6">{instance.name}</span>
-        {status.kind === 'opening' ? (
-          <span role="status" className="mt-0.5 block text-xs leading-5 text-mint-ink">{t('mobileApp.sheet.opening')}</span>
-        ) : status.kind === 'failed' ? (
-          <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
-            {t(status.reason, { name: instance.name })}
-          </span>
-        ) : (
-          <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
-        )}
+      <span className="flex min-w-0 flex-1 items-start gap-2">
+        <span className="mt-2 flex size-2 shrink-0 items-center justify-center">
+          <StatusDot tone={opening ? 'connecting' : offline ? 'stopped' : 'running'} label={!opening && !offline ? t('mobileApp.instances.online') : undefined} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block break-words text-base font-semibold leading-6">{instance.name}</span>
+          {status.kind === 'opening' ? (
+            <span role="status" className="mt-0.5 block text-xs leading-5 text-gold-ink">{t('mobileApp.sheet.opening')}</span>
+          ) : status.kind === 'failed' ? (
+            <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
+              {t(status.reason, { name: instance.name })}
+            </span>
+          ) : (
+            <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
+          )}
+        </span>
       </span>
     </>
   );
@@ -108,13 +116,15 @@ export function CurrentInstance({
             disabled={disabled || (status.kind !== 'idle')}
             // Offline on the page, tapping explains rather than opens: named by its lines, as a row is.
             aria-label={offline && onRefresh ? undefined : label}
+            aria-describedby={!opening && !offline ? statusId : undefined}
             aria-expanded={offline && onRefresh ? expanded : undefined}
             className={frame}
             onClick={onClick}
           >
             {body}
+            {!opening && !offline ? <span id={statusId} className="sr-only">{t('mobileApp.instances.online')}</span> : null}
             {status.kind === 'opening' ? (
-              <Loader2 className="size-4 shrink-0 animate-spin text-mint-ink" aria-hidden="true" />
+              <Loader2 className="size-4 shrink-0 animate-spin text-gold-ink" aria-hidden="true" />
             ) : (
               <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-mint-ink">
                 <Check className="size-4" />
@@ -170,24 +180,30 @@ export function InstanceListRow({
   const { t } = useTranslation();
   const subline = useSubline();
   const offline = !instance.available;
+  const opening = status.kind === 'opening';
   const body = (
     <>
       <InstanceIcon instance={instance} />
-      <span className="min-w-0 flex-1">
-        <span className={cn('block break-words text-sm font-semibold leading-5', offline && 'text-muted')}>
-          {instance.name}
+      <span className="flex min-w-0 flex-1 items-start gap-2">
+        <span className="mt-1.5 flex size-2 shrink-0 items-center justify-center">
+          <StatusDot tone={opening ? 'connecting' : offline ? 'stopped' : 'running'} label={!opening && !offline ? t('mobileApp.instances.online') : undefined} />
         </span>
-        {status.kind === 'opening' ? (
-          <span role="status" className="mt-0.5 block text-xs leading-5 text-mint-ink">
-            {t('mobileApp.sheet.opening')}
+        <span className="min-w-0 flex-1">
+          <span className={cn('block break-words text-sm font-semibold leading-5', offline && 'text-muted')}>
+            {instance.name}
           </span>
-        ) : status.kind === 'failed' ? (
-          <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
-            {t(status.reason, { name: instance.name })}
-          </span>
-        ) : (
-          <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
-        )}
+          {status.kind === 'opening' ? (
+            <span role="status" className="mt-0.5 block text-xs leading-5 text-gold-ink">
+              {t('mobileApp.sheet.opening')}
+            </span>
+          ) : status.kind === 'failed' ? (
+            <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
+              {t(status.reason, { name: instance.name })}
+            </span>
+          ) : (
+            <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
+          )}
+        </span>
       </span>
     </>
   );
@@ -218,7 +234,7 @@ export function InstanceListRow({
         >
           {body}
           {status.kind === 'opening' ? (
-            <Loader2 className="size-4 shrink-0 animate-spin text-mint-ink" aria-hidden="true" />
+            <Loader2 className="size-4 shrink-0 animate-spin text-gold-ink" aria-hidden="true" />
           ) : offline ? (
             <ChevronDown className={cn('size-4 shrink-0 text-muted', expanded && 'rotate-180')} aria-hidden="true" />
           ) : (

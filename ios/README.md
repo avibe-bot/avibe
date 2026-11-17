@@ -16,7 +16,7 @@ and Web resizing cannot both run.
 
 - Bundle identifier: `bot.avibe.ios`
 - Display name: `Avibe`
-- Deployment target: iOS 17
+- Deployment target: iOS 17.4 (App Shortcuts limited to a later iOS need `AppShortcutsBuilder.buildLimitedAvailability`, iOS 17.4)
 - The shell follows WebKit browser behavior except for the closed deviation
   list below. Origin-specific exceptions are not added for individual Web UI
   features.
@@ -159,9 +159,9 @@ and Web resizing cannot both run.
   keyboard-free geometry without hiding chrome; a known software keyboard stays
   active across rotation until the resized viewport recovers. Safari and
   installed Web apps keep their existing chrome behavior.
-- `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
-  upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
-  replaced when a native 1024-pixel source is delivered.
+- `AppIcon.appiconset` contains one opaque 1024-by-1024 RGB icon with square
+  corners and no alpha, built from the native 1024-pixel Vibey source with the
+  same composition as the earlier 512-pixel Home Screen artwork.
 - The user agent includes `AvibeiOS/<CFBundleShortVersionString>`.
 
 The closed deviation list is:
@@ -279,7 +279,7 @@ origin and its navigation test in the same change.
 ## App Shortcuts
 
 `AppShortcuts.swift` holds the App's one `AppShortcutsProvider`. It offers
-"Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") to Siri, Spotlight, the
+"Open Main Bot" (`zh-Hans`: "打开主伙伴") to Siri, Spotlight, the
 Shortcuts app, and Settings > Action Button > Shortcut. Its intent,
 `OpenMainBotIntent`, runs in the App's own process with the App in front
 (`openAppWhenRun`, and `supportedModes` `.foreground(.immediate)` from
@@ -299,6 +299,73 @@ capability, extension, or Info.plist key. Its title and Siri phrases are
 localized in `Localizable.xcstrings` and `AppShortcuts.xcstrings`. Xcode
 extracts the metadata the system reads into `Metadata.appintents` in the
 App bundle, and an XCTest checks it there.
+
+### Talk to Main Bot (background voice)
+
+The provider also offers "Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") from
+iOS 18, which is why the deployment target is iOS 17.4
+(`AppShortcutsBuilder.buildLimitedAvailability`). Its intent,
+`SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
+process without bringing the App to the front (`supportedModes`
+`[.background, .foreground(.dynamic)]` from iOS 26), and Apple requires a Live
+Activity for as long as it records. It is also a `LiveActivityIntent`, the
+documented way for an App that is not in front to start a Live Activity.
+`UIBackgroundModes` declares `audio`, which Apple requires to keep recording
+once the App is in the background (`AVAudioSession.Category.record`); the
+other Info.plist addition is `NSSupportsLiveActivities`. The background audio mode is
+used only while recording a take the user started (App Store guideline
+2.5.4), with the system microphone indicator and our Live Activity showing:
+the audio session is activated when a take starts recording and deactivated
+on every way it ends (send, cancel, the cap, an interruption, a failure, an
+account change), and Avibe plays no audio. The system asks
+for Face ID first (`authenticationPolicy` `.requiresAuthentication`), because
+the main Bot acts on the user's computer.
+
+- A run with no take starts one; a run while one records stops it and sends
+  it, so a second long press of the Action Button sends. The Live Activity's
+  Send, Cancel, Retry, and Discard are `LiveActivityIntent`s that run in the
+  App's process. A take ends by itself after five minutes, is discarded under
+  0.6 seconds, and is sent as far as it got when the microphone is
+  interrupted.
+- Before the microphone opens, `VoiceCaptureController` reads the selected
+  instance's `GET /api/asr/status` and records only when `consent` is
+  `granted`. A missing `consent` field is an Avibe from before the voice
+  consent question: nothing is recorded, and the Live Activity asks to update
+  Avibe. `null` or `declined`, no sign-in, no microphone permission, or Live
+  Activities turned off bring the App to the main Bot's conversation, where
+  the Web UI asks. A later `403 voice_consent_required` stops the take and
+  keeps nothing.
+- The take is sent as `POST /api/asr/transcribe` (the whole AAC take), then
+  `GET /api/sessions/main` and `POST /api/sessions/<id>/messages` with
+  `metadata.input = "voice"`. The reply arrives as the instance's usual
+  notification. A failure before the message `POST` keeps the take, and its
+  text once transcribed, for Retry for ten minutes. Once the `POST` was made
+  its outcome may be unknown, so a failure there is reported and never
+  retried: an instruction is never sent twice. An ordinary submission clears
+  the Session's composer draft, so an unsent draft is read first and put back
+  after, unless one was written meanwhile.
+- A Live Activity this process does not hold is a leftover of a take whose
+  process is gone (killed, or ended by the system); its recording is lost. It
+  is ended at launch, and by any press or island button that finds it, shown
+  for a moment as 录音中断了，没有发出去. Such a press records nothing; the next
+  one starts a new take. A listening or sending Live Activity also goes stale
+  on its own 90 seconds past the five-minute cap, and a stale one is drawn as
+  interrupted, so no timer runs on for a take nobody holds.
+- If the system will not start the Live Activity, nothing is recorded. When
+  "Talk to Main Bot" has to bring Avibe forward, an alert says why.
+- An account sign-out or change (`AppModel.prepareForAccountTransition`)
+  stops and discards any take, releases its WebView, and makes a start still
+  waiting on the instance give up.
+- `VoiceCaptureInstanceClient` makes these requests as the signed-in user
+  without the runtime WebView: a hidden `WKWebView` on the account's own
+  named store (the selection and store identifier the account coordinator
+  persisted, read and never written) loads `/api/csrf-token` on the instance
+  origin and runs same-origin `fetch` there. WebKit stays the only owner of
+  the session cookie, `Origin`, and the CSRF pair, as for the Workbench.
+- The `AvibeLiveActivity` widget extension (`bot.avibe.ios.live-activity`)
+  only draws. It has no entitlements, no App Group, and no network; the views
+  and their `VoiceCapture.xcstrings` table are also compiled into the App,
+  which renders review frames from them.
 
 ## Remote direct path (inactive)
 
@@ -483,8 +550,10 @@ windows, Show Pages, and iframes do not receive these handlers.
 
 ### avibe.bot pages in the App
 
-Account's 隐私政策 / Privacy policy and 删除账号 / Delete account
-(App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
+账号与数据 / Account and data, one page below Account, holds 隐私政策 /
+Privacy policy and, as one plain red line at its very bottom, 删除账号 /
+Delete account, so deletion is never on Account itself (owner, 2026-11-17).
+Both (App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
 is `privacyPolicy` or `accountDeletion` and nothing else; any other value or
 an extra parameter is `invalid_argument`. Native code owns the addresses:
 `/privacy` and `/account/delete` on the control-plane origin
@@ -1132,10 +1201,15 @@ The app and the Notification Service extension each carry a
 own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking;
 the app also declares system boot time (`35F9.1`), which the direct
 transport's deadlines read through `ProcessInfo.systemUptime`.
-The app also declares the data it collects, matching its App Privacy answers:
-the account's email address and user ID, linked to the user, for App
-Functionality only. The extension decrypts and shows notifications on the
-device and collects nothing.
+The app also declares the data it collects, matching its App Privacy answers
+(owner-approved, 2026-11-17): the account's email address and user ID, the
+device's push token, which the avibe.bot relay stores (Device ID),
+hold-to-talk recordings, which avibe.bot relays to the speech service (Audio
+Data), and the voice usage records avibe.bot keeps (Other Usage Data). Each is linked to the user, for App Functionality only, and not used
+for tracking. The extension decrypts and shows notifications on the device and
+collects nothing. `verify-archive` checks that each manifest exists and
+declares no tracking; it does not compare the collected types with App Store
+Connect, so change both together.
 
 `Info.plist` declares `ITSAppUsesNonExemptEncryption = false`: the app uses
 only the system's HTTPS and passkey cryptography, so builds need no export

@@ -684,6 +684,20 @@ final class DirectPathAppTests: XCTestCase {
         let webView = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
         try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
             (try? await webView.evaluateJavaScript(
+                "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Account and data' && !b.disabled)"
+            ) as? Bool) == true
+        }
+        let openedAccountData = try await webView.evaluateJavaScript("""
+            (() => {
+              const button = Array.from(document.querySelectorAll('button'))
+                .find(b => b.textContent.trim() === 'Account and data' && !b.disabled);
+              button?.click();
+              return Boolean(button);
+            })()
+            """) as? Bool
+        XCTAssertEqual(openedAccountData, true)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            (try? await webView.evaluateJavaScript(
                 "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Delete account' && !b.disabled)"
             ) as? Bool) == true
         }
@@ -2911,7 +2925,11 @@ final class DirectPathAppTests: XCTestCase {
         )
         controller.loadViewIfNeeded()
 
-        await fulfillment(of: [headersSent.expectation], timeout: 30)
+        // The WebView's first load waits for its web content process.
+        await fulfillment(
+            of: [headersSent.expectation],
+            timeout: WebKitReadiness.webContentLaunchSeconds
+        )
         try await eventually {
             events.contains {
                 $0.stage == .committed && $0.destination == .instance
@@ -3756,7 +3774,8 @@ final class DirectPathAppTests: XCTestCase {
 
         // Released until the sign-out ends: its cleanup may send one more
         // provider update, which the gate would otherwise hold.
-        try await eventually {
+        // Sign-out logs out through an account transport it may launch.
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
             notifications.providerPatches.releaseAll()
             return signedOut.value
         }
@@ -4108,7 +4127,11 @@ final class DirectPathAppTests: XCTestCase {
         app.showAccount()
         app.mobileSessionCoordinator.activateAccountSurface()
         let refresh = Task { try await app.mobileSessionCoordinator.refresh() }
-        await fulfillment(of: [fetched.expectation], timeout: 30)
+        // The refresh launches its own account transport first.
+        await fulfillment(
+            of: [fetched.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
         XCTAssertTrue(app.returnToRuntime())
         XCTAssertEqual(app.route, .browser(runtime))
         releaseFetch.signal()
@@ -4160,7 +4183,11 @@ final class DirectPathAppTests: XCTestCase {
                 code: "123456"
             )
         }
-        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
+        // The operation launches its own account transport first.
+        await fulfillment(
+            of: [hold.inFlight.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
         XCTAssertFalse(app.mobileSessionCoordinator.keepsSelectedRuntime(runtime))
         XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
@@ -5494,7 +5521,12 @@ final class DirectPathAppTests: XCTestCase {
                 )
             )
         }
-        await fulfillment(of: [hold.inFlight.expectation], timeout: 30)
+        // The request launches its own account transport first: the App
+        // itself allows that the readiness and request deadlines together.
+        await fulfillment(
+            of: [hold.inFlight.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
         return request
     }
 

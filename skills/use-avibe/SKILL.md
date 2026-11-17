@@ -107,7 +107,7 @@ Always follow these constraints:
 Some requests are not local maintenance at all. Switch to the feedback workflow in [Feedback and feature requests](references/feedback.md) when:
 
 - the behavior looks like a real bug rather than a local misconfiguration
-- the user is asking for a feature Avibe does not support yet
+- the user is asking for a feature Avibe does not have
 - backend integration behavior appears inconsistent with the documented configuration surface
 - the user simply asks to report something or request a change, with or without prior diagnosis
 
