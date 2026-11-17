@@ -116,6 +116,11 @@
 		17000000000000000000000002 /* VoiceCaptureProbeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000002 /* VoiceCaptureProbeUITests.swift */; };
 		17000000000000000000000003 /* VoiceCaptureProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000003 /* VoiceCaptureProbeTests.swift */; };
 		17000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift */; };
+		16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000014 /* AvibeLiveActivityBundle.swift */; };
+		16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
+		16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
+		16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
+		17000000000000000000000005 /* VoiceCaptureFramesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27000000000000000000000005 /* VoiceCaptureFramesTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -264,6 +269,9 @@
 		27000000000000000000000002 /* VoiceCaptureProbeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeUITests.swift; sourceTree = "<group>"; };
 		27000000000000000000000003 /* VoiceCaptureProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureProbeTests.swift; sourceTree = "<group>"; };
 		27000000000000000000000004 /* VoiceCaptureShowcaseUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureShowcaseUITests.swift; sourceTree = "<group>"; };
+		26000000000000000000000014 /* AvibeLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeLiveActivityBundle.swift; sourceTree = "<group>"; };
+		26000000000000000000000015 /* VoiceCapture.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = VoiceCapture.xcstrings; sourceTree = "<group>"; };
+		27000000000000000000000005 /* VoiceCaptureFramesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureFramesTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -413,6 +421,7 @@
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
 				27000000000000000000000003 /* VoiceCaptureProbeTests.swift */,
+				27000000000000000000000005 /* VoiceCaptureFramesTests.swift */,
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
 				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
@@ -504,8 +513,10 @@
 			isa = PBXGroup;
 			children = (
 				26000000000000000000000011 /* Info.plist */,
+				26000000000000000000000014 /* AvibeLiveActivityBundle.swift */,
 				26000000000000000000000012 /* Localizable.xcstrings */,
 				26000000000000000000000013 /* PrivacyInfo.xcprivacy */,
+				26000000000000000000000015 /* VoiceCapture.xcstrings */,
 				26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */,
 			);
 			path = AvibeLiveActivity;
@@ -708,6 +719,7 @@
 				10000000000000000000000C /* Assets.xcassets in Resources */,
 				100000000000000000000009 /* InfoPlist.xcstrings in Resources */,
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
+				16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */,
 				10000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */,
 				100000000000000000000012 /* MobileApp in Resources */,
 			);
@@ -754,6 +766,7 @@
 			files = (
 				16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */,
 				16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */,
+				16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -921,6 +934,7 @@
 				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
 				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
 				17000000000000000000000001 /* VoiceCaptureProbeSetup.swift in Sources */,
+				16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
 				100000000000000000000136 /* DirectIrohBinding.swift in Sources */,
@@ -943,6 +957,7 @@
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
 				17000000000000000000000003 /* VoiceCaptureProbeTests.swift in Sources */,
+				17000000000000000000000005 /* VoiceCaptureFramesTests.swift in Sources */,
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
 				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,
@@ -1015,6 +1030,7 @@
 			files = (
 				16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */,
 				16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */,
+				16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

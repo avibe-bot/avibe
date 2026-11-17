@@ -3,13 +3,6 @@ import AppIntents
 import SwiftUI
 import WidgetKit
 
-@main
-struct AvibeLiveActivityBundle: WidgetBundle {
-    var body: some Widget {
-        VoiceCaptureLiveActivity()
-    }
-}
-
 /// The background voice take in the Dynamic Island and on the Lock Screen.
 /// Prototype layout; the reviewed frames replace it.
 struct VoiceCaptureLiveActivity: Widget {
@@ -52,30 +45,36 @@ struct VoiceCaptureLiveActivity: Widget {
     }
 }
 
+/// The Live Activity's words, from the `VoiceCapture` table, which both
+/// the App and the extension carry (the App renders the review frames).
 enum VoiceCaptureCopy {
+    static func text(_ key: String) -> LocalizedStringResource {
+        LocalizedStringResource(String.LocalizationValue(key), table: "VoiceCapture")
+    }
+
     static func title(_ state: VoiceCaptureAttributes.ContentState) -> LocalizedStringResource {
         switch state.phase {
-        case .listening: return "voiceCapture.phase.listening"
-        case .sending: return "voiceCapture.phase.sending"
-        case .sent: return "voiceCapture.phase.sent"
-        case .failed: return "voiceCapture.phase.failed"
-        case .needsApp: return "voiceCapture.phase.needsApp"
+        case .listening: return text("voiceCapture.phase.listening")
+        case .sending: return text("voiceCapture.phase.sending")
+        case .sent: return text("voiceCapture.phase.sent")
+        case .failed: return text("voiceCapture.phase.failed")
+        case .needsApp: return text("voiceCapture.phase.needsApp")
         }
     }
 
     static func reason(_ reason: VoiceCaptureAttributes.Reason) -> LocalizedStringResource {
         switch reason {
-        case .offline: return "voiceCapture.reason.offline"
-        case .nothingHeard: return "voiceCapture.reason.nothingHeard"
-        case .transcriptionFailed: return "voiceCapture.reason.transcriptionFailed"
-        case .sendFailed: return "voiceCapture.reason.sendFailed"
-        case .signIn: return "voiceCapture.reason.signIn"
-        case .microphone: return "voiceCapture.reason.microphone"
-        case .consent: return "voiceCapture.reason.consent"
-        case .updateAvibe: return "voiceCapture.reason.updateAvibe"
-        case .voiceUnavailable: return "voiceCapture.reason.voiceUnavailable"
-        case .liveActivities: return "voiceCapture.reason.liveActivities"
-        case .interrupted: return "voiceCapture.reason.interrupted"
+        case .offline: return text("voiceCapture.reason.offline")
+        case .nothingHeard: return text("voiceCapture.reason.nothingHeard")
+        case .transcriptionFailed: return text("voiceCapture.reason.transcriptionFailed")
+        case .sendFailed: return text("voiceCapture.reason.sendFailed")
+        case .signIn: return text("voiceCapture.reason.signIn")
+        case .microphone: return text("voiceCapture.reason.microphone")
+        case .consent: return text("voiceCapture.reason.consent")
+        case .updateAvibe: return text("voiceCapture.reason.updateAvibe")
+        case .voiceUnavailable: return text("voiceCapture.reason.voiceUnavailable")
+        case .liveActivities: return text("voiceCapture.reason.liveActivities")
+        case .interrupted: return text("voiceCapture.reason.interrupted")
         }
     }
 }
@@ -140,22 +139,22 @@ struct VoiceCaptureDetail: View {
             case .listening:
                 HStack {
                     Button(intent: VoiceCaptureCancelIntent()) {
-                        Text("voiceCapture.action.cancel").frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.cancel")).frame(maxWidth: .infinity)
                     }
                     .tint(.gray)
                     Button(intent: VoiceCaptureSendIntent()) {
-                        Text("voiceCapture.action.send").frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.send")).frame(maxWidth: .infinity)
                     }
                     .tint(.orange)
                 }
             case .failed where state.reason.map(VoiceCaptureDetail.retryable) == true:
                 HStack {
                     Button(intent: VoiceCaptureCancelIntent()) {
-                        Text("voiceCapture.action.discard").frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.discard")).frame(maxWidth: .infinity)
                     }
                     .tint(.gray)
                     Button(intent: VoiceCaptureRetryIntent()) {
-                        Text("voiceCapture.action.retry").frame(maxWidth: .infinity)
+                        Text(VoiceCaptureCopy.text("voiceCapture.action.retry")).frame(maxWidth: .infinity)
                     }
                     .tint(.orange)
                 }
