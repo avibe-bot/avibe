@@ -16,7 +16,21 @@ final class InstanceSheetGestureUITests: XCTestCase {
         app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = "default"
         app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
         launchFixture()
-        XCTAssertTrue(SheetFixtureReadiness.waitForText("You’re in", in: app))
+        // The first paint after the document loads follows the host: 2-3 s
+        // on CI's cold first launches (draft #3918), longer when the host
+        // stalls (master run 44063592331 took 44 s to launch the app). Wait
+        // with WebKit's launch budget, as `waitForDocument` does; a page that
+        // never renders still fails, with the fixture's page receipts in the
+        // app log.
+        let documentReady = ProcessInfo.processInfo.systemUptime
+        let rendered = SheetFixtureReadiness.waitForText(
+            "You’re in", in: app, timeout: SheetFixtureReadiness.webContentLaunchSeconds
+        )
+        print(String(
+            format: "[cold real bundle] 'You’re in' %@ %.2f s after document-ready",
+            rendered ? "found" : "missing", ProcessInfo.processInfo.systemUptime - documentReady
+        ))
+        XCTAssertTrue(rendered, "The real bundle never rendered 'You’re in'; see [page receipt] in the app log")
         XCTAssertTrue(app.webViews.firstMatch.buttons["Close and return to Studio"].waitForExistence(timeout: 10))
         XCTAssertFalse(SheetFixtureReadiness.waitForText(
             "This required text does not exist", in: app, timeout: 0.2
@@ -565,6 +579,10 @@ enum SheetFixtureReadiness {
         return true
     }
 
+    /// WebKit's web content launch budget, as AvibeTests.WebKitReadiness
+    /// measures it on CI (twice the slowest launch seen, 66 s).
+    static let webContentLaunchSeconds: TimeInterval = 120
+
     static func waitForDocument(
         in app: XCUIApplication,
         file: StaticString = #filePath,
@@ -578,8 +596,8 @@ enum SheetFixtureReadiness {
             }, object: nil
         )
         // Same process-launch budget as AvibeTests.WebKitReadiness. The web
-        // content assertions below retain their existing 10-second budget.
-        XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 120), .completed,
+        // content assertions below keep their own budgets.
+        XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: webContentLaunchSeconds), .completed,
                        "Fixture did not load its bundled document", file: file, line: line)
     }
 
