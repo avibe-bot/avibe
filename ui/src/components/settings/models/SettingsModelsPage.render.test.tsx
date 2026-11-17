@@ -2799,7 +2799,7 @@ describe('SettingsModelsPage tools region', () => {
   it('connects active Tools service details to settings and the ordinary model Source key management', async () => {
     const put = vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue({ tools: [ACTIVE_SEARCH] });
     renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
-    await screen.findByRole('button', { name: 'Add provider' });
+    await screen.findByRole('button', { name: 'Add API key' });
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     const opener = await screen.findByRole('button', { name: 'DeepSeek' });
     await userEvent.click(opener);
@@ -2815,9 +2815,21 @@ describe('SettingsModelsPage tools region', () => {
     expect(await screen.findByRole('dialog', { name: 'Add search service' })).toBeTruthy();
   });
 
+  it('treats search services as no model provider: the routes offer no add-model step yet', async () => {
+    renderPage(SEARCH_SOURCES.filter((source) => source.protocol === 'search'), [emptyVibeyAgent], runtime, { tools: [ACTIVE_SEARCH] });
+    expect(await screen.findByText(/^Add a model provider and its models will be listed here\.$|^添加模型供应商后，这里会列出它提供的模型。$/)).toBeTruthy();
+    expect(screen.queryByText(/^This backend's model list is empty$|^这个后端的模型列表是空的$/)).toBeNull();
+  });
+
+  it('offers the add-model step once a model provider exists', async () => {
+    renderPage([retainedSource], [emptyVibeyAgent]);
+    expect(await screen.findByText(/^This backend's model list is empty$|^这个后端的模型列表是空的$/)).toBeTruthy();
+    expect(screen.queryByText(/^Add a model provider and its models will be listed here\.$|^添加模型供应商后，这里会列出它提供的模型。$/)).toBeNull();
+  });
+
   it('MH-USAGE-038: leaves a service detail for the Usage tab, whose window the detail read never moved', async () => {
     renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
-    await screen.findByRole('button', { name: 'Add provider' });
+    await screen.findByRole('button', { name: 'Add API key' });
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Exa' }));
     await userEvent.click(await screen.findByRole('button', { name: 'View usage' }));
