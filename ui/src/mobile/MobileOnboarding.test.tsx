@@ -2165,7 +2165,7 @@ describe('mobile instance sheet', () => {
     await openSheet();
     const opening = deferred<{ instance: typeof lab }>();
     mobile.selectInstance.mockReturnValueOnce(opening.promise);
-    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ }));
     await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('lab'));
     expect(await screen.findByText('mobileApp.sheet.opening')).toBeTruthy();
 
@@ -2198,7 +2198,7 @@ describe('mobile instance sheet', () => {
     expect(await screen.findByText('mobileApp.sheet.stale')).toBeTruthy();
     // No blanket "can't reach avibe.bot": the cached list is still there.
     expect(screen.queryByText('mobileApp.errors.network')).toBeNull();
-    expect(screen.getByRole('button', { name: /^Lab/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toBeTruthy();
 
     mobile.refresh.mockResolvedValueOnce(inSheet());
     fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
@@ -2235,7 +2235,7 @@ describe('mobile instance sheet', () => {
     render(<MobileOnboarding />);
     await screen.findByText('mobileApp.sheet.updating');
 
-    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ }));
     expect(await screen.findByText('mobileApp.sheet.opening')).toBeTruthy();
     // Native runs one account operation at a time: the open waits rather than failing as busy.
     expect(mobile.selectInstance).not.toHaveBeenCalled();
@@ -2290,7 +2290,7 @@ describe('mobile instance sheet', () => {
     refreshing.resolve(inSheet());
     await waitFor(() => expect(screen.queryByText('mobileApp.sheet.updating')).toBeNull());
     expect(screen.queryByText('mobileApp.sheet.stale')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ }));
     await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('lab'));
   });
 
@@ -2319,7 +2319,7 @@ describe('mobile instance sheet', () => {
   it('opened from the instance name, lists the instances without the account', async () => {
     await openSheet(inSheet(), '#sheet-instances');
     expect(screen.queryByRole('button', { name: /alexander\.with\.a\.very\.long/ })).toBeNull();
-    expect(screen.getByRole('button', { name: /^Lab/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'mobileApp.sheet.close:Personal Avibe' })).toBeTruthy();
     // It scrolls its document, as the avatar's sheet does.
     expect(screen.getByRole('main').classList.contains('overflow-y-auto')).toBe(false);
@@ -2435,8 +2435,8 @@ describe('mobile instance sheet', () => {
         .toContain('mobileApp.instances.current');
       expect(screen.getByText('mobileApp.sheet.recent')).toBeTruthy();
       // The others are listed once each; the current instance only in its block.
-      expect(screen.getAllByRole('button', { name: /^Lab/ })).toHaveLength(1);
-      expect(screen.queryAllByRole('button', { name: /^Personal Avibe/ })).toHaveLength(0);
+      expect(screen.getAllByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toHaveLength(1);
+      expect(screen.queryAllByRole('button', { name: /^(mobileApp.instances.online\s*)?Personal Avibe/ })).toHaveLength(0);
       // Nothing is behind the page to close to.
       expect(screen.queryByRole('button', { name: /mobileApp\.sheet\.close/ })).toBeNull();
       // The account button is the account's initial, as on Home, and opens Account.
@@ -2484,7 +2484,7 @@ describe('mobile instance sheet', () => {
       refreshing.reject({ code: 'network', message: 'offline' });
       expect(await screen.findByText('mobileApp.sheet.stale')).toBeTruthy();
       expect(screen.queryByText('mobileApp.instances.unavailable')).toBeNull();
-      expect(screen.getByRole('button', { name: /^Lab/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'mobileApp.sheet.reopen:Personal Avibe' })).toBeTruthy();
 
       mobile.refresh.mockResolvedValueOnce(inSheet());
@@ -2507,7 +2507,7 @@ describe('mobile instance sheet', () => {
       const state = { ...inSheet(), instances: inSheet().instances.slice(1) };
       mobile.bootstrap.mockResolvedValueOnce(state);
       render(<MobileOnboarding />);
-      await screen.findByRole('button', { name: /^Lab/ });
+      await screen.findByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ });
       expect(screen.getByRole('heading', { name: 'mobileApp.sheet.title', level: 1 })).toBeTruthy();
       expect(screen.getByText('mobileApp.sheet.others')).toBeTruthy();
       expect(screen.queryByText('mobileApp.sheet.youreIn')).toBeNull();
@@ -2517,13 +2517,13 @@ describe('mobile instance sheet', () => {
       mobile.bootstrap.mockResolvedValueOnce(signedIn());
       render(<MobileOnboarding />);
       // The boot page shares the title; the rows say the list is drawn.
-      await screen.findByRole('button', { name: /^Personal Avibe/ });
+      await screen.findByRole('button', { name: /^(mobileApp.instances.online\s*)?Personal Avibe/ });
       expect(screen.getByRole('heading', { name: 'mobileApp.instances.title', level: 1 })).toBeTruthy();
       expect(screen.getByText('mobileApp.sheet.firstRunSubtitle')).toBeTruthy();
       expect(screen.queryByText('mobileApp.sheet.youreIn')).toBeNull();
       expect(screen.queryByText('mobileApp.sheet.others')).toBeNull();
       expect(screen.queryByText('mobileApp.sheet.recent')).toBeNull();
-      expect(screen.getByRole('button', { name: /^Personal Avibe/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Personal Avibe/ })).toBeTruthy();
 
       // A refresh says Updating above the rows, as the sheet does in its header.
       const refreshing = deferred<MobileSessionState>();
