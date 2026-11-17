@@ -112,6 +112,10 @@
 		16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000012 /* Localizable.xcstrings */; };
 		16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000013 /* PrivacyInfo.xcprivacy */; };
 		16000000000000000000000020 /* AvibeLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000020 /* AvibeLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000014 /* AvibeLiveActivityBundle.swift */; };
+		16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
+		16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
+		16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -256,6 +260,8 @@
 		26000000000000000000000012 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		26000000000000000000000013 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		26000000000000000000000020 /* AvibeLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AvibeLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		26000000000000000000000014 /* AvibeLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeLiveActivityBundle.swift; sourceTree = "<group>"; };
+		26000000000000000000000015 /* VoiceCapture.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = VoiceCapture.xcstrings; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -492,8 +498,10 @@
 			isa = PBXGroup;
 			children = (
 				26000000000000000000000011 /* Info.plist */,
+				26000000000000000000000014 /* AvibeLiveActivityBundle.swift */,
 				26000000000000000000000012 /* Localizable.xcstrings */,
 				26000000000000000000000013 /* PrivacyInfo.xcprivacy */,
+				26000000000000000000000015 /* VoiceCapture.xcstrings */,
 				26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */,
 			);
 			path = AvibeLiveActivity;
@@ -696,6 +704,7 @@
 				10000000000000000000000C /* Assets.xcassets in Resources */,
 				100000000000000000000009 /* InfoPlist.xcstrings in Resources */,
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
+				16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */,
 				10000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */,
 				100000000000000000000012 /* MobileApp in Resources */,
 			);
@@ -742,6 +751,7 @@
 			files = (
 				16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */,
 				16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */,
+				16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -908,6 +918,7 @@
 				16000000000000000000000003 /* VoiceCaptureController.swift in Sources */,
 				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
 				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
+				16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
 				100000000000000000000136 /* DirectIrohBinding.swift in Sources */,
@@ -999,6 +1010,7 @@
 			files = (
 				16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */,
 				16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */,
+				16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
