@@ -432,7 +432,7 @@ describe("RouteChainDialog", () => {
       renderEmptyRoute({ ...agent, sources: { order: [], eligibility: [] } }, []);
       await screen.findByRole('button', { name: 'Configure default routing' });
       expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
-      expect(screen.getByText(/No default provider can route this model/)).toBeTruthy();
+      expect(screen.getByText(/No provider in default routing lists this model/)).toBeTruthy();
       expect(screen.queryByRole('button', { name: 'Restore automatic' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
       expect(screen.queryByText(/saved route is empty/)).toBeNull();
@@ -516,7 +516,7 @@ describe("RouteChainDialog", () => {
         sources={[]} onClose={close} onCommitted={committed} readAgents={vi.fn()} readSources={vi.fn()}
       /></I18nextProvider>);
       await clear(user);
-      await screen.findByText('After restore: unconfigured');
+      await screen.findByText('After restore: no provider supplies it');
       expect(restore).not.toHaveBeenCalled();
       await user.click(screen.getByRole('button', { name: 'Save' }));
       const guard = within(await screen.findByRole('dialog', { name: 'Save the route chain for opus-5' }));
@@ -594,7 +594,7 @@ describe("RouteChainDialog", () => {
       expect(screen.queryByText('After restore: automatic matching')).toBeNull();
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
       await user.click(screen.getByRole('button', { name: 'Retry' }));
-      await screen.findByText('After restore: unconfigured');
+      await screen.findByText('After restore: no provider supplies it');
       expect(preview).toHaveBeenCalledTimes(3);
       await user.click(pendingUndo());
       expect(document.querySelector('.model-hub-route-hop-model')?.textContent).toBe('opus-5');

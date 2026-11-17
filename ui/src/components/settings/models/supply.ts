@@ -80,8 +80,12 @@ export const gatewayRouteStatus = (agent: AgentSupply): GatewayRouteStatus => {
   const supply = models.map((id) => byId.get(id));
   if (supply.some((row) => !row)) return 'unknown';
   if (supply.every((row) => row?.chain_length === 0)) return 'unconfigured';
-  const available = supply.filter((row) => row && row.chain_length > 0 && row.has_runnable_hop).length;
-  if (available === models.length) return 'available';
+  // A model no provider supplies is stated on its own row; the backend's status speaks
+  // only for the models that have a route, so one unlisted model does not turn a
+  // working backend gold.
+  const routed = supply.filter((row) => row && row.chain_length > 0);
+  const available = routed.filter((row) => row?.has_runnable_hop).length;
+  if (available === routed.length) return 'available';
   return available > 0 ? 'partial' : 'unavailable';
 };
 

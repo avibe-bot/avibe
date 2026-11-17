@@ -3247,6 +3247,13 @@ providers come first (`gateway.group.emptyNoProviders`). The same state hides �
 empty. A preset vendor's Base URL, already filled in, waits under 更多设置 with the name;
 a custom provider keeps it in view.
 
+**2026-11-17 amendment — models no provider supplies** (owner, via Product). A model with an
+empty chain and no saved route reads 「没有供应商提供」 on its row, with no origin badge; a
+backend whose models are all like that reads 「托管 · 没有供应商提供」. A backend's route status
+counts only models that have a route, so one unsupplied model does not turn it gold. The route
+dialog's empty state says to add a provider that lists the model, or to choose one under 自定义.
+This pairs with avibe#3904, which stops forwarding unlisted models automatically.
+
 **2026-11-17 amendment — 自己登录** (owner, via Product). The Chinese name of the
 own-login mode is 「自己登录」 everywhere it appeared as 「Agent 管理」 (mode labels, the
 provider group and kind badge, 「改为自己登录」, the supply-mode panel, the subscription

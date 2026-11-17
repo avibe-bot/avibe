@@ -161,7 +161,9 @@ const ModelRow: React.FC<{
         )}
         <ModelUsers names={users} id={usersId} />
       </span>
-      <span className="relative flex shrink-0 items-center"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>
+      {/* A model nothing supplies says so in its own line; a badge naming the absent
+          route would only repeat it. */}
+      {!(supplyState === 'unconfigured' && routeOrigin === null) && <span className="relative flex shrink-0 items-center"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>}
       <ChevronRight className="model-hub-overview-chevron pointer-events-none size-[15px] shrink-0" aria-hidden="true" />
     </div>
   );
