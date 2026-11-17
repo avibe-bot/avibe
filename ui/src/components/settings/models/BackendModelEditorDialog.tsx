@@ -9,7 +9,10 @@ import type { TranslationKey } from '@/i18n/types';
 // models.dev is a metadata source here, not an authority: the first field is a
 // search, and choosing a suggestion fills the model id along with every fact the
 // catalog knows about it — all of them still editable, because what the user
-// wanted may be the model next to the one they found.
+// wanted may be the model next to the one they found. A picked model is a base:
+// retyping the id afterwards (a relay's name for the same model) keeps every
+// parameter, and only 「Clear parameters」 takes them back.
+// ui/design: models/model-menu/custom-model-from-catalog, models/model-menu/custom-model-id-edited
 import * as React from 'react';
 import { Check, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -22,7 +25,7 @@ import { isComposingKey } from '@/lib/imeComposition';
 import { NO_REASONING_EFFORT } from '@/lib/effortOptions';
 import { cn } from '@/lib/utils';
 import { getBackendUiMeta } from '@/lib/agentBackends';
-import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, retireModelsDevMatch } from './backendCatalog';
+import { applyModelsDevMatch, backendModelId, blankBackendModel, clearModelsDevParameters, draftWithId } from './backendCatalog';
 import { Field } from './dialogFields';
 import { formatTokensCompact } from './format';
 import { apiFailure, modelsApi } from './modelsApi';
@@ -160,12 +163,12 @@ export const BackendModelEditorDialog: React.FC<{
   const [customEffort, setCustomEffort] = React.useState('');
   const [submitted, setSubmitted] = React.useState(false);
   const fillAttempt = React.useRef(0);
-  /** The whole editable surface exactly as the last models.dev fill left it —
-   *  the draft and the three fields held as text. A value that still matches it
-   *  is models.dev's answer; a value that differs is the user's own typing. Null
-   *  once no answer is outstanding, which is the only state `changeId` needs to
-   *  tell apart. A ref, not state: nothing renders from it. */
-  const filled = React.useRef<{ draft: BackendModel; name: string; context: string; output: string } | null>(null);
+  /** The catalog model the parameters were filled from, by the name the list
+   *  showed it under; null while they are the user's own. It is what the line
+   *  under the id names, and what puts 「keep these parameters」 first in the
+   *  list: once a model is picked as a base, the id typed next is that model
+   *  under another name far more often than a search for a different one. */
+  const [base, setBase] = React.useState<string | null>(null);
   const listId = React.useId();
 
   const seed = React.useCallback((next: BackendModel) => {
@@ -179,7 +182,7 @@ export const BackendModelEditorDialog: React.FC<{
     setCustomOpen(false);
     setCustomEffort('');
     setSubmitted(false);
-    filled.current = null;
+    setBase(null);
   }, []);
 
   React.useEffect(() => {
@@ -290,62 +293,55 @@ export const BackendModelEditorDialog: React.FC<{
     // its provider publishes it as. `origin` is `models_dev` unconditionally
     // because the typeahead is add mode's field: a saved row's own creation path
     // is never re-decided here.
-    const next = applyModelsDevMatch(draft, match, 'models_dev', backend);
-    const name = match.display_name ?? '';
-    const context = groupTokens(match.context_window);
-    const output = groupTokens(match.max_output_tokens);
-    setDraft(next);
-    setNameText(name);
-    setContextText(context);
-    setOutputText(output);
-    filled.current = { draft: next, name, context, output };
+    // Another catalog row replaces the whole fill, the user's edits to it
+    // included: picking a model is asking for that model's parameters.
+    setDraft(applyModelsDevMatch(draft, match, 'models_dev', backend));
+    setNameText(match.display_name ?? '');
+    setContextText(groupTokens(match.context_window));
+    setOutputText(groupTokens(match.max_output_tokens));
+    setBase(match.display_name ?? match.model_id);
     setLookup('');
   };
 
-  /** Take the query as the id itself, resolved to one this backend accepts. The
-   *  draft's other fields are the user's own by construction: whatever an
-   *  earlier fill still owned was retired by `changeId` the moment they typed
-   *  again, and what survived that is what they typed themselves. */
+  /** Take the query as the id itself, resolved to one this backend accepts,
+   *  and leave every other field as it stands. */
   const takeLookupAsId = () => {
     setDraft((current) => draftWithId(current, lookup.trim(), backend));
     setLookup('');
   };
 
-  /**
-   * Retype the id, and every models.dev answer to the old one is retired: the
-   * request still in flight, the match list it would open, and the metadata an
-   * earlier fill already poured in.
-   *
-   * How far that reaches is decided field by field against the fill itself, not
-   * by one flag over the whole row — see `retireModelsDevMatch`. A draft that
-   * owes models.dev nothing keeps every field, since correcting a typo in the id
-   * is not a decision to retype the rest, and after one retirement there is
-   * nothing left to retire.
-   */
+  /** Retype the id. The request for the old query is dropped by the lookup
+   *  effect; the parameters stay, whoever filled them — correcting or renaming
+   *  the id is not a decision to retype the rest of the form. */
   const changeId = (nextId: string) => {
     setActive(0);
     setLookup(nextId.trim());
-    const fill = filled.current;
-    if (fill === null) {
-      patch({ id: nextId });
-      return;
-    }
-    setDraft((current) => retireModelsDevMatch(current, fill.draft, nextId));
-    if (nameText === fill.name) setNameText('');
-    if (contextText === fill.context) setContextText('');
-    if (outputText === fill.output) setOutputText('');
-    filled.current = null;
+    patch({ id: nextId });
   };
 
-  // The escape is the last row in every open state, including 「searching」 and
+  /** 「Clear parameters」: back to the blank form under the same id and name. */
+  const clearParameters = () => {
+    setDraft(clearModelsDevParameters);
+    setContextText('');
+    setOutputText('');
+    setBase(null);
+  };
+
+  // The escape is in the list in every open state, including 「searching」 and
   // 「unavailable」: models.dev being slow or down is not a reason the user may
-  // not name their own model.
+  // not name their own model. It is the last row while the form is the user's
+  // own, so Enter on a search takes the first match; once a catalog model is
+  // the base it is the first row, so Enter keeps that model's parameters under
+  // the id just typed and a different model is a deliberate pick.
   const lookupOpen = creating && lookup !== '';
+  const keepFirst = base !== null;
   const rowCount = matches.length + 1;
+  const literalRow = keepFirst ? 0 : matches.length;
+  const matchRow = (index: number) => (keepFirst ? index + 1 : index);
   const activeRow = Math.min(active, rowCount - 1);
-  const chooseRow = (index: number) => {
-    if (index < matches.length) applyMatch(matches[index]);
-    else takeLookupAsId();
+  const chooseRow = (row: number) => {
+    if (row === literalRow) takeLookupAsId();
+    else applyMatch(matches[keepFirst ? row - 1 : row]);
   };
 
   const onIdKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -417,6 +413,33 @@ export const BackendModelEditorDialog: React.FC<{
   // A suggestion is not a capability declaration: Off stays unchecked until
   // the operator adds it to this exact model, just like any custom effort.
   const efforts = [...new Set([NO_REASONING_EFFORT, ...effortSuggestions, ...draft.reasoning_efforts])];
+  const literalOption = (
+    <button
+      type="button"
+      role="option"
+      id={`${listId}-${literalRow}`}
+      aria-selected={activeRow === literalRow}
+      onMouseDown={(event) => event.preventDefault()}
+      onMouseEnter={() => setActive(literalRow)}
+      onClick={takeLookupAsId}
+      // First, it is the list's default answer and is drawn like a suggestion;
+      // last, it is the escape under them.
+      className={cn(
+        'model-hub-model-match flex min-w-0 items-center gap-2.5 text-left',
+        !keepFirst && 'model-hub-model-match--literal',
+        activeRow === literalRow && 'is-selected',
+      )}
+    >
+      {/* The id it will create, through the same resolver `commit` uses — not
+          the raw query, whose surrounding whitespace is not part of the id. */}
+      <span className="model-hub-model-match-literal min-w-0 truncate">
+        {t(keepFirst ? 'settings.models.gateway.modelEditor.useAsIdKeep' : 'settings.models.gateway.modelEditor.useAsId', {
+          query: backendModelId(lookup.trim()),
+        })}
+      </span>
+      {keepFirst && <span className="model-hub-model-match-meta ml-auto shrink-0 max-md:hidden" aria-hidden="true">{t('settings.shortcuts.keyLabels.enter')}</span>}
+    </button>
+  );
   const backendName = getBackendUiMeta(backend).label;
   const protocolLabel = t('settings.models.gateway.modelEditor.nativeProtocol.label') as string;
   const idHint = submitted && idError ? t(`settings.models.gateway.modelEditor.id.${idError}`) as string : null;
@@ -475,6 +498,22 @@ export const BackendModelEditorDialog: React.FC<{
                     placeholder={t('settings.models.gateway.modelEditor.id.placeholder') as string}
                     className="model-hub-model-control w-full font-mono text-[12.5px] read-only:text-muted"
                   />
+                  {/* Where the parameters came from, and the way back to an
+                      empty form. Inside the lookup's box, so the list opens
+                      under it and choosing 「clear」 does not count as leaving. */}
+                  {base !== null && (
+                    <p className="model-hub-model-note mt-1.5 flex min-w-0 items-center gap-1.5">
+                      <span className="min-w-0 truncate">{t('settings.models.gateway.modelEditor.parametersFrom', { name: base })}</span>
+                      <span aria-hidden="true" className="shrink-0 before:content-['·']" />
+                      <button
+                        type="button"
+                        onClick={clearParameters}
+                        className="shrink-0 font-semibold text-foreground underline underline-offset-2"
+                      >
+                        {t('settings.models.gateway.modelEditor.clearParameters')}
+                      </button>
+                    </p>
+                  )}
                   {lookupOpen && (
                     // Over the form, not in it: the fields below keep their
                     // places while the list opens and closes on every keystroke.
@@ -490,21 +529,23 @@ export const BackendModelEditorDialog: React.FC<{
                         aria-label={t('settings.models.gateway.modelEditor.matches') as string}
                         className="flex min-w-0 flex-col"
                       >
+                        {keepFirst && literalOption}
                         {matches.map((match, index) => {
                           const context = formatTokensCompact(match.context_window);
+                          const row = matchRow(index);
                           return (
                             <button
                               key={match.models_dev_id}
                               type="button"
                               role="option"
-                              id={`${listId}-${index}`}
-                              aria-selected={activeRow === index}
+                              id={`${listId}-${row}`}
+                              aria-selected={activeRow === row}
                               // The field keeps the caret: a click that moved
                               // focus would close the list before it fired.
                               onMouseDown={(event) => event.preventDefault()}
-                              onMouseEnter={() => setActive(index)}
+                              onMouseEnter={() => setActive(row)}
                               onClick={() => applyMatch(match)}
-                              className={cn('model-hub-model-match flex min-w-0 items-center gap-2.5 text-left', activeRow === index && 'is-selected')}
+                              className={cn('model-hub-model-match flex min-w-0 items-center gap-2.5 text-left', activeRow === row && 'is-selected')}
                             >
                               <span className="flex min-w-0 flex-1 items-center gap-2">
                                 {/* No `shrink-0`: pinning the name at its full
@@ -523,28 +564,7 @@ export const BackendModelEditorDialog: React.FC<{
                             </button>
                           );
                         })}
-                        <button
-                          type="button"
-                          role="option"
-                          id={`${listId}-${matches.length}`}
-                          aria-selected={activeRow === matches.length}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onMouseEnter={() => setActive(matches.length)}
-                          onClick={takeLookupAsId}
-                          className={cn(
-                            'model-hub-model-match model-hub-model-match--literal flex min-w-0 items-center text-left',
-                            activeRow === matches.length && 'is-selected',
-                          )}
-                        >
-                          {/* The id it will create, through the same resolver
-                              `commit` uses — not the raw query, whose
-                              surrounding whitespace is not part of the id. */}
-                          <span className="model-hub-model-match-literal min-w-0 truncate">
-                            {t('settings.models.gateway.modelEditor.useAsId', {
-                              query: backendModelId(lookup.trim()),
-                            })}
-                          </span>
-                        </button>
+                        {!keepFirst && literalOption}
                       </div>
                     </div>
                   )}
