@@ -14,6 +14,18 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         WebKitReadiness.webContentLaunch.components.seconds
     )
 
+    /// For a test about what happens after the control-plane document is
+    /// ready (a redirect the request must not follow): its readiness may
+    /// take as long as WebKit's web content launch, so a slow launch is not
+    /// mistaken for the network error the test expects. Requests keep the
+    /// App's own deadlines. The readiness deadline itself is tested by the
+    /// deadline tests, which keep theirs.
+    private static let readyAfterWebContentLaunch = MobileAuthTransportDeadlines(
+        readinessMilliseconds: Int(WebKitReadiness.webContentLaunch.components.seconds) * 1_000,
+        requestMilliseconds: MobileAuthTransportDeadlines.standard.requestMilliseconds,
+        logoutMilliseconds: MobileAuthTransportDeadlines.standard.logoutMilliseconds
+    )
+
     func testFailureMappingIsStageAccurateForEveryOperation() {
         struct MappingCase {
             let name: String
@@ -1070,7 +1082,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
-            websiteDataStore: .nonPersistent()
+            websiteDataStore: .nonPersistent(),
+            deadlines: Self.readyAfterWebContentLaunch
         )
 
         let request = Task {
@@ -1084,7 +1097,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let callback = try XCTUnwrap(
             state.requests().last(where: {
                 $0.method == "POST" && $0.path == "/auth/callback"
-            })
+            }),
+            "The request ended before its callback; \(server.requests.summary())"
         )
         let callbackBody = try XCTUnwrap(
             String(data: callback.body, encoding: .utf8)
@@ -1500,7 +1514,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
-            websiteDataStore: .nonPersistent()
+            websiteDataStore: .nonPersistent(),
+            deadlines: Self.readyAfterWebContentLaunch
         )
 
         let request = Task {
@@ -1514,7 +1529,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertTrue(
             state.requests().contains(where: {
                 $0.method == "POST" && $0.path == "/auth/v1/token"
-            })
+            }),
+            "The sign-in ended before its grant; \(server.requests.summary())"
         )
         XCTAssertFalse(
             state.requests().contains(where: { $0.path == "/auth/callback" })
