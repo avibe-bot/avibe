@@ -15,8 +15,17 @@ final class InstanceSheetGestureUITests: XCTestCase {
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_STATE"] = "default"
         app.launchEnvironment["AVIBE_FIXTURE_CAPTURE_THEME"] = "light"
+        let launched = ProcessInfo.processInfo.systemUptime
         launchFixture()
-        XCTAssertTrue(SheetFixtureReadiness.waitForText("You’re in", in: app))
+        let ready = ProcessInfo.processInfo.systemUptime
+        let inTime = SheetFixtureReadiness.waitForText("You’re in", in: app)
+        if !inTime {
+            // Draft-only: keep watching up to WebKit's launch budget.
+            let late = SheetFixtureReadiness.waitForText("You’re in", in: app, timeout: 120)
+            print("[cold receipt] late render: \(late) after \(ProcessInfo.processInfo.systemUptime - ready) s")
+        }
+        print(String(format: "[cold receipt] launch+document %.2f s; in-time=%@", ready - launched, inTime ? "yes" : "no"))
+        XCTAssertTrue(inTime)
         XCTAssertTrue(app.webViews.firstMatch.buttons["Close and return to Studio"].waitForExistence(timeout: 10))
         XCTAssertFalse(SheetFixtureReadiness.waitForText(
             "This required text does not exist", in: app, timeout: 0.2

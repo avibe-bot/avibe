@@ -163,6 +163,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Draft - cold real-bundle first launches
+        if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          for i in $(seq 1 10); do
+            echo "::group::cold iteration $i"
+            xcrun simctl terminate "$SIMULATOR_ID" bot.avibe.ios.sheet-fixture 2>/dev/null || true
+            xcrun simctl uninstall "$SIMULATOR_ID" bot.avibe.ios.sheet-fixture 2>/dev/null || true
+            xcodebuild \
+              -project ios/Avibe.xcodeproj \
+              -scheme AvibeSheetFixture \
+              -configuration Debug \
+              -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+              -derivedDataPath "$RUNNER_TEMP/AvibeSheetFixtureDerivedData" \
+              -parallel-testing-enabled NO \
+              -resultBundlePath "$RUNNER_TEMP/Cold-$i.xcresult" \
+              -only-testing:AvibeSheetFixtureTests/InstanceSheetGestureUITests/testColdRealBundleNeedsItsOwnWebContentAfterNativeReadiness \
+              CODE_SIGNING_ALLOWED=NO \
+              test-without-building 2>&1 | grep -E "cold receipt|page receipt|Test Case|error:" || true
+            echo "::endgroup::"
+          done
+
       - name: Run sheet gesture XCUITest fixture
         if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
         run: |
@@ -184,6 +206,8 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-sheet-fixture-xcresult
-          path: ${{ runner.temp }}/AvibeSheetFixtureTests.xcresult
+          path: |
+            ${{ runner.temp }}/AvibeSheetFixtureTests.xcresult
+            ${{ runner.temp }}/Cold-*.xcresult
           if-no-files-found: ignore
           retention-days: 7

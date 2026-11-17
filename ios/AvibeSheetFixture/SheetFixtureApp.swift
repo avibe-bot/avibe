@@ -204,6 +204,7 @@ private final class SheetFixtureRootViewController: UIViewController,
         sheetController = controller
         publishReadiness()
         observeDocument(in: controller)
+        if realBundle { observePageRender(in: controller) }
         controller.overrideUserInterfaceStyle = overrideUserInterfaceStyle
         if showsFullPage {
             addChild(controller)
@@ -318,6 +319,49 @@ private final class SheetFixtureRootViewController: UIViewController,
     /// with a selection.
     private var showsFullPage: Bool {
         captureState == "first-run" || captureState == "page-switching"
+    }
+
+    // Draft-only: page-side receipts for the cold real-bundle render.
+    private var pageReceiptTask: Task<Void, Never>?
+    private func observePageRender(in controller: MobileOnboardingViewController) {
+        let webView = controller.view.subviews.compactMap { $0 as? WKWebView }.first!
+        webView.configuration.userContentController.addUserScript(WKUserScript(
+            source: """
+            window.__fixtureErrors = [];
+            window.addEventListener('error', e => window.__fixtureErrors.push(String(e.message || e.type)));
+            window.addEventListener('unhandledrejection', e => window.__fixtureErrors.push('rejection: ' + String(e.reason)));
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        let started = ProcessInfo.processInfo.systemUptime
+        pageReceiptTask = Task { @MainActor [weak webView] in
+            var last = ""
+            var firstRender: Double?
+            while !Task.isCancelled, let webView, ProcessInfo.processInfo.systemUptime - started < 150 {
+                let probe = (try? await webView.evaluateJavaScript(
+                    """
+                    JSON.stringify({
+                      ready: document.readyState,
+                      text: document.body ? document.body.innerText.length : -1,
+                      youreIn: !!(document.body && /You’re in|正在使用/.test(document.body.innerText)),
+                      root: document.getElementById('root') ? document.getElementById('root').childElementCount : -1,
+                      errors: (window.__fixtureErrors || []).slice(0, 5)
+                    })
+                    """
+                ) as? String) ?? "unavailable"
+                let t = ProcessInfo.processInfo.systemUptime - started
+                if firstRender == nil, probe.contains("\"youreIn\":true") {
+                    firstRender = t
+                    NSLog("[page receipt] first render at %.2f s after presentation (documentReady=%d)", t, self.documentReady ? 1 : 0)
+                }
+                if probe != last {
+                    NSLog("[page receipt] t=%.2f s %@", t, probe)
+                    last = probe
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
     }
 
     private func publishReadiness() {
