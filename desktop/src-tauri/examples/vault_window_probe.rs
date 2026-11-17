@@ -593,6 +593,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             self.a_card_takes_no_input_until_it_has_been_seen();
 
             self.other_requests_keep_their_handler();
+            self.another_window_going_away_closes_nothing();
             self.reservations_are_bounded();
 
             // No child outlives the main window: not when the user closes it,
@@ -652,6 +653,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
 
             self.a_redirect_never_shows();
             self.other_requests_keep_their_handler();
+            self.another_window_going_away_closes_nothing();
             self.reservations_are_bounded();
 
             self.eval("window.open('about:blank'); window.open('about:blank')");
@@ -1047,7 +1049,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             // Another window of the app covers the card completely and goes
             // away again: the same two seconds, from AppKit's own word on
             // whether the card can be seen.
-            let cover = self.another_window_of_the_app();
+            let cover = self.another_window_of_the_app("other");
             let card = self.children()[0].number;
             self.on_main({
                 let cover = cover.clone();
@@ -1307,8 +1309,8 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         }
 
         /// A plain second window of this app, as a native app window is.
-        fn another_window_of_the_app(&self) -> WebviewWindow {
-            WebviewWindowBuilder::new(&self.app, "other", WebviewUrl::External("about:blank".parse().unwrap()))
+        fn another_window_of_the_app(&self, label: &str) -> WebviewWindow {
+            WebviewWindowBuilder::new(&self.app, label, WebviewUrl::External("about:blank".parse().unwrap()))
                 .title("another window")
                 .visible(false)
                 .incognito(true)
@@ -1446,6 +1448,63 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 "{handed:?}"
             );
             assert!(self.children().is_empty());
+        }
+
+        /// Windows are reserved while another window of the app is being taken
+        /// down. Every web view the shell builds announces its leaving, the
+        /// other window's too; that must close nothing of a Workbench that is
+        /// in place. (On its first CI run the probe lost one reserved window
+        /// right after such a window was destroyed, once, and nothing was
+        /// recording by what.)
+        fn another_window_going_away_closes_nothing(&mut self) {
+            const ROUNDS: usize = 10;
+            for round in 0..ROUNDS {
+                let other = self.another_window_of_the_app(&format!("other-{round}"));
+                if self.focus {
+                    // As in the case that failed: shown, and key for a moment.
+                    other.show().unwrap();
+                    self.on_main({
+                        let other = other.clone();
+                        move |_| ns_window(&other).makeKeyAndOrderFront(None)
+                    });
+                } else {
+                    self.on_main(|_| ());
+                }
+                trace::closely(true);
+                other.destroy().unwrap();
+                self.eval(
+                    r#"(() => {
+                        const kept = probe.windows.kept = [];
+                        const open = () => {
+                            kept.push(window.open('about:blank'));
+                            if (kept.length < 3) return setTimeout(open, 15);
+                            setTimeout(() => probe.report({
+                                case: 'kept',
+                                opened: kept.map((child) => !!child),
+                                closed: kept.map((child) => !child || child.closed),
+                            }), 300);
+                        };
+                        open();
+                    })()"#,
+                );
+                let kept = self.report("kept");
+                let held = self.child_windows();
+                trace::closely(false);
+                assert!(
+                    kept["opened"] == json!([true, true, true])
+                        && kept["closed"] == json!([false, false, false])
+                        && held == 3,
+                    "round {round}: a reserved window was lost while another window of the app went away: \
+                     {kept}, {held} windows held\n{}",
+                    trace::seen()
+                );
+                self.eval("probe.windows.kept.forEach((child) => child.close())");
+                self.wait_children("the kept windows to close", |children| children.is_empty());
+            }
+            println!(
+                "vault window probe: windows reserved while another window of the app was destroyed were kept, \
+                 {ROUNDS} times"
+            );
         }
 
         /// The main webview's pages cannot hold more than a few hidden windows,
