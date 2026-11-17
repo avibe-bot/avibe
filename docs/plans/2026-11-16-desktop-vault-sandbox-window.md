@@ -99,7 +99,7 @@ the sandbox unmodified.
    the page is destroyed; with the window out of the registry that delegate
    refuses every navigation.
 
-At most four children exist at once for the main webview, hidden ones included.
+At most four children exist at once in the app, hidden ones included.
 This bounds resources; it is not a security boundary between pages.
 
 ### Why the content is revealed by a presentation update
@@ -236,62 +236,65 @@ hidden Workbench. Three things follow.
   matters because the shell covers a Workbench by hiding it, but one path
   (bringing the main window forward while the account page reloads) can show
   the Workbench under the account screen.
-- Separately, the shell key-value observes `hidden` on the opener's web view,
-  since nothing else announces it. That is only what makes closing prompt:
-  hidden, every sandbox window of that opener is closed at once, reserved and
-  empty ones included. AppKit posts changes of `hidden` itself, so
-  Foundation's promise to end an observation when the observed object is
-  freed does not cover this key. The shell therefore observes only while the
-  opener has a sandbox window, from its first to its last, and holds a strong
-  reference to the web view for exactly that time: an observed web view is
-  never freed. The two are added together and removed together, the
-  observation first, one turn of the main run loop after the opener's last
-  window closed (which can happen inside the observation's own callback), and
-  every way a window ends goes through the one `close`. Hiding closes the
-  windows and so ends both, one turn later. The shell may close a retired web
-  view before that turn; the web view is still held then, so it is never
-  freed while observed. On a product
-  path the reference can outlive the Workbench by at most 60 seconds: between
-  the hide and the close a hidden Workbench can still reserve a window
-  (admission reads only that it is in its window), which can never be shown
-  and goes at the deadline. That AppKit announces `hidden` to an observer is
-  behaviour the probe checks, on the versions CI runs, like the three WebKit
-  calls.
-- An opener without a sandbox window is not observed, so the shell does not
-  know how long it has been in front of the user. It does not assume: **the
-  first window an opener asks for when it has none is an arrival, stamped at
-  the moment it is asked for.** While a window exists the observation is on
-  and a hide closes every window, so the next request is again a first one.
-  The cost: Confirm takes clicks no sooner than 2 seconds after the step's
-  window was asked for (after the Approve click), instead of 0.75 seconds
-  after the card appears, and approving a second request after the first card
-  closed waits 2 seconds from that click too. An explicit word from the shell
-  when it hides, shows or closes a Workbench's web view would give the 0.75
-  seconds back; see the follow-up.
-- Nothing announces a
-  web view being covered by another, or a view around it being hidden. Coming
-  out from under one of those is an arrival only if the shell looked while it
-  held (a window was asked for, or an event arrived for a card); otherwise a
-  card asked for then is live after 0.75 seconds, not 2. Input is not affected:
-  every event reads the opener afresh. All three of the
-  shell's retirement paths hide a web view before closing it. A close alone
-  does not hide; a card whose opener was closed without being hidden stays on
-  screen and takes no input, until the user closes it or the main window
-  goes, and for that time the reference above keeps the closed web view from
-  being freed. "Any close of the opener's web view also closes its cards" is
-  the right rule, but nothing announces a close; it is not in this change and
-  is required once replacement web views become openers, whose disposable
-  data store a reference must not keep alive. Before a card is displayed the opener is read once more; if it
-  is no longer in view the card is closed instead.
+- Separately, every web view the shell builds announces three things: that
+  it was hidden, that it was shown, and that it was moved into or out of a
+  window (which is also how it is closed). AppKit calls `viewDidHide`,
+  `viewDidUnhide` and `viewDidMoveToWindow` on a view for itself and for a
+  hidden view around it; the module adds those three methods to wry's web
+  view class, each calling its superclass first. Nothing inherited is
+  replaced (that would change every web view in the process, a sandbox
+  window's own included), and if wry's class already defines one of them
+  nothing is added and the support is not installed. On each announcement,
+  whichever web view made it, every opener is read again, and the sandbox
+  windows of one that is no longer in place (in its window, not hidden, not
+  covered) are closed, reserved and empty ones included, and their pages
+  destroyed before the announcement returns. **An announcement only ever
+  closes.** It is what makes closing prompt; nothing in the input rule waits
+  for one, and whether an opener is in view is still read afresh at the
+  commit and for every click and key. Nothing is observed and no web view is
+  held, so nothing here depends on when a web view is freed. (The first
+  version of this change key-value observed `hidden` on one web view and held
+  it while observed; that could not see a close, and a held web view would
+  have kept a replacement's disposable data store alive.)
+- This covers each way a Workbench leaves: the shell hiding it (under the
+  account screen, and first on every retirement path), closing it without
+  hiding it, and creating another web view in front of it, as it does with a
+  candidate Workbench during a switch. A retirement hides the web view,
+  erases its data store and then closes it; the hide closes the cards and
+  destroys their pages, so that is done before the erase starts. What is
+  asked of WebKit there is `_close` on the card's web view, in the same turn
+  as the hide; the erase is asked for in a later turn. Admission at
+  `window.open` is unchanged: it reads only that the opener is in its window,
+  so a hidden Workbench can still reserve an empty window. That window can
+  never be shown; it goes when a sandbox document commits in it, at the
+  deadline, or when the Workbench's web view is closed, whichever is first.
+- Not announced: a web view that is moved, resized or reordered over a
+  Workbench without being created or shown there. The shell has no such
+  path. If it gets one, a card stays on screen without input (every event
+  reads the opener) until the user closes it.
+- The shell still does not assume how long a Workbench has been in front of
+  the user: **the first window an opener asks for when it has none is an
+  arrival, stamped at the moment it is asked for.** A hide closes every
+  window, so the next request is again a first one. The cost: Confirm takes
+  clicks no sooner than 2 seconds after the step's window was asked for
+  (after the Approve click), instead of 0.75 seconds after the card appears,
+  and approving a second request after the first card closed waits 2 seconds
+  from that click too. Taking the "shown" announcement as the arrival would
+  give the 0.75 seconds back; that would make an announcement open something
+  for the first time, and is not built.
+- Coming out from under another web view, or a hidden view around it, is an
+  arrival only if the shell looked while it held (a window was asked for, or
+  an event arrived for a card); otherwise a card asked for then is live after
+  0.75 seconds, not 2. Input is not affected: every event reads the opener
+  afresh. Before a card is displayed the opener is read once more; if it is
+  no longer in view the card is closed instead.
 - "One on screen" is counted for the native window, whichever web view in it
   asked. The cap of four is for the whole app.
-- The support is installed only on the web view the app starts with. A
-  replacement web view is not an opener: its window requests go to wry, its
-  page has no marker, and nothing it does reaches what was installed for the
-  first one, because requests are admitted by the identity of the web view that
-  made them. So in this version a Workbench after an instance switch, and a
-  remote instance, keep the browser hand-off. Installing on replacement web
-  views, with the reload hook there and a probe case, is the follow-up.
+- The support is installed on every Workbench web view: the one the app
+  starts with (`build_main_window`) and each replacement
+  (`build_main_child`), with the reload hook on both. Requests are admitted
+  by the identity of the web view that made them, so one Workbench cannot
+  reach what was installed for another. The account screen is not an opener.
 
 ### Why the URL schemes are guarded
 
@@ -393,8 +396,15 @@ the sandbox's window goes to the browser with every other link.
     for two seconds. With another web view of the main window shown in front of
     the Workbench: a window it asks for is closed without ever being on screen,
     and after that web view is removed a card takes no input for two seconds.
-    With the Workbench's web view closed without being hidden: its card takes
-    no more input. Minimizing, a Space change and display sleep are not
+    With a replacement web view in the same window, which has a data store of
+    its own, three times: the replacement gets the marker and a card that
+    shares its data store and writes a cookie every 20 ms; then the
+    replacement is retired by the shell's own `instance_store::retire`, or
+    hidden, or closed without being hidden. Each time the card's window is
+    gone and WebKit reports its page closed (`_isClosed`) when the probe asks
+    on the main thread right behind the hide or the close, and the retirement,
+    which reads the store's cookies back after erasing it, succeeds.
+    Minimizing, a Space change and display sleep are not
     produced by the probe; for those, as for full covering, the claim rests on
     AppKit's documentation of the occlusion state.
   - **App not active.** A sandbox window is closed instead of appearing. This
@@ -406,8 +416,9 @@ the sandbox's window goes to the browser with every other link.
   two windows on screen, a window over a hidden main window. The input rule
   was not tried this way: its cases need the app activated, which is done only
   in CI.
-- The two calls in `build_main_window` that connect the module to the main
-  window have no automated check. Removing the install leaves the browser
+- The two calls in `build_main_window` and in `build_main_child` that connect
+  the module to a Workbench's web view have no automated check; the probe
+  builds its replacement web views itself. Removing the install leaves the browser
   hand-off; removing the navigation hook leaves a sandbox window open across a
   Workbench reload. Both show in the manual check on a signed build.
 
@@ -424,6 +435,16 @@ check blind there, or the page was not displayed. The two cannot be told apart
 without a macOS 15 machine. Until the probe passes on it, the marker is not set
 on macOS 15, and those systems keep the browser hand-off. Follow-up: make the
 read-back work on macOS 15 (or replace it), then add a CI job and the version.
+
+**A page's last writes.** Destroying a card's page is asked of WebKit before
+the erase is; the page's process is told a moment later. The probe's
+retirement passed with a card writing cookies, but nothing proves that no
+write from a card can land after the erase. The Workbench's own page is alive
+through the erase in any case; that is the retirement's existing rule, not
+this change's.
+
+**A web view moved or reordered over a Workbench**, as said above: not
+announced, not produced by the probe.
 
 Only a signed build with a real passkey can show these:
 

@@ -181,6 +181,7 @@ addEventListener('message', (event) => {
   if (event.data === 'log-later') setTimeout(() => fetch('/report', { method: 'POST', body: JSON.stringify(log) }), 3000);
 });
 if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slow.css">');
+if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe=' + Date.now() + '; path=/'; }, 20);
 </script>
 <body style="margin:0"><button style="position:fixed;inset:0;width:100%;height:100%">Confirm</button>"#;
 
@@ -271,16 +272,16 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                     })
                     .on_page_load(|window, payload| {
                         if payload.event() == tauri::webview::PageLoadEvent::Started {
-                            macos_vault_window::opener_navigated(&window);
+                            macos_vault_window::opener_navigated(window.as_ref());
                         }
                     })
                     .build()
                     .unwrap();
                 if shipping {
-                    macos_vault_window::install(&main);
+                    macos_vault_window::install(main.as_ref());
                 } else {
                     macos_vault_window::install_with(
-                        &main,
+                        main.as_ref(),
                         macos_vault_window::Policy {
                             origin: macos_vault_window::Origin {
                                 scheme: "http".to_owned(),
@@ -607,54 +608,25 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
                 children.is_empty()
             });
 
-            // The Workbench's web view is closed without being hidden first,
-            // as a web view is when the shell is done with it. It is out of
-            // its window, so its card takes no more input. (While the card is
-            // up the shell holds the web view, so this says nothing about a
-            // web view being freed.) From here the probe cannot ask the
-            // Workbench page anything, so the card reports by itself.
-            self.eval(&format!("probe.windows.card = window.open('{sandbox}/card')"));
-            self.wait_children("a card", |children| children.len() == 1 && children[0].shown());
-            let input = self.start_input();
-            std::thread::sleep(Duration::from_millis(3000));
-            // A reserved window too, so that both kinds are there at the end.
-            self.eval("window.open('about:blank'); probe.windows.card.postMessage('log-later', '*')");
-            std::thread::sleep(Duration::from_millis(300));
-            let workbench: &tauri::Webview = self.main.as_ref();
-            workbench.close().unwrap();
-            self.on_main(|_| ());
-            let closed = now_ms();
-            let log = self.report("card-log");
-            input.stop();
-            let received = |from: f64, until: f64| {
-                ["clicks", "keys", "commands"]
-                    .iter()
-                    .flat_map(|kind| log[*kind].as_array().expect("a list of times").iter())
-                    .filter(|at| at.as_f64().is_some_and(|at| at > from && at < until))
-                    .count()
-            };
-            assert!(
-                received(0.0, closed) > 0,
-                "the card was to be live before its opener was closed: {log}"
-            );
-            assert_eq!(
-                received(closed, f64::MAX),
-                0,
-                "a card took input after its opener's web view was closed: {log}"
-            );
-            assert!(self.child_windows() >= 1, "the card is still there");
-            println!("vault window probe: a card whose opener was closed without being hidden took no more input");
+            self.replacement_workbenches();
 
-            // No child outlives the main window: the card, and the reserved
-            // window if its deadline has not passed, go when it is destroyed.
+            // No child outlives the main window when it is destroyed.
+            self.eval(&format!(
+                "window.open('about:blank'); window.open('{sandbox}/window#case=destroyed')"
+            ));
+            self.a_window_opened_by_the_workbench_loaded("destroyed");
+            self.wait_children("a shown and a reserved window", |children| {
+                children.len() == 2 && children.iter().filter(|child| child.shown()).count() == 1
+            });
             self.the_main_window_takes_its_children_along();
 
             println!(
                 "vault window probe (app active{}): marker scope, hidden reservation, reveal only after the \
                  sandbox document is presented, opener link, empty content controller and own preferences, \
-                 URL scheme guard, navigation refusals, one window at a time, hidden main window, hidden, \
-                 covered and closed Workbench, no input before a card has been seen, a displayed card in front and key, size \
-                 bounds, close paths, \
+                 URL scheme guard, navigation refusals, one window at a time, hidden main window, hidden \
+                 and covered Workbench, no input before a card has been seen, a displayed card in front and \
+                 key, replacement Workbenches retired, hidden and closed with a card up, size bounds, close \
+                 paths, \
                  deadline, cap, reload and main-window teardown passed",
                 if self.focus { ", with focus" } else { "" }
             );
@@ -708,6 +680,132 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             assert_eq!(heard["origin"], sandbox, "{heard}");
             let reply = self.report("child-reply");
             assert_eq!(reply["origin"], sandbox, "{reply}");
+        }
+
+        /// After the user switches instance the shell shows the Workbench in a
+        /// replacement web view inside the same native window, with a data
+        /// store of its own, and later retires it. Such a Workbench opens the
+        /// sandbox's window as the first one does, and however it goes (retired
+        /// by the shell's own helper, hidden, or closed without being hidden)
+        /// its card is closed and the card's page destroyed at that moment,
+        /// before anything else happens to its data store.
+        fn replacement_workbenches(&mut self) {
+            let sandbox = format!("http://localhost:{}", self.port);
+            // The shell hides the Workbench it replaces.
+            let first: &tauri::Webview = self.main.as_ref();
+            first.hide().unwrap();
+            for ending in ["retired", "hidden", "closed"] {
+                let port = self.port;
+                let view = self
+                    .main
+                    .as_ref()
+                    .window()
+                    .add_child(
+                        tauri::webview::WebviewBuilder::new(
+                            format!("replacement-{ending}"),
+                            WebviewUrl::External("about:blank".parse().unwrap()),
+                        )
+                        .incognito(true)
+                        .initialization_script(SHELL_SCRIPT)
+                        .on_new_window(|_url, _features| NewWindowResponse::Deny)
+                        .on_page_load(|view, payload| {
+                            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                                macos_vault_window::opener_navigated(&view);
+                            }
+                        }),
+                        tauri::LogicalPosition::new(0., 0.),
+                        tauri::LogicalSize::new(4000., 4000.),
+                    )
+                    .unwrap();
+                macos_vault_window::install_with(
+                    &view,
+                    macos_vault_window::Policy {
+                        origin: macos_vault_window::Origin {
+                            scheme: "http".to_owned(),
+                            host: "localhost".to_owned(),
+                            port: Some(port),
+                        },
+                        reserve_deadline: RESERVE_DEADLINE,
+                    },
+                );
+                self.on_main(|_| ());
+                view.navigate(format!("http://127.0.0.1:{port}/workbench").parse().unwrap())
+                    .unwrap();
+                let ready = self.report("workbench-ready");
+                assert_eq!(ready["marker"], true, "a replacement Workbench is told too: {ready}");
+                assert_eq!(ready["shell"], 1, "{ready}");
+                self.report("frame-ready");
+
+                // Its card keeps writing to the data store it shares with it.
+                view.eval(format!("probe.windows.card = window.open('{sandbox}/card#cookies')"))
+                    .unwrap();
+                self.wait_children("a replacement Workbench's card", |children| {
+                    children.len() == 1 && children[0].shown()
+                });
+                assert!(
+                    self.keep_the_card_of(&view),
+                    "the card does not share its replacement Workbench's data store"
+                );
+
+                match ending {
+                    // The shell's own way: hide, erase the store, destroy.
+                    "retired" => avibe_desktop_lib::instance_store::retire(&view)
+                        .expect("a replacement Workbench is retired with a card up"),
+                    "hidden" => view.hide().unwrap(),
+                    _ => view.close().unwrap(),
+                }
+                // Asked on the main thread right behind the hide or the close.
+                let (windows, destroyed) = self.on_main(|mtm| (child_windows(mtm).len(), kept_card_is_destroyed()));
+                assert_eq!(windows, 0, "a card outlived its {ending} Workbench");
+                assert_ne!(
+                    destroyed,
+                    Some(false),
+                    "the card's page outlived its {ending} Workbench"
+                );
+                if ending == "hidden" {
+                    view.close().unwrap();
+                    self.on_main(|_| ());
+                }
+                println!(
+                    "vault window probe: a replacement Workbench was {ending} with a card up; the card was closed{}",
+                    if destroyed == Some(true) {
+                        " and its page destroyed at once"
+                    } else {
+                        " (WebKit does not say whether its page is destroyed)"
+                    }
+                );
+            }
+            let first: &tauri::Webview = self.main.as_ref();
+            first.show().unwrap();
+            self.on_main(|_| ());
+        }
+
+        /// Keeps a reference to the one card's web view for a later question,
+        /// and says whether it has the data store of `opener`.
+        fn keep_the_card_of(&self, opener: &tauri::Webview) -> bool {
+            let (tx, rx) = mpsc::channel();
+            opener
+                .with_webview(move |platform| {
+                    let mtm = MainThreadMarker::new().expect("main thread");
+                    // SAFETY: Tauri hands out the live web view on the main thread.
+                    let shared = unsafe {
+                        let opener = Retained::retain(platform.inner().cast::<WKWebView>()).expect("the opener");
+                        let card = child_windows(mtm)
+                            .iter()
+                            .find_map(|window| child_view(window))
+                            .and_then(|view| Retained::retain(Retained::as_ptr(&view) as *mut WKWebView))
+                            .expect("the card's web view");
+                        let shared = std::ptr::eq(
+                            &*card.configuration().websiteDataStore(),
+                            &*opener.configuration().websiteDataStore(),
+                        );
+                        KEPT_CARD.set(Some(card));
+                        shared
+                    };
+                    let _ = tx.send(shared);
+                })
+                .unwrap();
+            rx.recv_timeout(Duration::from_secs(10)).expect("main thread answered")
         }
 
         fn activate(&self) {
@@ -1481,6 +1579,23 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
         /// Counted without the main window, which may be gone.
         fn child_windows(&self) -> usize {
             self.on_main(|mtm| child_windows(mtm).len())
+        }
+    }
+
+    thread_local! {
+        /// The card's web view the probe is asking about; main thread only.
+        static KEPT_CARD: std::cell::RefCell<Option<Retained<WKWebView>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Whether the kept card's page has been destroyed, as WebKit says it;
+    /// `None` when WebKit has no word for it.
+    fn kept_card_is_destroyed() -> Option<bool> {
+        use objc2_foundation::NSObjectProtocol;
+        let card = KEPT_CARD.take()?;
+        // SAFETY: Main thread; the selector is checked to exist and returns a BOOL.
+        unsafe {
+            card.respondsToSelector(objc2::sel!(_isClosed))
+                .then(|| objc2::msg_send![&*card, _isClosed])
         }
     }
 
