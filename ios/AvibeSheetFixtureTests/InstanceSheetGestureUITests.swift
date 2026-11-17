@@ -287,16 +287,24 @@ enum SheetFixtureReadiness {
         XCTAssertTrue(status.waitForExistence(timeout: 10), file: file, line: line)
         status.tap()
         var stages: [String] = []
+        var last: [String: Any] = [:]
         let received = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                stages = dismissalEvidence(in: app)["stages"] as? [String] ?? []
+                // The sheet is up: its surface carries the receipt, in one
+                // query.
+                last = dismissalEvidence(in: app, sheetUp: true)
+                stages = last["stages"] as? [String] ?? []
                 return stages.contains("native-touch-ended")
                     || stages.contains("native-touch-cancelled")
             }, object: nil
         )
+        // One XCUI query took 2.5-7.5 s on a loaded host (run 44014994553,
+        // where the tap's receipt was recorded 0.07 s after touch-down but a
+        // 10 s gate saw it in no poll). XCTest gives a UI query 30 s itself.
         XCTAssertEqual(
-            XCTWaiter.wait(for: [received], timeout: 10), .completed,
-            "The warm-up tap never reached the window", file: file, line: line
+            XCTWaiter.wait(for: [received], timeout: uiQueryBudget), .completed,
+            "The warm-up tap's receipt was not read; last receipt=\(describe(last))",
+            file: file, line: line
         )
         let evidence = dismissalEvidence(in: app)
         if let began = evidence["native-touch-began"] as? [String: Any],
@@ -323,27 +331,31 @@ enum SheetFixtureReadiness {
         of close: XCUIElement,
         in app: XCUIApplication,
         ignoringStages ignored: Int = 0,
-        timeout: TimeInterval = 5,
+        timeout: TimeInterval = uiQueryBudget,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        var last: [String: Any] = [:]
+        func ownStages(_ evidence: [String: Any]) -> [String: Any] {
+            var evidence = evidence
+            if let stages = evidence["stages"] as? [String] {
+                evidence["stages"] = Array(stages.dropFirst(ignored))
+            }
+            return evidence
+        }
+        // One query per poll: on a loaded host each takes seconds. The
+        // budget is XCTest's own for a UI query; the claim is that the
+        // gesture dismisses, which the native receipt below also records.
         let gone = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                var evidence = dismissalEvidence(in: app)
-                if let stages = evidence["stages"] as? [String] {
-                    evidence["stages"] = Array(stages.dropFirst(ignored))
-                }
-                if !evidence.isEmpty { last = evidence }
-                return !close.exists
-            }, object: nil
+            predicate: NSPredicate(format: "exists == false"), object: close
         )
         guard XCTWaiter.wait(for: [gone], timeout: timeout) == .completed else {
+            let last = ownStages(dismissalEvidence(in: app, sheetUp: true))
             XCTFail(dismissalFailure(from: last), file: file, line: line)
             return
         }
-        if let began = last["native-touch-began"] as? [String: Any],
-           let willDismiss = last["sheet-will-dismiss"] as? [String: Any],
+        let evidence = ownStages(dismissalEvidence(in: app, sheetUp: false))
+        if let began = evidence["native-touch-began"] as? [String: Any],
+           let willDismiss = evidence["sheet-will-dismiss"] as? [String: Any],
            let down = began["uptime"] as? Double,
            let start = willDismiss["uptime"] as? Double {
             logLatency(String(
@@ -373,8 +385,22 @@ enum SheetFixtureReadiness {
 
     /// The fixture's dismissal receipt: on the root view once the sheet is
     /// gone, on the sheet's surface while it is up.
-    static func dismissalEvidence(in app: XCUIApplication) -> [String: Any] {
-        for identifier in ["fixture-root", "fixture-document-surface"] {
+    /// XCTest's own budget for evaluating one UI query.
+    static let uiQueryBudget: TimeInterval = 30
+
+    static func describe(_ evidence: [String: Any]) -> String {
+        (try? JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+    }
+
+    /// The receipt is on the sheet's surface while it is up, and on the root
+    /// view once it is gone (the sheet's modal accessibility hides the root
+    /// meanwhile). Ask the likely one first: each query is a snapshot.
+    static func dismissalEvidence(in app: XCUIApplication, sheetUp: Bool = true) -> [String: Any] {
+        let order = sheetUp
+            ? ["fixture-document-surface", "fixture-root"]
+            : ["fixture-root", "fixture-document-surface"]
+        for identifier in order {
             let element = app.otherElements[identifier]
             guard element.exists,
                   let data = element.label.data(using: .utf8),
