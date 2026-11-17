@@ -10,7 +10,7 @@ const designFrames = frames([
   ...bilingual('long-email', '账户 · 完整长邮箱', () => <AccountPage instance={personal} />).map(frame => ({ ...frame, fixtures: { ...frame.fixtures, api: { ...frame.fixtures?.api, '/api/session': { remote: true, authenticated: true, email: smallCodeFixture.email } } } })),
   ...bilingual('no-instance', '账户 · 尚未选择实例', () => <AccountPage />),
   // The full-page Account and data (from an instance's avatar); the sheet's is switcher/account-data.
-  ...bilingual('data', '账号与数据 · 整页：隐私政策，最底部一行灰字「删除账号」', () => <AccountDataPage locked={false} onBack={noop} onPrivacy={noop} onDelete={noop} />).map(frame => ({ ...frame, status: 'shipped' as const })),
+  ...bilingual('data', '账号与数据 · 整页：隐私政策，最底部一行红字「删除账号」', () => <AccountDataPage locked={false} onBack={noop} onPrivacy={noop} onDelete={noop} />).map(frame => ({ ...frame, status: 'shipped' as const })),
 ]);
 
 export default designFrames;

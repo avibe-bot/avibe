@@ -183,8 +183,8 @@ const designFrames = frames([
     </Underneath>
   )),
   // Account and data, one page below Account (owner, 2026-11-17): the privacy policy, and deleting
-  // the account as one plain line at the very bottom.
-  ...both('account-data', '账号与数据：从账号页推入；隐私政策，最底部一行灰字「删除账号」', () => (
+  // the account as one plain red line at the very bottom.
+  ...both('account-data', '账号与数据：从账号页推入；隐私政策，最底部一行红字「删除账号」', () => (
     <NativeSheet><AccountDataSheetPage locked={false} onBack={noop} onPrivacy={noop} onDelete={noop} /></NativeSheet>
   ), { status: 'shipped' }),
   ...both('account-long', '账号 · 完整长邮箱 · 375×667', () => <NativeSheet>{accountPage({ session: session([personal, ...others], personal.id, longEmail) })}</NativeSheet>, { size: SMALL, email: longEmail, status: 'shipped' }),
