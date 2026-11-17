@@ -613,6 +613,27 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(popup.close).toHaveBeenCalledOnce();
   });
 
+  it('retries an access approval that could not load the secure code with the duration the card shows now', async () => {
+    api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: 300 } });
+    vault.approveProtectedRelease.mockRejectedValueOnce(Object.assign(new Error('slow'), { code: 'sandbox_unreachable' }));
+    openWindow();
+    render(card());
+    await vi.waitFor(() => expect(api.createVaultAgentBindingsBatch).toHaveBeenCalled());
+    await approveWhenReady();
+    expect(await screen.findByText(en.errors.sandbox_unreachable)).toBeTruthy();
+    // Changed after the failure: Retry grants what the card shows now, not the first click's choice.
+    vault.approveProtectedRelease.mockResolvedValueOnce([blindBox]);
+    fireEvent.click(await screen.findByRole('radio', { name: /^15 min$/ }));
+    await vi.waitFor(() =>
+      expect(api.createVaultAgentBindingsBatch).toHaveBeenLastCalledWith({ request_id: 'vrq_access', grant_duration: 900 }),
+    );
+    const retry = screen.getByRole('button', { name: en.vaults.requests.retry }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(retry.disabled).toBe(false));
+    fireEvent.click(retry);
+    await vi.waitFor(() => expect(api.fulfillVaultAccessRequest).toHaveBeenCalledOnce());
+    expect(api.fulfillVaultAccessRequest.mock.calls[0][1]).toMatchObject({ grant_duration: 900 });
+  });
+
   it('shows a single custom field label in an access approval', () => {
     const request: VaultRequest = {
       ...protectedAccess,

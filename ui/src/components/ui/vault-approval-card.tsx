@@ -393,10 +393,9 @@ export const VaultApprovalCard: React.FC<{
   const [error, setError] = useState<string | null>(null);
   // The last approval failed because avault needs its one-time Keychain authorization.
   const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
-  // The secure code did not finish downloading (a slow or lost connection): the same step can simply
-  // run again, from a Retry click, which opens the secure window as the first click did.
+  // The secure code did not finish downloading (a slow or lost connection): Retry is the Approve
+  // button again, in place, with what the card shows now and Approve's own gate.
   const [canRetry, setCanRetry] = useState(false);
-  const lastRun = useRef<(() => Promise<void>) | null>(null);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   // The addresses this request signs as: a wallet's stored account snapshot, else the key's row.
   const signingAddresses = hdDerivation
@@ -477,7 +476,6 @@ export const VaultApprovalCard: React.FC<{
 
   const finish = useCallback(
     (run: () => Promise<void>) => {
-      lastRun.current = run;
       setBusy(true);
       setError(null);
       setNeedsAvaultAuthorization(false);
@@ -962,8 +960,8 @@ export const VaultApprovalCard: React.FC<{
           {error}
           {canRetry ? (
             <Button
-              type="button" variant="secondary" size="sm" className="self-start" disabled={busy}
-              onClick={() => { if (lastRun.current) finish(lastRun.current); }}
+              type="button" variant="secondary" size="sm" className="self-start" disabled={approveDisabled}
+              onClick={isSign ? approveSign : approveAccess}
             >
               <RefreshCw className="size-3.5" />
               {t('vaults.requests.retry')}
