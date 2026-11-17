@@ -2160,6 +2160,9 @@ fn focus_or_restore_main_window(app: &AppHandle) {
     let Some(window) = ensure_main_window(app) else {
         return;
     };
+    // Show and focus what is on screen, not the message receiver: a shown
+    // account page that is reloading still covers the Workbench.
+    let window = instance_client::displayed_webview(app).unwrap_or(window);
     let _ = window.window().unminimize();
     let _ = native_frame::clamp(&window.window());
     let _ = window.window().show();
