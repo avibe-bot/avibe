@@ -3132,31 +3132,31 @@ final class DirectPathAppTests: XCTestCase {
         defer { notifications.providerPatches.releaseAll() }
         let runtime = try await openHoldingItsProviderUpdate("instance-1", in: app, notifications: notifications)
 
-        // Sign-out begins; its push cleanup waits behind the held update, so
-        // the browser is still shown when the WebView arrives.
+        // Sign-out revokes the browser synchronously, before push cleanup
+        // finishes behind the held provider update. A late WebView must still
+        // be refused while that sign-out is in flight.
+        final class Finished {
+            var value = false
+        }
+        let signedOut = Finished()
         let signOut = Task { @MainActor in
+            defer { signedOut.value = true }
             _ = try await app.mobileSessionCoordinator.logout()
         }
         try await eventually { !app.mobileSessionCoordinator.isSelectedRuntime(runtime) }
-        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertFalse(signedOut.value, "registration must be tested before the held sign-out finishes")
+        XCTAssertEqual(app.route, .onboarding(.instances))
         let controller = registerTheRootViewsController(for: runtime, in: app)
         XCTAssertNil(controller.livePrimaryWebView)
         XCTAssertEqual(app.route, .onboarding(.instances))
 
         // Released until the sign-out ends: its cleanup may send one more
         // provider update, which the gate would otherwise hold.
-        final class Finished {
-            var value = false
-        }
-        let signedOut = Finished()
-        Task { @MainActor in
-            _ = await signOut.result
-            signedOut.value = true
-        }
         try await eventually {
             notifications.providerPatches.releaseAll()
             return signedOut.value
         }
+        _ = await signOut.result
         trackStore(of: app)
         XCTAssertEqual(app.route, .onboarding(.instances))
     }
