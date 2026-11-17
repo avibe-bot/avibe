@@ -89,8 +89,12 @@
 //!   web view takes it out of its window without hiding it, and the shell
 //!   does not rely on a closed web view being freed or on a weak reference to
 //!   it clearing: wherever it matters the opener is also checked to be still
-//!   in the window it was installed in. The opener's web view
-//!   being shown again counts as an arrival for the input rule.
+//!   in the window it was installed in. The opener's `hidden` is observed
+//!   only while it has a child, and its web view is held
+//!   for exactly that time, so an observed web view is never freed. Without a
+//!   child the opener is not watched, so the first window it asks for when it
+//!   has none is itself an arrival for the input rule, from the moment it is
+//!   asked for.
 //! - **Only the web view the app starts with.** The support is installed on
 //!   the main window's own web view. A Runtime replacement, which the shell
 //!   shows in a child web view of the same native window after the user
@@ -440,22 +444,30 @@ pub(crate) fn install_with(window: &WebviewWindow, policy: Policy) {
         let Some(window) = webview.window() else {
             return;
         };
-        let observers = observe_arrivals(&webview, &window);
-        let hidden_observer = OpenerObserver::watch(mtm, &webview, key);
-        STATE.with_borrow_mut(|state| {
+        // First let go of every opener whose web view is gone, or whose
+        // address this one took. Only then is this one entered: an address
+        // can be reused, and nothing of an earlier web view may be mistaken
+        // for, or take away, what belongs to this one.
+        let gone = STATE.with_borrow_mut(|state| {
             state.policy.get_or_insert(policy);
-            // An opener whose web view is gone, or whose address this one took.
             let (kept, gone): (Vec<Opener>, Vec<Opener>) = std::mem::take(&mut state.openers)
                 .into_iter()
                 .partition(|opener| opener.key != key && opener.webview.load().is_some());
             state.openers = kept;
-            gone.into_iter().for_each(Opener::stop_watching);
+            gone
+        });
+        gone.into_iter().for_each(Opener::stop_watching);
+        let (sight, observers) = observe_arrivals(&webview, &window);
+        let hidden_observer = OpenerObserver::new(mtm, key);
+        STATE.with_borrow_mut(|state| {
             state.openers.push(Opener {
                 key,
+                sight,
                 webview: Weak::from_retained(&webview),
                 app: app.clone(),
                 observers,
                 hidden_observer,
+                watched: None,
             });
         });
         // Only now is the claim true for this webview. Its controller is the
@@ -522,13 +534,7 @@ fn is_on_screen(window: &NSWindow) -> bool {
 /// no longer an opener, whether or not it has been freed by then.
 fn in_home_window(webview: &WKWebView) -> Option<Retained<NSWindow>> {
     let key = webview as *const WKWebView as usize;
-    let home = ARRIVALS.with_borrow(|arrivals| {
-        arrivals
-            .openers
-            .iter()
-            .find(|sight| sight.key == key)
-            .and_then(|sight| sight.home.load())
-    })?;
+    let home = ARRIVALS.with_borrow(|arrivals| arrivals.sights.home(key).and_then(Weak::load))?;
     let window = webview.window()?;
     std::ptr::eq(&*window, &*home).then_some(window)
 }
@@ -584,20 +590,88 @@ type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 struct Arrivals {
     /// The latest of: this app became the active one; an opener came back
     /// into view (its window from hidden, minimized or another Space, or its
-    /// web view from hidden or from under another web view).
+    /// web view from hidden); an opener that has no sandbox window asked for
+    /// one. The last is a rule, not an observation: without a window the
+    /// opener is not watched, so the request itself is the arrival. Nothing
+    /// announces a web view being covered by another or a view around it
+    /// being hidden, so coming out from under one of those counts only if the
+    /// shell looked while it held. Input does not depend on this record: every
+    /// event reads the opener afresh.
     last: Option<Instant>,
-    openers: Vec<OpenerSight>,
+    sights: Sights<Weak<NSWindow>>,
     app_observer: Option<Observer>,
 }
 
-/// What is known about one opener's web view.
-struct OpenerSight {
-    /// Its address.
+/// What is known about each opener's web view, found by the address WebKit
+/// names it with. `H` is the native window the support was installed for.
+///
+/// An address is not an identity: a web view can be freed and a later one
+/// given its address. So each entry also has a number of its own, and an
+/// opener gives up its entry by that number, never by address.
+struct Sights<H> {
+    next: u64,
+    entries: Vec<Sight<H>>,
+}
+
+struct Sight<H> {
+    id: u64,
     key: usize,
-    /// The native window the support was installed for.
-    home: Weak<NSWindow>,
-    /// Whether it was shown when last looked at.
+    home: H,
+    /// Whether the web view was shown when last looked at.
     shown: bool,
+}
+
+impl<H> Default for Sights<H> {
+    fn default() -> Self {
+        Self {
+            next: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<H> Sights<H> {
+    /// A web view at `key` becomes an opener; `shown` is how it is first seen,
+    /// which is not an arrival. What was known about an earlier web view at
+    /// that address is dropped. Returns the number that names this entry.
+    fn install(&mut self, key: usize, home: H, shown: bool) -> u64 {
+        self.entries.retain(|sight| sight.key != key);
+        self.next += 1;
+        self.entries.push(Sight {
+            id: self.next,
+            key,
+            home,
+            shown,
+        });
+        self.next
+    }
+
+    /// Drops the entry `id` names and no other. It may be gone already, its
+    /// address taken by a later opener, whose entry must stay.
+    fn remove(&mut self, id: u64) {
+        self.entries.retain(|sight| sight.id != id);
+    }
+
+    fn home(&self, key: usize) -> Option<&H> {
+        self.entries
+            .iter()
+            .find(|sight| sight.key == key)
+            .map(|sight| &sight.home)
+    }
+
+    /// Records how the web view at `key` is seen now, hidden included, and
+    /// returns whether it has come back: shown, and not shown when last
+    /// looked at.
+    fn look(&mut self, key: usize, shown: bool) -> bool {
+        self.entries
+            .iter_mut()
+            .find(|sight| sight.key == key)
+            .is_some_and(|sight| {
+                // Always recorded, whichever way it is seen.
+                let was_shown = std::mem::replace(&mut sight.shown, shown);
+                shown && !was_shown
+            })
+    }
 }
 
 thread_local! {
@@ -618,13 +692,8 @@ fn look_at_opener(webview: &WKWebView) -> Option<Retained<NSWindow>> {
     let window = shown_in(webview);
     let shown = window.is_some();
     ARRIVALS.with_borrow_mut(|arrivals| {
-        if let Some(sight) = arrivals.openers.iter_mut().find(|sight| sight.key == key) {
-            // Remember what is seen every time, hidden included, so that the
-            // next time it is shown counts as coming back.
-            let was_shown = std::mem::replace(&mut sight.shown, shown);
-            if shown && !was_shown {
-                arrivals.last = Some(Instant::now());
-            }
+        if arrivals.sights.look(key, shown) {
+            arrivals.last = Some(Instant::now());
         }
     });
     window
@@ -632,8 +701,9 @@ fn look_at_opener(webview: &WKWebView) -> Option<Retained<NSWindow>> {
 
 /// Notes the arrivals AppKit announces: this app becoming the active one,
 /// however that came about, and the opener's window being shown, restored or
-/// uncovered. Returns the window's observers, which end with the opener.
-fn observe_arrivals(webview: &Retained<WKWebView>, window: &Retained<NSWindow>) -> Vec<Observer> {
+/// uncovered. Returns the number of the opener's entry and the window's
+/// observers, which end with the opener.
+fn observe_arrivals(webview: &Retained<WKWebView>, window: &Retained<NSWindow>) -> (u64, Vec<Observer>) {
     let center = NSNotificationCenter::defaultCenter();
     if ARRIVALS.with_borrow(|arrivals| arrivals.app_observer.is_none()) {
         let became_active = RcBlock::new(|_: NonNull<NSNotification>| {
@@ -652,26 +722,20 @@ fn observe_arrivals(webview: &Retained<WKWebView>, window: &Retained<NSWindow>) 
         // Kept for the life of the process.
         ARRIVALS.with_borrow_mut(|arrivals| arrivals.app_observer = Some(observer));
     }
-    // A web view at an address seen before starts without a history, and what
-    // is seen first is not an arrival.
+    // The entry has to exist before the web view can be judged to be in its
+    // window; how it is first seen is then recorded without being an arrival.
     let key = Retained::as_ptr(webview) as usize;
-    ARRIVALS.with_borrow_mut(|arrivals| {
-        arrivals.openers.retain(|sight| sight.key != key);
-        arrivals.openers.push(OpenerSight {
-            key,
-            home: Weak::from_retained(window),
-            shown: false,
-        });
-    });
+    let sight = ARRIVALS.with_borrow_mut(|arrivals| arrivals.sights.install(key, Weak::from_retained(window), false));
     let shown = shown_in(webview).is_some();
     ARRIVALS.with_borrow_mut(|arrivals| {
-        if let Some(sight) = arrivals.openers.iter_mut().find(|sight| sight.key == key) {
-            sight.shown = shown;
+        if shown {
+            // Seen shown for the first time: recorded, and not an arrival.
+            let _ = arrivals.sights.look(key, true);
         }
     });
     let watched = Weak::from_retained(webview);
     // SAFETY: As above; the statics are AppKit's notification names.
-    unsafe {
+    let observers = unsafe {
         [
             NSWindowDidChangeOcclusionStateNotification,
             NSWindowDidDeminiaturizeNotification,
@@ -689,7 +753,8 @@ fn observe_arrivals(webview: &Retained<WKWebView>, window: &Retained<NSWindow>) 
             center.addObserverForName_object_queue_usingBlock(Some(name), Some(window), None, &changed)
         })
         .collect()
-    }
+    };
+    (sight, observers)
 }
 
 struct ObserverFields {
@@ -721,34 +786,81 @@ define_class!(
 );
 
 impl OpenerObserver {
-    /// Starts observing `hidden` on an opener's web view.
-    fn watch(mtm: MainThreadMarker, webview: &WKWebView, opener: usize) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, opener: usize) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ObserverFields { opener });
         // SAFETY: `NSObject`'s designated initializer.
-        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Starts observing `hidden` on an opener's web view, unless it is observed
+/// already, and holds the web view for as long as the observation lasts.
+///
+/// AppKit posts changes of `hidden` itself, so Foundation's promise to end an
+/// observation when the observed object is freed does not cover this key. The
+/// shell therefore never lets an observed web view be freed: it observes only
+/// while the opener has a sandbox window, and keeps a strong reference for
+/// exactly that time. The two are added together and removed together, the
+/// observation first. Hiding the opener closes its windows, which ends both,
+/// so a web view the shell retires is let go before it is closed. That AppKit
+/// announces `hidden` to an observer at all is behaviour the WebView probe
+/// checks, on the macOS versions CI runs it on.
+fn watch_opener(key: usize) {
+    let begun = STATE.with_borrow_mut(|state| {
+        let opener = state.openers.iter_mut().find(|opener| opener.key == key)?;
+        if opener.watched.is_some() {
+            return None;
+        }
+        let webview = opener.webview.load()?;
+        opener.watched = Some(webview.clone());
+        Some((webview, opener.hidden_observer.clone()))
+    });
+    if let Some((webview, observer)) = begun {
         // SAFETY: Key-value observing of a view's `hidden`, with no options and
-        // no context. The observer object lives in the opener's entry, which
-        // outlasts the registration. The registration ends in one of two ways:
-        // `Opener::stop_watching` removes it while the web view is alive, or
-        // the web view is freed first and Foundation ends it then (see the
-        // check in `adopt`). It is never removed through a stale pointer.
+        // no context. `unwatch_idle_opener` removes it through the reference stored
+        // above, which keeps the web view alive until then.
         let _: () = unsafe {
             msg_send![
-                webview,
-                addObserver: &*this,
+                &*webview,
+                addObserver: &*observer,
                 forKeyPath: ns_string!("hidden"),
                 options: 0usize,
                 context: std::ptr::null_mut::<c_void>()
             ]
         };
-        this
     }
 }
 
-/// An opener's web view was hidden or shown. Hidden, it is not what the user
-/// is looking at: every sandbox window it has, on screen or not, is closed.
-/// Shown again, the user has arrived. This is only what makes the closing
-/// prompt; whether an opener is in view is read afresh wherever it matters.
+/// Ends the observation `watch_opener` began and then lets the web view go, if
+/// the opener has no sandbox window left. Run one turn of the main run loop
+/// after its last window closed, because that can happen inside the
+/// observation's own callback; a window asked for in between keeps both.
+fn unwatch_idle_opener(key: usize) {
+    let ended = STATE.with_borrow_mut(|state| {
+        if state.children.iter().any(|child| child.opener == key) {
+            return None;
+        }
+        let opener = state.openers.iter_mut().find(|opener| opener.key == key)?;
+        Some((opener.watched.take()?, opener.hidden_observer.clone()))
+    });
+    if let Some((webview, observer)) = ended {
+        // The observation first, then the reference that kept it safe.
+        stop_observing(&webview, &observer);
+        drop(webview);
+    }
+}
+
+fn stop_observing(webview: &WKWebView, observer: &OpenerObserver) {
+    // SAFETY: Removes the observation `watch_opener` added, on the live web
+    // view it was added to.
+    let _: () = unsafe { msg_send![webview, removeObserver: observer, forKeyPath: ns_string!("hidden")] };
+}
+
+/// The web view of an opener that has sandbox windows was hidden or shown.
+/// Hidden, it is not what the user is looking at: every sandbox window it has,
+/// on screen or not, is closed, which also ends this observation. This is only
+/// what makes the closing prompt; whether an opener is in view is read afresh
+/// wherever it matters.
 fn opener_view_changed(key: usize) {
     let webview = STATE.with_borrow(|state| {
         state
@@ -779,11 +891,16 @@ fn close_children_of(opener: usize) {
 struct Opener {
     /// The webview's address, which is how WebKit names it in callbacks.
     key: usize,
+    /// Its entry among the sights, which it alone gives up.
+    sight: u64,
     /// Proves the address still belongs to the webview that was installed.
     webview: Weak<WKWebView>,
     app: AppHandle,
     observers: Vec<Observer>,
     hidden_observer: Retained<OpenerObserver>,
+    /// The web view, held while its `hidden` is observed: from its first
+    /// sandbox window to its last. See `watch_opener`.
+    watched: Option<Retained<WKWebView>>,
 }
 
 impl Opener {
@@ -795,15 +912,10 @@ impl Opener {
             // SAFETY: The token `addObserverForName` returned, removed once.
             unsafe { center.removeObserver(observer) };
         }
-        // Only while the web view is alive, which the weak reference says. If
-        // it has been freed, the observation ended with it.
-        if let Some(webview) = self.webview.load() {
-            // SAFETY: Removes the observation `OpenerObserver::watch` added.
-            let _: () = unsafe {
-                msg_send![&*webview, removeObserver: &*self.hidden_observer, forKeyPath: ns_string!("hidden")]
-            };
+        if let Some(webview) = &self.watched {
+            stop_observing(webview, &self.hidden_observer);
         }
-        ARRIVALS.with_borrow_mut(|arrivals| arrivals.openers.retain(|sight| sight.key != self.key));
+        ARRIVALS.with_borrow_mut(|arrivals| arrivals.sights.remove(self.sight));
     }
 }
 
@@ -1236,6 +1348,18 @@ fn reveal(id: u64) {
     let Some((window, webview)) = found else {
         return;
     };
+    // Nothing announces every way an opener can leave the user's view, so it
+    // is read once more before its card is put in front and given the
+    // keyboard.
+    let opener_in_view = window
+        .ivars()
+        .opener
+        .load()
+        .is_some_and(|opener| look_at_opener(&opener).is_some());
+    if !opener_in_view {
+        close(id, false);
+        return;
+    }
     window.ivars().displayed.set(true);
     webview.setAlphaValue(1.0);
     // The ordinary order-front: behind the active app's windows if this app
@@ -1250,13 +1374,21 @@ fn reveal(id: u64) {
 /// which the opener sees as a closed popup. `window_closing` is set when AppKit
 /// is already closing the window.
 fn close(id: u64, window_closing: bool) {
-    let child = STATE.with_borrow_mut(|state| {
+    let closed = STATE.with_borrow_mut(|state| {
         let index = state.children.iter().position(|child| child.id == id)?;
-        Some(state.children.remove(index))
+        let child = state.children.remove(index);
+        let last = !state.children.iter().any(|other| other.opener == child.opener);
+        Some((child, last))
     });
-    let Some(child) = child else {
+    let Some((child, last)) = closed else {
         return;
     };
+    if last {
+        let opener = child.opener;
+        let unwatch = RcBlock::new(move || unwatch_idle_opener(opener));
+        // SAFETY: The block runs on the main thread.
+        unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&unwatch) };
+    }
     // The webview keeps its delegate until the page is destroyed. The child is
     // out of the registry, so from here the delegate refuses every navigation.
     child.window.setDelegate(None);
@@ -1343,15 +1475,6 @@ fn adopt(webview: &WKWebView) -> bool {
             return false;
         };
         if child_preferences(mtm).is_none() {
-            return false;
-        }
-        // The opener's `hidden` is observed, and the web view may be freed
-        // while that observation is registered. Foundation then ends the
-        // observation itself, on every macOS this app runs on, provided the
-        // class leaves the notifications for that key to Foundation.
-        let class: &AnyClass = webview.class();
-        let automatic: bool = msg_send![class, automaticallyNotifiesObserversForKey: ns_string!("hidden")];
-        if !automatic {
             return false;
         }
         if !guard_url_schemes() {
@@ -1497,7 +1620,8 @@ fn open_child(
         webview.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     }
     window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    STATE.with_borrow_mut(|state| {
+    let first = STATE.with_borrow_mut(|state| {
+        let first = !state.children.iter().any(|child| child.opener == opener);
         state.children.push(Child {
             id,
             opener,
@@ -1507,7 +1631,18 @@ fn open_child(
             committed: false,
             on_screen: false,
         });
+        first
     });
+    if first {
+        // The first window an opener asks for when it has none is an arrival,
+        // from the moment it is asked for. With no window the opener is not
+        // watched, so the shell does not know how long the Workbench has been
+        // in front of the user; it does not assume.
+        ARRIVALS.with_borrow_mut(|arrivals| arrivals.last = Some(Instant::now()));
+    }
+    // From its first sandbox window to its last, the opener is watched for
+    // being hidden.
+    watch_opener(opener);
     let deadline = policy.reserve_deadline;
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(deadline).await;
@@ -1908,6 +2043,53 @@ mod tests {
                 "seen for {seen_for:?}, first sight {first_sight}, arrived {arrived_for:?} ago"
             );
         }
+    }
+
+    #[test]
+    fn an_opener_coming_back_into_view_is_an_arrival() {
+        let mut sights = Sights::default();
+        sights.install(0x1000, (), true);
+        // Still shown: nothing happened.
+        assert!(!sights.look(0x1000, true));
+        // Hidden is remembered, so that shown again is coming back.
+        assert!(!sights.look(0x1000, false));
+        assert!(!sights.look(0x1000, false));
+        assert!(sights.look(0x1000, true));
+        assert!(!sights.look(0x1000, true));
+        // First seen hidden, then shown: it has come into view.
+        sights.install(0x2000, (), false);
+        assert!(sights.look(0x2000, true));
+        // A web view that was never installed is nobody's opener.
+        assert!(!sights.look(0x3000, true));
+        assert!(sights.home(0x3000).is_none());
+    }
+
+    #[test]
+    fn a_reused_address_does_not_cost_the_later_opener_its_entry() {
+        let mut sights = Sights::default();
+        // A web view is installed, then freed; its opener still holds the
+        // number of its entry.
+        let earlier = sights.install(0x1000, "first window", true);
+        // A later web view is given the same address and installed. It starts
+        // without the earlier one's history.
+        let later = sights.install(0x1000, "second window", false);
+        assert_ne!(earlier, later);
+        assert_eq!(sights.home(0x1000), Some(&"second window"));
+        // The earlier opener is let go only now: the later one's entry stays.
+        sights.remove(earlier);
+        assert_eq!(sights.home(0x1000), Some(&"second window"));
+        assert!(sights.look(0x1000, true), "the later opener is still looked at");
+        // And the other order: let go first, then installed.
+        let mut sights = Sights::default();
+        let earlier = sights.install(0x1000, "first window", true);
+        sights.remove(earlier);
+        assert!(sights.home(0x1000).is_none());
+        sights.install(0x1000, "second window", true);
+        assert_eq!(sights.home(0x1000), Some(&"second window"));
+        // Its own opener letting go removes it.
+        let own = sights.install(0x2000, "third window", true);
+        sights.remove(own);
+        assert!(sights.home(0x2000).is_none());
     }
 
     #[test]

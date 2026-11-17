@@ -226,7 +226,14 @@ rules are stated at the top of that file. In short:
   matters, at the commit and for every click and key. The shell hides a Workbench's
   web view under its account screen and before it retires one, while the page
   keeps running; such a page gets no window, and a window it already has is
-  closed. Only one sandbox window is on screen over the main window at a time.
+  closed. The shell watches the web view's hidden state for this only while
+  it has a sandbox window, so without one it does not know how long the
+  Workbench has been in front of the user, and does not assume: the first
+  window a Workbench asks for when it has none counts as an arrival, from the
+  moment it is asked for. In practice Confirm takes clicks no sooner than two
+  seconds after the step's window was asked for (after the Approve click), and
+  approving a second request after the first card closed waits two seconds
+  from that click as well. Only one sandbox window is on screen over the main window at a time.
   A window that may not appear when its sandbox document is ready is closed,
   never shown later. Its size is
   clamped to between 360 x 400 and 900 x 1000 points. The main webview's pages
@@ -269,12 +276,13 @@ rules are stated at the top of that file. In short:
   on the main window's own web view, which holds the Workbench the app starts
   with. After the user switches instance, the Workbench runs in a replacement
   web view inside the same window; that one, and the account screen, are not
-  openers: their requests for a window go to the browser as before and their
-  pages get no marker. So after switching instance, or while connected to
-  another computer, this version still opens the browser for the passkey step.
-  The start-up web view is retired on an instance switch, on return from
-  sign-out, and on a local rebind while the account screen is up; from then on
-  there is no marker until the app restarts.
+  openers: their requests for a window go to wry as before (web links open in
+  the browser, the rest are dropped) and their pages get no marker. So after
+  switching instance, or while connected to another computer, this version
+  still opens the browser for the passkey step. In general the start-up web
+  view is retired whenever the shell replaces the Workbench instead of
+  navigating it in place; a main window that is built again gets the support
+  again.
 
 The passkey prompt, the review and the cryptography stay in sandbox code. None
 of the shell's own code handles the passkey result. WebKit's passkey code does
@@ -298,7 +306,9 @@ Three rules rest on WebKit methods outside its public API: the presentation
 update, destroying a page at once, and turning off the picture-in-picture
 features. Each is checked to exist before anything is installed; if one is
 missing there is no window and no marker. That a method exists says nothing
-about what it does. Their behaviour is checked only by the probe, on the macOS
+about what it does. The same goes for AppKit announcing a web view's `hidden`
+to an observer, which the shell relies on to close a hidden Workbench's cards
+at once. Their behaviour is checked only by the probe, on the macOS
 versions CI runs it on, which is why the marker is limited to those versions
 (`PROBED_MACOS` in the module). When CI moves to a new macOS, add it there.
 macOS 15 has passkey PRF and would be the natural floor, but it is not on the

@@ -608,9 +608,10 @@ if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slo
             });
 
             // The Workbench's web view is closed without being hidden first,
-            // as a web view is when the shell is done with it. Whether or not
-            // it is freed and its page stopped, it is out of its window: its
-            // card takes no more input. From here the probe cannot ask the
+            // as a web view is when the shell is done with it. It is out of
+            // its window, so its card takes no more input. (While the card is
+            // up the shell holds the web view, so this says nothing about a
+            // web view being freed.) From here the probe cannot ask the
             // Workbench page anything, so the card reports by itself.
             self.eval(&format!("probe.windows.card = window.open('{sandbox}/card')"));
             self.wait_children("a card", |children| children.len() == 1 && children[0].shown());

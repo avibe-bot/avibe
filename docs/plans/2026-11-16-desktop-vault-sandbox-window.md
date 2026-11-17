@@ -80,8 +80,9 @@ the sandbox unmodified.
    the app is active and the window is visible, and that has held without a
    break for 0.75 seconds the first time the card is seen and 2 seconds every
    later time, and never sooner than 2 seconds after the user last arrived
-   (the app became active, or the opener came back into view: its window from
-   hidden, minimized or another Space, or its web view from hidden). Until then input is dropped at the window's
+   (the app became active; the opener came back into view: its window from
+   hidden, minimized or another Space, or its web view from hidden; or an
+   opener that had no sandbox window asked for one). Until then input is dropped at the window's
    event entry and is not passed to what is underneath. Its content size is
    clamped to 360-900 by 400-1000 points.
 5. **What it holds.** A new, empty `WKUserContentController` and default
@@ -238,11 +239,48 @@ hidden Workbench. Three things follow.
 - Separately, the shell key-value observes `hidden` on the opener's web view,
   since nothing else announces it. That is only what makes closing prompt:
   hidden, every sandbox window of that opener is closed at once, reserved and
-  empty ones included; shown again, that is an arrival. All three of the
+  empty ones included. AppKit posts changes of `hidden` itself, so
+  Foundation's promise to end an observation when the observed object is
+  freed does not cover this key. The shell therefore observes only while the
+  opener has a sandbox window, from its first to its last, and holds a strong
+  reference to the web view for exactly that time: an observed web view is
+  never freed. The two are added together and removed together, the
+  observation first, one turn of the main run loop after the opener's last
+  window closed (which can happen inside the observation's own callback), and
+  every way a window ends goes through the one `close`. Hiding closes the
+  windows and so ends both before a retired web view is closed. On a product
+  path the reference can outlive the Workbench by at most 60 seconds: between
+  the hide and the close a hidden Workbench can still reserve a window
+  (admission reads only that it is in its window), which can never be shown
+  and goes at the deadline. That AppKit announces `hidden` to an observer is
+  behaviour the probe checks, on the versions CI runs, like the three WebKit
+  calls.
+- An opener without a sandbox window is not observed, so the shell does not
+  know how long it has been in front of the user. It does not assume: **the
+  first window an opener asks for when it has none is an arrival, stamped at
+  the moment it is asked for.** While a window exists the observation is on
+  and a hide closes every window, so the next request is again a first one.
+  The cost: Confirm takes clicks no sooner than 2 seconds after the step's
+  window was asked for (after the Approve click), instead of 0.75 seconds
+  after the card appears, and approving a second request after the first card
+  closed waits 2 seconds from that click too. An explicit word from the shell
+  when it hides, shows or closes a Workbench's web view would give the 0.75
+  seconds back; see the follow-up.
+- Nothing announces a
+  web view being covered by another, or a view around it being hidden. Coming
+  out from under one of those is an arrival only if the shell looked while it
+  held (a window was asked for, or an event arrived for a card); otherwise a
+  card asked for then is live after 0.75 seconds, not 2. Input is not affected:
+  every event reads the opener afresh. All three of the
   shell's retirement paths hide a web view before closing it. A close alone
   does not hide; a card whose opener was closed without being hidden stays on
   screen and takes no input, until the user closes it or the main window
-  goes.
+  goes, and for that time the reference above keeps the closed web view from
+  being freed. "Any close of the opener's web view also closes its cards" is
+  the right rule, but nothing announces a close; it is not in this change and
+  is required once replacement web views become openers, whose disposable
+  data store a reference must not keep alive. Before a card is displayed the opener is read once more; if it
+  is no longer in view the card is closed instead.
 - "One on screen" is counted for the native window, whichever web view in it
   asked. The cap of four is for the whole app.
 - The support is installed only on the web view the app starts with. A
