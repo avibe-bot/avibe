@@ -230,9 +230,9 @@ export const SystemScheduleForwarder: FC = () => {
       claimMutexRef.current = false;
     }
   }, [startClaim, startReceiptDelivery]);
-  reconcileRef.current = reconcile;
 
   useEffect(() => {
+    reconcileRef.current = reconcile;
     enabledRef.current = active;
     void reconcile();
     const interval = window.setInterval(() => void reconcile(), POLL_INTERVAL_MS);
