@@ -6260,10 +6260,10 @@ def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path
     assert openai["models"]["second-model"]["variants"] == {
         "high": {"reasoningEffort": "high"},
     }
+    # An empty inherited row remains in the menu, but has no runnable launch.
     assert {launch.target_model for launch in overlay.launches} == {
         "first-model",
         "second-model",
-        "empty-route-model",
     }
 
 
@@ -9514,7 +9514,10 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     assert unclassified["reachable"] is False
     assert isinstance(unclassified["latency_ms"], int)
     assert unclassified["error"] == "models.source.error.unclassified"
-    assert unclassified_service.store.load().sources[0].state.status == "error"
+    # Probe's generic error key is response-local, not a persisted blocker:
+    # an unknown request 4xx cannot disable the entire Source.
+    assert unclassified_service.store.load().sources[0].state.status == "standby"
+    assert unclassified_service.events.list(limit=10) == []
     _assert_valid("probe-result.schema.json", unclassified)
 
     request_error_service = _service(
@@ -9881,7 +9884,7 @@ def test_source_failure_event_is_single_grain_and_retained(tmp_path: Path) -> No
             _outcome(
                 RawOutcomeKind.HTTP_ERROR,
                 status=402,
-                code="payment_required",
+                code="billing_error",
                 message="balance exhausted",
             )
         ],

@@ -44,9 +44,9 @@ from tests.scenario_harness.model_hub import (
 pytestmark = pytest.mark.e2e_model_hub
 
 
-def _real_route_service(tmp_path, adapter, mocks, protocol, inventory, *, manual=False, backend="opencode"):
+def _real_route_service(tmp_path, adapter, mocks, protocol, inventory, *, backend="opencode"):
     target = "vendor/unlisted-route-target" if backend == "opencode" else fixed_model(backend)
-    menu = "vendor/menu-route-model" if manual else target
+    menu = "vendor/menu-route-model" if backend == "opencode" else target
     sources = []
     for index, mock in enumerate(mocks):
         models = [target] if index else inventory
@@ -65,22 +65,19 @@ def _real_route_service(tmp_path, adapter, mocks, protocol, inventory, *, manual
             id=menu, origin="manual", native_protocol="anthropic" if protocol == "anthropic" else "openai_responses",
         )]
     agent.sources.order = [sources[0].id]
-    if manual:
-        agent.routes[menu] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(sources[0].id, target),))
-    else:
-        agent.routes.pop(menu)
+    # Unknown targets require explicit intent; no automatic forwarding fixture.
+    agent.routes[menu] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(sources[0].id, target),))
     service = service_for(tmp_path, MemoryModelHubStore(config), adapter)
     return service, menu, target, sources
 
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
 @pytest.mark.parametrize("inventory", [[], ["unrelated-listed-model"]], ids=["empty", "incomplete"])
-@pytest.mark.parametrize("manual", [False, True], ids=["passthrough", "manual"])
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
-def test_mh_routing_008_real_gateway_cpa_exact_model_and_source(tmp_path, monkeypatch, protocol, inventory, manual, stream):
+def test_mh_routing_008_real_gateway_cpa_exact_model_and_source(tmp_path, monkeypatch, protocol, inventory, stream):
     """MH-ROUTING-008: real gateway/adapter/pinned CPA forwards exact unlisted API-key targets without source fallback."""
     async def exercise(adapter, first, second):
-        service, menu, target, sources = _real_route_service(tmp_path, adapter, [first, second], protocol, inventory, manual=manual)
+        service, menu, target, sources = _real_route_service(tmp_path, adapter, [first, second], protocol, inventory)
         await service.runtime_start()
         connection = adapter.supervisor.client_if_running().connection
         config_path = next(adapter.state_store.root.glob("instances/*/config.yaml"))
@@ -190,7 +187,7 @@ def test_mh_routing_008_real_gateway_cpa_exact_model_and_source(tmp_path, monkey
         assert adapter.state_store.get_source(sources[0].id).model_ids == tuple(inventory)
         assert (config_path.read_bytes(), config_path.stat().st_mtime_ns) == before
         assert adapter.supervisor.client_if_running().connection == connection
-        assert service.agent_chain("opencode", menu)["route_origin"] == ("manual" if manual else "passthrough")
+        assert service.agent_chain("opencode", menu)["route_origin"] == "manual"
 
     with MockLLMUpstream() as first, MockLLMUpstream() as second, _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
         asyncio.run(exercise(adapter, first, second))
@@ -204,7 +201,7 @@ def test_mh_routing_012_persisted_dormant_opencode_override_reaches_exact_source
     """MH-ROUTING-012: resolver-selectable dormant routes are registered without expanding the menu or inventory."""
     async def exercise(adapter, first, second):
         arranged, dormant, target, sources = _real_route_service(
-            tmp_path, adapter, [first, second], protocol, inventory, manual=True,
+            tmp_path, adapter, [first, second], protocol, inventory,
         )
         config = arranged.store.load()
         catalog = "vendor/independent-catalog-model"
@@ -382,10 +379,10 @@ def test_mh_routing_009_save_during_active_stream_hot_reloads_without_restart_or
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "anthropic"])
 @pytest.mark.parametrize("legacy_empty", [False, True], ids=["absent", "legacy-empty"])
-def test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa(
+def test_mh_routing_013_legacy_empty_inherits_only_matching_inventory_through_real_cpa(
     tmp_path, monkeypatch, protocol, legacy_empty,
 ):
-    """MH-ROUTING-013: empty and absent loaded routes share matching, passthrough and stable registration."""
+    """MH-ROUTING-013: empty and absent routes share matching, unsupplied gaps and stable manual registration."""
     async def exercise(adapter, mocks):
         backend = {"openai_responses": "codex", "openai_chat": "opencode", "anthropic": "claude"}[protocol]
         arranged, _, _, sources = _real_route_service(tmp_path, adapter, mocks, protocol, [], backend=backend)
@@ -433,16 +430,18 @@ def test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_thr
                     ordered_ids = [sources[index].id for index in order]
                     if service.store.load().agents[backend].sources.order != ordered_ids:
                         await service.set_agent_sources(backend, {"order": ordered_ids})
+                    unknown_chain = service.agent_chain(backend, unknown)
+                    assert unknown_chain["route_origin"] is unknown_chain["current"] is None
+                    assert unknown_chain["chain"] == []
+                    assert all(unknown not in item.route_model_ids for item in registration)
                     for model, selected, target, origin in (
                         (known, 1, known, "automatic"),
-                        (unknown, order[0], unknown, "passthrough"),
                         (manual_menu, 2, manual_target, "manual"),
                     ):
                         chain = service.agent_chain(backend, model)
                         assert chain["manual_override"] == (manual if origin == "manual" else None)
                         assert chain["route_origin"] == origin
-                        expected_chain = ([(sources[index].id, unknown) for index in order] if origin == "passthrough"
-                                          else [(sources[selected].id, target)])
+                        expected_chain = [(sources[selected].id, target)]
                         assert [(hop["source_id"], hop["model_id"]) for hop in chain["chain"]] == expected_chain
                         base_url, token = await gateway.endpoint(
                             backend, process_scope=f"{tmp_path}/{len(evidence)}", turn_id=f"turn_inherited_{len(evidence)}",
@@ -524,7 +523,7 @@ def test_mh_routing_010_model_not_found_stays_request_scoped_through_real_gatewa
                     assert response.status == 400, raw
                     assert json.loads(raw)["error"]["code"] == "upstream_request_invalid"
                 assert [item.state.to_payload() for item in service.store.load().sources] == before
-                assert service.agent_chain(backend, menu)["route_origin"] == "passthrough"
+                assert service.agent_chain(backend, menu)["route_origin"] == "manual"
                 gateway.correlation.settle(
                     "turn_model_error", settled_by=SETTLED_BY_TERMINAL_RESULT,
                     ts="2026-09-05T18:00:00+00:00",

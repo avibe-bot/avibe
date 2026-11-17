@@ -216,6 +216,10 @@ class TurnUpstreamFailure:
     connection_error: bool = False
     # The Source's id, so a surface can open the Source the copy names.
     source_id: str = ""
+    # The exact model id this hop sent the Source (a mapped target, not the
+    # menu id), and whether that Source's list held it when the hop was admitted.
+    model_id: str = ""
+    inventory_member: bool = True
 
 
 @dataclass(frozen=True)
@@ -228,8 +232,9 @@ class TurnOutcomeRenderingRule:
     upstream_failure_key: str | None = None
     upstream_failure_without_status_key: str | None = None
     connection_failure_key: str | None = None
-    # Replaces the summary for an unlisted model's HTTP refusal; diagnostics
-    # remain in the existing provenance details rather than becoming a suffix.
+    # Replaces the summary when the failing hop's model is absent from its
+    # Source's list, whatever the Route origin; diagnostics remain in the
+    # existing provenance details rather than becoming a suffix.
     passthrough_model_key: str | None = None
     # Only a Models change clears this refusal: the same input fails the same way until
     # then, so it waits for an explicit retry instead of the automatic startup retries.
@@ -488,14 +493,15 @@ def produce_turn_outcome(
         last_upstream_failure=(
             last_upstream_failure if rule.upstream_failure_key is not None else None
         ),
+        # Names the hop that failed last, so a mapped target or a later fallback
+        # hop is attributed exactly; a connection failure is no upstream answer.
         passthrough_model=(
-            resolution.requested_model
+            last_upstream_failure.model_id
             if rule.passthrough_model_key is not None
-            and resolution is not None and resolution.route_origin == "passthrough"
-            and (
-                (last_upstream_failure is not None and not last_upstream_failure.connection_error)
-                or decision == "turn.request_nonfallback"
-            )
+            and last_upstream_failure is not None
+            and last_upstream_failure.model_id
+            and not last_upstream_failure.inventory_member
+            and not last_upstream_failure.connection_error
             else None
         ),
     )

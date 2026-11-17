@@ -38,11 +38,11 @@ the generated result. Restoring automatic or submitting empty hops deletes the k
 through the same exact guarded operation; canonical output never retains an empty value.
 
 For API-key defaults [A, B], model M uses B alone when only B lists M. When neither lists M,
-the route is [A/M, B/M], forwarding M unchanged. A saved manual route replaces the
-whole generated chain. API-key inventory is matching evidence, not an invocation whitelist. Subscriptions keep
-their existing known-model admission, matching and stale-hop retention rules. Unknown
-passthrough is restricted to eligible Hub API-key Sources; unmatched subscription-only
-defaults are Unconfigured.
+the route is empty and unsupplied. A saved manual route replaces the whole generated
+chain; an explicit Hub API-key hop may still forward an unlisted target unchanged.
+API-key inventory is required matching evidence for automatic routing, not a manual
+invocation whitelist. Subscriptions keep their existing known-model admission,
+matching and stale-hop retention rules. No Source kind speculates about unknown models.
 §4.2 owns effective planning and §4.3 owns execution of that plan. There is no separate
 mapping structure or second persisted policy flag. Nonempty overrides remain exact,
 including stale and dormant entries. Supported legacy empties normalize to absence
@@ -127,7 +127,7 @@ base URLs, protocol conversion, account pools or routers.
    native-to-Gateway handoff, recovery, and no-replay behavior without placing a hidden
    native attempt ahead of a user-owned configured chain.
 3. **Every route exposes its intent and effective result.** Backend defaults generate
-   automatic matches or unchanged-id API-key passthrough. A manual override replaces that result
+   inventory-matched automatic routes only. A manual override replaces that result
    exactly only when nonempty; Restore automatic or empty input removes the override.
 4. **The user owns every configured order and mapping.** No health score, learned
    ranking or vendor label rewrites manual intent. Automatic routes follow current
@@ -583,8 +583,7 @@ evaluated in this order, before transient health or invocation-channel filtering
 | --- | --- | --- | --- |
 | `route_plan.manual` | a nonempty manual value exists | exact saved nonempty array and order | manual |
 | `route_plan.automatic` | absent or valid empty manual value; eligible defaults provide matching evidence | all accepted matching pairs in default order | automatic |
-| `route_plan.passthrough` | absent or valid empty manual value and no matching pairs; eligible non-retired Hub API-key defaults remain | exact requested id on each such API-key Source; no subscription speculation | passthrough |
-| `route_plan.empty` | absent or valid empty manual value and neither inherited tier has any eligible pair | empty | null |
+| `route_plan.empty` | absent or valid empty manual value and no eligible matching inventory pair | empty | null |
 
 Matching uses complete non-retired inventory, independent of health and CLI readiness:
 
@@ -600,19 +599,18 @@ given a concrete id it sends that id unchanged. A route credential answers only 
 id its launch was told to send, so a Claude launch must name a concrete id. An
 alias selection keeps its own menu row, limits and manual Route; only its inherited
 hops name the member each Source lists. The set of aliases is closed, and a suffix or
-version never makes a new one. A Hub Source that lists no member of the family still
-inherits the alias by its own name, which the Claude CLI cannot use; select a full id
-or save a manual Route for such a Source.
+version never makes a new one. A Hub Source that lists neither a member of the family nor the literal alias
+provides no inherited hop; select a listed full id or save a manual Route.
 
 An inventory change that moves an alias to another member on a Source still serving
 it re-targets that Source's inherited hop. It is not a removed hop for the §4.5
 guards, and background discovery may commit it.
 
-A matching tier never gains speculative passthrough hops. A Hub-only HTTP request
-filters transport availability after planning; a native matching tier cannot cause a
-second passthrough tier to be invented. Explicit `retired: true` excludes that exact
-Source/model pair from matching, passthrough and invocation. An absent API-key inventory row
-alone excludes nothing from invocation. Subscription membership and retirement admission
+Automatic routing never invents speculative hops. A Hub-only HTTP request filters
+transport availability after planning; a native matching tier cannot cause an
+unlisted Hub hop to be invented. Explicit `retired: true` excludes that exact
+Source/model pair from matching and invocation. An absent API-key inventory row
+excludes automatic matching but does not block an explicit manual hop. Subscription membership and retirement admission
 remain unchanged, including stale-hop retention. Deleting an API-key manual inventory row
 removes matching evidence and preserves explicit routes; subscription deletion retains
 its existing admission and guard semantics. Source deletion still atomically
@@ -625,6 +623,25 @@ nonempty arrays never imply historical authorship. Valid empty values inherit un
 explicit owner compatibility correction, including directly constructed configuration.
 Source health, quota, latency, cost, usage and timestamps never choose a tier or reorder
 it. Live inspection only annotates runnability, current position and recovery state.
+
+**2026-11-17 compatibility and acceptance amendment.** The wire enum retains
+`passthrough` for older producers, but the planner no longer emits it. No schema
+version, persisted intent, key, or Source-state migration is required. Empty inherited
+routes report null origin, `chain_length: 0`, `has_runnable_hop: false`, and
+`supply_state: interrupted`. Every enabled Agent selecting such a model remains in
+`named_agents` with its unchanged Agent-level model, `route_reason: route_unconfigured`,
+and `supply_status: interrupted`. This includes the main Bot's underlying enabled
+Agent definition, but **not a different model override on the Bot's permanent
+Session**: the existing callback reads Agent definitions only. The orchestrator
+assigned effective Bot-Session selection reporting to a separate follow-up on
+2026-11-17; this change does not touch controller/store or expand supply-guard inputs.
+Users whose reported selection is unsupplied see the existing unconfigured-route
+issue rather than available supply. Existing Source
+blockers are not blindly cleared: their stored form cannot prove which request caused
+them. Acceptance covers the shared planner, manual save/preview/invocation, load and
+named-Agent projections (MH-ROUTING-002/003/004/006/013/015), and parsed opaque 4xx
+through settlement followed by another model's successful request (MH-ROUTING-016).
+No UI, credential-save validation, or engine upgrade belongs to this change.
 
 Sources PUT replaces defaults atomically and guards actual effective hop/supply removal.
 The compatibility chains/reorder POST has identical semantics when order is supplied;
@@ -709,8 +726,19 @@ replayed. An error frame whose class no machine-code row names, arriving inside 
 response, is ambiguous evidence (the relay, the engine, or a transient fault) and never
 writes Source health (orchestrator decision 2026-10-11): before output it falls back for
 this turn only, recorded as `unclassified_error`, with no cooldown, live backoff, or
-Source event; after output it is event-only, like a stream interruption. An
-unclassified HTTP-status failure keeps `error`.
+Source event; after output it is event-only, like a stream interruption.
+
+An HTTP 4xx without a recognized body classification, other than 401/403/429, is
+request-scoped: surface `upstream_request_invalid` (downstream 400,
+`request_nonfallback`) without fallback, Source health mutation, cooldown, live
+backoff, or Source event. This includes opaque 402/408 as well as 400/404/422 and
+applies whether the attempted model is listed or manually forwarded. HTML, plain
+text, empty bodies and unknown JSON codes do not justify disabling the entire relay.
+Recognized machine-code decisions keep their existing precedence, including the
+408 plus recognized request-family timeout rule. 401/403 credential handling,
+429 limits, 5xx and actual transport errors are unchanged. `unclassified_error`
+remains the residual Source-level classification outside these request/status rules;
+raw upstream bodies never become persisted detail keys or log content.
 
 The read projection is `C` with live annotations plus `current`, never a reconstructed
 provider list. Takeover remains derived: the current hop is not `C[0]` and `C[0]` is
@@ -1087,7 +1115,7 @@ Three classes, because the action owed by the user differs in each.
 | `standby` | 正常 | — | healthy source; when `adopted_by` is non-empty it is shown as supplying the configured route |
 | `cooldown` | 暂不可用 (gold) | **yes** | shaped quota/rate/server result; persisted `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
-| `error` | 异常 | **no** | unclassified HTTP-status failure — no `retry_at`, so nothing clears it unattended; an unclassified in-stream error frame never sets it |
+| `error` | 异常 | **no** | residual unclassified Source-level failure outside the request-scoped 4xx rule — no `retry_at`, so nothing clears it unattended; an unclassified in-stream error frame never sets it |
 
 `needs_action`, introduced in v2 and retained by v3, carries a `detail_key` naming the cause, so the
 row can offer **one tap to fix it** (re-auth, top up, replace key) instead of a
@@ -1420,8 +1448,11 @@ land as standalone prose.
 **Unlisted-model summary (owner product review, 2026-11-12).** The
 `turn.exhausted`, `turn.request_nonfallback`, `turn.streamed_fallback`, and
 `turn.no_candidate.blocked` rows also accept display-only `passthrough_model`:
-exact route inspection says the model was not listed by the providers, and the
-request received an upstream HTTP refusal (not merely a connection failure).
+the hop that failed last sent a model id its Source's listed inventory did not
+hold when that hop was admitted, whatever the Route origin (an explicit manual
+hop is now the only way to forward such an id), and it received an upstream
+HTTP refusal (not merely a connection failure). `{model}` names that hop's exact
+target id, so a mapped target or a fallback hop is attributed exactly.
 Their registered `passthrough_model_key` selects
 `modelHub.launch.passthrough_model_unlisted` instead of the ordinary summary and
 upstream suffix: “The provider doesn't list {model}; try another model.” Source
@@ -1511,10 +1542,10 @@ it never invalidates an explicit API-key manual invocation by itself. Subscripti
 model-membership admission remains unchanged. Explicit retirement
 excludes the exact pair, while manual inventory deletion removes matching evidence
 without deleting explicit API-key hops; subscription admission remains unchanged.
-When inventory evidence changes an inherited plan from `passthrough` to `automatic`,
-displaced speculative candidates are not destructive removals and are excluded from
-`would_remove_hops` / `removed_hops`. This applies equally to active Hub plans and
-dormant Direct plans: learning a model list does not delete saved route intent.
+Learning inventory may add matching inherited hops to a previously empty plan,
+without changing saved intent. Losing the final automatic inventory match removes
+that hop; API-key manual admission is not an automatic fallback. This applies to
+active Hub plans and dormant Direct plans alike.
 Explicit manual-hop invalidations, disappearance of existing inventory matches, and
 new protected-supply loss remain guarded. Other mutation guards, including Source
 deletion, default membership and Restore, continue to compare all effective removals.
@@ -1792,7 +1823,7 @@ hops across all backends and preserves survivor order.
 
 There is no separate `mappings` field or second persisted policy discriminator.
 A manual hop's differing model id is the mapping itself. Automatic Claude alias
-matching is confined to §4.2's existing parser; API-key passthrough preserves the requested id.
+matching is confined to §4.2's existing parser; manual API-key forwarding preserves the target id.
 All read and write wrappers expose the same GET/PUT/DELETE/preview operations and
 server-authored fields. Historical TurnProvenance keeps its exact attempts and remains
 readable for released versions through 10 without requiring new route fields.
@@ -2200,7 +2231,7 @@ directions into questions that later lanes must answer before writing mechanical
       observation; an ambiguous Auto result requires one concrete choice to retry.
 - [ ] §4.2 alone owns effective planning. Manual arrays survive unrelated changes;
       automatic routes follow current default membership/order and matching evidence,
-      with unchanged-id Hub API-key passthrough only when the matching tier is empty;
+      with an empty unsupplied result when no inventory match exists;
       unmatched subscription-only defaults remain Unconfigured.
 - [ ] §4.4 allows every hub-held subscription to serve every backend while retaining
       native CLI's sanctioned-backend binding.

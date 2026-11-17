@@ -450,7 +450,7 @@ def test_claude_alias_without_an_observed_family_member_keeps_literal_identity()
     assert _matching_v1_model_id(backend="claude", requested_model="haiku", source=listed) is None
     config = _config([listed], model="claude-opus-4-6")
     unmatched = resolve_model_hub_turn(config, "claude", "haiku")
-    assert (unmatched.route_origin, unmatched.source_model_ids) == ("passthrough", ((listed.id, "haiku"),))
+    assert (unmatched.route_origin, unmatched.source_model_ids) == (None, ())
 
 
 def test_claude_alias_inherits_its_full_ids_route_and_yields_to_an_explicit_one():
@@ -957,6 +957,59 @@ def test_request_nonfallback_surfaces_upstream_detail_without_persisting_it(tmp_
     assert detail not in persisted
 
 
+@pytest.mark.parametrize("listed", [False, True], ids=["manual-unlisted", "manual-listed"])
+@pytest.mark.parametrize("status", [400, 402, 404, 405, 408, 409, 413, 415, 422, 499])
+@pytest.mark.parametrize("body", [b"<html>not found</html>", b"model unavailable", b'{"error":{"code":"relay_opaque"}}'])
+def test_unrecognized_request_4xx_does_not_block_other_models(tmp_path, status, body, listed):
+    """MH-ROUTING-016: opaque request failures cannot poison the whole relay.
+
+    Parse a real non-standard body, settle through resolve, then invoke another
+    model on that Source. Classification-only assertions miss health writes.
+    """
+    from vibe.model_hub_runtime.client import ProtocolObservation, _reduce_protocol_observation
+    from vibe.model_hub_runtime.state import SourceRecord
+
+    source = _source("src_request01", ("claude-opus-4-6", "unlisted") if listed else ("claude-opus-4-6",))
+    config = _config([source])
+    config.agents["claude"].models.append(ModelHubBackendModelConfig(id="unlisted"))
+    config.agents["claude"].routes["unlisted"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "unlisted"),)
+    )
+    service, store, adapter = _service(tmp_path, config)
+    outcome = _reduce_protocol_observation(
+        ProtocolObservation(
+            outcome="failed_terminal", error_payload=body,
+            error_envelope_paths=(("error",),), message=f"upstream returned HTTP {status}",
+        ),
+        source=SourceRecord(
+            source_id=source.id, vendor=source.vendor, protocol=source.protocol,
+            base_url=source.base_url, credential_ref=source.credential_ref,
+            allowed_origins=(), model_ids=tuple(model.id for model in source.models), prefix="fixture",
+        ),
+        model_id="unlisted", http_status=status, stream_started=False,
+    )
+    assert outcome is not None
+    adapter.outcomes.append(outcome)
+    before = store.load().to_payload()
+    with pytest.raises(ModelHubError) as refused:
+        asyncio.run(service.resolve(backend="claude", model_id="unlisted", request={}))
+    assert refused.value.code == "upstream_request_invalid"
+    assert refused.value.status == 400
+    assert refused.value.turn_outcome.discriminator == "request_nonfallback"
+    assert outcome.upstream_detail is None
+    assert store.load().to_payload() == before
+    assert service.recovery.annotations(store.load()) == {}
+    assert service.events.list() == []
+    assert adapter.invocations == [(source.id, "unlisted")]
+    adapter.outcomes.append(RawCallOutcome(
+        kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
+        stream_started=False, source_id=source.id, model_id="claude-opus-4-6",
+    ))
+    result = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
+    assert result.source_id == source.id
+    assert adapter.invocations == [(source.id, "unlisted"), (source.id, "claude-opus-4-6")]
+
+
 def test_runtime_skips_later_hops_after_a_source_global_failure(tmp_path):
     first = _source("src_route022", ("upstream-first", "upstream-second"))
     second = _source("src_route023", ("upstream-third",))
@@ -1060,6 +1113,7 @@ def test_runtime_fallback_continues_when_recovery_blocks_runtime_state_save(tmp_
 
 
 def test_static_api_key_401_falls_through_without_retry(tmp_path):
+    """MH-ROUTING-016: opaque request 4xx policy never weakens static 401 blockers."""
     first = _source(
         "src_static401a",
         credential_ref="cred_static401",
@@ -1342,13 +1396,14 @@ def test_runtime_leaves_protocol_reasoning_validation_to_the_adapter(tmp_path):
     assert adapter.invocation_requests[0]["reasoning"] == {"effort": "ultra", "summary": "auto"}
 
 
-def test_runtime_inherits_exact_passthrough_without_aliasing_api_inventory():
+def test_runtime_does_not_forward_an_unlisted_exact_id_or_alias_api_inventory():
     source = _source("src_route003", ("claude-opus-4-6-20260115",))
     config = _config([source], model="claude-opus-4-6-20260115")
     resolution = resolve_model_hub_turn(config, "claude", "claude-opus-4-6")
-    assert resolution.source is source
+    assert resolution.source is None
     assert resolution.target_model == "claude-opus-4-6"
-    assert resolution.route_origin == "passthrough"
+    assert resolution.route_origin is None
+    assert resolution.route_reason == "route_unconfigured"
 
 
 def test_resolution_preserves_unlisted_manual_target():
@@ -1609,10 +1664,7 @@ def test_set_agent_chain_reports_removed_hops_and_syncs_transport_targets(tmp_pa
     assert len(adapter.synced) == 1
     assert menu_model not in adapter.synced[0][1].route_model_ids
     # An alias is asked of a Source by the member it selects, never by its own name.
-    assert set(adapter.synced[0][1].route_model_ids) == {
-        model.id for agent in config.agents.values() for model in agent.models
-        if model.id not in {menu_model, "opus", "opus[1m]"}
-    }
+    assert set(adapter.synced[0][1].route_model_ids) == {"claude-opus-4-7"}
 
 
 def test_source_creation_cancellation_revokes_unsaved_credential(tmp_path):
@@ -2388,9 +2440,16 @@ def test_refresh_source_uses_guarded_success_shape(tmp_path):
     config = _config([source], model=menu_model)
     adapter = FakeAdapter(discovered=("new-model",))
     service, store, _ = _service(tmp_path, config, adapter)
-    result = asyncio.run(service.refresh_source(source.id))
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.refresh_source(source.id))
+    result = asyncio.run(service.refresh_source(
+        source.id, force=True,
+        confirmed_remove_hops=refusal.value.data["would_remove_hops"],
+        confirmed_interruptions=refusal.value.data["would_interrupt"],
+    ))
     assert set(result) == {"source", "removed_hops", "interrupted"}
-    assert result["removed_hops"] == []
+    # The explicit route survives inventory loss, but inherited alias hops do not.
+    assert result["removed_hops"] == refusal.value.data["would_remove_hops"]
     assert store.load().agents["claude"].routes[menu_model].hops == config.agents["claude"].routes[menu_model].hops
 
 
@@ -2450,16 +2509,27 @@ def test_inventory_mutations_share_the_successful_discovery_finalizer(
         assert store.load().to_payload() == before
         return
 
-    result = asyncio.run(mutation())
+    if inventory_case == "empty":
+        with pytest.raises(ModelHubError) as refusal:
+            asyncio.run(mutation())
+        confirmation = (
+            {"force": True,
+             "confirmed_remove_hops": refusal.value.data["would_remove_hops"],
+             "confirmed_interruptions": refusal.value.data["would_interrupt"]}
+            if operation == "refresh" else {"force": True, **refusal.value.data}
+        )
+        result = asyncio.run(mutation(confirmation))
+    else:
+        result = asyncio.run(mutation())
     persisted = store.load().sources[0]
     response_source = result["source"]
     assert [model["retired"] for model in response_source["models"]] == [
         False
     ] * len(discovered)
-    assert response_source["adopted_by"] == sorted(
-        [{"backend": backend, "menu_model": model.id} for backend, agent in config.agents.items() for model in agent.models],
-        key=lambda item: (item["backend"], item["menu_model"]),
-    )
+    assert response_source["adopted_by"] == [
+        {"backend": "claude", "menu_model": model}
+        for model in (["claude-opus-4-6", "opus", "opus[1m]"] if discovered else ["claude-opus-4-6"])
+    ]
     persisted_projection = {
         key: value
         for key, value in response_source.items()

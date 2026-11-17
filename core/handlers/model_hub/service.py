@@ -5419,8 +5419,7 @@ class ModelHubService:
         previous: ModelHubConfig,
         updated: ModelHubConfig,
     ) -> list[dict]:
-        # Inventory evidence narrows speculative candidates without deleting routes.
-        # It also re-targets an inherited hop on a Source that still serves the
+        # Inventory re-targets an inherited hop on a Source that still serves the
         # same row, which is not a removal: a Claude family alias follows the
         # newest member its Source lists. Literal matching inherits only the
         # row's own id, so no other inherited hop can move this way.
@@ -5436,8 +5435,6 @@ class ModelHubService:
                 effective_model_route(previous, backend, menu_model).route_origin,
                 effective_model_route(updated, backend, menu_model).route_origin,
             )
-            if origins == ("passthrough", "automatic"):
-                return False
             return "manual" in origins or (backend, menu_model, item["source_id"]) not in serving
 
         return [item for item in removed if moved_supply(item)]
@@ -6807,8 +6804,9 @@ class ModelHubService:
         selection itself is untouched, so switching back to Direct still runs
         it. A row the user removed stays removed, and a selection nothing
         serves stays visible as an Agent that needs attention. During migration,
-        a static Source carried from that selection's native provider can instead
-        retain it by passthrough, without claiming an upstream inventory.
+        a static Source carried from that selection's native provider can retain
+        the menu identity without claiming inventory or automatic supply. The
+        selection remains unsupplied until discovery or an explicit manual hop.
         """
 
         if self.named_agents_override is None:
@@ -10730,6 +10728,7 @@ class ModelHubService:
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
         source_transition_persisted: bool | None = None,
+        inventory_member: bool = True,
     ) -> TurnOutcomeProjectionInput | None:
         """Produce the sole complete terminal projection after attempt settlement."""
 
@@ -10751,6 +10750,11 @@ class ModelHubService:
                 config=config,
                 resolution=resolution,
                 upstream_detail=outcome.upstream_detail,
+                # Identifies the refusing hop only; this row appends no suffix.
+                last_upstream_failure=self._upstream_failure(
+                    self._source_label(config, source_id), outcome, source_id=source_id,
+                    model_id=source_model_id, inventory_member=inventory_member,
+                ),
             )
         if category == "upstream_protocol":
             # The Gateway's existing protocol-error copy is the positive row;
@@ -10777,21 +10781,28 @@ class ModelHubService:
             backend=backend,
             model_id=model_id,
         )
-        source_label = next(
-            (source.display_name for source in config.sources if source.id == source_id), source_id,
-        )
         return produce_turn_outcome(
             "turn.streamed_fallback",
             config=config,
             resolution=resolution,
             attempted_hop=(source_id, source_model_id),
             source_transition_persisted=source_transition_persisted,
-            last_upstream_failure=self._upstream_failure(source_label, outcome, source_id=source_id),
+            last_upstream_failure=self._upstream_failure(
+                self._source_label(config, source_id), outcome, source_id=source_id,
+                model_id=source_model_id, inventory_member=inventory_member,
+            ),
+        )
+
+    @staticmethod
+    def _source_label(config: ModelHubConfig, source_id: str) -> str:
+        return next(
+            (source.display_name for source in config.sources if source.id == source_id), source_id,
         )
 
     @staticmethod
     def _upstream_failure(
         source_label: str, outcome: RawCallOutcome, *, source_id: str = "",
+        model_id: str = "", inventory_member: bool = True,
     ) -> TurnUpstreamFailure | None:
         if not outcome.upstream_detail and outcome.kind is not RawOutcomeKind.HTTP_ERROR:
             return None
@@ -10803,6 +10814,8 @@ class ModelHubService:
                 detail=outcome.upstream_detail,
                 connection_error=True,
                 source_id=source_id,
+                model_id=model_id,
+                inventory_member=inventory_member,
             )
         status = outcome.http_status
         return TurnUpstreamFailure(
@@ -10814,6 +10827,8 @@ class ModelHubService:
             ),
             detail=outcome.upstream_detail or "",
             source_id=source_id,
+            model_id=model_id,
+            inventory_member=inventory_member,
         )
 
     @staticmethod
@@ -11028,6 +11043,7 @@ class ModelHubService:
                 outcome=outcome,
                 decision=decision,
                 source_transition_persisted=source_transition_persisted,
+                inventory_member=resolved.inventory_member,
             ),
         )
 
@@ -11990,6 +12006,7 @@ class ModelHubService:
                         outcome=outcome,
                         decision=decision,
                         source_transition_persisted=source_transition_persisted,
+                        inventory_member=inventory_member,
                     ),
                 )
             if decision.action == "fallback" and pinned_hop is not None:
@@ -12015,7 +12032,10 @@ class ModelHubService:
                     recovery_request.non_retryable_failure = True
                 # The newest refusal wins even without text: an older message
                 # would name a response that did not end this request.
-                last_upstream_failure = self._upstream_failure(source.display_name, outcome, source_id=source.id)
+                last_upstream_failure = self._upstream_failure(
+                    source.display_name, outcome, source_id=source.id,
+                    model_id=target_model, inventory_member=inventory_member,
+                )
                 if recovery_request is not None:
                     recovery_request.last_upstream_failure = last_upstream_failure
                 event_reason, _persisted = await self._settle_fallback_source(
@@ -12139,6 +12159,7 @@ class ModelHubService:
                     pending.reason = "server_error"
                     pending.last_upstream_failure = self._upstream_failure(
                         resolved.source_label, retry_outcome, source_id=resolved.source_id,
+                        model_id=resolved.model_id, inventory_member=resolved.inventory_member,
                     )
                     if getattr(kwargs.get("request"), "pinned_hop", None) is not None:
                         # Never replay opaque continuation content on a different

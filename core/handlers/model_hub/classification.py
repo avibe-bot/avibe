@@ -316,11 +316,6 @@ def _classify_unstreamed(
         return ResolutionDecision("refresh")
 
     error_text = _error_text(outcome)
-    if outcome.http_status == 402:
-        return ResolutionDecision(
-            "fallback",
-            reason="balance_exhausted",
-        )
     if not clears_request and (_SURFACE_PATTERNS.search(error_text) or names_model_refusal(outcome)):
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
@@ -341,6 +336,19 @@ def _classify_unstreamed(
             reason="rate_limited",
             cooldown_seconds=60,
         )
+    if (
+        outcome.kind == RawOutcomeKind.HTTP_ERROR
+        and outcome.http_status is not None and 400 <= outcome.http_status < 500
+        and not (
+            outcome.http_status == 408
+            and any(code in MACHINE_ERROR_CODES for code in machine_error_codes(outcome))
+        )
+    ):
+        # An opaque 4xx rejects this request, not every model on the Source.
+        # Auth/limit statuses and recognized machine codes were handled above.
+        # Keep the established 408 + recognized request-code timeout policy;
+        # an unreadable 408 (or 402) alone does not justify Source-wide state.
+        return ResolutionDecision("surface", error_code="upstream_request_invalid", downstream_status=400)
     if outcome.http_status == 408 or (outcome.http_status is not None and 500 <= outcome.http_status < 600):
         return ResolutionDecision(
             "fallback",

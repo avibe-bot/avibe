@@ -258,7 +258,12 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
     service.store.load().sources[0].display_name = "Relay 服务"
     models = _canonicalize_fixed_test_routes(service)
     if unlisted:
-        service.store.load().agents[backend].routes = {}
+        # Forwarding an unlisted id now requires a manual hop.
+        service.store.load().agents[backend].routes = {
+            models[backend]: ModelHubRouteConfig(hops=(
+                ModelHubRouteHopConfig("src_recovery01", models[backend]),
+            ))
+        }
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     context = MessageContext(
