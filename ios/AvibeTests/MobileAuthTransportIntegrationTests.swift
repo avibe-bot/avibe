@@ -26,6 +26,13 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         logoutMilliseconds: MobileAuthTransportDeadlines.standard.logoutMilliseconds
     )
 
+    /// How long an operation under `readyAfterWebContentLaunch` may take
+    /// before the transport itself ends it, plus a few seconds.
+    private static let readyAfterWebContentLaunchOperationTimeout = TimeInterval(
+        readyAfterWebContentLaunch.readinessMilliseconds
+            + readyAfterWebContentLaunch.requestMilliseconds
+    ) / 1_000 + 5
+
     func testFailureMappingIsStageAccurateForEveryOperation() {
         struct MappingCase {
             let name: String
@@ -1092,7 +1099,10 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 code: "123456"
             )
         }
-        await assertNetworkError(from: request)
+        await assertNetworkError(
+            from: request,
+            timeout: Self.readyAfterWebContentLaunchOperationTimeout
+        )
 
         let callback = try XCTUnwrap(
             state.requests().last(where: {
@@ -1524,7 +1534,10 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 password: password
             )
         }
-        await assertNetworkError(from: request)
+        await assertNetworkError(
+            from: request,
+            timeout: Self.readyAfterWebContentLaunchOperationTimeout
+        )
 
         XCTAssertTrue(
             state.requests().contains(where: {
@@ -1745,6 +1758,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
     private func assertNetworkError<T>(
         from task: Task<T, Error>,
+        timeout: TimeInterval? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
@@ -1756,7 +1770,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         await fulfillment(
             of: [completed],
-            timeout: Self.fixtureEventTimeout
+            timeout: timeout ?? Self.fixtureEventTimeout
         )
         guard let result else {
             task.cancel()
