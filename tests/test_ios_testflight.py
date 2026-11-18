@@ -557,6 +557,59 @@ def test_the_app_manifest_declares_uploaded_health_data_exactly(tmp_path: Path):
         testflight.check_health_privacy_declaration(app)
 
 
+def test_archive_verification_requires_health_only_in_the_main_app_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo = Path(__file__).resolve().parents[1]
+    current = (repo / "ios/Avibe/Resources/PrivacyInfo.xcprivacy").read_bytes()
+    source = plistlib.loads(current)
+    without_health = plistlib.dumps(
+        {
+            **source,
+            "NSPrivacyCollectedDataTypes": [
+                entry
+                for entry in source["NSPrivacyCollectedDataTypes"]
+                if entry["NSPrivacyCollectedDataType"] != "NSPrivacyCollectedDataTypeHealth"
+            ],
+        }
+    )
+
+    def archive(name: str, app_manifest: bytes) -> Path:
+        root = tmp_path / name
+        app = root / "Products/Applications/Avibe.app"
+        app.mkdir(parents=True)
+        info = {"CFBundleIdentifier": testflight.BUNDLE_ID, "CFBundleShortVersionString": "1.0"}
+        (app / "Info.plist").write_bytes(plistlib.dumps(info))
+        (app / "PrivacyInfo.xcprivacy").write_bytes(app_manifest)
+        for bundle_id, extension_source in [
+            (testflight.NOTIFICATION_SERVICE_BUNDLE_ID, "ios/NotificationService"),
+            (testflight.LIVE_ACTIVITY_BUNDLE_ID, "ios/AvibeLiveActivity"),
+        ]:
+            extension = app / "PlugIns" / f"{bundle_id}.appex"
+            extension.mkdir(parents=True)
+            (extension / "Info.plist").write_bytes(
+                plistlib.dumps({**info, "CFBundleIdentifier": bundle_id})
+            )
+            # The real extension manifests declare no Health data.
+            (extension / "PrivacyInfo.xcprivacy").write_bytes(
+                (repo / extension_source / "PrivacyInfo.xcprivacy").read_bytes()
+            )
+        return root
+
+    class ReachedSignatureChecks(Exception):
+        pass
+
+    def stop_before_codesign(*_args, **_kwargs):
+        raise ReachedSignatureChecks
+
+    # Signature checks follow the manifest checks; stop there instead of running codesign.
+    monkeypatch.setattr(testflight, "run", stop_before_codesign)
+    with pytest.raises(ReachedSignatureChecks):
+        testflight.verify_archive(archive("current", current), build="2")
+    with pytest.raises(testflight.TestFlightError, match="Avibe.app.*HealthKit data"):
+        testflight.verify_archive(archive("missing", without_health), build="2")
+
+
 @pytest.mark.parametrize(
     ("info", "entitlements", "message"),
     [
