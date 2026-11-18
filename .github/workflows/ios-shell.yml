@@ -200,7 +200,11 @@ jobs:
           security list-keychains -d user -s "$work/probe.keychain-db" $(security list-keychains -d user | tr -d '"')
           sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain c.pem || true
           security find-identity -p codesigning "$work/probe.keychain-db"
-          identity="$(security find-identity -p codesigning "$work/probe.keychain-db" | awk '/\)/{print $2; exit}')"
+          security find-identity "$work/probe.keychain-db" || true
+          # The self-signed identity is not "valid" for find-identity's
+          # policy filter; codesign takes it by its certificate hash.
+          identity="$(openssl x509 -in c.pem -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')"
+          echo "identity $identity"
           resign() {
             codesign -d --entitlements - --xml "$1" > "$work/ents.plist" 2>/dev/null || true
             if [ -s "$work/ents.plist" ]; then
