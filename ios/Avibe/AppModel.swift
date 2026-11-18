@@ -233,9 +233,17 @@ final class AppModel: ObservableObject {
     /// Chosen once when the one runtime-preserving sheet opens. Repeated
     /// presentation requests never replace its document or change its mode.
     @Published private(set) var accountSheetStartScreen: MobileOnboardingStartScreen = .sheet
+    /// The scheme the instance page on screen reports, or `nil` while it is
+    /// unknown. The sheets over it take this appearance, so they match the
+    /// page rather than the system when the two differ.
+    @Published var runtimePageColorScheme: PageColorScheme?
     /// Advances each time a runtime opens, so the root builds a new runtime
     /// controller even when the same instance is selected again.
-    @Published private(set) var runtimeIdentity = 0
+    @Published private(set) var runtimeIdentity = 0 {
+        // A new or retired runtime has reported no scheme yet: its sheets
+        // follow the system until it does.
+        didSet { runtimePageColorScheme = nil }
+    }
     /// The direct listener faulted in this process. One-way: only a new
     /// launch clears it.
     @Published private(set) var directListenerFault = false

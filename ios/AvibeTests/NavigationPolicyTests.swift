@@ -963,6 +963,24 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(ackCount, 0)
     }
 
+    /// The sheets over an instance take its page's scheme; a new runtime has
+    /// reported none yet, so they follow the system again until it does.
+    @MainActor
+    func testANewRuntimeForgetsThePreviousPagesColorScheme() async throws {
+        let (appModel, _) = try await makeFixtureAppModel(
+            storedSelection: Self.instanceOneSelection
+        )
+        try await waitUntil("The restored open") {
+            appModel.runtimeIdentity == 1
+        }
+        appModel.runtimePageColorScheme = .dark
+        appModel.openSelectedInstance(path: "/")
+        try await waitUntil("The second open") {
+            appModel.runtimeIdentity == 2
+        }
+        XCTAssertNil(appModel.runtimePageColorScheme)
+    }
+
     /// Settings > Action Button > Shortcut > Avibe runs `OpenMainBotIntent`.
     /// Launched by it, the App gets the request before its bootstrap
     /// restores the selected instance; that instance then opens again, and

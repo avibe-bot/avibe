@@ -118,7 +118,11 @@ struct RootView: View {
             MobileOnboardingContainer(
                 coordinator: appModel.mobileSessionCoordinator,
                 startScreen: appModel.accountSheetStartScreen,
-                returnToRuntime: appModel.returnToRuntime
+                returnToRuntime: appModel.returnToRuntime,
+                // The sheet takes the instance page's appearance (the system's
+                // until the page reports one), so it does not flash or turn
+                // light over a dark page.
+                pageColorScheme: appModel.runtimePageColorScheme
             )
             .ignoresSafeArea(.container, edges: .all)
             .presentationDetents([.large])
@@ -401,6 +405,7 @@ private struct BrowserScreen: View {
                         },
                         pageColorSchemeChanged: {
                             pageColorScheme = $0
+                            appModel.runtimePageColorScheme = $0
                         },
                         runtimeNavigationChanged: { event in
                             appModel.handleRuntimeNavigation(

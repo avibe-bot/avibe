@@ -554,6 +554,19 @@ surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 guides and avibe.bot's Account security page). Instance documents, child
 windows, Show Pages, and iframes do not receive these handlers.
 
+### Sheet appearance
+
+The instance and account sheets over a live instance take the instance page's
+colour scheme (`AppModel.runtimePageColorScheme`, the scheme the page reports
+for the status bar), and the system's until the page reports one. The sheet's
+controller and its presented container get the matching
+`overrideUserInterfaceStyle`, so WebKit gives the bundled page that
+`prefers-color-scheme` and the grabber and corners match. Until the bundled
+page paints, the WebView is transparent over the page's own `--background`
+(`MobileOnboardingViewController.pageBackground`), so the sheet slides in in
+its final colour rather than WebKit's white. The bundled page still loads when
+the sheet has appeared; no preloading.
+
 ### avibe.bot pages in the App
 
 账号与数据 / Account and data, one page below Account, holds 隐私政策 /

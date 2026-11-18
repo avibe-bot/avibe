@@ -212,7 +212,7 @@ const designFrames = frames([
   ...both('b-sheet', 'B · 点名字打开的 sheet（没有账号行）', sheet({ onAccount: undefined }), { b: true, status: 'shipped' }),
   // B's account entries open the same sheet on the Account page (#sheet-account): ✕ returns to the
   // instance, there is no Back, and the licenses still push inside it. Compare A's `account`.
-  ...both('b-account', 'B · 账号入口打开的 sheet 直接是账号页：右上角 ✕ 回到实例，没有返回', () => <NativeSheet>{accountPage({ onClose: noop })}</NativeSheet>, { b: true, status: 'shipped' }),
+  ...both('b-account', 'B · 账号入口打开的 sheet 直接是账号页：右上角 ✕ 回到实例，没有返回；「切换实例」打开同一张 sheet 的实例列表', () => <NativeSheet>{accountPage({ onClose: noop, onSwitchInstance: noop })}</NativeSheet>, { b: true, status: 'shipped' }),
 ]);
 
 export default designFrames;
