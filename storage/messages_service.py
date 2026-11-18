@@ -139,24 +139,23 @@ def _row_to_payload(
     ):
         from storage.message_deliveries import workspace_notice_source
 
+        # A transcript read, or the write that delivers the notice, never fails on what is added for display.
         try:
             source_session_id, turn_id = workspace_notice_source(conn, metadata)
-        except Exception:  # a transcript read never fails on what it adds for display
-            logger.debug("workspace notice source unavailable for %s", row.get("id"), exc_info=True)
-            source_session_id, turn_id = None, None
-        if source_session_id:
-            from core.backend_failure_retry import workspace_notice_retry_available
+            if source_session_id:
+                retry_session_id = source_session_id
+                content["failure_source"] = {"session_id": source_session_id, "retry": False}
+                if turn_id:
+                    from core.backend_failure_retry import workspace_notice_retry_available
 
-            retry_session_id = source_session_id
-            content["failure_source"] = {
-                "session_id": source_session_id,
-                "retry": bool(turn_id) and workspace_notice_retry_available(
-                    conn,
-                    {"type": row.get("type"), "author": row.get("author"), "source": row.get("source"), "metadata": metadata},
-                    source_session_id,
-                    str(turn_id),
-                ),
-            }
+                    content["failure_source"]["retry"] = workspace_notice_retry_available(
+                        conn,
+                        {"type": row.get("type"), "author": row.get("author"), "source": row.get("source"), "metadata": metadata},
+                        source_session_id,
+                        str(turn_id),
+                    )
+        except Exception:
+            logger.debug("workspace notice source unavailable for %s", row.get("id"), exc_info=True)
     link = content.get("failure_retry") if isinstance(content, dict) else None
     if conn is not None and isinstance(link, dict):
         from storage.message_deliveries import failure_retry_state, get_delivery

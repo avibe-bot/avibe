@@ -329,12 +329,13 @@ def workspace_notice_retry_available(
     # start: the start claim retires it (``SessionTurnManager._delivery_agent_runs_can_start``),
     # so a Retry that takes it over would only be retired. Offer none. Read-only
     # here, unlike the claim path's inspection, which may write.
+    from storage.background import normalize_run_status
     from storage.models import agent_runs
 
     for row in retained:
         for run in conn.execute(
             select(agent_runs.c.status, agent_runs.c.cancel_requested).where(agent_runs.c.delivery_id == row["id"])
         ).mappings():
-            if run["cancel_requested"] or str(run["status"] or "").lower() not in {"queued", "running"}:
+            if run["cancel_requested"] or normalize_run_status(run["status"]) not in {"queued", "running"}:
                 return False
     return True
