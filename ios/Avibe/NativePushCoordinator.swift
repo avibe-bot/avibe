@@ -399,7 +399,10 @@ final class NativePushCoordinator {
 
         let vapidKeyHash = try Self.requireVapidHash(vapidPublicKey)
         let installation = try await ensureBound(to: account)
-        try await reconcilePendingOperations(for: installation)
+        try await reconcilePendingOperations(
+            for: installation,
+            subscribingOrigin: instanceOrigin
+        )
         try await requestPermission()
         let provider = try await ensureProvider(installation: installation)
         guard provider.generation > 0 else {
@@ -807,10 +810,17 @@ final class NativePushCoordinator {
         return installation
     }
 
+    /// With `subscribingOrigin`, a pending revoke for another origin that
+    /// fails stays queued for retry instead of failing the subscription; one
+    /// for that origin, and the account-wide revoke, still fail it.
     private func reconcilePendingOperations(
-        for installation: PushInstallationState
+        for installation: PushInstallationState,
+        subscribingOrigin: String? = nil
     ) async throws {
-        try await reconcilePendingRevokes(for: installation)
+        try await reconcilePendingRevokes(
+            for: installation,
+            failingOnlyFor: subscribingOrigin
+        )
         try await reconcileRegistrationCreates(
             for: installation,
             throughBindGeneration: installation.bindGeneration
@@ -870,11 +880,14 @@ final class NativePushCoordinator {
         return true
     }
 
+    /// Tries every pending revoke: one the relay keeps refusing must not hold
+    /// back the others. The first failure is reported after, or, with
+    /// `origin`, only the first failure for that instance origin; the others
+    /// stay pending for the next pass.
     private func reconcilePendingRevokes(
-        for installation: PushInstallationState
+        for installation: PushInstallationState,
+        failingOnlyFor origin: String? = nil
     ) async throws {
-        // Every pending revoke gets its try: one the relay keeps refusing must
-        // not hold back the others. The first failure is reported after.
         var firstFailure: Error?
         let records = try keychain.listRecords()
         for record in records where
@@ -898,7 +911,7 @@ final class NativePushCoordinator {
                 }
                 throw Self.managementError(response)
             } catch {
-                if firstFailure == nil {
+                if firstFailure == nil, origin == nil || record.instanceOrigin == origin {
                     firstFailure = error
                 }
             }
