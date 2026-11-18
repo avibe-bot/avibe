@@ -1662,6 +1662,97 @@ final class HealthSyncTests: XCTestCase {
         fixture.reader.releaseQuery()
     }
 
+    @MainActor
+    func testAResumeArrivingDuringRestorationStillConverges() async throws {
+        func manifests(_ fixture: HealthCoordinatorFixture) -> Int {
+            fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count
+        }
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        fixture.reader.holdQueries = true
+        fixture.client.holdManifest = true
+        let first = Task { await fixture.coordinator.resume(foreground: false) }
+        try await eventually { fixture.client.manifestContinuation != nil }
+        // A foreground entry while the background restoration still runs.
+        await fixture.coordinator.resume(foreground: true)
+        fixture.client.holdManifest = false
+        fixture.client.releaseManifest()
+        try await eventually { manifests(fixture) == 2 && fixture.client.pendingClaims.count == 1 }
+        fixture.reader.releaseQuery()
+        _ = first
+    }
+
+    @MainActor
+    func testTheManifestFollowsBackgroundDeliveryEnabledAfterAnEarlyColdAck() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        let upload = try pendingUpload(in: fixture.directory)
+        fixture.reader.holdStartObserving = true
+        let restoring = Task { await fixture.coordinator.resume(foreground: false) }
+        try await eventually { fixture.reader.startObservingHeld }
+        // A background-session completion delivered while observers are being registered.
+        await fixture.uploader.acknowledge(upload)
+        fixture.reader.releaseStartObserving()
+        await restoring.value
+        let manifests = fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }
+        XCTAssertEqual(manifests.last?.body?["background_delivery"] as? Bool, true)
+    }
+
+    @MainActor
+    func testATransientPollingFailureRetriesThePendingResult() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        try HealthDeviceStore(directory: fixture.directory).update {
+            var result = self.pendingResult()
+            result.ready = true
+            $0.completed[result.id] = result
+        }
+        // A terminal result failure leaves it unacknowledged without scheduling a retry.
+        fixture.client.resultErrors = [HealthSyncError.http(409, "conflict", nil)]
+        fixture.reader.queryErrors = [NSError(domain: "HealthFixture", code: 4)]
+        await fixture.coordinator.resume(foreground: true)
+        try await eventually { fixture.client.results.count == 1 && fixture.client.pendingClaims.count == 1 }
+        fixture.client.claimErrors = [HealthSyncError.http(503, "unavailable", 1)]
+        fixture.client.releasePending()
+        try await eventually(timeout: .seconds(10)) { fixture.client.results.count == 2 }
+    }
+
+    @MainActor
+    func testATransientHealthKitDeliveryFailureRetriesThePendingResult() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        try HealthDeviceStore(directory: fixture.directory).update {
+            var result = self.pendingResult()
+            result.ready = true
+            $0.completed[result.id] = result
+        }
+        fixture.client.resultErrors = [HealthSyncError.http(409, "conflict", nil)]
+        // The activation refresh fails locally; the delivery fails transiently.
+        fixture.reader.queryErrors = [
+            NSError(domain: "HealthFixture", code: 5), HealthSyncError.http(503, "unavailable", 1),
+        ]
+        await fixture.coordinator.resume(foreground: true)
+        XCTAssertEqual(fixture.client.results.count, 1)
+        await fixture.reader.observer?()
+        try await eventually(timeout: .seconds(10)) { fixture.client.results.count == 2 }
+    }
+
+    @MainActor
+    func testASuspendedDeviceReconnectedInTheSameForegroundPollsAgain() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        fixture.client.manifestErrors = [HealthSyncError.http(422, "invalid_payload", nil)]
+        await fixture.coordinator.resume(foreground: true)
+        XCTAssertTrue(try HealthDeviceStore(directory: fixture.directory).state.suspended)
+        let claimsBefore = fixture.client.pendingClaims.count
+        fixture.client.claims = [[claim(token: "claim-2")]]
+        let reconnecting = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let reply = await reconnecting.value
+        XCTAssertEqual(reply, "connected")
+        try await eventually { fixture.client.pendingClaims.count == claimsBefore + 1 }
+    }
+
     /// Restores two queued payloads, acknowledges the first and lets its result
     /// delivery fail once with `resultError`.
     @MainActor
@@ -1850,9 +1941,19 @@ final class HealthFakeReader: HealthDataReading {
         )
     }
     private(set) var starts = 0
+    var holdStartObserving = false
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    var startObservingHeld: Bool { startContinuation != nil }
+    func releaseStartObserving() {
+        holdStartObserving = false
+        let continuation = startContinuation
+        startContinuation = nil
+        continuation?.resume()
+    }
     func startObserving(onChange: @escaping () async -> Void) async -> Bool {
         starts += 1
         observer = onChange
+        if holdStartObserving { await withCheckedContinuation { startContinuation = $0 } }
         return true
     }
     private(set) var disables = 0
