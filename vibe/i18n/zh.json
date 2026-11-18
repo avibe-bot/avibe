@@ -1891,5 +1891,13 @@
   "mcp_oauth_callback_success": "MCP OAuth 登录已完成，可以关闭此标签页。",
   "mcp_oauth_callback_failure": "MCP OAuth 登录未完成，请返回 Avibe 重试。",
   "mcp_oauth_start_failure": "MCP OAuth 登录无法开始，请返回 Avibe 重试。",
-  "mcp_oauth_start_rejected": "请从 Avibe 中打开此 MCP OAuth 链接。"
+  "mcp_oauth_start_rejected": "请从 Avibe 中打开此 MCP OAuth 链接。",
+  "mobile": {
+    "health": {
+      "requestCreated": "已向 iPhone 发起健康数据请求。",
+      "connectTitle": "{name} 请求读取你的健康数据",
+      "refreshTitle": "{name} 请求更新健康数据",
+      "notificationBody": "请在 iPhone 上打开 Avibe 处理。"
+    }
+  }
 }

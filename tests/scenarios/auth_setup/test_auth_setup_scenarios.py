@@ -110,6 +110,138 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     CliCommandObservations().bind(monkeypatch)
 
 
+def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypatch, tmp_path):
+    """AUTH-SETUP-180: real producers/consumers; fake phone, policy and push only."""
+    from sqlalchemy import select
+    from core import web_push
+    from core.handlers import mobile_health
+    from storage import mobile_store, web_push_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+    from tests.test_mobile_health import IDENTITY, upload_payload
+    from vibe import cli_mobile, permissions
+
+    now = datetime(2026, 11, 18, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(mobile_store, "_now", lambda: now.isoformat())
+    config = _save_config(tmp_path, paired=True, instance_kind="personal")
+    config.language = "zh"
+    config.save()
+    projection = {
+        "instance": {"id": IDENTITY["id"], "name": IDENTITY["name"], "access_mode": "allowlist"},
+        "access": {"owner": {"email": IDENTITY["owner"]}, "entries": []},
+    }
+    monkeypatch.setattr(permissions, "get_current_permissions", lambda *_a: SimpleNamespace(
+        source="live", projection=projection,
+    ))
+    remote_access_authorization_service.upsert_scoped(
+        reference=None, instance_id=IDENTITY["id"], subject="synthetic-owner",
+        email=IDENTITY["owner"], scope_kind="instance", scope_ref=IDENTITY["id"],
+        authorization_state="current", last_checked_at=int(now.timestamp()), updated_at=int(now.timestamp()),
+        claims={"sub": "synthetic-owner", "email": IDENTITY["owner"],
+                "vibe_instance_id": IDENTITY["id"], "vibe_instance_role": "owner",
+                "vibe_instance_access_source": "owner", "vibe_instance_kind": "personal"},
+    )
+    engine = get_cached_sqlite_engine()
+    session_id = "ses_mobile_synthetic"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project",
+                                native_id="proj_mobile_synthetic", now=now.isoformat())
+        conn.execute(agent_sessions.insert().values(
+            id=session_id, scope_id=scope_id, agent_backend="codex", agent_variant="default",
+            session_anchor="anchor_mobile", native_session_id="", status="active", metadata_json="{}",
+            created_at=now.isoformat(), updated_at=now.isoformat(), last_active_at=now.isoformat(),
+        ))
+        web_push_service.upsert_subscription(
+            conn, user_key="remote:synthetic-owner", device_id="synthetic-phone",
+            payload={"endpoint": "https://avibe.bot/api/push/apns/" + "a" * 43,
+                     "keys": {"p256dh": "fake-key", "auth": "fake-auth"}},
+        )
+    sent = []
+    monkeypatch.setattr(web_push, "send_web_push", lambda **kwargs: sent.append(kwargs["payload"]))
+    monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+    monkeypatch.setenv("AVIBE_CALLER_REMOTE", "1")
+    monkeypatch.setenv("AVIBE_AGENT_NAME", "伙伴")
+    store = mobile_store.MobileStore()
+    client = app.test_client()
+    ui_server._auth_ratelimit.clear()
+    harness = SimpleNamespace(request=None, auth=None, claim=None)
+    runner = ScenarioRunner(harness)
+
+    def connect(h):
+        args = cli.build_parser().parse_args(["mobile", "health", "connect", "--no-callback"])
+        h.request = cli_mobile.execute(args)["request"]
+        with engine.connect() as conn:
+            row = conn.execute(select(messages).where(messages.c.session_id == session_id)).mappings().one()
+        metadata = json.loads(row["metadata_json"])
+        assert metadata["mobile_request"] == mobile_health.request_metadata(h.request)
+        assert row["type"] == "notify" and row["author"] == "harness"
+        assert len(sent) == 1 and sent[0]["kind"] == "health.request"
+        assert sent[0]["request_id"] == h.request["id"]
+        assert sent[0]["url"] == f"/mobile/health/{h.request['id']}"
+        assert "伙伴" in sent[0]["title"] and "987654321" not in json.dumps(sent)
+
+    def pair(h):
+        code = client.post("/api/mobile/pairings", json={"request_id": h.request["id"]},
+                           headers=csrf_headers(client))
+        assert code.status_code == 200
+        response = client.post("/api/mobile/device/v1/pair", json={
+            "pairing_code": code.get_json()["pairing_code"], "device_name": "合成 iPhone",
+            "platform": "ios", "app_version": "1", "metrics": ["steps", "sleep"],
+            "installation_id": "synthetic-install",
+        })
+        assert response.status_code == 200
+        assert response.get_json()["instance"]["id"] == config.remote_access.vibe_cloud.instance_id
+        h.auth = {"Authorization": "Bearer " + response.get_json()["credential"]}
+        response = client.post("/api/mobile/device/v1/requests/claim", headers=h.auth,
+                               json={"wait_seconds": 0, "max": 1, "request_id": h.request["id"]})
+        assert response.status_code == 200
+        h.claim = response.get_json()["requests"][0]
+        assert h.claim["id"] == h.request["id"]
+
+    def upload_and_complete(h):
+        response = client.put("/api/mobile/device/v1/health/days",
+                              headers=h.auth, json=upload_payload())
+        assert response.status_code == 200
+        response = client.post(f"/api/mobile/device/v1/requests/{h.request['id']}/result",
+                              headers=h.auth, json={
+                                  "claim_token": h.claim["claim_token"], "outcome": "succeeded",
+                                  "result": {"metrics": {"steps": "ok", "sleep": "ok"}},
+                              })
+        assert response.status_code == 200
+        status = client.get(f"/api/mobile/requests/{h.request['id']}").get_json()
+        assert status["state"] == "succeeded" and "987654321" not in json.dumps(status)
+
+    def read_and_revoke(h):
+        args = cli.build_parser().parse_args([
+            "mobile", "health", "read", "--metric", "steps,sleep",
+            "--from", "2026-11-18", "--to", "2026-11-18",
+        ])
+        data = cli_mobile.execute(args)["metrics"]
+        assert data["steps"]["items"][0]["value"]["count"] == 987654321
+        assert data["sleep"]["items"][0]["value"]["in_bed_minutes"] is None
+        assert cli_mobile.execute(cli.build_parser().parse_args(["mobile", "health", "revoke"]))["purged"]
+        response = client.post("/api/mobile/device/v1/requests/claim", headers=h.auth,
+                               json={"wait_seconds": 0, "max": 1})
+        assert response.status_code == 403 and response.get_json()["code"] == "device_revoked"
+        assert b"987654321" not in store.path.read_bytes()
+        with store.transaction() as conn:
+            accesses = [dict(row) for row in conn.execute("SELECT * FROM accesses")]
+        assert any(row["caller"] == "伙伴" and row["session_id"] == session_id for row in accesses)
+        assert "987654321" not in json.dumps(accesses)
+
+    asyncio.run(runner.run(
+        ScenarioStep("connect-and-persist-card", connect),
+        ScenarioStep("pair-and-claim-same-request", pair),
+        ScenarioStep("upload-before-status-result", upload_and_complete),
+        ScenarioStep("local-agent-read-and-revoke", read_and_revoke),
+    ))
+    ScenarioExpect.step_history(runner, [
+        "connect-and-persist-card", "pair-and-claim-same-request",
+        "upload-before-status-result", "local-agent-read-and-revoke",
+    ])
+
+
 def test_selected_cli_health_refusal_recovers_through_setup_http(monkeypatch, tmp_path):
     """AUTH-SETUP-133: deterministic command boundary -> real HTTP setup projection.
 

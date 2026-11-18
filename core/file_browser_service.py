@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
 from core.media_types import is_inline_safe_type
+from core.mobile_storage_boundary import is_mobile_private_path
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,9 @@ def resolve_safe_path(raw: str) -> Path:
     """Expand and canonicalize one user-supplied absolute filesystem path."""
     expanded = _expanded_absolute_path(raw)
     try:
-        return expanded.resolve(strict=False)
+        resolved = expanded.resolve(strict=False)
+        _require_browser_path(resolved)
+        return resolved
     except (OSError, RuntimeError, ValueError) as exc:
         raise FileBrowserError("invalid_path", str(exc), 400) from exc
 
@@ -167,7 +170,13 @@ def _expanded_absolute_path(raw: str) -> Path:
     expanded = Path(os.path.expanduser(raw))
     if not expanded.is_absolute():
         raise FileBrowserError("invalid_path", "Path must be absolute", 400)
+    _require_browser_path(expanded)
     return expanded
+
+
+def _require_browser_path(path: Path, *, recursive: bool = False) -> None:
+    if is_mobile_private_path(path, include_ancestors=recursive):
+        raise FileBrowserError("permission_denied", "Permission denied", 403)
 
 
 def resolve_existing_directory(raw: str) -> Path:
@@ -227,7 +236,9 @@ def _resolve_entry_path(raw: str) -> Path:
         raise NotFoundError("Parent directory not found") from exc
     except (OSError, RuntimeError, ValueError) as exc:
         raise FileBrowserError("invalid_path", str(exc), 400) from exc
-    return parent / expanded.name
+    target = parent / expanded.name
+    _require_browser_path(target)
+    return target
 
 
 def _raw_final_component(raw: str) -> str:
@@ -518,6 +529,7 @@ def _stat_existing(path: Path, *, follow_symlinks: bool = True) -> os.stat_resul
 
 
 def _require_stable_resolved_path(path: Path) -> None:
+    _require_browser_path(path)
     try:
         current = path.resolve(strict=True)
     except FileNotFoundError as exc:
@@ -614,6 +626,8 @@ def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any
         with os.scandir(target) as iterator:
             for entry in iterator:
                 scanned_entries += 1
+                if is_mobile_private_path(Path(entry.path)):
+                    continue
                 if not show_hidden and entry.name.startswith("."):
                     if scanned_entries > MAX_LIST_ENTRIES:
                         truncated = True
@@ -1134,6 +1148,8 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_path)
     name = _validate_new_name(new_name)
     target = source.with_name(name)
+    _require_browser_path(source, recursive=source.is_dir())
+    _require_browser_path(target, recursive=target.is_dir())
     same_entry = _same_entry_no_follow(source, target)
     same_directory_entry = same_entry and _same_directory_entry(source, target)
     if same_directory_entry and name == source.name:
@@ -1161,6 +1177,8 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_src)
     target = _resolve_entry_path(raw_dst)
+    _require_browser_path(source, recursive=source.is_dir())
+    _require_browser_path(target, recursive=target.is_dir())
     if source == target:
         # Moving onto itself is a no-op; never unlink-then-move (it would delete it). Kept
         # before the subtree guard below so an exact self-move stays idempotent rather than
@@ -1236,6 +1254,8 @@ def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
     """
     source = _resolve_existing_entry_path(raw_src)
     target = _resolve_entry_path(raw_dst)
+    _require_browser_path(source, recursive=source.is_dir())
+    _require_browser_path(target, recursive=target.is_dir())
     _validate_new_name(_raw_final_component(raw_dst))
     source_stat = _stat_existing(source, follow_symlinks=False)
     source_is_dir = stat.S_ISDIR(source_stat.st_mode)
@@ -2257,6 +2277,7 @@ def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
         # A filesystem root (/, or a drive root on Windows). Never deletable — a recursive
         # delete here would try to wipe everything the process can reach.
         raise FileBrowserError("invalid_path", "Refusing to delete a filesystem root", 400)
+    _require_browser_path(target, recursive=target.is_dir())
     target_stat = _stat_existing(target, follow_symlinks=False)
 
     def _delete() -> dict[str, Any]:
@@ -2436,7 +2457,7 @@ def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | Non
     # The rest of the file browser treats symlinks as no-follow / non-editable; mirror that here so
     # search/replace can't follow a link out of the opened root (e.g. a planted
     # ``secret -> ~/.ssh/id_rsa``) and surface or rewrite content outside the tree.
-    if path.is_symlink():
+    if path.is_symlink() or is_mobile_private_path(path):
         return None, None
     try:
         st = path.stat()
@@ -2468,12 +2489,15 @@ def _iter_search_files(root: Path, include: list[str], exclude: list[str]):
     """Yield (path, rel_posix) for every candidate file under ``root``."""
     exclude_names = [pat for pat in exclude if "/" not in pat]
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames if d not in SEARCH_SKIP_DIRS and not _match_globs(d, exclude_names)
+            and not is_mobile_private_path(base / d)
         )
-        base = Path(dirpath)
         for name in sorted(filenames):
             fpath = base / name
+            if is_mobile_private_path(fpath):
+                continue
             rel = fpath.relative_to(root).as_posix()
             if include and not _match_globs(rel, include):
                 continue
@@ -2650,12 +2674,15 @@ def search_names(
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         # Prune in place: drop noise trees and (unless show_hidden) hidden dirs so os.walk never
         # descends into them. The retained dir names are still candidates to MATCH below.
+        base = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames if d not in SEARCH_SKIP_DIRS and (show_hidden or not d.startswith("."))
+            and not is_mobile_private_path(base / d)
         )
-        base = Path(dirpath)
         # Directories first, then files, each alphabetically — mirrors the listing's grouping.
         for name in list(dirnames) + sorted(filenames):
+            if is_mobile_private_path(base / name):
+                continue
             if not show_hidden and name.startswith("."):
                 continue
             if needle not in name.lower():

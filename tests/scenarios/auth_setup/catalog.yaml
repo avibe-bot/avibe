@@ -1289,4 +1289,12 @@ scenarios:
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_notifications_page_replays_native_preference_on_reveal
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_remote_document_ignores_local_rebind_and_preference_replay
+  - id: AUTH-SETUP-180
+    name: A personal unshared instance pairs a fake health device with route-scoped credentials and local-only reads
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: mobile
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
+    reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
 next_priority: []

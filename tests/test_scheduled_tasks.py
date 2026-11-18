@@ -12351,6 +12351,28 @@ def test_hfr_477_consumed_terminal_outcome_belongs_to_the_consuming_run(
     assert task.id in {item["id"] for item in compact.items}
 
 
+def test_mobile_maintenance_survives_task_reconcile_and_uses_service_lifecycle(tmp_path: Path) -> None:
+    """Private mobile cleanup belongs to the controller's existing scheduler."""
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    service = ScheduledTaskService(controller=SimpleNamespace(platform_settings_managers={}), store=store)
+    service.scheduler = _StubScheduler()
+
+    async def exercise():
+        service.start()
+        job = service.scheduler.get_job("mobile-health-maintenance")
+        assert job is not None
+        service.reconcile_jobs()
+        assert service.scheduler.get_job(job.id) is job
+        # No mobile DB means no policy/network access and no callbacks to wake.
+        assert not (paths.get_state_dir() / "mobile" / "mobile.sqlite3").exists()
+        await job.func(*job.args)
+        assert not (paths.get_state_dir() / "mobile" / "mobile.sqlite3").exists()
+        await service.stop()
+        assert service.scheduler.shutdown_calls == 1 and not service._running
+
+    asyncio.run(exercise())
+
+
 def test_start_keeps_watcher_alive_after_initial_reconcile_failure(tmp_path: Path) -> None:
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     controller = SimpleNamespace(platform_settings_managers={})

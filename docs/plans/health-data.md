@@ -506,3 +506,89 @@ Sleep calculation:
   - Deletion and backfill corrections.
   - Overnight sleep and time zones.
   - Revoke and sign-out.
+
+## Amendment 1 (confirmed by main, 2026-11-18 09:02)
+
+This fills the handoff before a phone has a device credential. The read-only,
+route-scoped credential and value-free result boundaries remain unchanged.
+
+1. **Pairing codes bind to a connect request.** The owner cookie + CSRF endpoint
+   `POST /api/mobile/pairings` takes `{"request_id":"mreq_..."}` and issues a
+   five-minute single-use code only for a nonterminal `health.connect` on this
+   instance. Only its hash is stored. Pairing atomically validates and consumes
+   that code, creates / replaces the device credential, binds the connect
+   request to that device, and invalidates its other unused codes. A competing
+   or replayed pairing cannot replace the binding. Terminal, canceled or expired
+   requests cannot be paired. Pairing itself does not complete the request.
+2. **Claim by request ID.** `POST /api/mobile/device/v1/requests/claim` adds optional
+   `request_id`. A filtered claim returns only that request bound to the current
+   device. Unbound connect requests never enter normal polling; unrelated devices
+   receive an empty list. Each claimed object contains `id`, `operation`
+   (`health.connect` / `health.refresh`), `claim_token`, `created_at`, `expires_at`,
+   `requires_user`, and `metrics`, without pairing code, credential or values.
+   The lease remains 60 seconds with three attempts. Reclaim changes the claim
+   token; the phone's execution ledger prevents repeated execution.
+3. **Status-only results.** `result.metrics` maps only the four metric keys to
+   `ok`, `empty`, or `protected_data_unavailable`, `capability_unavailable`,
+   `user_declined`, `internal`. `error` contains only `code`; unknown fields are
+   rejected and freeform strings are not stored. `user_declined` means only
+   “Not now” in Avibe's native confirmation, never an inference from an empty
+   HealthKit result. Values upload through `PUT /health/days` before success.
+
+   ```json
+   {"claim_token":"...","outcome":"succeeded","result":{"metrics":{"steps":"ok","sleep":"empty"}}}
+   ```
+
+   ```json
+   {"claim_token":"...","outcome":"failed","error":{"code":"protected_data_unavailable"},"result":{"metrics":{"steps":"protected_data_unavailable"}}}
+   ```
+
+4. **Refresh polls directly.** A paired foreground phone long-polls claim for up
+   to 25 seconds. Otherwise the encrypted alert opens
+   `/mobile/health/<requestId>` and the app resumes authenticated polling. Only
+   the originally bound device can claim refresh.
+5. **Repeat pairing identity.** Pair adds optional `installation_id`, a random
+   app-install identifier stored in ThisDeviceOnly Keychain. It locates the old
+   credential to revoke; it is never authentication. Without it, device names
+   are not used as identifiers. S3 supplies this field.
+
+## Amendment 2 (confirmed by main, 2026-11-18 09:14)
+
+1. **Conversation card metadata.** Harness conversation message metadata adds
+   `mobile_request: {id, operation, state, created_at, expires_at, requires_user,
+   metrics}`. It contains no claim token, pairing code or health values.
+   `GET /api/mobile/requests/{id}` requires owner cookie authentication and returns
+   only the same metadata; it is not a health-reading API. `state` is exactly
+   `queued | claimed | succeeded | failed | expired | canceled`.
+2. **Sleep stages.** `sleep.stages` maps `awake`, `core`, `deep`, `rem`,
+   `unspecified` to minutes using the interval union per stage. Omit absent
+   stages; do not include inBed (use `in_bed_minutes`). Conflicting multiple
+   sources use `null` according to appendix D. If either inBed or asleep data is
+   absent, its component is `null`, never zero. The sleep day closes at 18:00.
+3. **Workout types.** `workout.activity` is the Apple enumeration name in lower
+   snake case, such as `running`, `cycling`, `walking`. Unknown values use
+   `other_<rawValue>`.
+4. **Instance validation.** Accept these nullable components and represent them
+   as missing data; never substitute zero.
+
+Amendment 2 addendum: declined / update-required presentation derives from
+`failed` plus `error.code` (`user_declined` / `capability_unavailable`).
+Disconnected is the device state after revocation, not a request state.
+
+Amendment 2 further addendum (confirmed by main, 2026-11-18 09:49):
+`mobile_request` and GET request metadata may include `error: {code} | null`.
+Only the fixed error-code allowlist is allowed, without tokens, health values,
+or freeform text.
+
+## Amendment 3 (confirmed by main, 2026-11-18 09:34)
+
+`pair` response `instance.id` is the instance ID from the Cloud instance catalog.
+The instance obtains it from `V2Config.remote_access.vibe_cloud.instance_id`,
+checks it against the live Permissions projection's `instance.id`, then returns
+that exact ID. No locally generated fallback ID is used. Missing catalog ID or
+incomplete runtime credentials rejects pairing with HTTP 403
+`instance_not_eligible`; unregistered and non-personal instances are also
+ineligible and the phone stops synchronization. A temporarily unavailable live eligibility answer
+returns HTTP 503 `instance_eligibility_unavailable` and `Retry-After: 30`.
+The pairing target comes only from the trusted instance currently selected in
+the iOS app; the webpage cannot supply a target.
