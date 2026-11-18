@@ -1472,7 +1472,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           </div>
 
           {/* Channel rows */}
-          <div className="flex-1 space-y-3 overflow-y-auto">
+          <div className="flex-1 space-y-3 overflow-y-auto p-px">
             {visibleRows.length === 0 && (
               <div className="rounded-xl border border-dashed border-border bg-surface-3/60 p-8 text-center text-muted">
                 {searchQuery
