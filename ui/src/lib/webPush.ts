@@ -1292,17 +1292,21 @@ async function reconcileWebPushOnce(
         return { support, status: 'disabled' };
       }
       if (nativeState.state !== 'on') {
+        // No choice of "off" is stored for this instance (a sign-in starts
+        // from a fresh account store) and iOS already allows Avibe's
+        // notifications: turn them on, as the user had them. Never when
+        // permission is not yet asked, so the system prompt never appears
+        // on its own.
+        const restoresByDefault = nativeState.permission === 'granted';
         const rememberedEndpoints = await getRememberedWebPushEndpoints();
         const rememberedEndpoint = rememberedEndpoints[0];
-        if (!rememberedEndpoint) {
-          return { support, status: 'disabled' };
-        }
-        const rememberedStatus = await api.getWebPushStatus({
-          endpoint: rememberedEndpoint,
-        });
+        const rememberedStatus = rememberedEndpoint
+          ? await api.getWebPushStatus({ endpoint: rememberedEndpoint })
+          : null;
         if (
-          !rememberedStatus.current_subscription_enabled
-          && !rememberedStatus.current_subscription_repairable
+          !restoresByDefault
+          && !rememberedStatus?.current_subscription_enabled
+          && !rememberedStatus?.current_subscription_repairable
         ) {
           return { support, status: 'disabled' };
         }

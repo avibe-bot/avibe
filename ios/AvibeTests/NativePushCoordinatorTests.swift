@@ -269,6 +269,61 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertNil(absentStatus["endpoint"])
     }
 
+    /// The status names iOS's notification permission, so the page can turn
+    /// notifications back on after a sign-in only when iOS already allows
+    /// them, never prompting on its own. A fresh install's account (nothing
+    /// bound yet) and a signed-out App say it too.
+    func testStatusNamesTheSystemPermission() async throws {
+        let cases: [(UNAuthorizationStatus, String)] = [
+            (.authorized, "granted"),
+            (.provisional, "granted"),
+            (.ephemeral, "granted"),
+            (.notDetermined, "notDetermined"),
+            (.denied, "denied"),
+        ]
+        for (authorization, expected) in cases {
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: nil,
+                providerPatchPending: false
+            )
+            let bound = makeCoordinator(
+                store: store,
+                management: ManagementRecorder(),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let status = try await bound.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(status["permission"] as? String, expected, "\(authorization)")
+
+            let unbound = makeCoordinator(
+                store: InMemoryPushKeychainStore(),
+                management: ManagementRecorder(),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let fresh = try await unbound.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(fresh["state"] as? String, expected == "denied" ? "unavailable" : "off")
+            XCTAssertEqual(fresh["permission"] as? String, expected, "\(authorization)")
+
+            let signedOut = makeCoordinator(
+                store: InMemoryPushKeychainStore(),
+                management: ManagementRecorder(),
+                account: Locked<MobileAccount?>(nil),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let none = try await signedOut.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(none["permission"] as? String, expected, "\(authorization)")
+        }
+    }
+
     func testRevokeOutcomeBridgePayloadRemainsLegacyCompatible() {
         XCTAssertEqual(
             NativePushRevokeOutcome.confirmed.jsonObject["revoked"] as? Bool,

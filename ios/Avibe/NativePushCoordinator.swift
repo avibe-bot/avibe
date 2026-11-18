@@ -296,9 +296,28 @@ final class NativePushCoordinator {
         resumeAfterAccountActivation()
     }
 
+    /// The push state for one instance origin, with iOS's notification
+    /// permission for the App (`permission`: granted, notDetermined or
+    /// denied), which the page reads to turn notifications back on after a
+    /// sign-in without ever prompting.
     func status(
         vapidPublicKey: String?,
         instanceOrigin: String
+    ) async throws -> [String: Any] {
+        let authorizationStatus = await notificationAuthorizationStatus()
+        var status = try await statusBody(
+            vapidPublicKey: vapidPublicKey,
+            instanceOrigin: instanceOrigin,
+            authorizationStatus: authorizationStatus
+        )
+        status["permission"] = Self.permissionName(authorizationStatus)
+        return status
+    }
+
+    private func statusBody(
+        vapidPublicKey: String?,
+        instanceOrigin: String,
+        authorizationStatus: UNAuthorizationStatus
     ) async throws -> [String: Any] {
         guard let account = accountProvider() else {
             return [
@@ -306,7 +325,6 @@ final class NativePushCoordinator {
                 "revokeState": "absent",
             ]
         }
-        let authorizationStatus = await notificationAuthorizationStatus()
         let inactiveState = Self.authorizationAllowsAlerts(authorizationStatus)
             || authorizationStatus == .notDetermined
             ? "off"
@@ -1444,6 +1462,15 @@ final class NativePushCoordinator {
     ) -> String? {
         response.body["error"] as? String
             ?? (response.body["error"] as? [String: Any])?["code"] as? String
+    }
+
+    private static func permissionName(
+        _ status: UNAuthorizationStatus
+    ) -> String {
+        if authorizationAllowsAlerts(status) {
+            return "granted"
+        }
+        return status == .notDetermined ? "notDetermined" : "denied"
     }
 
     private static func authorizationAllowsAlerts(
