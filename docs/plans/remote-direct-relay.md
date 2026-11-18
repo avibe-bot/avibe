@@ -10,6 +10,27 @@ For the opt-in trial on the owner's own instance, use the pinned iroh 1.4.1 `def
 
 Select this fixed map by a versioned trial policy, never by an arbitrary URL override. Use minimal endpoints with no n0 DNS/pkarr address lookup, publishing or discovery; ordinary DNS resolution of relay hostnames is distinct. Only the authenticated instance rendezvous supplies peer identity and starting candidates. A ready answer may have `addresses: []` **only** with a valid, connected relay candidate from the selected map. Publish the observed relay, not the whole map as if connected; bind it to the same instance, peer, generation and authenticated answer lifetime. No backend relay lease is implied. Without a valid relay or direct address the answer remains unavailable. Keep local peer admission, CONNECT, end-to-end TLS, ordinary remote authorization, per-instance opt-out, control-plane disable and Cloudflare fallback. Disabling the trial withdraws local publication and closes its endpoint; it does not change a public relay's policy.
 
+**Instance admission during the trial.** Before granting or refreshing local peer admission, require both the authenticated Owner role and an exact match against the trial App keys pinned by the owner for this pairing. Manage pins through a separate owner-only setting; rendezvous requests cannot enroll keys. Viewer and Editor get neither admission nor a relay field. Enforce this on the shared local admission table for every path, not just when serializing relay offers. Clear prior admissions and close their connections before entering trial mode; revoke on pin removal, loss of Owner authority or pairing change. Test that a Viewer or Editor knowing the relay and instance ID cannot enter CONNECT, that an Owner with an unpinned key is refused, and that an Owner with the matching key still passes normal ingress and remote auth.
+
+**Public-trial ready answer (relay as the sole candidate):**
+
+```json
+{
+  "version": 1, "status": "ready", "instance_id": "inst_example", "hostname": "example-app.avibe.bot",
+  "generation": "5f1c9a0b2d3e4f60:3", "issued_at": 1800000000, "expires_at": 1800000300,
+  "alpn": "avibe-direct/1",
+  "endpoint": {
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "addresses": [],
+    "relay": {"policy": "public-trial-v1", "url": "https://aps1-1.relay.n0.iroh.link./"}
+  },
+  "client": {"endpoint_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "admitted_until": 1800000300}
+}
+```
+
+The App validates the enclosing answer and accepts `public-trial-v1` only with an exact URL from its pinned production relay map. Unknown or missing policy, or a nonmember URL, means no relay dialing; never interpret it as the deferred leased mode. Known-address candidates remain independently usable. The public relay field has no independent lease deadline.
+
+Advance the publication generation when the observed relay appears, disappears, changes URL, **or the selected trial policy changes**, even if the endpoint key and IP candidates stay fixed. Fence pending offers and retire the old route; returning to an earlier relay or policy never restores an old generation. With stable key and IPs, test relay A→B, A→null and a policy-only change; in each case a late result for A's old generation cannot install or renew a route.
+
 **Measurement:** the reported Mac trial network carried both UDP and TCP through a Singapore proxy. STUN observed endpoint-independent mapping on that path. This does not establish direct reachability from the phone, inbound filtering behavior or the path used by an application request. Record the selected path during an authenticated request; separately test fallback with direct UDP isolated. Keep exact egress identifiers in private trial notes.
 
 ## Deferred: Avibe-operated relay before opening to other users
