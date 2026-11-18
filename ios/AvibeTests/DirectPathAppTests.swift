@@ -4176,27 +4176,20 @@ final class DirectPathAppTests: XCTestCase {
             rootView: RootView().environmentObject(app)
         )
         window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-        }
 
-        // Frame 2: a cold start with no cached page: the skeleton, and the
-        // pill over it (the real RootView, connecting to an instance that
-        // does not answer).
+        // 2a: a cold start with no cached page: the skeleton, and the pill
+        // below its top bar (the real RootView, connecting to an instance
+        // that does not answer).
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         try await Task.sleep(for: .milliseconds(1500))
-        capture(window, app, "2-skeleton-connecting-light")
-        timing.advance(by: .seconds(8))
-        try await Task.sleep(for: .milliseconds(1200))
-        capture(window, app, "2-skeleton-long-wait-light")
+        capture(window, app, "2a-skeleton-connecting-light")
         window.overrideUserInterfaceStyle = .dark
         try await Task.sleep(for: .milliseconds(1200))
-        capture(window, app, "2-skeleton-long-wait-dark")
+        capture(window, app, "2a-skeleton-connecting-dark")
         window.overrideUserInterfaceStyle = .light
         let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
 
-        // Frames 1 and 3 (mock): the pill over a page, then the live page.
+        // 1a and 3b (mock page with the Workbench's top bar and tab bar).
         let page = MockCachedPage()
         let mock = UIWindow(windowScene: scene)
         mock.frame = scene.screen.bounds
@@ -4205,10 +4198,6 @@ final class DirectPathAppTests: XCTestCase {
         let host = UIHostingController(rootView: AnyView(EmptyView()))
         mock.rootViewController = host
         mock.makeKeyAndVisible()
-        defer {
-            mock.isHidden = true
-            mock.rootViewController = nil
-        }
         func show(_ view: some View) async throws {
             host.rootView = AnyView(view)
             try await Task.sleep(for: .milliseconds(900))
@@ -4217,45 +4206,34 @@ final class DirectPathAppTests: XCTestCase {
         var connecting = attempt
         connecting.phase = .connecting
         connecting.isTakingLong = false
-        var loading = attempt
-        loading.phase = .loadingPage
-        loading.isTakingLong = false
-        var slow = attempt
-        slow.phase = .connecting
-        slow.isTakingLong = true
-
         try await show(ZStack(alignment: .top) {
             page.view
             RuntimeOpenStatusPill(attempt: connecting, cancel: {})
         })
-        captureWindow(mock, "1-pill-connecting-over-cached-page-light")
-        try await show(ZStack(alignment: .top) {
-            page.view
-            RuntimeOpenStatusPill(attempt: loading, cancel: {})
-        })
-        captureWindow(mock, "1-pill-loading-page-light")
-        try await show(ZStack(alignment: .top) {
-            page.view
-            RuntimeOpenStatusPill(attempt: slow, cancel: {})
-        })
-        captureWindow(mock, "1-pill-long-wait-light")
-        try await page.markLive()
-        try await show(page.view)
-        captureWindow(mock, "3-live-page-swapped-in-light")
-        try await page.markCached()
+        captureWindow(mock, "1a-pill-connecting-over-cached-page-light")
         try await show(ZStack(alignment: .bottom) {
             page.view
             CachedPageTimeoutBannerProposal(instanceName: "Studio")
         })
-        captureWindow(mock, "3-timeout-banner-over-cached-page-light")
+        captureWindow(mock, "3b-timeout-banner-over-cached-page-light")
         mock.overrideUserInterfaceStyle = .dark
         try await page.load(dark: true)
         try await show(ZStack(alignment: .top) {
             page.view
             RuntimeOpenStatusPill(attempt: connecting, cancel: {})
         })
-        captureWindow(mock, "1-pill-connecting-over-cached-page-dark")
+        captureWindow(mock, "1a-pill-connecting-over-cached-page-dark")
+        try await show(ZStack(alignment: .bottom) {
+            page.view
+            CachedPageTimeoutBannerProposal(instanceName: "Studio")
+        })
+        captureWindow(mock, "3b-timeout-banner-over-cached-page-dark")
+        // Leave the windows alive past the test's own teardown (the earlier
+        // run crashed releasing them mid-teardown).
+        Self.retainedWindows += [mock, window]
     }
+
+    private static var retainedWindows: [UIWindow] = []
 
     @MainActor
     private func captureWindow(_ window: UIWindow, _ name: String) {
@@ -7580,17 +7558,27 @@ private final class MockCachedPage {
             """
         }.joined()
         let html = """
-            <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+            <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
             <style>
             body{margin:0;font-family:-apple-system,"PingFang SC";background:\(background);color:\(text)}
-            header{padding:64px 20px 12px;font-size:26px;font-weight:700}
+            .topbar{position:fixed;top:0;left:0;right:0;padding:env(safe-area-inset-top) 16px 0;height:52px;display:flex;align-items:center;gap:10px;background:\(background);border-bottom:1px solid rgba(127,127,127,.15)}
+            .topbar .logo{width:28px;height:28px;border-radius:8px;background:#7c6cf2}
+            .topbar b{flex:1;font-size:17px}.topbar .me{width:30px;height:30px;border-radius:15px;background:#10b981;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px}
+            main{padding-top:calc(env(safe-area-inset-top) + 60px);padding-bottom:calc(env(safe-area-inset-bottom) + 64px)}
+            h1{margin:8px 20px 2px;font-size:26px}
             .status{margin:0 20px 8px;font-size:12px;color:\(muted)}
             .row{display:flex;gap:12px;padding:12px 20px}
             .avatar{width:40px;height:40px;border-radius:20px;background:#7c6cf2;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600}
             .body{flex:1;min-width:0}.top{display:flex;justify-content:space-between}
             .top span,.line{color:\(muted);font-size:13px}.line{margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-            </style></head><body><header>收件箱</header>
-            <div class="status" id="status">上次更新 10:42</div>\(rows)</body></html>
+            .tabs{position:fixed;left:0;right:0;bottom:0;padding:6px 0 calc(env(safe-area-inset-bottom) + 4px);display:flex;justify-content:space-around;background:\(background);border-top:1px solid rgba(127,127,127,.15);font-size:11px;color:\(muted)}
+            .tabs div{display:flex;flex-direction:column;align-items:center;gap:3px}.tabs i{width:24px;height:24px;border-radius:6px;background:rgba(127,127,127,.25)}
+            .tabs .on{color:#10b981}.tabs .on i{background:#10b981}
+            </style></head><body>
+            <div class="topbar"><div class="logo"></div><b>Studio</b><div class="me">A</div></div>
+            <main><h1>收件箱</h1><div class="status" id="status">上次更新 10:42</div>\(rows)</main>
+            <div class="tabs"><div class="on"><i></i>收件箱</div><div><i></i>会话</div><div><i></i>应用</div><div><i></i>我</div></div>
+            </body></html>
             """
         webView.isOpaque = false
         webView.loadHTMLString(html, baseURL: nil)
@@ -7623,29 +7611,35 @@ private struct CachedPageTimeoutBannerProposal: View {
     let instanceName: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "wifi.exclamationmark")
-                    .font(.title3)
-                    .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("暂时连不上 \(instanceName)")
-                        .font(.subheadline.weight(.semibold))
-                    Text("显示的是上次的内容，连上后会自动更新。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "xmark")
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.title3)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("暂时连不上 \(instanceName)")
+                    .font(.subheadline.weight(.semibold))
+                Text("显示的是上次的内容，连上后会自动更新。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Button("重试", action: {})
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                .tint(AvibeStyle.accent)
+                .foregroundStyle(AvibeStyle.onAccent)
+            Button(action: {}) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
         }
         .padding(14)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
         .padding(.horizontal, 16)
-        .padding(.bottom, 28)
+        // Above the page's tab bar, never over it.
+        .padding(.bottom, AvibeStyle.tabBarHeight + 8)
     }
 }
