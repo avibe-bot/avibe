@@ -165,7 +165,11 @@ def test_complete_registered_api_management_inventory():
     # + 1 atomic Vault field save (Editor namespace plus resource management).
     # + 1 protected-HD exact reconciliation read (create's Editor floor plus saved-ID resource use).
     # + 1 voice consent answer (Editor, with the voice routes it gates).
-    assert len(endpoints) == 338
+    # + 2 system schedule device claim/receipt methods (Editor).
+    assert len(endpoints) == 340
+    for path in ("/api/system-schedule/claim", "/api/system-schedule/receipt"):
+        assert ("POST", path) in endpoints
+        assert http_authorization_policy("POST", path).minimum_role == "editor"
     idle_policy = http_authorization_policy("GET", "/api/desktop/update/idle")
     assert idle_policy.minimum_role == "member"
     assert idle_policy.direct_loopback_only

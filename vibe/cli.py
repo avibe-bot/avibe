@@ -21089,6 +21089,7 @@ def build_parser():
     watch_remove_parser.add_argument("watch_id", help="Watch ID from 'vibe watch list'")
     _add_json_noop(watch_remove_parser)
     _hide_subcommands(subparsers, "desktop")
+    subparsers.metavar = "COMMAND"
     return parser
 
 

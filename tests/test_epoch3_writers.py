@@ -273,7 +273,8 @@ def test_boundary_preserves_old_bytes_and_commits_epoch_with_schema(tmp_path):
         conn.execute("INSERT INTO vault_audit(id,ts,event,delivery) VALUES ('old','exact','proxied',?)", ('{ "x":  1 }',))
         before = conn.execute("SELECT * FROM vault_audit").fetchall()
         conn.execute("INSERT INTO vault_audit_access_snapshots(id,snapshot) VALUES (7,'legacy-unused')")
-    migrations.run_migrations(path)
+    # Exercise this epoch boundary independently of later additive revisions.
+    migrations.run_migrations(path, revision="20261114_0089")
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT * FROM vault_audit").fetchall() == before
         assert conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone() == ("3",)
