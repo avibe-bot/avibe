@@ -3,6 +3,7 @@ import { createInstance } from 'i18next';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
@@ -71,6 +72,9 @@ const dock = vi.hoisted(() => ({
 }));
 
 vi.mock('../../context/DockContext', () => ({ useDock: () => dock }));
+
+const toast = vi.hoisted(() => vi.fn());
+vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: toast }) }));
 
 vi.mock('../useShowPages', () => ({
   useShowPageInventory: () => ({
@@ -841,5 +845,244 @@ describe('PERMISSIONS-021 ShowPageShareControl Dock pin authority', () => {
     await waitFor(() => expect(api.getShowPageAccess).toHaveBeenCalled());
     expect(screen.queryByRole('switch', { name: 'Pin to Dock' })).toBeNull();
     expect(api.getShowPage).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShowPageShareControl native share and export', () => {
+  const payload = {
+    session_id: 'ses-1',
+    visibility: 'private',
+    active_url: '/show/ses-1/',
+    share_id: null,
+    url_available: true,
+    offline: false,
+    title: null,
+  };
+  const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const fullCapabilities = {
+    version: 1,
+    inbound_kinds: [],
+    outbound_kinds: ['link', 'pdf', 'image'],
+    max_bytes: { pdf: 52428800, image: 52428800, link: 32768 },
+    max_total_bytes: 52428800,
+    max_attachments: 1,
+    supports_pending: false,
+  };
+
+  type Present = (params: { operationId: string; kind: string; sessionId: string }) => unknown;
+
+  const installShell = ({
+    shareDraft = true,
+    capabilities = fullCapabilities as unknown,
+    present = (async (params) => ({ ...params, status: 'completed' })) as Present,
+  } = {}) => {
+    native.shell = true;
+    const call = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'share.capabilities') return capabilities;
+      if (method === 'share.present') {
+        return present(params as { operationId: string; kind: string; sessionId: string });
+      }
+      throw { code: 'unknown_method', message: method };
+    });
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: '1.0 (1)',
+        capabilities: shareDraft ? { app: 1, 'c1.share_draft': 1 } : { app: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+    });
+    return call;
+  };
+
+  const mountShowFrame = (sessionId = 'ses-1') => {
+    const frame = document.createElement('iframe');
+    frame.dataset.avibeShowSession = sessionId;
+    frame.getBoundingClientRect = () => ({
+      x: 0, y: 0, left: 0, top: 0, right: 320, bottom: 480, width: 320, height: 480, toJSON: () => ({}),
+    });
+    document.body.appendChild(frame);
+    return frame;
+  };
+
+  const presentCalls = (call: ReturnType<typeof installShell>) =>
+    call.mock.calls.filter(([method]) => method === 'share.present');
+
+  const openControl = async () => {
+    api.getShowPage.mockResolvedValue(payload);
+    api.getShowPageAccess.mockResolvedValue(showPageAccess());
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ShowPageShareControl sessionId="ses-1" initialAccess={showPageAccess()} />
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    await screen.findByDisplayValue(/\/show\/ses-1\//);
+  };
+
+  const expectNoWrites = () => {
+    expect(api.ensureShowPage).not.toHaveBeenCalled();
+    expect(api.applyShowAccess).not.toHaveBeenCalled();
+    expect(api.setShowPageAvailability).not.toHaveBeenCalled();
+    expect(permissionsApi.updateResourceAccess).not.toHaveBeenCalled();
+  };
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'avibeNative');
+    document.querySelectorAll('iframe[data-avibe-show-session]').forEach((frame) => frame.remove());
+  });
+
+  it('exports only after the notice is accepted, with the share UI gone and the request bound to its Session', async () => {
+    let overlaysAtCapture: number | null = null;
+    const call = installShell({
+      present: async (params) => {
+        overlaysAtCapture = document.querySelectorAll('[role="dialog"], [data-radix-popper-content-wrapper]').length;
+        return { ...params, status: 'completed' };
+      },
+    });
+    mountShowFrame();
+    await openControl();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share PDF' }));
+    expect(await screen.findByText(/Recipients can keep a copy that Avibe cannot revoke\./)).toBeTruthy();
+    expect(screen.queryByText('Share this Show Page')).toBeNull();
+    expect(call).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(presentCalls(call)).toHaveLength(1));
+    const [, params] = presentCalls(call)[0];
+    expect(Object.keys(params ?? {}).sort()).toEqual(['kind', 'operationId', 'sessionId']);
+    expect(params).toMatchObject({ kind: 'pdf', sessionId: 'ses-1' });
+    expect(params?.operationId).toMatch(uuidV4);
+    expect(call.mock.calls[0][0]).toBe('share.capabilities');
+    expect(overlaysAtCapture).toBe(0);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBe(document.activeElement));
+    expect(toast).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it('exports nothing when the notice is cancelled, and a cancelled share says nothing', async () => {
+    const call = installShell({ present: async (params) => ({ ...params, status: 'cancelled' }) });
+    mountShowFrame();
+    await openControl();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share image' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBe(document.activeElement));
+    expect(call).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Share image' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(presentCalls(call)).toHaveLength(1));
+    expect(presentCalls(call)[0][1]).toMatchObject({ kind: 'image', sessionId: 'ses-1' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBe(document.activeElement));
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it('refuses an export the shell does not offer and asks for an update', async () => {
+    const call = installShell({ capabilities: { ...fullCapabilities, outbound_kinds: ['link'] } });
+    mountShowFrame();
+    await openControl();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share PDF' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      'This version of Avibe can only share links. Update Avibe to export a PDF or image.',
+      'error',
+    ));
+    expect(presentCalls(call)).toHaveLength(0);
+  });
+
+  it.each([
+    ['failed', { status: 'failed', error: { code: 'capture_failed' } }, 'Couldn’t share. Try again.'],
+    ['expired', { status: 'expired', error: { code: 'deadline' } }, 'This share has expired. Share again.'],
+    ['a malformed', { status: 'done' }, 'Couldn’t share. Try again.'],
+  ])('reports a %s result with a retryable error', async (_label, result, message) => {
+    const call = installShell({ present: async (params) => ({ ...params, ...result }) });
+    mountShowFrame();
+    await openControl();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Share image' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(message, 'error'));
+
+    // The error leaves the action ready for a new, explicit attempt.
+    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Share image' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(presentCalls(call)).toHaveLength(2));
+    expect(presentCalls(call)[1][1]?.operationId).not.toBe(presentCalls(call)[0][1]?.operationId);
+  });
+
+  it('shares the link through the shell once while a share is open', async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    const call = installShell({
+      present: (params) => new Promise((resolve) => {
+        finish = () => resolve({ ...params, status: 'completed' });
+      }),
+    });
+    await openControl();
+
+    const shareLink = screen.getByRole('button', { name: 'Share link' });
+    fireEvent.click(shareLink);
+    fireEvent.click(shareLink);
+    await waitFor(() => expect(presentCalls(call)).toHaveLength(1));
+    expect(presentCalls(call)[0][1]).toMatchObject({ kind: 'link', sessionId: 'ses-1' });
+    expect((shareLink as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(shareLink);
+
+    await act(async () => finish(undefined));
+    await waitFor(() => expect((shareLink as HTMLButtonElement).disabled).toBe(false));
+    expect(presentCalls(call)).toHaveLength(1);
+    expect(toast).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it('offers export only for a Show the user sees now', async () => {
+    installShell();
+    mountShowFrame('ses-other');
+    await openControl();
+
+    expect(screen.getByRole('button', { name: 'Share link' })).toBeTruthy();
+    expect(screen.queryByText('Export visible content')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+  });
+
+  it('offers no export while the Show is under annotation', async () => {
+    installShell();
+    mountShowFrame().style.pointerEvents = 'none';
+    await openControl();
+
+    expect(screen.getByRole('button', { name: 'Share link' })).toBeTruthy();
+    expect(screen.queryByText('Export visible content')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+  });
+
+  it('explains the update in an App that can only share links, without exporting', async () => {
+    const call = installShell({ shareDraft: false });
+    mountShowFrame();
+    await openControl();
+
+    expect(screen.getByText(
+      'This version of Avibe can only share links. Update Avibe to export a PDF or image.',
+    )).toBeTruthy();
+    const pdf = screen.getByRole('button', { name: 'Share PDF' }) as HTMLButtonElement;
+    expect(pdf.disabled).toBe(true);
+    fireEvent.click(pdf);
+    expect(screen.queryByText(/Recipients can keep a copy/)).toBeNull();
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('adds no export to a browser', async () => {
+    mountShowFrame();
+    await openControl();
+
+    expect(screen.queryByText('Export visible content')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
   });
 });

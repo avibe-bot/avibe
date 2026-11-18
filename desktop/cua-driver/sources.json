@@ -4,7 +4,7 @@
     "version": "0.31.0",
     "tag": "cua-driver-rs-v0.31.0",
     "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
-    "tool_snapshot_sha256": "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944",
+    "tool_snapshot_sha256": "45e30d82b6744d334029fae30b350a9e611fe5fe6f90b403126f6a4d819dc456",
     "license": "MIT",
     "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
     "release_checksums_asset": "checksums.txt",
@@ -30,7 +30,7 @@
       "patches": [
         {
           "file": "patches/0001-macos-raw-single-click.patch",
-          "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e"
+          "sha256": "aaff83e0ad5d28cda83798660de4a8efb55a88f981f611f89f6099690b381425"
         },
         {
           "file": "patches/0002-windows-security-boundary.patch",
@@ -45,10 +45,10 @@
       "root": "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc"
     },
     "patch": {
-      "variant": "avibe-raw-single-click-reopen-v2",
+      "variant": "avibe-dialog-diagnostics-v3",
       "file": "patches/0001-macos-raw-single-click.patch",
-      "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e",
-      "contract": "click.click_mode=raw; embedded parent-liveness cleanup; running launch_app uses kAEReopenApplication ('rapp') without activation; cold and new-instance launch use 'oapp'",
+      "sha256": "aaff83e0ad5d28cda83798660de4a8efb55a88f981f611f89f6099690b381425",
+      "contract": "click.click_mode=raw; embedded parent-liveness cleanup; running launch_app uses kAEReopenApplication ('rapp') without activation; cold and new-instance launch use 'oapp'; bounded AX window resolution and unresolved-dialog diagnostics; recovery is observation-only and grants no input authorization",
       "upstream_refs": [
         "https://github.com/trycua/cua/pull/3922",
         "https://github.com/trycua/cua/pull/3539",
@@ -58,7 +58,7 @@
         "https://github.com/trycua/cua/issues/2874",
         "https://github.com/trycua/cua/pull/6198"
       ],
-      "upgrade_plan": "Drop the reopen hunk when an upstream cua-driver release includes the running launch_app kAEReopenApplication ('rapp') behavior; keep the raw-click and embedded parent-liveness hunks until their upstream contracts are released, then rebase the remaining single patch and rerun the macOS acceptance checks."
+      "upgrade_plan": "Drop the reopen hunk when an upstream cua-driver release includes the running launch_app kAEReopenApplication ('rapp') behavior; keep the raw-click and embedded parent-liveness hunks until their upstream contracts are released, then rebase the remaining single patch and rerun the macOS acceptance checks. Retain the bounded AX diagnostic hunk until an upstream release provides equivalent observation-only window resolution and refusal evidence; revalidate exact-window observation without granting input authorization."
     }
   },
   "managed_policy": "policy.yaml",

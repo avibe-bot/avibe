@@ -95,14 +95,16 @@ def load_manifest(path: Path = SOURCES) -> dict:
         or driver["source"].get("root")
         != "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc"
         or not isinstance(driver.get("patch"), dict)
-        or driver["patch"].get("variant") != "avibe-raw-single-click-reopen-v2"
+        or driver["patch"].get("variant") != "avibe-dialog-diagnostics-v3"
         or driver["patch"].get("file")
         != "patches/0001-macos-raw-single-click.patch"
         or SHA256.fullmatch(str(driver["patch"].get("sha256"))) is None
         or driver["patch"].get("contract")
         != ("click.click_mode=raw; embedded parent-liveness cleanup; "
             "running launch_app uses kAEReopenApplication ('rapp') without activation; "
-            "cold and new-instance launch use 'oapp'")
+            "cold and new-instance launch use 'oapp'; "
+            "bounded AX window resolution and unresolved-dialog diagnostics; "
+            "recovery is observation-only and grants no input authorization")
         or not isinstance(driver["patch"].get("upstream_refs"), list)
         or not driver["patch"]["upstream_refs"]
         or not isinstance(driver["patch"].get("upgrade_plan"), str)
@@ -323,18 +325,36 @@ def verify_architecture(binary: Path, target: str) -> None:
 
 
 def verify_built_contract(binary: Path) -> None:
-    if run([str(binary), "--version"]).strip() != "cua-driver 0.31.0":
+    """Compare every allowed tool against the fields dump-docs actually emits.
+
+    Full output schemas, capabilities, risk and openWorldHint come from the
+    canonical SDK inventory capture; dump-docs does not expose those fields.
+    """
+    if run([str(binary), "--version"], encoding="utf-8").strip() != "cua-driver 0.31.0":
         raise ValueError("patched Cua Driver reports an unexpected version")
     try:
         docs = json.loads(
-            run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False)
+            run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False, encoding="utf-8")
         )
-        click = next(tool for tool in docs["tools"] if tool.get("name") == "click")
-        click_mode = click["input_schema"]["properties"]["click_mode"]
-    except (json.JSONDecodeError, KeyError, StopIteration, TypeError) as exc:
-        raise ValueError("patched Cua Driver does not expose click.click_mode") from exc
-    if click_mode.get("enum") != ["auto", "raw"]:
-        raise ValueError("patched Cua Driver click.click_mode contract is unexpected")
+        tools = docs["tools"]
+        by_name = {tool["name"]: tool for tool in tools}
+        if len(by_name) != len(tools):
+            raise ValueError("duplicate tool in dump-docs")
+        snapshot = json.loads(TOOL_SNAPSHOT.read_text(encoding="utf-8"))
+        for tool in snapshot["tools"]:
+            expected = {
+                "name": tool["name"],
+                "description": tool["description"],
+                "input_schema": tool["inputSchema"],
+                "read_only": tool["annotations"]["readOnlyHint"],
+                "destructive": tool["annotations"]["destructiveHint"],
+                "idempotent": tool["annotations"]["idempotentHint"],
+            }
+            actual = by_name.get(tool["name"], {})
+            if any(actual.get(key) != value for key, value in expected.items()):
+                raise ValueError(f"metadata differs for {tool['name']}")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise ValueError("patched Cua Driver dump-docs does not match the pinned tool snapshot") from exc
 
 
 def verify_windows_built_contract(binary: Path) -> None:

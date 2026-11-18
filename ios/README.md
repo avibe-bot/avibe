@@ -1266,3 +1266,91 @@ Changing Apple App ID capabilities or provisioning profiles, signing an archive,
 physical-device validation and TestFlight distribution require separate owner
 approval. Unsigned simulator builds and synthetic-data tests do not establish
 physical-device authorization, locked-device access, or background wake latency.
+
+## Sharing a Show from the iPhone App
+
+Open the Show, then its share control. **Share link** passes the existing private,
+restricted, or public address to the iOS system share sheet; sharing never changes
+who can open the page. AirDrop, Messages, and other destinations are provided by
+iOS and the apps installed on that phone.
+
+**Share PDF** and **Share image** first explain that the recipient can keep an
+independent copy which Avibe cannot revoke. After confirmation, the App captures
+only the currently visible region of the displayed Show. The PDF is a single-page
+raster copy of those pixels; the image is PNG. Neither export scrolls the page,
+loads lazy content, or promises a full-page archive. Video and external embeds may
+be absent. Keep the Show visible until the system sheet appears.
+
+The `c1.share_draft: 1` capability offers `share.capabilities` and
+`share.present({operationId, kind, sessionId})`. The trusted instance main frame
+names the Show; the native host reads its current access and existing link through
+the same WebView's read-only APIs. It accepts no export URL, HTML, coordinates,
+cookies, or local file path from a frame. A matching visible, loaded Show iframe
+is required for PDF/image, and navigation or account/instance teardown cancels a
+pending share. Older App versions keep their Web Share link path and explain how
+to update for exports.
+
+Results distinguish `completed`, `cancelled`, `failed`, and `expired`.
+`completed` means the system reported a successful handoff, not that another
+person received or read the item. Completion and cancellation add no toast;
+errors explain how to try again. Export files are limited to 50 MiB, live in a
+controlled temporary directory, and expire five minutes after a successful
+callback or immediately after cancellation/failure. An operation without a
+callback expires after fifteen minutes, including when the App resumes from
+suspension. Launch removes orphan export directories older than 24 hours.
+Copies already kept by a destination remain under that destination's control.
+
+This feature adds no Share Extension and needs no new entitlement, App ID, or
+provisioning profile. Receiving content from another app is a separate delivery.
+Physical-device sharing and a newly distributed TestFlight build remain release
+acceptance checks; unsigned simulator evidence cannot replace them.
+
+### Reproduce the Show sharing foreground check
+
+`ShowShareForegroundTests` exercises the actual Show route and sharing controls
+in English/Chinese and light/dark, opens the system activity sheet, and attaches
+menu, confirmation, and system-sheet screenshots to the XCTest result. It uses a
+nonpersistent WebKit store and disposable export files; it selects no destination
+and sends no content to another app. Without `AVIBE_I1_FOREGROUND_ORIGIN`, this
+on-demand test skips.
+
+Install the UI's existing dependencies with `npm ci` in `ui/` if needed. From the
+repository root, start the fixture server in a separate terminal:
+
+```sh
+node ios/scripts/show_share_foreground.mjs
+```
+
+The script resolves the checkout and UI dependencies relative to itself, so an
+absolute script path also works from any working directory. It prints one JSON
+readiness line containing `pid`, `url`, and `backendPort`. Both ports are assigned
+by the OS on `127.0.0.1`. The optional `--report-file <path>` writes that same JSON
+to a new file; its parent directory must already exist, and an existing file is
+never overwritten.
+
+Copy the printed `url` into `AVIBE_I1_FOREGROUND_ORIGIN` for the test process.
+For an `xcodebuild` simulator run, forward it with the `TEST_RUNNER_` prefix:
+
+```sh
+TEST_RUNNER_AVIBE_I1_FOREGROUND_ORIGIN='http://127.0.0.1:<printed port>' \
+xcodebuild \
+  -project ios/Avibe.xcodeproj \
+  -scheme Avibe \
+  -destination 'platform=iOS Simulator,name=<installed iPhone>,OS=latest' \
+  -only-testing:AvibeTests/ShowShareForegroundTests \
+  CODE_SIGNING_ALLOWED=NO \
+  test
+```
+
+For an Xcode launch, add `AVIBE_I1_FOREGROUND_ORIGIN` with the same value to the
+test action's environment. Keep the server running until the test finishes, then
+use Ctrl-C or send SIGTERM to the reported PID. Both signals close Vite and the
+fixture backend and remove the process-owned temporary Vite cache. Remove an
+optional report file after use.
+
+The server serves the repository's design frames and only the disposable
+`ses_funnel` Show/access data. `/show/ses_funnel/` is explicitly routed to the
+fixture document, including query strings. Both HTTP entrypoints reject every
+method except GET. The Vite proxy target is the process-owned fixture backend,
+and local `.env` files are disabled; no real account, running Avibe service, or
+production instance is used.

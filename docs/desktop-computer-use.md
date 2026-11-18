@@ -114,6 +114,18 @@ Permission** and does not keep retrying in the background until both grants
 are available. If the exact fixed app still reports a missing permission after
 the grant, use the Quit & Reopen recovery above without rebuilding it.
 
+## Dialogs that need manual handling
+
+Some app dialogs are visible in screenshots but missing from macOS
+Accessibility. Avibe makes a bounded lookup through explicit app and window
+relationships. Recovered surfaces are observation-only: seeing a dialog does
+not by itself prove where keyboard input will go. If input cannot be confined
+to that window, the agent asks you to handle it manually and observes again
+afterward. This also applies to first-run introduction dialogs.
+
+Computer Use does not control the Dock. To remove an icon, drag it out of the
+Dock manually.
+
 ## Stop computer use
 
 Turn off **Computer Use** in the native Avibe application or tray menu. This

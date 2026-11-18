@@ -332,6 +332,7 @@ final class WebViewFactory {
     private let showInstances: () -> Void
     private let instanceName: () -> String?
     private let healthConnect: HealthConnectAction
+    private let showShare = ShowShareCoordinator.shared
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
@@ -377,6 +378,7 @@ final class WebViewFactory {
         deviceID: deviceID,
         directStatus: directStatus,
         healthConnect: healthConnect,
+        showShare: showShare,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
                 return ["state": "unavailable"]
@@ -552,6 +554,7 @@ final class WebViewFactory {
     }
 
     func resetForNavigationCommit(in webView: WKWebView) {
+        showShare.cancel(in: webView)
         outerScrollLockControllers[
             ObjectIdentifier(webView)
         ]?.resetForNavigationCommit()
@@ -576,6 +579,7 @@ final class WebViewFactory {
     }
 
     func unregister(_ webView: WKWebView) {
+        showShare.cancel(in: webView)
         outerScrollLockControllers.removeValue(forKey: ObjectIdentifier(webView))
         keyboardViewportLayoutControllers.removeValue(
             forKey: ObjectIdentifier(webView)
