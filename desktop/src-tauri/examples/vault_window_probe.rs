@@ -1407,6 +1407,11 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             // while a web view or its process was being set up; time in which
             // the main thread answered nothing is recorded, said, and not
             // counted. A card held back with no such time recorded fails.
+            // The main thread answers in the order it was asked, and a
+            // question is put to it within 50 ms of the last answer, so one
+            // more turn of it here is behind the answer to any question that
+            // waited through a blocked stretch before the card was displayed.
+            self.on_main(|_| ());
             let unanswered = trace::unanswered_between(arrived, displayed);
             if unanswered > 0.0 {
                 println!(
@@ -2034,25 +2039,28 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             std::thread::spawn(move || loop {
                 let (asked, asked_ms) = (Instant::now(), super::now_ms());
                 let (tx, rx) = std::sync::mpsc::channel();
+                // The stretch is recorded by the answer itself, on the main
+                // thread: whatever is posted to the main thread after this
+                // question finds it recorded.
                 let posted = app.run_on_main_thread(move || {
+                    let waited = asked.elapsed();
+                    if waited >= UNANSWERED_FROM {
+                        UNANSWERED
+                            .lock()
+                            .expect("the stretches")
+                            .push((asked_ms, asked_ms + waited.as_secs_f64() * 1000.0));
+                        note(
+                            format!(
+                                "the app's main thread did not answer for {} ms, until now",
+                                waited.as_millis()
+                            ),
+                            None,
+                        );
+                    }
                     let _ = tx.send(());
                 });
                 if posted.is_err() || rx.recv().is_err() {
                     return;
-                }
-                let waited = asked.elapsed();
-                if waited >= UNANSWERED_FROM {
-                    UNANSWERED
-                        .lock()
-                        .expect("the stretches")
-                        .push((asked_ms, asked_ms + waited.as_secs_f64() * 1000.0));
-                    note(
-                        format!(
-                            "the app's main thread did not answer for {} ms, until now",
-                            waited.as_millis()
-                        ),
-                        None,
-                    );
                 }
                 std::thread::sleep(Duration::from_millis(50));
             });
@@ -2060,6 +2068,8 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
 
         /// How much of the time between two moments (on the clock of
         /// `now_ms`) the app's main thread did not answer, in milliseconds.
+        /// A stretch is recorded when its question is answered; the caller
+        /// first lets the main thread answer what was posted before.
         pub fn unanswered_between(from: f64, until: f64) -> f64 {
             UNANSWERED
                 .lock()
