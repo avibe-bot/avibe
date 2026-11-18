@@ -1019,9 +1019,15 @@ describe('mobile onboarding', () => {
         await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(line));
         expect(mobile.signInWithProvider).toHaveBeenLastCalledWith(provider);
       }
-      mobile.signInWithProvider.mockRejectedValueOnce({ code: 'stale_session', message: 'stale' });
-      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }));
-      await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+      const stale = deferred<MobileSessionState>();
+      mobile.signInWithProvider.mockReturnValueOnce(stale.promise);
+      const apple = screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }) as HTMLButtonElement;
+      fireEvent.click(apple);
+      await waitFor(() => expect(apple.disabled).toBe(true));
+      stale.reject({ code: 'stale_session', message: 'stale' });
+      // Only once the attempt has settled does the absence of a line say anything.
+      await waitFor(() => expect(apple.disabled).toBe(false));
+      expect(screen.queryByRole('alert')).toBeNull();
     });
 
     it('marks an account a provider sign-in just created, until it has an instance', async () => {

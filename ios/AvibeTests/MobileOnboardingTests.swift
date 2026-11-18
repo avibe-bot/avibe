@@ -1039,8 +1039,11 @@ final class MobileOnboardingTests: XCTestCase {
         }
         web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
         let requirement = MobileSecondFactorRequirement(email: "alex@example.com", gate: .challenge, methods: [.totp])
+        // The store that receives the first-factor cookies is the one in use at the exchange.
+        var exchangedIn: String?
         transport.providerExchangeHandler = { _, _, _ in
-            MobileProviderExchange(discovery: .secondFactorRequired(requirement), accountCreated: true)
+            exchangedIn = store.identifier
+            return MobileProviderExchange(discovery: .secondFactorRequired(requirement), accountCreated: true)
         }
         let coordinator = makeCoordinator(
             defaults: defaults,
@@ -1051,12 +1054,12 @@ final class MobileOnboardingTests: XCTestCase {
         coordinator.activateAccountSurface()
 
         let state = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
-        let kept = store.identifier
 
         guard case .twoFactorRequired = state else {
             return XCTFail("Expected the second factor, got \(state)")
         }
-        XCTAssertEqual(store.identifier, kept)
+        XCTAssertNotNil(exchangedIn)
+        XCTAssertEqual(store.identifier, exchangedIn)
         XCTAssertEqual(transport.providerExchanges.count, 1)
         XCTAssertFalse(coordinator.accountWasJustCreated)
     }
