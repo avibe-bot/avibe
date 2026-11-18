@@ -844,9 +844,15 @@ impl Coordinator {
         } else {
             None
         };
-        // A different account that signed in retires the stored one: its new
-        // record is saved first, then the old key is erased.
+        // A different account that signed in retires the stored one, in three
+        // phases under credential_io: (1) its key and record are written,
+        // touching nothing of the old account; (2) the final epoch check and
+        // the in-memory commit are the one linearization point; (3) only once
+        // (2) committed is the old key erased. Every failure before (2) rolls
+        // back with the old account untouched; a failure in (3) never
+        // restores the old record or undoes the committed account.
         let retired_id = stored.filter(|old| signed_in && working.record.account_id.as_ref() != Some(old));
+        let committed_id = working.record.account_id.clone();
         working.record.last_committed = working.state.connection.committed.clone();
         if let Some(id) = &written_id {
             // Own the key before the blocking write starts. Sign-out waits for
@@ -859,12 +865,13 @@ impl Coordinator {
         let store = self.store.clone();
         let checked = epoch.clone();
         let write_id = written_id.clone();
-        let erase_id = retired_id.clone();
-        let (mut saved, previous, retired) = tokio::task::spawn_blocking(move || {
+        // (1) A task that never returns (a panic) is a failure before (2):
+        // it rolls back like any other, with what it may have written unknown.
+        let (mut saved, previous) = tokio::task::spawn_blocking(move || {
             let previous = match &write_id {
                 Some(id) => match credentials.read(id) {
                     Ok(previous) => Some(previous),
-                    Err(error) => return (Err(error), None, None),
+                    Err(error) => return (Err(error), None),
                 },
                 None => None,
             };
@@ -876,14 +883,10 @@ impl Coordinator {
                 checked.check()?;
                 store.save(&record)
             })();
-            let retired = match (&result, &erase_id) {
-                (Ok(()), Some(old)) => Some(credentials.erase(old)),
-                _ => None,
-            };
-            (result, previous, retired)
+            (result, previous)
         })
         .await
-        .map_err(|_| ClientError::new("credentials_unavailable"))?;
+        .unwrap_or_else(|_| (Err(ClientError::new("credentials_unavailable")), None));
         let mut recency = None;
         let rollback_record = {
             let mut current = self.inner.lock().expect("client state");
@@ -921,17 +924,6 @@ impl Coordinator {
                 // The public switches are not the account's: a read that
                 // landed during this operation stays.
                 working.state.sign_in = current.state.sign_in.clone();
-                match (&retired_id, &retired) {
-                    (Some(old), Some(Ok(()))) => {
-                        owned.ids.remove(old);
-                    }
-                    // The retired key stays owned for a sign-out to erase; the
-                    // new account is signed in under its own key, and says so.
-                    (Some(_), Some(Err(error))) => {
-                        working.state.enrollment.error_code = Some(error.code.clone());
-                    }
-                    _ => {}
-                }
                 working.state.revision = current.state.revision + 1;
                 if opened {
                     if let (Some(account), ClientTarget::Remote { instance_id, .. }) =
@@ -943,10 +935,41 @@ impl Coordinator {
                 }
                 refresh_display(working);
                 order_catalog(working);
+                // (2) The linearization point.
                 *current = working.clone();
                 None
             }
         };
+        if rollback_record.is_none() {
+            if let Some(old) = retired_id {
+                // (3) Still under credential_io: no sign-out, forget or other
+                // persist can touch a key until this ends.
+                let credentials = self.credentials.clone();
+                let erase_id = old.clone();
+                let erased = tokio::task::spawn_blocking(move || credentials.erase(&erase_id))
+                    .await
+                    .unwrap_or_else(|_| Err(ClientError::new("credentials_unavailable")));
+                match erased {
+                    Ok(()) => {
+                        owned.ids.remove(&old);
+                    }
+                    // The old key stays owned for a sign-out to erase. The
+                    // error shows only while the committed account is still
+                    // the one signed in; a sign-out in between has already
+                    // replaced that state and must not inherit it.
+                    Err(error) => {
+                        let mut current = self.inner.lock().expect("client state");
+                        let still_committed = current.state.account.status == AccountStatus::SignedIn
+                            && current.state.account.identity.as_ref().map(|account| &account.id)
+                                == committed_id.as_ref();
+                        if still_committed {
+                            current.state.enrollment.error_code = Some(error.code.clone());
+                            current.state.revision += 1;
+                        }
+                    }
+                }
+            }
+        }
         if let Some(recency) = recency {
             // Order is a local preference: a failed write keeps this run's
             // order in memory and never fails the committed selection.

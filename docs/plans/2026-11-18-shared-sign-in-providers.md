@@ -115,6 +115,17 @@ owned for a sign-out to erase, and the new account is never written under it.
 An unfinished sign-in is written only under the stored account its flow
 continues.
 
+Order of that retirement (21:50 review): under the credential owner, (1) the
+new account's key and record are written, touching nothing of the old one;
+(2) the final generation check and the in-memory commit are the one
+linearization point; (3) only after (2) is the old key erased. A fence or a
+failure before (2), a crashed write task included, rolls back with the old
+record and key untouched. A failure in (3) never restores the old record or
+undoes the new account; the error shows only while that account is still
+the one signed in. Limits: a key whose erase fails and is not signed out in
+the same run stays in the keychain unused (no inventory); a crash between
+(2) and (3), or the process ending there, is not covered.
+
 The switches are public data, not the account's:
 - Desktop reads them without the account's epoch, so restore, local binding,
   abort or a first factor do not drop them; reads show in the order they
