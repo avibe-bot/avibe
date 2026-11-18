@@ -6,7 +6,7 @@ use handshake_limit::{HandshakeLimit, HandshakePermit};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use iroh::{
-    Endpoint, EndpointAddr, RelayMode, Watcher,
+    Endpoint, EndpointAddr, NetReportConfig, RelayConfig, RelayMode, RelayUrl, Watcher,
     endpoint::{Incoming, IncomingAddr, PortmapperConfig, QuicTransportConfig, VarInt, presets},
 };
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,7 @@ enum Command {
         token: String,
         max_connections: u32,
         max_streams_per_connection: u32,
+        relay: Option<RelayOffer>,
     },
     #[serde(rename = "admission")]
     Admission {
@@ -71,7 +72,30 @@ enum Command {
     Stop,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayOffer {
+    version: u32,
+    url: String,
+}
+
+impl RelayOffer {
+    fn validate(self) -> Result<RelayUrl> {
+        let invalid = SidecarError("invalid_relay");
+        let url: RelayUrl = self.url.parse().map_err(|_| invalid)?;
+        if self.version != 1
+            || url.scheme() != "https"
+            || url.host_str().is_none()
+            || url.origin().ascii_serialization() != self.url
+        {
+            return Err(invalid);
+        }
+        Ok(url)
+    }
+}
+
 struct StartConfig {
+    relay: Option<RelayUrl>,
     stream_addr: SocketAddr,
     token: String,
     max_connections: u32,
@@ -89,6 +113,8 @@ enum Message<'a> {
     },
     #[serde(rename = "addresses")]
     Addresses { addresses: Vec<String> },
+    #[serde(rename = "relay_status")]
+    RelayStatus { connected: bool },
     #[serde(rename = "peer_closed")]
     PeerClosed {
         endpoint_id: &'a str,
@@ -177,6 +203,7 @@ fn parse_start(command: Command) -> Result<StartConfig> {
         token,
         max_connections,
         max_streams_per_connection,
+        relay,
     } = command
     else {
         return Err(SidecarError("start_required"));
@@ -197,6 +224,7 @@ fn parse_start(command: Command) -> Result<StartConfig> {
         return Err(SidecarError("invalid_limits"));
     }
     Ok(StartConfig {
+        relay: relay.map(RelayOffer::validate).transpose()?,
         stream_addr,
         token: token.to_ascii_lowercase(),
         max_connections,
@@ -420,10 +448,18 @@ async fn run(control: &Control) -> Result<()> {
         .keep_alive_interval(TRANSPORT_KEEP_ALIVE)
         .default_path_keep_alive_interval(TRANSPORT_KEEP_ALIVE)
         // Stock iroh ignores values below eight: zero does NOT disable it.
+        .send_observed_address_reports(false)
+        .receive_observed_address_reports(false)
         .max_remote_nat_traversal_addresses(8)
         .build();
     let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(match &config.relay {
+            None => RelayMode::Disabled,
+            Some(url) => {
+                RelayMode::Custom([RelayConfig::new(url.clone(), None)].into_iter().collect())
+            }
+        })
+        .net_report_config(NetReportConfig::minimal())
         .portmapper_config(PortmapperConfig::Disabled)
         .transport_config(transport_config)
         .hooks(control.admissions.clone())
@@ -445,6 +481,35 @@ async fn run(control: &Control) -> Result<()> {
         let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
         return Err(error);
     }
+    // Publish the endpoint key before waiting for relay admission: its owner
+    // needs this key to obtain the backend lease. Never infer ready from URL.
+    let relay_task = config.relay.clone().map(|url| {
+        let mut status = endpoint.home_relay_status();
+        let control = control.clone();
+        tokio::spawn(async move {
+            let mut previous = false;
+            loop {
+                let connected = status
+                    .get()
+                    .iter()
+                    .any(|r| r.url() == &url && r.is_connected());
+                if connected != previous {
+                    if let Err(error) = control.emit(&Message::RelayStatus { connected }).await {
+                        control.fail(error).await;
+                        return;
+                    }
+                    previous = connected;
+                }
+                tokio::select! {
+                    _ = control.stop.wait() => return,
+                    result = status.updated() => if result.is_err() {
+                        control.fail(SidecarError("relay_watcher_closed")).await;
+                        return;
+                    },
+                }
+            }
+        })
+    });
     let address_task = tokio::spawn(watch_addresses(
         endpoint_watcher,
         ready_address,
@@ -476,8 +541,13 @@ async fn run(control: &Control) -> Result<()> {
                     continue;
                 }
                 let Ok(permit) = connection_limit.clone().try_acquire_owned() else { incoming.ignore(); continue; };
-                let IncomingAddr::Ip(source) = incoming.remote_addr() else { incoming.ignore(); continue; };
-                let Some(handshake_permit) = handshake_limit.acquire(source.ip()) else { incoming.ignore(); continue; };
+                let source = match incoming.remote_addr() {
+                    IncomingAddr::Ip(source) => Some(source.ip()),
+                    IncomingAddr::Relay { url, endpoint_id } if config.relay.as_ref() == Some(&url)
+                        && control.admissions.contains(&endpoint_id.to_string()) => None,
+                    _ => { incoming.ignore(); continue; }
+                };
+                let Some(handshake_permit) = handshake_limit.acquire_source(source) else { incoming.ignore(); continue; };
                 connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), permit, Arc::clone(&config)));
             }
         }
@@ -492,6 +562,10 @@ async fn run(control: &Control) -> Result<()> {
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
     let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
+    if let Some(task) = relay_task {
+        task.abort();
+        let _ = task.await;
+    }
     address_task.abort();
     expiry_task.abort();
     control_task.abort();
@@ -501,6 +575,54 @@ async fn run(control: &Control) -> Result<()> {
     match *control.failure.lock().await {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+
+    #[test]
+    fn relay_control_accepts_only_canonical_https_origin() {
+        for origin in [
+            "https://relay.example.invalid",
+            "https://relay.example.invalid:8443",
+        ] {
+            assert!(
+                RelayOffer {
+                    version: 1,
+                    url: origin.into()
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+        for origin in [
+            "http://relay.example.invalid",
+            "https://relay.example.invalid/redirect",
+            "https://u@relay.example.invalid",
+            "https://relay.example.invalid?token=x",
+            "https://relay.example.invalid#f",
+            "https://relay.example.invalid/../",
+            " https://relay.example.invalid",
+        ] {
+            assert!(
+                RelayOffer {
+                    version: 1,
+                    url: origin.into()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            RelayOffer {
+                version: 2,
+                url: "https://relay.example.invalid".into()
+            }
+            .validate()
+            .is_err()
+        );
     }
 }
 
