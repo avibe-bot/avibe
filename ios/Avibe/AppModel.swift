@@ -11,10 +11,19 @@ protocol RuntimeOpenTimer: AnyObject {
 protocol RuntimeOpenTiming: AnyObject {
     var now: Duration { get }
 
+    /// The deadlines of the account transports the App opens. The App's are
+    /// `.standard`; a timing for the CI simulator may give the control-plane
+    /// page a web content launch's time there.
+    var accountTransportDeadlines: MobileAuthTransportDeadlines { get }
+
     func schedule(
         after delay: Duration,
         _ action: @escaping @MainActor () -> Void
     ) -> any RuntimeOpenTimer
+}
+
+extension RuntimeOpenTiming {
+    var accountTransportDeadlines: MobileAuthTransportDeadlines { .standard }
 }
 
 @MainActor
@@ -339,6 +348,13 @@ final class AppModel: ObservableObject {
         defaults: defaults,
         controlPlane: controlPlane,
         websiteDataStore: websiteDataStore,
+        transportFactory: { [deadlines = runtimeOpenTiming.accountTransportDeadlines] url, store in
+            MobileAuthTransport(
+                controlPlaneURL: url,
+                websiteDataStore: store,
+                deadlines: deadlines
+            )
+        },
         onOpenRuntime: { [weak self] runtime in
             _ = self?.openRuntime(runtime)
         },
