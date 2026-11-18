@@ -4144,11 +4144,10 @@ final class DirectPathAppTests: XCTestCase {
 
     // MARK: Review captures (draft only, not for merge)
 
-    /// Renders the real `RootView` over a real `AppModel` (no transport, as
-    /// shipped) at the two runtime-open screens #3848 added, for review:
-    /// the long wait (8 s into the open) and the timeout notice over the
-    /// instance list (30 s). Time is the manual open clock; nothing else is
-    /// stubbed beyond the fixture control plane. Fixture data only.
+    /// Frames for Product: the status pill, the skeleton, and cached-then-
+    /// live (mocked: PR 3 makes the cached page real). The pill, skeleton
+    /// and RootView are the App's own; frame 3's page is a mock document
+    /// and its timeout banner a copy proposal. Fixture data only.
     @MainActor
     func testCaptureRuntimeOpenScreensForReview() async throws {
         let studioSession = """
@@ -4181,25 +4180,94 @@ final class DirectPathAppTests: XCTestCase {
             window.isHidden = true
             window.rootViewController = nil
         }
-        try await Task.sleep(for: .seconds(4))
-        capture(window, app, "00-instances-before-open")
 
+        // Frame 2: a cold start with no cached page: the skeleton, and the
+        // pill over it (the real RootView, connecting to an instance that
+        // does not answer).
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        try await Task.sleep(for: .milliseconds(800))
+        try await Task.sleep(for: .milliseconds(1500))
+        capture(window, app, "2-skeleton-connecting-light")
         timing.advance(by: .seconds(8))
         try await Task.sleep(for: .milliseconds(1200))
-        capture(window, app, "01-long-wait-light")
+        capture(window, app, "2-skeleton-long-wait-light")
         window.overrideUserInterfaceStyle = .dark
         try await Task.sleep(for: .milliseconds(1200))
-        capture(window, app, "01-long-wait-dark")
+        capture(window, app, "2-skeleton-long-wait-dark")
         window.overrideUserInterfaceStyle = .light
+        let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
 
-        timing.advance(by: .seconds(22))
-        try await Task.sleep(for: .seconds(6))
-        capture(window, app, "02-timeout-light")
-        window.overrideUserInterfaceStyle = .dark
-        try await Task.sleep(for: .seconds(2))
-        capture(window, app, "02-timeout-dark")
+        // Frames 1 and 3 (mock): the pill over a page, then the live page.
+        let page = MockCachedPage()
+        let mock = UIWindow(windowScene: scene)
+        mock.frame = scene.screen.bounds
+        mock.windowLevel = .normal + 2
+        mock.overrideUserInterfaceStyle = .light
+        let host = UIHostingController(rootView: AnyView(EmptyView()))
+        mock.rootViewController = host
+        mock.makeKeyAndVisible()
+        defer {
+            mock.isHidden = true
+            mock.rootViewController = nil
+        }
+        func show(_ view: some View) async throws {
+            host.rootView = AnyView(view)
+            try await Task.sleep(for: .milliseconds(900))
+        }
+        try await page.load()
+        var connecting = attempt
+        connecting.phase = .connecting
+        connecting.isTakingLong = false
+        var loading = attempt
+        loading.phase = .loadingPage
+        loading.isTakingLong = false
+        var slow = attempt
+        slow.phase = .connecting
+        slow.isTakingLong = true
+
+        try await show(ZStack(alignment: .top) {
+            page.view
+            RuntimeOpenStatusPill(attempt: connecting, cancel: {})
+        })
+        captureWindow(mock, "1-pill-connecting-over-cached-page-light")
+        try await show(ZStack(alignment: .top) {
+            page.view
+            RuntimeOpenStatusPill(attempt: loading, cancel: {})
+        })
+        captureWindow(mock, "1-pill-loading-page-light")
+        try await show(ZStack(alignment: .top) {
+            page.view
+            RuntimeOpenStatusPill(attempt: slow, cancel: {})
+        })
+        captureWindow(mock, "1-pill-long-wait-light")
+        try await page.markLive()
+        try await show(page.view)
+        captureWindow(mock, "3-live-page-swapped-in-light")
+        try await page.markCached()
+        try await show(ZStack(alignment: .bottom) {
+            page.view
+            CachedPageTimeoutBannerProposal(instanceName: "Studio")
+        })
+        captureWindow(mock, "3-timeout-banner-over-cached-page-light")
+        mock.overrideUserInterfaceStyle = .dark
+        try await page.load(dark: true)
+        try await show(ZStack(alignment: .top) {
+            page.view
+            RuntimeOpenStatusPill(attempt: connecting, cancel: {})
+        })
+        captureWindow(mock, "1-pill-connecting-over-cached-page-dark")
+    }
+
+    @MainActor
+    private func captureWindow(_ window: UIWindow, _ name: String) {
+        let language = Bundle.main.preferredLocalizations.first ?? "unknown"
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let shot = XCTAttachment(image: image)
+        shot.name = "coldstart-\(language)-\(name)"
+        shot.lifetime = .keepAlways
+        add(shot)
+        print("[review capture] \(name) language=\(language)")
     }
 
     @MainActor
@@ -7483,5 +7551,101 @@ private final class RootViewStandIn {
         registrations.append(
             Made(runtime: runtime, controller: controller, providerUpdateInFlight: inFlight)
         )
+    }
+}
+
+/// Draft-only: a mock Workbench page standing in for the cached page PR 3
+/// will restore.
+@MainActor
+private final class MockCachedPage {
+    let webView = WKWebView(frame: .zero)
+    var view: some View { MockWebViewHost(webView: webView).ignoresSafeArea() }
+
+    func load(dark: Bool = false) async throws {
+        let background = dark ? "#111" : "#fff"
+        let text = dark ? "#eee" : "#111"
+        let muted = dark ? "#999" : "#666"
+        let rows = [
+            ("奶酪包", "今天的日程我整理好了，下午三点有个评审。", "10:42"),
+            ("产品伙伴", "冷启动方案的三张帧图已经发你了。", "10:30"),
+            ("vibey", "PR #3920 的 CI 全部通过。", "昨天"),
+            ("Studio 周报", "本周完成 12 项，延期 1 项。", "昨天"),
+            ("账单提醒", "下月续费将在 3 天后扣款。", "周一"),
+            ("旅行计划", "已为你比较了三家酒店的价格。", "周日"),
+        ].map { name, line, time in
+            """
+            <div class="row"><div class="avatar">\(name.prefix(1))</div>
+            <div class="body"><div class="top"><b>\(name)</b><span>\(time)</span></div>
+            <div class="line">\(line)</div></div></div>
+            """
+        }.joined()
+        let html = """
+            <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>
+            body{margin:0;font-family:-apple-system,"PingFang SC";background:\(background);color:\(text)}
+            header{padding:64px 20px 12px;font-size:26px;font-weight:700}
+            .status{margin:0 20px 8px;font-size:12px;color:\(muted)}
+            .row{display:flex;gap:12px;padding:12px 20px}
+            .avatar{width:40px;height:40px;border-radius:20px;background:#7c6cf2;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600}
+            .body{flex:1;min-width:0}.top{display:flex;justify-content:space-between}
+            .top span,.line{color:\(muted);font-size:13px}.line{margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            </style></head><body><header>收件箱</header>
+            <div class="status" id="status">上次更新 10:42</div>\(rows)</body></html>
+            """
+        webView.isOpaque = false
+        webView.loadHTMLString(html, baseURL: nil)
+        try await Task.sleep(for: .milliseconds(800))
+    }
+
+    func markLive() async throws {
+        _ = try? await webView.evaluateJavaScript(
+            "document.getElementById('status').textContent='刚刚更新';"
+            + "document.querySelector('.row .line').textContent='新消息：下午三点的评审改到四点。';"
+        )
+    }
+
+    func markCached() async throws {
+        _ = try? await webView.evaluateJavaScript(
+            "document.getElementById('status').textContent='上次更新 10:42';"
+        )
+    }
+}
+
+private struct MockWebViewHost: UIViewRepresentable {
+    let webView: WKWebView
+    func makeUIView(context: Context) -> WKWebView { webView }
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+}
+
+/// Draft-only copy proposal for a timeout while a cached page shows: a
+/// banner, the content kept (Product, 2026-11-18).
+private struct CachedPageTimeoutBannerProposal: View {
+    let instanceName: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("暂时连不上 \(instanceName)")
+                        .font(.subheadline.weight(.semibold))
+                    Text("显示的是上次的内容，连上后会自动更新。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "xmark")
+            }
+            Button("重试", action: {})
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        }
+        .padding(14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 28)
     }
 }
