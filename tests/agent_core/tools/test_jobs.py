@@ -616,7 +616,8 @@ async def test_blocked_spawn_allows_heartbeat_and_stop(tmp_path, monkeypatch, st
         with pytest.raises(asyncio.CancelledError):
             await task
         job = host.find_job(instance())
-        assert job and not host.started(job) and not ran.exists()
+        assert job and (Path(host.job_dir(job)) / "decision").read_text().strip() == "abandon"
+        assert not ran.exists()
         assert _wait_until(lambda: _wrapper_gone(host.job_dir(job)))
     else:
         job = await task

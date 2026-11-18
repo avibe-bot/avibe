@@ -344,17 +344,19 @@ class LocalJobHost:
         # know which undecided wrapper to abandon, even if cancellation raced its return.
         spawned: list[str] = []
 
-        def spawn():
-            result = self._spawn(command, cwd, env, timeout_s, call)
+        def spawn(host, command, cwd, env, timeout_s, call):
+            result = host._spawn(command, cwd, env, timeout_s, call)
             spawned.append(result[0])
             return result
 
         try:
-            job_id, proc, marker, meta = await read_in_worker(spawn)
+            job_id, proc, marker, meta = await read_in_worker(spawn, self, command, cwd, env, timeout_s, call)
             identity = await self._await_pid(job_id, proc, marker)
         except asyncio.CancelledError:
             if spawned:
-                await run_to_end(asyncio.to_thread(self._create_decision, spawned[0], _ABANDON))
+                # The same atomic decision used before worker-based spawn. Do not queue Stop
+                # behind unrelated default-executor work while the wrapper awaits its decision.
+                self._create_decision(spawned[0], _ABANDON)
             raise
         # No await between publishing go and transferring ownership to the caller.
         decision = self._record_and_decide(job_id, meta, identity)
