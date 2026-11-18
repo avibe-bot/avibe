@@ -4,6 +4,19 @@ Status: implementation contract check, 2026-11-18 (#3946). It replaces
 `2026-11-18-shared-sign-in-exchange.md`. Backend facts come from the
 verification report of 17:30: avibe-backend `884a13c`, plus #370's body.
 
+**Update 20:50 (main), after #3945 merged as `1e0851472`:** the iPhone keeps
+#3945's route as merged: the backend mobile broker (`/api/mobile/auth/*`),
+its `mobile_providers` display gate, and its `new_account` hint from
+`Avibe-Account-Created`. The iPhone parts below that describe the Supabase
+route, `auth.signInMethods` and the iPhone session-read split are superseded
+and not shipped. The Desktop keeps this document's route. Both apps hand the
+shared page the same shape, `{providers, passkey}`; the iPhone reads it once
+per signed-out session answer (#3945's `providers`, plus `passkey`), and an
+answer without it offers email alone. As of 21:00 the broker is backend #376
+(open): production serves no `mobile_providers`, `Avibe-Account-Created` is
+never produced, and Apple is not implemented there, so the iPhone shows email
+(and passkey sign-in when switched on) until it ships; nothing is guessed.
+
 ## The route that exists
 
 1. The client gets Supabase tokens.
@@ -70,7 +83,7 @@ Passkey sign-in also needs the system's passkey sheet:
 
 | App | Offered, and run, when |
 | --- | --- |
-| iPhone | Always with the switch: the 17.4 floor and the `webcredentials:avibe.bot` association. |
+| iPhone | Always with the switch: the 17.4 floor and the `webcredentials:avibe.bot` association. (Its providers come from `mobile_providers`, see the update above.) |
 | Desktop, macOS | macOS 13 or later (passkeys ship there; 12 has the classes as a developer preview) and the running signature's associated domains name `webcredentials:avibe.bot` (the Developer ID build; local and ad-hoc builds lack it). |
 | Desktop, Windows | webauthn.dll at API version 1, which serves the assertion options the shell sends. |
 | Desktop, other | Never. |
@@ -106,12 +119,12 @@ The switches are public data, not the account's:
 - Desktop reads them without the account's epoch, so restore, local binding,
   abort or a first factor do not drop them; reads show in the order they
   started; an account commit or rollback keeps them.
-- iPhone reads them beside account operations, not as one: the read changes
-  no account and rotates no store.
+- iPhone reads them once per signed-out session answer, bounded at 2 s, with
+  no cookie; the read changes no account and rotates no store.
 
 ## The provider session read
 
-On the iPhone, after `/auth/callback` sets the cookies, the session read is a
+(Superseded for the iPhone by the 20:50 update; kept for the record.) On the iPhone, after `/auth/callback` sets the cookies, the session read is a
 request of its own with its own deadline (the Desktop's grant and session
 calls were already separate requests). Its classification is the session
 read's: `401` the sign-in did not hold, `403 two_factor_required` the second
@@ -124,7 +137,7 @@ and avibe.bot may keep a session no one holds until it expires.
 
 | Signal | What happens |
 | --- | --- |
-| iPhone `new_account` hint | `Avibe-Account-Created` only existed in the unbuilt route; GoTrue's token answer and avibe.bot's session endpoints carry no such field. Native never sets it; what the empty state should say instead is Max's decision, not settled in code. |
+| iPhone `new_account` hint | On #3945's broker route the App shows it when `Avibe-Account-Created` is present (20:50). The broker (backend #376, open) does not produce it yet, so it does not show; nothing is inferred from email or an empty instance list. The Desktop has no such signal and shows no such hint. |
 | `provider_email_unverified` | Trusted: GoTrue's `error_code=provider_email_needs_verification` in the callback. Kept on both apps. |
 
 ## Preserved on any route

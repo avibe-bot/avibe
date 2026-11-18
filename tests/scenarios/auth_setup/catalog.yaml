@@ -1315,22 +1315,15 @@ scenarios:
     missing_layer: signed-build-and-hosted-providers
     backend: ios
     reason: >-
-      XCTest owns the boundary on the backend's existing route (#3946):
-      the PKCE vector, the exact Supabase authorization address bound to
-      this attempt's provider, challenge and state, the callback table
-      (Supabase's keys, state, GoTrue's error fragment copy, bounds), the
-      provider switch read before anything opens (the page offers only the
-      switched-on providers, AUTH-SETUP-185's auth.signInMethods), Apple's hashed nonce to
-      Apple and raw nonce to Supabase with the state check, coordinator store
+      XCTest owns the boundary: the PKCE vector, the exact launch-route and
+      callback tables (state, keys, fragment, bounds), the canonical start
+      values, Apple's hashed nonce and state check, coordinator store
       rotation on every non-success with the store kept for a second factor,
-      exclusivity and late results, the fixed pkce and id_token grant scripts
-      into /auth/callback, the session read after it as a request with its own
-      deadline, and the bridge's strictness. Known limit, as for the email
-      code and the password: a read that fails after the callback set the
-      cookies still retires the store. The catalog citation
-      checker does not collect Swift XCTest. The hosted project's redirect
-      handling, the https callback on a signed build, the real providers,
-      Apple's enablement and sheet remain device checks.
+      exclusivity and late results, the fixed start/exchange/apple scripts
+      with their Origin and account-created bit, and the bridge's strictness.
+      The catalog citation checker does not collect Swift XCTest. The https
+      callback on a signed build, the real providers and Apple's sheet remain
+      device checks after the backend exchange is deployed.
     owning_layer: iOS XCTest plus physical-device acceptance
   - id: AUTH-SETUP-182
     name: One sign-in flow gives the iPhone and Desktop apps the same steps, words and errors
@@ -1434,16 +1427,15 @@ scenarios:
       so trying again reads it without a second sheet or verify; a sign-out
       while that read is out publishes nothing and never reads the store again,
       and a verify avibe.bot does not accept retires it. Welcome offers passkey
-      sign-in, and each provider, only when auth.signInMethods reports its
-      public switch exactly true. XCTest owns the native side
+      sign-in only when the signed-out session answer carries passkey: true
+      (passkey_login_enabled, read with #3945's mobile_providers). XCTest owns the native side
       (MobileOnboardingTests, and the WebKit fixture-server tests for the
-      options, verify and cancel scripts and the switches in
-      MobileAuthTransportIntegrationTests);
+      options, verify and cancel scripts in MobileAuthTransportIntegrationTests);
       the catalog citation checker does not collect Swift XCTest. Production's
       passkey switch, a real authenticator and a signed build remain device
       checks.
     owning_layer: iOS XCTest plus physical-device acceptance
     partial_evidence:
-      covers: the page side, offering exactly the ways native reports switched on and email only when the read fails
-      test: "ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-185 a read that fails offers email only"
+      covers: the page side, offering exactly the ways a signed-out answer names, and email alone when it names none
+      test: "ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-185 not read"
 next_priority: []
