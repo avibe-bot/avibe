@@ -76,3 +76,51 @@ The unrelated macOS desktop window probe failed its foreground timing assertion
 in CI run 44221510579, matching the existing master failure in run 44184871334.
 The orchestrator confirmed this check is not required and instructed this lane
 to document it without modifying or rerunning desktop code.
+
+
+## Identity lifecycle candidate (2026-11-18)
+
+The orchestrator approved one lifecycle correction after independent design
+review. A paired device remains provisional until its setup manifest and exact
+connect claim validate. A single state replacement records the unexecuted
+reservation and committed device ID before publishing the operational identity.
+Only committed identities can register observers, query, upload or poll. The
+bridge's `connected` reply means the connection is established; the durable
+reservation/outbox continues initial sync. A request succeeds only after upload
+ACK and accepted result delivery, independently of the bridge reply.
+
+Health account events are separate from push cleanup. Logout and account changes
+freeze authority synchronously; same-account two-factor checks pause work while
+retaining the committed binding. Fresh nonempty authoritative catalogs can revoke
+a removed paired instance without treating another instance's removal as logout.
+The existing named WebKit store UUID is captured in the private Health Keychain
+identity; missing or mismatching bindings fail closed after account/protected-start
+validation. Account UUID generation, rotation timing and transactions are unchanged.
+
+Precommit failures roll back their captured identity before normal sync failure
+policy applies. Cleanup removes local credentials immediately, persists the
+existing cleanup marker and disables all system Health background delivery even
+when this process has no observer. Remote revocation is best effort using only the
+captured old credential. Late callbacks cannot mutate a new epoch's identity.
+
+Atomic file replacement is not a power-loss guarantee. If both exiting-marker
+persistence and Keychain deletion fail, and no account-store rotation is persisted,
+the same visible account may restore an older committed record after restart.
+The UUID gate does not repair account initialization when defaults are unreadable.
+Offline logout can leave remote historical state until retention or explicit
+Agent revocation. These are finite storage/network limits, not stronger guarantees.
+
+The candidate requires fresh focused XCTest, unsigned build and independent
+exact-head review; earlier evidence above belongs to the preceding commits.
+
+
+Fresh candidate validation: unsigned generic Simulator build-for-testing exited
+0. The final isolated run passed 58 XCTest cases (37 HealthSync, 18 Reader and
+three existing account consumers), including an actual 41-second unacknowledged
+upload, setup rollback/relaunch, late epoch failures, protected-start handling,
+concurrent reservation recovery, cold system delivery cleanup and account hooks.
+The initial 46-case run retained its failed xcresult: its sole failure was the
+old bridge expectation that pending upload must return failed. The revised test
+requires connected before logout and still forbids successful request receipts.
+No physical-device, signing, provisioning, installation or release evidence is
+implied. Independent exact-head review and current-head CI remain pending.

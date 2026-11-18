@@ -738,7 +738,10 @@ final class WebViewController: UIViewController {
                 return self.deviceID()
             },
             directStatus: directStatus,
-            healthConnect: healthConnect,
+            healthConnect: { [weak self] requestID, pairingCode, origin in
+                guard let self, !self.isInvalidatedForAccountTransition else { return "failed" }
+                return await self.healthConnect(requestID, pairingCode, origin)
+            },
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
             },

@@ -84,6 +84,7 @@ protocol HealthUploading: AnyObject {
     var onComplete: (@MainActor (String, Result<[String: Any], Error>) async -> Void)? { get set }
     func reconnect()
     func upload(id: String, file: URL, identity: HealthDeviceIdentity) async throws
+    func invalidate()
     func cancelAll() async
 }
 
@@ -124,8 +125,10 @@ final class HealthBackgroundUploader: NSObject, HealthUploading, URLSessionDataD
         }
     }
 
+    func invalidate() { generationLock.withLock { generation = UUID() } }
+
     func cancelAll() async {
-        generationLock.withLock { generation = UUID() }
+        invalidate()
         for task in await session.allTasks { task.cancel() }
     }
 

@@ -342,11 +342,13 @@ final class AppModel: ObservableObject {
                 accountID: accountID
             ) ?? false
         },
+        onHealthAccountEvent: { [weak self] event in
+            self?.healthSync?.accountEvent(event)
+        },
         onPreparePushLogout: { [weak self] in
             // Signing out or another account: the badge counted this
             // account's Inbox. (A session refresh of the same account keeps it.)
             self?.nativeBadge.clear()
-            await self?.healthSync?.logout()
             await self?.nativePushCoordinator.prepareForLogout()
         }
     )
@@ -484,15 +486,17 @@ final class AppModel: ObservableObject {
         sessionNotifications = SessionNotificationCleaner(
             center: pushNotificationCenter ?? SystemPushNotificationCenter()
         )
+        healthSync?.captureStartupReadiness()
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
+        healthSync?.websiteDataStoreIDProvider = { [weak self] in self?.websiteDataStore.identifier }
         healthSync?.accountIDProvider = { [weak self] in
-            self?.sessionCoordinator.currentAccount?.id
+            self?.sessionCoordinator.healthAccountID
         }
         healthSync?.targetProvider = { [weak self] in
-            guard let self, let account = self.sessionCoordinator.currentAccount,
+            guard let self, let accountID = self.sessionCoordinator.healthAccountID,
                   let instance = self.sessionCoordinator.selectedInstance,
                   let origin = WebOrigin(url: instance.url) else { return nil }
-            return HealthConnectionTarget(accountID: account.id, instanceID: instance.id, name: instance.name, origin: origin.serialized)
+            return HealthConnectionTarget(accountID: accountID, instanceID: instance.id, name: instance.name, origin: origin.serialized)
         }
         _ = nativePushCoordinator
         _ = directPathController

@@ -9,6 +9,7 @@ struct HealthDeviceIdentity: Codable, Equatable {
     let origin: String
     let deviceID: String
     let credential: String
+    var websiteDataStoreID: UUID? = nil
 }
 
 protocol HealthCredentialStoring {
@@ -41,9 +42,8 @@ struct HealthCredentialStore: HealthCredentialStoring {
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         let (status, value) = itemAccess.copyMatching(request)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = value as? Data else {
-            throw HealthSyncError.code("credential_unavailable")
-        }
+        guard status == errSecSuccess else { throw HealthCredentialReadError.status(status) }
+        guard let data = value as? Data else { throw HealthSyncError.code("credential_corrupt") }
         return try JSONDecoder().decode(HealthDeviceIdentity.self, from: data)
     }
 
@@ -89,6 +89,8 @@ struct HealthCredentialStore: HealthCredentialStoring {
     }
 }
 
+enum HealthCredentialReadError: Error { case status(OSStatus) }
+
 enum HealthSyncError: Error, Equatable {
     case code(String)
     case http(Int, String, TimeInterval?)
@@ -119,6 +121,7 @@ struct HealthSyncState: Codable {
     var initialBackfillPending = true
     var suspended = false
     var cleanupPending = false
+    var committedDeviceID: String?
 }
 
 /// Only health sync owns this directory; no payload is placed in app groups.
@@ -183,6 +186,7 @@ final class HealthDeviceStore {
     func prepareForCleanup() throws {
         try update {
             $0.cleanupPending = true
+            $0.committedDeviceID = nil
             $0.uploads.removeAll()
             $0.completed.removeAll()
         }

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import Security
 
 struct HealthConnectionTarget: Equatable {
     let accountID: String
@@ -28,7 +29,11 @@ final class HealthSyncCoordinator: ObservableObject {
     private var identity: HealthDeviceIdentity?
     private var epoch = UUID()
     private var consentContinuation: CheckedContinuation<Bool, Never>?
-    private var connecting = false
+    private var connecting: UUID?
+    private var cleanupTask: Task<Void, Never>?
+    private var startupBindingUntrusted = false
+    var websiteDataStoreIDProvider: (() -> UUID?)?
+    var protectedDataAvailable: () -> Bool = { UIApplication.shared.isProtectedDataAvailable }
     private var foreground = false
     private var restoring = false
     private var uploadingIDs: Set<String> = []
@@ -49,7 +54,9 @@ final class HealthSyncCoordinator: ObservableObject {
     }
 
     private func requireAccount() throws {
-        guard let identity, currentAccountID == identity.accountID, !cleanupPending else {
+        guard let identity, currentAccountID == identity.accountID, !cleanupPending,
+              !startupBindingUntrusted, bindingMatches(identity),
+              store?.state.committedDeviceID == identity.deviceID else {
             throw HealthSyncError.code("connection_changed")
         }
     }
@@ -82,12 +89,75 @@ final class HealthSyncCoordinator: ObservableObject {
         continuation?.resume(returning: allowed)
     }
 
+    /// Capture before account-store construction; an AFU Keychain read can
+    /// distinguish first-unlock protection from an ordinary later lock.
+    func captureStartupReadiness() {
+        do { _ = try credentials.load() }
+        catch HealthCredentialReadError.status(let status) where status == errSecInteractionNotAllowed {
+            startupBindingUntrusted = true
+        } catch { /* Restore classifies corruption and other read failures. */ }
+    }
+
+    private func bindingMatches(_ candidate: HealthDeviceIdentity) -> Bool {
+        guard let binding = candidate.websiteDataStoreID else { return false }
+        return websiteDataStoreIDProvider?() == binding
+    }
+
+    func accountEvent(_ event: HealthAccountEvent) {
+        switch event {
+        case .signedOut(let explicit):
+            if startupBindingUntrusted && !explicit {
+                guard protectedDataAvailable() else { return }
+                startupBindingUntrusted = false
+            }
+            _ = beginCleanup(unregister: true)
+        case .authorizationUnavailable:
+            guard !cleanupPending else { return }
+            if connecting != nil { _ = beginCleanup(unregister: true) }
+            else { pauseAuthority() }
+        case .authenticated(let accountID, let instances):
+            if startupBindingUntrusted {
+                guard protectedDataAvailable() else { return }
+                startupBindingUntrusted = false
+            }
+            if let identity, identity.accountID != accountID || !bindingMatches(identity)
+                || (!instances.isEmpty && !instances.contains(identity.instanceID)) {
+                _ = beginCleanup(unregister: true)
+            }
+        }
+    }
+
+    private func pauseAuthority() {
+        epoch = UUID()
+        reader.stopObserving()
+        uploader.invalidate()
+        uploadingIDs.removeAll()
+        setBackground()
+        syncTask?.cancel()
+        syncTask = nil
+        syncID = nil
+        retryTask?.cancel()
+        retryTask = nil
+        for id in Array(uploadWaiters.keys) {
+            finishWaiters(id, result: .failure(HealthSyncError.code("connection_changed")))
+        }
+        let previous = cleanupTask
+        cleanupTask = Task { @MainActor in
+            await previous?.value
+            await self.uploader.cancelAll()
+            _ = await self.reader.disableBackgroundDelivery()
+        }
+    }
+
     func connect(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
-        guard !connecting, let target = targetProvider?(), currentAccountID == target.accountID,
+        guard connecting == nil, !startupBindingUntrusted,
+              let binding = websiteDataStoreIDProvider?(),
+              let target = targetProvider?(), currentAccountID == target.accountID,
               target.origin == origin.serialized,
               !requestID.isEmpty, !pairingCode.isEmpty else { return "failed" }
-        connecting = true
-        defer { connecting = false }
+        let connection = UUID()
+        connecting = connection
+        defer { if connecting == connection { connecting = nil } }
         let token = epoch
         let approved = await withCheckedContinuation { continuation in
             consentContinuation = continuation
@@ -96,19 +166,22 @@ final class HealthSyncCoordinator: ObservableObject {
         guard epoch == token, targetProvider?() == target else { return "failed" }
         guard approved else { return "declined" }
         var operationEpoch = token
+        var provisional: HealthDeviceIdentity?
+        var committed = false
         do {
             try await reader.authorize()
             try requireCurrent(token)
-            guard targetProvider?() == target else { throw HealthSyncError.code("connection_changed") }
             let installationID = try credentials.installationID()
-            // End the previous phone-to-instance authorization before replacing it.
             let wasForeground = foreground
-            let pairEpoch = await stopLocal(unregister: true)
-            operationEpoch = pairEpoch
-            try requireCurrent(pairEpoch)
-            guard !cleanupPending, targetProvider?() == target, currentAccountID == target.accountID else {
-                throw HealthSyncError.code("connection_changed")
-            }
+            operationEpoch = beginCleanup(unregister: true)
+            connecting = connection
+            await cleanupTask?.value
+            // This connect still owns its generation after replacing the old device.
+            guard connecting == nil || connecting == connection else { throw HealthSyncError.code("connection_changed") }
+            connecting = connection
+            try requireCurrent(operationEpoch)
+            guard !cleanupPending, targetProvider?() == target, currentAccountID == target.accountID,
+                  websiteDataStoreIDProvider?() == binding else { throw HealthSyncError.code("connection_changed") }
             foreground = wasForeground
             let response = try await client.request(origin: target.origin, credential: nil, method: "POST",
                 path: "/api/mobile/device/v1/pair", body: [
@@ -116,77 +189,137 @@ final class HealthSyncCoordinator: ObservableObject {
                     "device_name": UIDevice.current.name, "platform": "ios",
                     "app_version": Self.appVersion, "metrics": HealthQueryWindow.metrics,
                 ])
-            try requireCurrent(pairEpoch)
+            guard let deviceID = response["device_id"] as? String, !deviceID.isEmpty,
+                  let credential = response["credential"] as? String, !credential.isEmpty else {
+                throw HealthSyncError.code("invalid_pair")
+            }
+            let candidate = HealthDeviceIdentity(installationID: installationID,
+                accountID: target.accountID, instanceID: target.instanceID,
+                instanceName: target.name, origin: target.origin, deviceID: deviceID,
+                credential: credential, websiteDataStoreID: binding)
+            provisional = candidate
+            guard epoch == operationEpoch else {
+                await revoke(candidate)
+                return "failed"
+            }
             guard targetProvider?() == target, currentAccountID == target.accountID,
-                  let deviceID = response["device_id"] as? String,
-                  let credential = response["credential"] as? String, !credential.isEmpty,
                   let instance = response["instance"] as? [String: Any],
                   instance["id"] as? String == target.instanceID else { throw HealthSyncError.code("invalid_pair") }
-            let identity = HealthDeviceIdentity(installationID: installationID,
-                accountID: target.accountID, instanceID: target.instanceID,
-                instanceName: target.name, origin: target.origin, deviceID: deviceID, credential: credential)
-            try credentials.save(identity)
-            self.identity = identity
-            store = try HealthDeviceStore(directory: directory)
+            let provisionalStore = try HealthDeviceStore(directory: directory)
+            try provisionalStore.update { $0 = HealthSyncState() }
+            store = provisionalStore
+            try credentials.save(candidate)
+            func setup(_ method: String, _ path: String, _ body: [String: Any]) async throws -> [String: Any] {
+                let response = try await client.request(origin: candidate.origin, credential: candidate.credential,
+                    method: method, path: "/api/mobile/device/v1/" + path, body: body)
+                try requireCurrent(operationEpoch)
+                guard currentAccountID == target.accountID, bindingMatches(candidate) else {
+                    throw HealthSyncError.code("connection_changed")
+                }
+                return response
+            }
+            _ = try await setup("PUT", "manifest", manifestBody(background: false))
+            let responseClaim = try await setup("POST", "requests/claim", ["request_id": requestID, "wait_seconds": 0, "max": 1])
+            guard let claims = responseClaim["requests"] as? [[String: Any]], claims.count == 1,
+                  claims[0]["id"] as? String == requestID,
+                  claims[0]["operation"] as? String == "health.connect" else {
+                throw HealthSyncError.code("request_unavailable")
+            }
+            let reservation = try Self.reservation(claims[0])
+            // This single replacement is the commitment point. No await or
+            // observer/query/upload can interleave with publishing the owner.
+            try provisionalStore.update {
+                $0.completed[requestID] = reservation
+                $0.committedDeviceID = candidate.deviceID
+            }
+            identity = candidate
+            committed = true
             uploader.reconnect()
-            await registerObservers()
-            try requireCurrent(pairEpoch)
-            try await manifest()
-            // Pairing binds this exact connect request to the new device.
-            try await claimAndProcess(requestID: requestID, wait: 0)
-            try requireCurrent(pairEpoch)
-            if foreground { beginPolling() }
+            let workEpoch = operationEpoch
+            Task { @MainActor [weak self] in
+                guard let self, self.epoch == workEpoch else { return }
+                await self.registerObservers()
+                guard self.epoch == workEpoch else { return }
+                do {
+                    _ = try await self.synchronize(requestID: requestID, waitForUpload: false)
+                    try await self.sendResults()
+                    if self.foreground { self.beginPolling() }
+                } catch { await self.handle(error, expectedEpoch: workEpoch) }
+            }
             return "connected"
         } catch {
-            guard epoch == operationEpoch else { return "failed" }
-            await handle(error)
-            notice = Self.safeCode(error) == "contract_unsupported" ? "health.update_required" : "health.connection_failed"
+            guard epoch == operationEpoch else {
+                if let provisional { await revoke(provisional) }
+                return "failed"
+            }
+            if !committed {
+                _ = await stopLocal(unregister: !Self.isAuthorizationFailure(error),
+                                    expectedEpoch: operationEpoch, capturedIdentity: provisional)
+            }
+            notice = Self.safeCode(error) == "contract_unsupported" || Self.httpStatus(error) == 426
+                ? "health.update_required" : "health.connection_failed"
             return "failed"
         }
+    }
+
+    private static func reservation(_ claim: [String: Any]) throws -> HealthPendingResult {
+        guard let id = claim["id"] as? String, validID(id),
+              let token = claim["claim_token"] as? String, !token.isEmpty,
+              let operation = claim["operation"] as? String,
+              ["health.connect", "health.refresh"].contains(operation),
+              let metrics = claim["metrics"] as? [String], !metrics.isEmpty,
+              Set(metrics).count == metrics.count,
+              Set(metrics).isSubset(of: Set(HealthQueryWindow.metrics)) else { throw HealthSyncError.code("invalid_claim") }
+        return HealthPendingResult(id: id, claimToken: token, outcome: "failed",
+            states: Dictionary(uniqueKeysWithValues: metrics.map { ($0, "internal") }), error: "internal", uploadID: nil)
     }
 
     /// Called on launch and whenever the account becomes active. Background
     /// observer delivery needs its persisted device even without a WebView.
     func resume(foreground: Bool) async {
         self.foreground = foreground
-        // Cleanup survives failed Keychain deletion and is retried even signed out.
-        if store == nil, FileManager.default.fileExists(atPath: directory.path) {
-            do { store = try HealthDeviceStore(directory: directory) }
-            catch { notice = "health.cleanup_failed"; return }
-        }
-        if cleanupPending || store?.state.cleanupPending == true {
+        if let identity, let accountID = currentAccountID,
+           identity.accountID != accountID || (!startupBindingUntrusted && !bindingMatches(identity)) {
             await stopLocal(unregister: true)
             return
         }
-        guard let accountID = currentAccountID else { return }
-        // Revalidate before the restoration/connection early return: a previous
-        // launch-time resume may still be suspended in an asynchronous request.
-        if let identity, identity.accountID != accountID {
-            await stopLocal(unregister: true)
-            return
-        }
-        guard !restoring, !connecting else { return }
+        guard connecting == nil, !restoring else { return }
         restoring = true
         let token = epoch
         defer { restoring = false }
+        await cleanupTask?.value
+        guard epoch == token else { return }
         do {
-            if identity == nil {
-                guard let saved = try credentials.load() else { return }
-                if accountID != saved.accountID {
-                    await stopLocal(unregister: true)
-                    return
-                }
-                identity = saved
-                store = try HealthDeviceStore(directory: directory)
-                // Only durable payload creation completes local execution.
-                try store?.update {
-                    $0.completed = $0.completed.filter { now().timeIntervalSince($0.value.completedAt) < 7 * 86400 }
-                }
-                guard store?.state.suspended != true else { return }
-                uploader.reconnect()
-                await registerObservers()
+            if store == nil { store = try HealthDeviceStore(directory: directory) }
+            if cleanupPending || store?.state.cleanupPending == true {
+                await stopLocal(unregister: true)
+                return
             }
-            guard identity != nil, store?.state.suspended != true else { return }
+            guard !startupBindingUntrusted else { return }
+            let saved: HealthDeviceIdentity?
+            do { saved = try credentials.load() }
+            catch is DecodingError {
+                await stopLocal(unregister: false)
+                return
+            }
+            guard let saved else {
+                if store?.state.committedDeviceID != nil { await stopLocal(unregister: false) }
+                return
+            }
+            guard store?.state.committedDeviceID == saved.deviceID else {
+                await stopLocal(unregister: true, capturedIdentity: saved)
+                return
+            }
+            guard let accountID = currentAccountID else { return }
+            guard accountID == saved.accountID, bindingMatches(saved) else {
+                await stopLocal(unregister: true, capturedIdentity: saved)
+                return
+            }
+            guard store?.state.suspended != true else { return }
+            identity = saved
+            uploader.reconnect()
+            await registerObservers()
+            try requireCurrent(token)
             try await manifest()
             if let store {
                 for reservation in Array(store.state.completed.values) where !reservation.ready {
@@ -199,7 +332,9 @@ final class HealthSyncCoordinator: ObservableObject {
                 beginPolling()
                 _ = try await synchronize()
             }
-        } catch { if epoch == token { await handle(error) } }
+        } catch is DecodingError {
+            await stopLocal(unregister: true, expectedEpoch: token)
+        } catch { await handle(error, expectedEpoch: token) }
     }
 
     func setBackground() {
@@ -217,18 +352,22 @@ final class HealthSyncCoordinator: ObservableObject {
             do {
                 // Return after durable enqueue, leaving transfers to URLSession.
                 _ = try await self.synchronize(waitForUpload: false)
-            } catch { if self.epoch == token { await self.handle(error) } }
+            } catch { if self.epoch == token { await self.handle(error, expectedEpoch: token) } }
         }
         if epoch == token { backgroundDelivery = enabled }
     }
 
-    private func manifest() async throws {
-        _ = try await request("PUT", "manifest", [
+    private func manifestBody(background: Bool) -> [String: Any] {
+        [
             "contract": 1, "app_version": Self.appVersion,
             "os_version": UIDevice.current.systemVersion,
             "timezone": TimeZone.current.identifier, "metrics": HealthQueryWindow.metrics,
-            "background_delivery": backgroundDelivery, "push_wake": false,
-        ])
+            "background_delivery": background, "push_wake": false,
+        ]
+    }
+
+    private func manifest() async throws {
+        _ = try await request("PUT", "manifest", manifestBody(background: backgroundDelivery))
     }
 
     private func beginPolling() {
@@ -241,7 +380,7 @@ final class HealthSyncCoordinator: ObservableObject {
                 do { try await self.claimAndProcess(requestID: nil, wait: 25) }
                 catch {
                     guard self.epoch == token else { break }
-                    await self.handle(error)
+                    await self.handle(error, expectedEpoch: token)
                     if self.identity == nil { break }
                     let delay = max(5, self.retryAfter?.timeIntervalSince(self.now()) ?? 5)
                     try? await Task.sleep(for: .seconds(delay))
@@ -312,6 +451,11 @@ final class HealthSyncCoordinator: ObservableObject {
             try requireCurrent(token)
             if syncID == activeID { syncTask = nil; syncID = nil }
         }
+        if let requestID, let completed = store?.state.completed[requestID], completed.ready {
+            try requireAccount()
+            try await drainUploads()
+            return completed.states
+        }
         let taskID = UUID()
         let task = Task { @MainActor () throws -> [String: String] in
             try self.requireAccount()
@@ -370,7 +514,8 @@ final class HealthSyncCoordinator: ObservableObject {
     }
 
     private func uploadCompleted(id: String, result: Result<[String: Any], Error>) async {
-        guard let store, store.state.uploads.first == id, identity != nil else { return }
+        guard let store, store.state.uploads.first == id, identity != nil,
+              uploadingIDs.contains(id), (try? requireAccount()) != nil else { return }
         uploadingIDs.remove(id)
         let token = epoch
         do {
@@ -402,7 +547,7 @@ final class HealthSyncCoordinator: ObservableObject {
                 }
             }
             finishWaiters(id, result: .failure(error))
-            await handle(error)
+            await handle(error, expectedEpoch: token)
             if !terminal { scheduleRetry() }
         }
     }
@@ -452,12 +597,13 @@ final class HealthSyncCoordinator: ObservableObject {
         return result
     }
 
-    private func handle(_ error: Error) async {
+    private func handle(_ error: Error, expectedEpoch: UUID) async {
+        guard epoch == expectedEpoch else { return }
         guard let error = error as? HealthSyncError else { return }
         let status: Int?
         if case .http(let value, _, _) = error { status = value } else { status = nil }
         if status == 401 || ["device_unauthorized", "device_revoked", "instance_not_eligible"].contains(error.code) {
-            await stopLocal(unregister: false)
+            await stopLocal(unregister: false, expectedEpoch: expectedEpoch)
         } else if status == 422 || status == 426 || error.code == "contract_unsupported"
                     || ["invalid_payload", "incomplete_window"].contains(error.code) {
             notice = status == 426 || error.code == "contract_unsupported" ? "health.update_required" : "health.connection_failed"
@@ -479,18 +625,29 @@ final class HealthSyncCoordinator: ObservableObject {
             try? await Task.sleep(for: .seconds(max(5, self.retryAfter?.timeIntervalSince(self.now()) ?? 30)))
             guard !Task.isCancelled, self.epoch == token else { return }
             self.retryTask = nil
-            do { try await self.drainUploads() } catch { await self.handle(error) }
+            do { try await self.drainUploads() } catch { await self.handle(error, expectedEpoch: token) }
         }
     }
 
+    private func revoke(_ captured: HealthDeviceIdentity) async {
+        _ = try? await client.request(origin: captured.origin, credential: captured.credential,
+            method: "DELETE", path: "/api/mobile/device/v1/", body: nil)
+    }
+
+    /// Revocation authority is removed synchronously, before account consumers
+    /// can await their unrelated push/network cleanup.
     @discardableResult
-    private func stopLocal(unregister: Bool) async -> UUID {
+    private func beginCleanup(unregister: Bool, expectedEpoch: UUID? = nil,
+                              capturedIdentity: HealthDeviceIdentity? = nil) -> UUID {
+        if let expectedEpoch, expectedEpoch != epoch { return epoch }
+        let old = capturedIdentity ?? identity ?? (try? credentials.load())
         epoch = UUID()
         let stoppedEpoch = epoch
+        connecting = nil
         answerConsent(false)
-        let old = identity ?? (try? credentials.load())
         identity = nil
         reader.stopObserving()
+        uploader.invalidate()
         setBackground()
         syncTask?.cancel()
         syncTask = nil
@@ -498,31 +655,49 @@ final class HealthSyncCoordinator: ObservableObject {
         retryTask?.cancel()
         retryTask = nil
         for id in Array(uploadWaiters.keys) { finishWaiters(id, result: .failure(HealthSyncError.code("connection_changed"))) }
-        // Retain a value-free cleanup marker until secrets and files are gone.
-        // A failed Keychain delete must not revive this connection next launch.
         cleanupPending = true
         let cleanupStore = store ?? (try? HealthDeviceStore(directory: directory))
-        do { try cleanupStore?.prepareForCleanup() }
-        catch { notice = "health.cleanup_failed" }
+        do { try cleanupStore?.prepareForCleanup() } catch { notice = "health.cleanup_failed" }
         var credentialsCleared = false
-        do { try credentials.clear(); credentialsCleared = true }
-        catch { notice = "health.cleanup_failed" }
-        if credentialsCleared {
-            do {
-                if let cleanupStore { try cleanupStore.clear() }
-                else if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
-                cleanupPending = false
-            } catch { notice = "health.cleanup_failed" }
-        }
+        do { try credentials.clear(); credentialsCleared = true } catch { notice = "health.cleanup_failed" }
         store = nil
         uploadingIDs.removeAll()
         retryAfter = nil
-        await uploader.cancelAll()
-        if unregister, let old {
-            _ = try? await client.request(origin: old.origin, credential: old.credential,
-                method: "DELETE", path: "/api/mobile/device/v1/", body: nil)
+        let previous = cleanupTask
+        cleanupTask = Task { @MainActor in
+            await previous?.value
+            await self.uploader.cancelAll()
+            let disabled = await self.reader.disableBackgroundDelivery()
+            guard self.epoch == stoppedEpoch else {
+                if unregister, let old { await self.revoke(old) }
+                return
+            }
+            if credentialsCleared && disabled {
+                do {
+                    if let cleanupStore { try cleanupStore.clear() }
+                    self.cleanupPending = false
+                } catch { self.notice = "health.cleanup_failed" }
+            } else { self.notice = "health.cleanup_failed" }
+            if unregister, let old { await self.revoke(old) }
         }
         return stoppedEpoch
+    }
+
+    @discardableResult
+    private func stopLocal(unregister: Bool, expectedEpoch: UUID? = nil,
+                           capturedIdentity: HealthDeviceIdentity? = nil) async -> UUID {
+        let stopped = beginCleanup(unregister: unregister, expectedEpoch: expectedEpoch, capturedIdentity: capturedIdentity)
+        await cleanupTask?.value
+        return stopped
+    }
+
+    private static func httpStatus(_ error: Error) -> Int? {
+        guard case .http(let status, _, _) = error as? HealthSyncError else { return nil }
+        return status
+    }
+
+    private static func isAuthorizationFailure(_ error: Error) -> Bool {
+        httpStatus(error) == 401 || ["device_unauthorized", "device_revoked", "instance_not_eligible"].contains((error as? HealthSyncError)?.code ?? "")
     }
 
     private func requireCurrent(_ token: UUID) throws {
@@ -540,7 +715,7 @@ final class HealthSyncCoordinator: ObservableObject {
 
     private static func isTerminal(_ error: Error) -> Bool {
         guard let syncError = error as? HealthSyncError, case .http(let status, _, _) = syncError else { return false }
-        return (400..<500).contains(status) && ![408, 429].contains(status)
+        return (400..<500).contains(status) && ![403, 408, 429].contains(status)
     }
 
     private static var appVersion: String {

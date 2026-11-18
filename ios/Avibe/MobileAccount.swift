@@ -504,6 +504,12 @@ private struct StoredMobileSelection: Codable, Equatable {
     let url: URL
 }
 
+enum HealthAccountEvent {
+    case signedOut(explicit: Bool)
+    case authorizationUnavailable
+    case authenticated(accountID: String, instanceIDs: [String])
+}
+
 @MainActor
 final class MobileSessionCoordinator {
     typealias TransportFactory = @MainActor (
@@ -528,6 +534,15 @@ final class MobileSessionCoordinator {
     private let onDetachActiveOwner: @MainActor () -> Bool
     private let onDetachActiveOwnerForAuthenticatedAccount: @MainActor (String) -> Bool
     private let onAuthenticatedAccount: @MainActor (String) -> Bool
+    private let onHealthAccountEvent: @MainActor (HealthAccountEvent) -> Void
+    private var healthAuthorizationAvailable = false
+
+    var healthAccountID: String? {
+        guard healthAuthorizationAvailable, authoritativeTransition == nil else { return nil }
+        if case .resetting = phase { return nil }
+        return snapshot?.account.id
+    }
+
     private let onPreparePushLogout: @MainActor () async -> Void
 
     private var transport: MobileAuthTransporting?
@@ -618,6 +633,7 @@ final class MobileSessionCoordinator {
         onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
         onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) {
         self.defaults = defaults
@@ -632,6 +648,7 @@ final class MobileSessionCoordinator {
         self.onDetachActiveOwnerForAuthenticatedAccount = onDetachActiveOwnerForAuthenticatedAccount
         self.onAuthenticatedAccount = onAuthenticatedAccount
         self.onPreparePushLogout = onPreparePushLogout
+        self.onHealthAccountEvent = onHealthAccountEvent
         transport = nil
     }
 
@@ -728,6 +745,8 @@ final class MobileSessionCoordinator {
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
+                self.healthAuthorizationAvailable = false
+                self.onHealthAccountEvent(.signedOut(explicit: false))
                 try await self.preparePushLogout(
                     publishing: .signedOut, generation: requestGeneration
                 )
@@ -738,6 +757,7 @@ final class MobileSessionCoordinator {
             if let authenticatedAccountID = self.differentAuthenticatedAccountID(
                 discovery
             ) {
+                self.onHealthAccountEvent(.signedOut(explicit: false))
                 let transitionGeneration = self.beginAccountTransition(
                     clearSelection: true
                 )
@@ -867,6 +887,8 @@ final class MobileSessionCoordinator {
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
+                self.healthAuthorizationAvailable = false
+                self.onHealthAccountEvent(.signedOut(explicit: false))
                 try await self.preparePushLogout(
                     publishing: .signedOut, generation: requestGeneration
                 )
@@ -880,6 +902,7 @@ final class MobileSessionCoordinator {
                     let previousAccountID,
                     previousAccountID != fresh.account.id
                 {
+                    self.onHealthAccountEvent(.signedOut(explicit: false))
                     let transitionGeneration = self.beginAccountTransition(
                         clearSelection: true
                     )
@@ -895,6 +918,8 @@ final class MobileSessionCoordinator {
                     )
                     return .signedOut
                 }
+                self.healthAuthorizationAvailable = true
+                self.onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
                 if self.selectedRuntimeOriginIsMissing(in: fresh) {
                     try await self.preparePushLogout(
                         publishing: .signedIn(
@@ -908,6 +933,8 @@ final class MobileSessionCoordinator {
                 self.signedOutStoreIsFresh = false
                 return self.state(for: fresh)
             case .secondFactorRequired(let requirement):
+                self.healthAuthorizationAvailable = false
+                self.onHealthAccountEvent(.authorizationUnavailable)
                 try await self.preparePushLogout(
                     publishing: .twoFactorRequired(
                         requirement.withEmail(fallback: self.secondFactorEmail)
@@ -1117,6 +1144,8 @@ final class MobileSessionCoordinator {
             borrowsCleanup = false
         }
         let resetToken = try beginReset()
+        healthAuthorizationAvailable = false
+        onHealthAccountEvent(.signedOut(explicit: true))
         defer { finishReset(resetToken) }
         // Notify before the first await so the schedule slot loses authority
         // immediately. Its store retains pending durable revocation; a local
@@ -1192,6 +1221,8 @@ final class MobileSessionCoordinator {
             // The first-factor session ended while it owed the second factor:
             // an explicit signed-out answer, like a session read's `401`.
             try requireCurrentGeneration(requestGeneration)
+            healthAuthorizationAvailable = false
+            onHealthAccountEvent(.signedOut(explicit: false))
             try await preparePushLogout(publishing: .signedOut, generation: requestGeneration)
             let transitionGeneration = beginAccountTransition(clearSelection: true)
             try await replaceWithFreshSignedOutStore(generation: transitionGeneration)
@@ -1311,10 +1342,14 @@ final class MobileSessionCoordinator {
                     message: "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
                 )
             }
+            healthAuthorizationAvailable = true
+            onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
             secondFactorEmail = nil
             snapshot = fresh
             return state(for: fresh)
         case .secondFactorRequired(let requirement):
+            healthAuthorizationAvailable = false
+            onHealthAccountEvent(.authorizationUnavailable)
             snapshot = nil
             return .twoFactorRequired(
                 requirement.withEmail(fallback: secondFactorEmail)
@@ -1531,6 +1566,8 @@ final class MobileSessionCoordinator {
         clearSelection: Bool,
         prepareRuntime: Bool = true
     ) {
+        healthAuthorizationAvailable = false
+        onHealthAccountEvent(.authorizationUnavailable)
         snapshot = nil
         if clearSelection {
             clearStoredSelection()

@@ -8,6 +8,7 @@ protocol HealthDataReading {
     /// Return only after the change has been processed or durably queued.
     func startObserving(onChange: @escaping () async -> Void) async -> Bool
     func stopObserving()
+    func disableBackgroundDelivery() async -> Bool
 }
 
 struct HealthQueryWindow {
@@ -523,6 +524,22 @@ final class HealthDataReader: HealthDataReading {
                 enabled = enabled && success
             }
             return enabled && self.observationGeneration == generation
+        }
+        deliveryOperation = operation
+        return await operation.value
+    }
+
+    func disableBackgroundDelivery() async -> Bool {
+        stopObserving()
+        let previous = deliveryOperation
+        let operation = Task { @MainActor in
+            _ = await previous?.value
+            guard HKHealthStore.isHealthDataAvailable() else { return true }
+            return await withCheckedContinuation { continuation in
+                self.store.disableAllBackgroundDelivery { success, error in
+                    continuation.resume(returning: success && error == nil)
+                }
+            }
         }
         deliveryOperation = operation
         return await operation.value

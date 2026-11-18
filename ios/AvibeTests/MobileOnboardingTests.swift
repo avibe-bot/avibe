@@ -2120,6 +2120,7 @@ final class MobileOnboardingTests: XCTestCase {
         refreshTransport.secondFactor = requirement
         var runtime: MobileRuntimeContext?
         var transitions = 0
+        var healthEvents: [String] = []
         let coordinator = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
@@ -2128,6 +2129,13 @@ final class MobileOnboardingTests: XCTestCase {
             onPrepareAccountTransition: {
                 transitions += 1
                 return []
+            },
+            onHealthAccountEvent: { event in
+                switch event {
+                case .signedOut: healthEvents.append("signedOut")
+                case .authorizationUnavailable: healthEvents.append("paused")
+                case .authenticated: healthEvents.append("authenticated")
+                }
             }
         )
         coordinator.activateAccountSurface()
@@ -2141,6 +2149,9 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(coordinator.isSelectedRuntime(selected))
         XCTAssertEqual(transitions, 1)
         XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertTrue(healthEvents.contains("paused"))
+        XCTAssertFalse(healthEvents.contains("signedOut"))
+        XCTAssertNil(coordinator.healthAccountID)
 
         refreshTransport.secondFactor = nil
         refreshTransport.session = snapshot(accountID: "account-1")
@@ -2150,6 +2161,8 @@ final class MobileOnboardingTests: XCTestCase {
             .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: nil)
         )
         XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertEqual(coordinator.healthAccountID, "account-1")
+        XCTAssertEqual(healthEvents.last, "authenticated")
     }
 
     func testRefreshNetworkFailureKeepsSelectedRuntimeAndSnapshot() async throws {
@@ -4122,6 +4135,9 @@ final class MobileOnboardingTests: XCTestCase {
                 transitionEvents.append("detached")
                 return true
             },
+            onHealthAccountEvent: { event in
+                if case .signedOut = event { transitionEvents.append("health_revoked") }
+            },
             onPreparePushLogout: {
                 transitionEvents.append("push_cleanup_started")
                 cleanupStarted.fulfill()
@@ -4139,6 +4155,7 @@ final class MobileOnboardingTests: XCTestCase {
             transitionEvents,
             [
                 "runtime_revoked",
+                "health_revoked",
                 "detached",
                 "push_cleanup_started",
             ]
@@ -4407,6 +4424,7 @@ final class MobileOnboardingTests: XCTestCase {
         onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
         onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) -> MobileSessionCoordinator {
         var queue = transports
@@ -4428,6 +4446,7 @@ final class MobileOnboardingTests: XCTestCase {
             onDetachActiveOwner: onDetachActiveOwner,
             onDetachActiveOwnerForAuthenticatedAccount: onDetachActiveOwnerForAuthenticatedAccount,
             onAuthenticatedAccount: onAuthenticatedAccount,
+            onHealthAccountEvent: onHealthAccountEvent,
             onPreparePushLogout: onPreparePushLogout
         )
     }
