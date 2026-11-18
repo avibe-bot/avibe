@@ -2654,6 +2654,44 @@ def test_hold_then_status_and_release_preserve_unrelated_config(
     assert "HELD:" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("target", ["worktree", "master"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["apply", "dry-run"])
+def test_hold_refuses_another_live_owner_unless_taken_over(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    target: str,
+    dry_run: bool,
+) -> None:
+    """A second owner cannot silently replace a live hold; the same owner may refresh it."""
+    config, commands = hold_fixture(tmp_path, monkeypatch, target)
+    flags = ["--target", target, "--slug", "eval"]
+    assert incus_regression.main(["hold", *flags, "--owner", "smoke-lane", "--reason", "Post-merge smoke"]) == 0
+    held = dict(config)
+    sets = len([command for command in commands if "set" in command])
+    preview = ["--dry-run"] if dry_run else []
+
+    capsys.readouterr()
+    assert (
+        incus_regression.main(["hold", *flags, *preview, "--owner", "release-lane", "--reason", "RC hand pass"])
+        == 1
+    )
+    assert "already held by smoke-lane" in capsys.readouterr().err
+    assert config == held
+    assert len([command for command in commands if "set" in command]) == sets
+
+    # The current owner refreshes its own hold without --take-over.
+    assert incus_regression.main(["hold", *flags, *preview, "--owner", "smoke-lane", "--reason", "Still smoking"]) == 0
+    assert incus_regression.main(
+        ["hold", *flags, *preview, "--owner", "release-lane", "--reason", "Agreed handover", "--take-over"]
+    ) == 0
+    if dry_run:
+        assert config == held
+    else:
+        assert config["user.avibe-regression.hold.owner"] == "release-lane"
+        assert config["user.avibe-regression.hold.reason"] == "Agreed handover"
+
+
 @pytest.mark.parametrize("mode", ["up", "down"])
 def test_compatibility_wrapper_passes_hold_owner(tmp_path, mode):
     python = tmp_path / "fake-python"
