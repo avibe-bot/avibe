@@ -2747,6 +2747,8 @@ final class DirectPathAppTests: XCTestCase {
         let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
 
         timing.advance(by: .seconds(5))
+        // Before the long-wait mark an ordinary open offers no Cancel yet.
+        XCTAssertFalse(try XCTUnwrap(app.runtimeOpenAttempt).offersCancel)
         app.handleRuntimeNavigation(
             RuntimeNavigationEvent(stage: .handedOff, destination: .external),
             attemptID: attemptID,
@@ -2765,6 +2767,10 @@ final class DirectPathAppTests: XCTestCase {
             ),
             .loading
         )
+        // No timeout will end this loading layer: it offers Cancel at once,
+        // before the long-wait mark.
+        XCTAssertFalse(handedOff.isTakingLong)
+        XCTAssertTrue(handedOff.offersCancel)
 
         app.handleRuntimeNavigation(
             RuntimeNavigationEvent(stage: .restarting, destination: .external),
@@ -2787,10 +2793,12 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
         XCTAssertNil(app.runtimeOpenAttempt?.deadline)
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).offersCancel)
 
         timing.advance(by: .seconds(120))
         XCTAssertEqual(app.route, .browser(runtime))
         XCTAssertNil(app.runtimeOpenNotice)
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).offersCancel)
 
         app.cancelRuntimeOpen(attemptID: attemptID)
         XCTAssertTrue(isOnInstancePicker(app))
