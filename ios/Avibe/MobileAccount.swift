@@ -507,8 +507,9 @@ protocol MobileAuthTransporting: AnyObject {
     func verifySecondFactor(
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
-    /// `POST /api/mobile/auth/start` for Google or GitHub. Throws
-    /// `providerUnavailable`, `rate_limited`, or `network`.
+    /// `POST /api/mobile/auth/start`: a browser address for Google and GitHub,
+    /// the server's nonce for Apple. Throws `providerUnavailable`,
+    /// `rate_limited`, or `network`.
     func providerStart(
         provider: MobileSignInProvider,
         challenge: String,
@@ -520,6 +521,14 @@ protocol MobileAuthTransporting: AnyObject {
     func providerExchange(
         transactionID: String,
         code: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange
+    /// `POST /api/mobile/auth/apple`, then the session read; errors as
+    /// `providerExchange`.
+    func appleExchange(
+        transactionID: String,
+        identityToken: String,
+        authorizationCode: String,
         verifier: String
     ) async throws -> MobileProviderExchange
     func logout() async throws
@@ -554,6 +563,7 @@ final class MobileSessionCoordinator {
     private let transportFactory: TransportFactory
     private let passkeyAuthenticator: MobilePasskeyAuthenticating
     private let webAuthenticator: MobileWebAuthenticating
+    private let appleAuthorizer: MobileAppleAuthorizing
     /// The account generation whose provider sign-in the backend attested created the account.
     /// Memory only: any account transition moves the generation on, which retires it.
     private var providerCreatedGeneration: Int?
@@ -648,6 +658,7 @@ final class MobileSessionCoordinator {
         },
         passkeyAuthenticator: MobilePasskeyAuthenticating? = nil,
         webAuthenticator: MobileWebAuthenticating? = nil,
+        appleAuthorizer: MobileAppleAuthorizing? = nil,
         onOpenRuntime: @escaping (MobileRuntimeContext) -> Void,
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
@@ -664,6 +675,7 @@ final class MobileSessionCoordinator {
         self.passkeyAuthenticator = passkeyAuthenticator
             ?? MobilePasskeyAuthenticator()
         self.webAuthenticator = webAuthenticator ?? MobileWebAuthenticator()
+        self.appleAuthorizer = appleAuthorizer ?? MobileAppleAuthorizer()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
         self.onDetachActiveOwner = onDetachActiveOwner
@@ -852,8 +864,9 @@ final class MobileSessionCoordinator {
         providerCreatedGeneration == generation && snapshot != nil
     }
 
-    /// Google or GitHub in the system sign-in window, then the backend's one-time exchange into
-    /// this store (contract: `_tmp/ios-login/contract-backend.md`). A login transition like the
+    /// Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then the
+    /// backend's one-time exchange into this store (contract: avibe-bot-backend's mobile
+    /// provider exchange). A login transition like the
     /// email code's: it starts from a fresh signed-out store, and every attempt that does not
     /// sign in, a cancel included, rotates to a fresh one. The verifier, state, code and
     /// transaction never leave native memory and the transport's fixed scripts.
@@ -875,40 +888,49 @@ final class MobileSessionCoordinator {
                     state: secrets.state
                 )
                 try self.requireCurrentGeneration(loginGeneration)
-                let controlPlane = self.controlPlane.baseURL
-                guard
-                    MobileProviderRoute.isAllowedBrowserURL(start.browserURL, controlPlane: controlPlane),
-                    let callbackHost = controlPlane.host
-                else {
-                    throw MobileAccountError.network
-                }
                 // The store is in use from here: a cancel below still retires it.
                 self.signedOutStoreIsFresh = false
-                let returned = try await self.webAuthenticator.authenticate(
-                    url: start.browserURL,
-                    callbackHost: callbackHost,
-                    callbackPath: MobileProviderRoute.callbackPath,
-                    presentationAnchor: presentationAnchor
-                )
-                try self.requireCurrentGeneration(loginGeneration)
-                let code: String
-                switch MobileProviderRoute.callback(returned, controlPlane: controlPlane, state: secrets.state) {
-                case .code(let value):
-                    code = value
-                case .cancelled:
-                    throw MobileAccountError.providerCancelled
-                case .emailUnverified:
-                    throw MobileAccountError.providerEmailUnverified
-                case .unavailable:
-                    throw MobileAccountError.providerUnavailable
-                case .invalid:
-                    throw MobileAccountError.invalidOrExpired
+                let exchange: MobileProviderExchange
+                switch (provider, start) {
+                case (.google, .browser(let transactionID, let url)),
+                     (.github, .browser(let transactionID, let url)):
+                    let code = try await self.authenticateInBrowser(
+                        url: url,
+                        state: secrets.state,
+                        presentationAnchor: presentationAnchor,
+                        generation: loginGeneration
+                    )
+                    exchange = try await self.requireTransport().providerExchange(
+                        transactionID: transactionID,
+                        code: code,
+                        verifier: secrets.verifier
+                    )
+                case (.apple, .apple(let transactionID, let nonce)):
+                    guard !nonce.isEmpty else {
+                        throw MobileAccountError.network
+                    }
+                    let credential = try await self.appleAuthorizer.authorize(
+                        nonce: MobileAppleNonce.hashed(nonce),
+                        state: secrets.state,
+                        presentationAnchor: presentationAnchor
+                    )
+                    try self.requireCurrentGeneration(loginGeneration)
+                    guard
+                        let returnedState = credential.state,
+                        MobileProviderRoute.constantTimeEqual(returnedState, secrets.state)
+                    else {
+                        throw MobileAccountError.invalidOrExpired
+                    }
+                    exchange = try await self.requireTransport().appleExchange(
+                        transactionID: transactionID,
+                        identityToken: credential.identityToken,
+                        authorizationCode: credential.authorizationCode,
+                        verifier: secrets.verifier
+                    )
+                default:
+                    // The backend answered with the other provider class.
+                    throw MobileAccountError.network
                 }
-                let exchange = try await self.requireTransport().providerExchange(
-                    transactionID: start.transactionID,
-                    code: code,
-                    verifier: secrets.verifier
-                )
                 try self.requireCurrentGeneration(loginGeneration)
                 self.clearStoredSelection()
                 self.secondFactorEmail = nil
@@ -922,6 +944,42 @@ final class MobileSessionCoordinator {
                 }
                 throw error
             }
+        }
+    }
+
+    /// Google or GitHub: opens the answered browser address, if it is the control plane's launch
+    /// route, and returns the one-time code from the exact callback.
+    private func authenticateInBrowser(
+        url: URL,
+        state: String,
+        presentationAnchor: ASPresentationAnchor,
+        generation loginGeneration: Int
+    ) async throws -> String {
+        let controlPlane = self.controlPlane.baseURL
+        guard
+            MobileProviderRoute.isAllowedBrowserURL(url, controlPlane: controlPlane),
+            let callbackHost = controlPlane.host
+        else {
+            throw MobileAccountError.network
+        }
+        let returned = try await webAuthenticator.authenticate(
+            url: url,
+            callbackHost: callbackHost,
+            callbackPath: MobileProviderRoute.callbackPath,
+            presentationAnchor: presentationAnchor
+        )
+        try requireCurrentGeneration(loginGeneration)
+        switch MobileProviderRoute.callback(returned, controlPlane: controlPlane, state: state) {
+        case .code(let code):
+            return code
+        case .cancelled:
+            throw MobileAccountError.providerCancelled
+        case .emailUnverified:
+            throw MobileAccountError.providerEmailUnverified
+        case .unavailable:
+            throw MobileAccountError.providerUnavailable
+        case .invalid:
+            throw MobileAccountError.invalidOrExpired
         }
     }
 
@@ -1392,8 +1450,9 @@ final class MobileSessionCoordinator {
         with snapshot: MobileSessionSnapshot
     ) {
         generation += 1
-        // A sign-in window still open belongs to the generation that just ended.
+        // A sign-in window or sheet still open belongs to the generation that just ended.
         webAuthenticator.cancel()
+        appleAuthorizer.cancel()
         authoritativeTransition = nil
         clearStoredSelection()
         self.snapshot = snapshot
@@ -1641,8 +1700,9 @@ final class MobileSessionCoordinator {
         clearSelection: Bool
     ) -> Int {
         generation += 1
-        // A sign-in window still open belongs to the generation that just ended.
+        // A sign-in window or sheet still open belongs to the generation that just ended.
         webAuthenticator.cancel()
+        appleAuthorizer.cancel()
         authoritativeTransition = nil
         invalidateAccount(clearSelection: clearSelection)
         return generation
@@ -1677,8 +1737,9 @@ final class MobileSessionCoordinator {
         let token = UUID()
         phase = .resetting(token)
         generation += 1
-        // A sign-in window still open belongs to the generation that just ended.
+        // A sign-in window or sheet still open belongs to the generation that just ended.
         webAuthenticator.cancel()
+        appleAuthorizer.cancel()
         authoritativeTransition = nil
         pendingStoreReleaseBarriers.append(
             contentsOf: onPrepareAccountTransition()

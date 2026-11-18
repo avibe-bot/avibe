@@ -741,6 +741,15 @@ private final class FixtureMobileAuthTransport: MobileAuthTransporting {
         throw MobileAccountError.network
     }
 
+    func appleExchange(
+        transactionID: String,
+        identityToken: String,
+        authorizationCode: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        throw MobileAccountError.network
+    }
+
     func passkeyChallenge() async throws -> MobilePasskeyChallenge {
         throw MobileAccountError.passkeyUnavailable
     }

@@ -203,15 +203,24 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         guard response.boolean("ok") else {
             throw Self.mappedError(for: .providerStart, response: response)
         }
-        guard
-            let transactionID = response.string("transactionID"),
-            !transactionID.isEmpty,
-            let rawBrowserURL = response.string("browserURL"),
-            let browserURL = URL(string: rawBrowserURL)
-        else {
+        guard let transactionID = response.string("transactionID"), !transactionID.isEmpty else {
             throw MobileAccountError.network
         }
-        return MobileProviderStart(transactionID: transactionID, browserURL: browserURL)
+        switch provider {
+        case .google, .github:
+            guard
+                let rawBrowserURL = response.string("browserURL"),
+                let browserURL = URL(string: rawBrowserURL)
+            else {
+                throw MobileAccountError.network
+            }
+            return .browser(transactionID: transactionID, url: browserURL)
+        case .apple:
+            guard let nonce = response.string("nonce"), !nonce.isEmpty else {
+                throw MobileAccountError.network
+            }
+            return .apple(transactionID: transactionID, nonce: nonce)
+        }
     }
 
     func providerExchange(
@@ -223,9 +232,40 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             Self.providerExchangeScript,
             operation: .providerExchange,
             arguments: [
-                "transactionID": transactionID,
-                "code": code,
-                "verifier": verifier,
+                "path": "/api/mobile/auth/exchange",
+                "payload": [
+                    "transaction_id": transactionID,
+                    "code": code,
+                    "code_verifier": verifier,
+                ],
+            ]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .providerExchange, response: response)
+        }
+        return MobileProviderExchange(
+            discovery: try decodeDiscovery(response),
+            accountCreated: response.boolean("accountCreated")
+        )
+    }
+
+    func appleExchange(
+        transactionID: String,
+        identityToken: String,
+        authorizationCode: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        let response = try await evaluateJSON(
+            Self.providerExchangeScript,
+            operation: .providerExchange,
+            arguments: [
+                "path": "/api/mobile/auth/apple",
+                "payload": [
+                    "transaction_id": transactionID,
+                    "identity_token": identityToken,
+                    "authorization_code": authorizationCode,
+                    "code_verifier": verifier,
+                ],
             ]
         )
         guard response.boolean("ok") else {
@@ -1131,11 +1171,7 @@ extension MobileAuthTransport: WKNavigationDelegate {
               retryAfter: Number(response.headers.get("retry-after")) || null
             });
           }
-          if (
-            response.status !== 200
-            || typeof payload?.transaction_id !== "string"
-            || typeof payload?.browser_url !== "string"
-          ) {
+          if (response.status !== 200 || typeof payload?.transaction_id !== "string") {
             return failed("invalid_response", response.status, "Sign-in start returned an invalid response.");
           }
           return JSON.stringify({
@@ -1143,31 +1179,33 @@ extension MobileAuthTransport: WKNavigationDelegate {
             stage,
             status: response.status,
             transactionID: payload.transaction_id,
-            browserURL: payload.browser_url
+            browserURL: typeof payload.browser_url === "string" ? payload.browser_url : null,
+            nonce: typeof payload.nonce === "string" ? payload.nonce : null
           });
         """
     )
 
-    // Redeems the one-time code into this store's cookies (204), then reads the session as the
-    // other sign-ins do. `Avibe-Account-Created: 1` is the backend's attestation that this
+    // Redeems the Google/GitHub one-time code (`/api/mobile/auth/exchange`) or Apple's token and
+    // code (`/api/mobile/auth/apple`) into this store's cookies (204), then reads the session as
+    // the other sign-ins do. `path` is one of those two fixed routes, set natively. `Avibe-Account-Created: 1` is the backend's attestation that this
     // exchange created the account; it is relayed as one bit and decides nothing.
     private static let providerExchangeScript = boundedScript(
         initialStage: .exchange,
         body: """
-          const exchangeResponse = await boundedFetch(new URL("/api/mobile/auth/exchange", window.location.origin), {
+          const exchangeResponse = await boundedFetch(new URL(path, window.location.origin), {
             method: "POST",
             credentials: "same-origin",
             cache: "no-store",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({transaction_id: transactionID, code, code_verifier: verifier})
+            body: JSON.stringify(payload)
           });
           if (exchangeResponse.status !== 204) {
-            const payload = await exchangeResponse.json().catch(() => null);
+            const answer = await exchangeResponse.json().catch(() => null);
             return JSON.stringify({
               ok: false,
               stage,
               status: exchangeResponse.status,
-              code: typeof payload?.error === "string" ? payload.error : null,
+              code: typeof answer?.error === "string" ? answer.error : null,
               retryAfter: Number(exchangeResponse.headers.get("retry-after")) || null
             });
           }

@@ -386,7 +386,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     else {
                         throw MobileAccountError(
                             code: "invalid_argument",
-                            message: "The sign-in provider is not one the App offers."
+                            message: "The sign-in provider is not google, github or apple."
                         )
                     }
                     guard let window = trustedWebView?.window else {

@@ -3,11 +3,12 @@ import CryptoKit
 import Foundation
 import Security
 
-/// The other accounts the App signs in with through the system sign-in window. Apple is on hold
-/// (owner, 2026-11-18) and is not a case here.
+/// The other accounts the App signs in with: Google and GitHub in the system sign-in window,
+/// Apple in its native sheet (owner, 2026-11-18).
 enum MobileSignInProvider: String, CaseIterable {
     case google
     case github
+    case apple
 }
 
 /// One attempt's PKCE verifier and state: 32 random bytes each, unpadded base64url. They live in
@@ -38,10 +39,26 @@ struct MobileProviderSecrets: Equatable {
     }
 }
 
-/// What `POST /api/mobile/auth/start` returns for Google and GitHub.
-struct MobileProviderStart: Equatable {
-    let transactionID: String
-    let browserURL: URL
+/// What `POST /api/mobile/auth/start` returns: a browser address for Google and GitHub, the
+/// server's raw nonce for Apple.
+enum MobileProviderStart: Equatable {
+    case browser(transactionID: String, url: URL)
+    case apple(transactionID: String, nonce: String)
+}
+
+/// What Sign in with Apple hands back: the identity token and the one-use authorization code
+/// (both UTF-8), and the request's state as Apple returned it.
+struct MobileAppleCredential: Equatable {
+    let identityToken: String
+    let authorizationCode: String
+    let state: String?
+}
+
+enum MobileAppleNonce {
+    /// The `nonce` an Apple ID request carries: lowercase hex SHA256 over the server's raw nonce.
+    static func hashed(_ raw: String) -> String {
+        SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 /// What the exchange settles: the session read after it, and whether the backend attested that
@@ -102,7 +119,9 @@ enum MobileProviderRoute {
             components.port == nil,
             components.user == nil,
             components.password == nil,
-            components.fragment == nil,
+            // The backend may end the address with an empty `#` so the browser drops a fragment
+            // Supabase put on an earlier hop; any fragment with content is refused.
+            components.fragment == nil || components.fragment == "",
             components.percentEncodedPath == callbackPath,
             let items = components.queryItems
         else {
@@ -143,7 +162,7 @@ enum MobileProviderRoute {
         }
     }
 
-    private static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
+    static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
         let left = Array(lhs.utf8)
         let right = Array(rhs.utf8)
         guard left.count == right.count else {
@@ -251,6 +270,130 @@ final class MobileWebAuthenticator: NSObject, MobileWebAuthenticating {
 extension MobileWebAuthenticator: ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         guard let pending, pending.session === session else {
+            return ASPresentationAnchor()
+        }
+        return pending.anchor
+    }
+}
+
+@MainActor
+protocol MobileAppleAuthorizing: AnyObject {
+    /// Runs the Sign in with Apple sheet for the email scope with `nonce` (already hashed) and
+    /// `state`. Throws `providerCancelled` when the person dismisses it, `network` otherwise.
+    func authorize(
+        nonce: String,
+        state: String,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileAppleCredential
+    /// Closes an open sheet; its caller gets `providerCancelled`. Nothing open: no effect.
+    func cancel()
+}
+
+@MainActor
+final class MobileAppleAuthorizer: NSObject, MobileAppleAuthorizing {
+    private struct Pending {
+        let controller: ASAuthorizationController
+        let anchor: ASPresentationAnchor
+        let continuation: CheckedContinuation<MobileAppleCredential, Error>
+    }
+
+    private var pending: Pending?
+
+    func authorize(
+        nonce: String,
+        state: String,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileAppleCredential {
+        guard pending == nil else {
+            throw MobileAccountError.busy
+        }
+        let request = ASAuthorizationAppleIDProvider().createRequest()
+        // The name is never sent anywhere, so it is not asked for.
+        request.requestedScopes = [.email]
+        request.nonce = nonce
+        request.state = state
+        let controller = ASAuthorizationController(authorizationRequests: [request])
+        controller.delegate = self
+        controller.presentationContextProvider = self
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = Pending(controller: controller, anchor: presentationAnchor, continuation: continuation)
+                if Task.isCancelled {
+                    finish(controller, with: .failure(MobileAccountError.providerCancelled))
+                    return
+                }
+                controller.performRequests()
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancel()
+            }
+        }
+    }
+
+    func cancel() {
+        guard let pending else { return }
+        pending.controller.cancel()
+        finish(pending.controller, with: .failure(MobileAccountError.providerCancelled))
+    }
+
+    static func mappedError(_ error: Error) -> MobileAccountError {
+        if let error = error as? ASAuthorizationError, error.code == .canceled {
+            return .providerCancelled
+        }
+        return .network
+    }
+
+    private func finish(
+        _ controller: ASAuthorizationController,
+        with result: Result<MobileAppleCredential, Error>
+    ) {
+        guard let pending, pending.controller === controller else {
+            return
+        }
+        self.pending = nil
+        pending.continuation.resume(with: result)
+    }
+}
+
+extension MobileAppleAuthorizer: ASAuthorizationControllerDelegate {
+    func authorizationController(
+        controller: ASAuthorizationController,
+        didCompleteWithAuthorization authorization: ASAuthorization
+    ) {
+        guard
+            let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+            let identityToken = credential.identityToken.flatMap({ String(data: $0, encoding: .utf8) }),
+            let authorizationCode = credential.authorizationCode.flatMap({ String(data: $0, encoding: .utf8) }),
+            !identityToken.isEmpty,
+            !authorizationCode.isEmpty
+        else {
+            finish(controller, with: .failure(MobileAccountError.network))
+            return
+        }
+        finish(
+            controller,
+            with: .success(
+                MobileAppleCredential(
+                    identityToken: identityToken,
+                    authorizationCode: authorizationCode,
+                    state: credential.state
+                )
+            )
+        )
+    }
+
+    func authorizationController(
+        controller: ASAuthorizationController,
+        didCompleteWithError error: Error
+    ) {
+        finish(controller, with: .failure(Self.mappedError(error)))
+    }
+}
+
+extension MobileAppleAuthorizer: ASAuthorizationControllerPresentationContextProviding {
+    func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
+        guard let pending, pending.controller === controller else {
             return ASPresentationAnchor()
         }
         return pending.anchor
