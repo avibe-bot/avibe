@@ -39,7 +39,12 @@ export default defineConfig({
   // without this the unit suite fails on files it was never meant to collect.
   // Excluding the directory — rather than renaming the specs — keeps the trap
   // disarmed for every Playwright file added later.
-  test: { exclude: [...configDefaults.exclude, 'e2e/**'] },
+  test: {
+    exclude: [...configDefaults.exclude, 'e2e/**'],
+    // Leave browser storage to jsdom, not Node's process-wide Web Storage.
+    execArgv: process.allowedNodeEnvironmentFlags.has('--no-experimental-webstorage')
+      ? ['--no-experimental-webstorage'] : [],
+  },
   plugins: [react(), emojiCatalog(), firstScreenPreload()],
   build: {
     rolldownOptions: {
