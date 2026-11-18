@@ -204,6 +204,22 @@ def test_every_bot_keeps_the_record_based_memory_and_agreement_rules_once(bot):
         assert superseded not in bot_text
 
 
+@pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
+def test_every_bot_keeps_the_brief_and_user_message_rules_once(bot):
+    """Owner-approved wording 2026-11-18 (bots.md D9), folded into "Handing out work"."""
+    blocks = _blocks(enabled_agents=_ROSTER, bot=bot)
+    shared = blocks["bot-harness-prompt"]
+    bot_text = "".join(text for module, text in blocks.items() if module.startswith("bot-"))
+    for line in (
+        "In a brief, say what the Session may decide without you.",
+        "When the user writes while you are working, answer them before anything else.",
+        "Before sending them a message, ask whether it changes what they will do or decide; if not, keep it for"
+        " your next message.",
+    ):
+        assert bot_text.count(line) == 1 and line in shared
+    assert shared.index("say the goal, what is decided, and what to report. In a brief") > 0
+
+
 def test_bot_harness_prompt_teaches_read_receipts():
     built = _blocks(enabled_agents=_ROSTER, bot=_CSO)["bot-harness-prompt"]
     assert "read receipt with its last reply" in built

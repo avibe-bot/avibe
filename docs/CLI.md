@@ -974,8 +974,9 @@ The command prints one `run` object: its `id`, `status`, `run_type`,
 `no_reply` is included when set. `--sync` replaces this with the finished run
 record; historical callback fields remain readable in stored records.
 
-Successful final callbacks are retired. The target's input tells it how to
-report to the sender with `vibe agent run`, except when the sender is a Session
+Successful final callbacks are retired. The target's input tells it to
+report to the sender with `vibe agent run` when the work is done, it needs a
+decision, or a problem changes the plan, except when the sender is a Session
 that the receiver itself dispatched. If the target handles the message without
 writing back, Avibe sends the sender one read receipt once the target is idle
 with no pending work. It includes the last reply with its formatting, up to

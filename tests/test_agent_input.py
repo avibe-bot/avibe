@@ -147,20 +147,23 @@ def test_every_harness_input_names_its_source_on_its_first_line(tmp_path, trigge
         pytest.param(
             {"source_kind": "agent", "source_actor": "ses_main", "callback_session_id": "ses_main",
              "callback_mode": "failure"},
-            "When the work is done or you need a decision, you can report to @<bot:main> with "
+            "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
+            "not for progress. Open with which of the three it is. Report to @<bot:main> with "
             "`vibe agent run --bot main --message ...`.",
             id="bot-sender",
         ),
         pytest.param(
             {"source_kind": "agent", "source_actor": "sescaller01", "callback_session_id": "sescaller01",
              "callback_mode": "failure"},
-            "When the work is done or you need a decision, you can report to #sescaller01 with "
+            "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
+            "not for progress. Open with which of the three it is. Report to #sescaller01 with "
             "`vibe agent run --session-id sescaller01 --message ...`.",
             id="session-sender",
         ),
         pytest.param(
             {"source_kind": "agent", "source_actor": "ses_main", "callback_session_id": "ses_main"},
-            "When the work is done or you need a decision, you can report to @<bot:main> with "
+            "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
+            "not for progress. Open with which of the three it is. Report to @<bot:main> with "
             "`vibe agent run --bot main --message ...`.",
             id="legacy-callback",
         ),
@@ -204,7 +207,8 @@ def test_harness_hint_omits_reverse_dispatch_report_target():
         "source_actor": "sescaller01",
     }
     assert harness_hint(spec, receiver="sesreceiver01") == (
-        "When the work is done or you need a decision, you can report to #sescaller01 with "
+        "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
+        "not for progress. Open with which of the three it is. Report to #sescaller01 with "
         "`vibe agent run --session-id sescaller01 --message ...`."
     )
     spec["suppress_report_hint"] = True
@@ -214,7 +218,11 @@ def test_harness_hint_omits_reverse_dispatch_report_target():
 def test_a_merged_batch_names_each_distinct_report_target_once():
     from core.agent_input import harness_hints
 
-    bot = "When the work is done or you need a decision, you can report to @<bot:main> with `vibe agent run --bot main --message ...`."
+    bot = (
+        "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
+        "not for progress. Open with which of the three it is. Report to @<bot:main> with "
+        "`vibe agent run --bot main --message ...`."
+    )
     assert harness_hints({"harness_hints": [bot, "", bot]}) == (bot,)
 
 

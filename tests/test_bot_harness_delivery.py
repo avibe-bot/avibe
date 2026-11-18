@@ -105,7 +105,7 @@ async def test_bot_dispatch_uses_shared_admission(home, capsys, monkeypatch, bus
                 assert f"[Harness: agent run {run_id} from @<bot:{sender}>]" in rendered
                 assert ("[No reply needed.]" in rendered) == ("--no-reply" in flags)
                 if "--no-reply" not in flags:
-                    assert f"report to @<bot:{sender}>" in rendered
+                    assert f"Report to @<bot:{sender}>" in rendered
         assert run["metadata"]["callback_mode"] == "failure"
         if not busy:
             manager._start_persisted_turn.assert_awaited_once()
