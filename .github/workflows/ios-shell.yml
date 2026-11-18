@@ -175,11 +175,16 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -derivedDataPath "$RUNNER_TEMP/AvibeDerivedData" \
             ENABLE_DEBUG_DYLIB=NO IROH_DEBUG_DYLIB_PATH= IROH_DEBUG_DYLIB_INPUT= \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            PROVISIONING_PROFILE_SPECIFIER= APP_PROVISIONING_PROFILE_SPECIFIER= \
+            NOTIFICATION_SERVICE_PROFILE_SPECIFIER= LIVE_ACTIVITY_PROFILE_SPECIFIER= \
             build
+          # linkd runs App Intents only for a signed bundle ("Rejecting invalid
+          # client due to requiresValidBundle" when unsigned).
           app="$(find "$RUNNER_TEMP/AvibeDerivedData/Build/Products" -maxdepth 2 -name Avibe.app -type d | head -1)"
           echo "installing $app"
           xcrun simctl install "$SIMULATOR_ID" "$app"
+          codesign -dv "$app" 2>&1 | head -5 || true
 
       - name: Start the voice capture probe's stand-in instance (draft only)
         run: |
