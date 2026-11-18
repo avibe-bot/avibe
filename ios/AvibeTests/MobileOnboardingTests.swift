@@ -5262,17 +5262,22 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
     }
 
-    func testRemovedRuntimeHealthAuthenticationWaitsForPushCleanupAndLogoutRetiresIt() async throws {
-        for signOut in [false, true] {
+    func testHealthAuthenticationWaitsForPushCleanupAndLogoutRetiresIt() async throws {
+        // Since #3953 a refresh settles push first only when the persisted push account
+        // names another account; removing the selected instance runs no push cleanup.
+        for scenario in ["pushCleanup", "pushCleanupThenSignOut", "removedInstance"] {
+            let signOut = scenario == "pushCleanupThenSignOut"
+            let removedInstance = scenario == "removedInstance"
             let defaults = makeDefaults()
             let store = makeAccountStore(defaults: defaults)
             let health = try makeSavedHealthFixture(binding: store.identifier)
             let initial = FakeMobileAuthTransport()
             initial.session = snapshot(accountID: "account-1")
             let refreshTransport = FakeMobileAuthTransport()
-            refreshTransport.session = snapshot(accountID: "account-1", instances: [])
-            let started = expectation(description: "removed origin cleanup")
-            let release = expectation(description: "release removed origin cleanup")
+            refreshTransport.session = removedInstance
+                ? snapshot(accountID: "account-1", instances: []) : snapshot(accountID: "account-1")
+            let started = expectation(description: "push cleanup")
+            let release = expectation(description: "release push cleanup")
             var cleanups = 0
             var forward = false
             var authentications = 0
@@ -5294,8 +5299,21 @@ final class MobileOnboardingTests: XCTestCase {
             _ = try await coordinator.bootstrap()
             _ = try coordinator.selectInstance(id: instance.id)
             coordinator.activateAccountSurface()
+            if !removedInstance {
+                // The persisted push record names another account, so this refresh settles push first.
+                defaults.set("account-0", forKey: "avibe.mobile.pushAccount")
+            }
             forward = true
             let refresh = Task { try await coordinator.refresh() }
+            if removedInstance {
+                _ = try await refresh.value
+                try await waitForHealthRestore(health)
+                XCTAssertEqual(cleanups, 0)
+                XCTAssertEqual(authentications, 1)
+                XCTAssertEqual(health.reader.starts, 1)
+                XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+                continue
+            }
             await fulfillment(of: [started], timeout: 10)
             XCTAssertNil(coordinator.healthAccountID)
             XCTAssertEqual(authentications, 0)
