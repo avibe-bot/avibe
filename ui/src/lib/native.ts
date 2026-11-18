@@ -3,6 +3,7 @@ export type NativeCapability =
   | 'accountPresentation'
   | 'app'
   | 'badge'
+  | 'health'
   | 'haptics'
   | 'instancePresentation'
   | 'keyboardResizesViewport'
@@ -156,6 +157,11 @@ async function callNative<T>(
 
 export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
   return callNative<NativeAppInfo>('app', 'app.info');
+}
+
+/** Establishes a connection only; request completion comes from the instance API. */
+export async function nativeHealthConnect(params: { requestId: string; pairingCode: string }): Promise<{ state: 'connected' | 'declined' | 'failed' } | null> {
+  return callNative('health', 'health.connect', params);
 }
 
 export async function nativeSystemScheduleRequest(

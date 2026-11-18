@@ -83,6 +83,7 @@ import { onPageReactivated } from './lib/pageActivity';
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
 // the file browser / xterm code loads only when an app actually opens.
+const HealthLandingPage = lazy(() => import('./components/health/HealthRequest'));
 const AppsFileBrowserPage = lazy(() =>
   import('./components/workbench/AppsFileBrowserPage').then((m) => ({ default: m.AppsFileBrowserPage })),
 );
@@ -887,6 +888,7 @@ const WorkbenchRouteSurface = () => {
       }
     />
     <Route path="/chat/:sessionId" element={<ChatPage />} />
+    <Route path="/mobile/health/:requestId" element={<HealthLandingPage />} />
 
     {settingsRoute()}
 
