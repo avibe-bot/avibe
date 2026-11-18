@@ -53,7 +53,7 @@ Local evidence before PR:
 - 26 focused cases cover fake-device pairing and status, hostile input,
   route-scoped remote bearer authentication, private file/media/Show boundaries,
   wait/callback ownership, push filtering/budget, retention and CLI contracts.
-  This includes the canonical `AUTH-SETUP-180` closed-loop scenario and the
+  This includes the canonical `AUTH-SETUP-186` closed-loop scenario and the
   controller maintenance lifecycle.
 - 707 adjacent Show, CLI invocation authority and instance operation cases pass.
 - Adjacent message mirror, file browser, media, Web Push and scenario citation
@@ -175,7 +175,7 @@ Local repair evidence:
   Linux procfs cases remain for CI.
 - All 1,095 health, file-browser, media, Show and ACL consumer cases pass on
   macOS, including prior firmlink, `/.vol`, percent-root, missing-root and
-  target-error cases. `AUTH-SETUP-180` also passes independently with the real
+  target-error cases. `AUTH-SETUP-186` also passes independently with the real
   MobileStore, SQLite, CLI parser/executor and ASGI device routes; only the
   phone, control plane and push transport are synthetic.
 - Main's bridge decision (a) is reflected in `health-data.md`: connected means

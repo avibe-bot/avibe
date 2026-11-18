@@ -111,7 +111,7 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
 
 
 def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypatch, tmp_path):
-    """AUTH-SETUP-180: real producers/consumers; fake phone, policy and push only."""
+    """AUTH-SETUP-186: real producers/consumers; fake phone, policy and push only."""
     from sqlalchemy import select
     from core import web_push
     from core.handlers import mobile_health
