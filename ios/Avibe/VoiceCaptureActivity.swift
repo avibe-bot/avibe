@@ -48,6 +48,20 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         case interrupted
     }
 
+    /// Where starting a take stopped; shown with `recordingFailed`.
+    enum Step: String, Codable, Hashable {
+        /// Creating the take's file (准备录音文件).
+        case takeFile
+        /// The audio session's category, mode and options (设置音频会话).
+        case sessionCategory
+        /// `setActive(true)` (激活音频会话).
+        case sessionActivate
+        /// Creating the recorder or `record()` (启动录音器).
+        case recorder
+        /// `Activity.request` (启动实时活动).
+        case liveActivity
+    }
+
     struct ContentState: Codable, Hashable {
         var phase: Phase
         /// When the microphone opened; the timer counts from here.
@@ -60,6 +74,8 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         var heard: String?
         /// The system's error code for `recordingFailed`, shown with it.
         var errorCode: Int?
+        /// Where the start stopped, for `recordingFailed`.
+        var failedStep: Step?
 
         static let heardLimit = 160
     }

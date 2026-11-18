@@ -97,6 +97,9 @@ struct VoiceCaptureEnvironment {
     var existingActivities: () -> [VoiceCaptureActivityHandle]
     /// Deletes recordings a gone process left behind.
     var discardLeftoverAudio: () -> Void
+    /// Posts the failure as a notification that stays in Notification
+    /// Center, so one press yields a line the user can send back.
+    var postFailureNotice: (VoiceCaptureAttributes.ContentState) -> Void
     var now: () -> Date
     var sleep: (Duration) async -> Void
 
@@ -122,6 +125,7 @@ struct VoiceCaptureEnvironment {
             Activity<VoiceCaptureAttributes>.activities.map(LiveVoiceCaptureActivity.init)
         },
         discardLeftoverAudio: { VoiceCaptureRecorder.discardAll() },
+        postFailureNotice: { VoiceCaptureFailureNotification.post($0) },
         now: Date.init,
         sleep: { try? await Task.sleep(for: $0) }
     )
@@ -149,10 +153,13 @@ final class VoiceCaptureController {
     /// `cannotStartRecording`, or a Cocoa file error); nil for Avibe's own
     /// errors, whose numbers would mean nothing (`record()` returning false).
     static func systemCode(_ error: Error) -> Int? {
+        if let failure = error as? VoiceCaptureRecorder.StartFailure {
+            return systemCode(failure.underlying)
+        }
         if error is VoiceCaptureRecorder.Failure { return nil }
-        let ns = error as NSError
-        return ns.domain == NSOSStatusErrorDomain || ns.domain == NSCocoaErrorDomain
-            || ns.domain == AVFoundationErrorDomain ? ns.code : nil
+        // As the system gave it (an OSStatus such as 561145187, a Cocoa
+        // code, or ActivityKit's); the step says whose it is.
+        return (error as NSError).code
     }
 
     /// A run this soon after a failed start is the same press again.
@@ -441,7 +448,7 @@ final class VoiceCaptureController {
             record("start: take file failed \(error)")
             instance.close()
             state = .idle
-            showNotice(phase: .failed, reason: .recordingFailed, errorCode: Self.systemCode(error))
+            showFailure(step: .takeFile, error: error)
             return .stopped
         }
 
@@ -456,9 +463,14 @@ final class VoiceCaptureController {
             instance.close()
             state = .idle
             // No island means no recording (Apple stops it). Nothing was
-            // recorded; the App comes forward and says why.
+            // recorded; the App comes forward and says why, and the
+            // notification keeps the step and code.
             audio.discard()
-            record("start: activity request failed \(error)")
+            record("start: activity request failed \((error as NSError).domain) \((error as NSError).code) \(error)")
+            failedStartAt = environment.now()
+            environment.postFailureNotice(Self.failure(
+                step: .liveActivity, error: error, at: environment.now()
+            ))
             return .needsApp(.activityFailed)
         }
         do {
@@ -468,12 +480,11 @@ final class VoiceCaptureController {
             instance.close()
             state = .idle
             // Permission was checked above: this is the system refusing to
-            // record, not a missing permission. Say so, with its code.
+            // record, not a missing permission. Say where, with its code.
             failedStartAt = environment.now()
-            var failed = VoiceCaptureAttributes.ContentState(
-                phase: .failed, startedAt: startedAt, endedAt: startedAt, reason: .recordingFailed
-            )
-            failed.errorCode = Self.systemCode(error)
+            let step = (error as? VoiceCaptureRecorder.StartFailure)?.step ?? .recorder
+            let failed = Self.failure(step: step, error: error, at: startedAt)
+            environment.postFailureNotice(failed)
             await activity.end(
                 failed,
                 dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal))
@@ -649,10 +660,30 @@ final class VoiceCaptureController {
     }
 
     /// A short notice for a press that never recorded.
+    static func failure(
+        step: VoiceCaptureAttributes.Step, error: Error, at date: Date
+    ) -> VoiceCaptureAttributes.ContentState {
+        var state = VoiceCaptureAttributes.ContentState(
+            phase: .failed, startedAt: date, endedAt: date, reason: .recordingFailed
+        )
+        state.failedStep = step
+        state.errorCode = systemCode(error)
+        return state
+    }
+
+    /// A start that failed before its island existed: the notification and
+    /// a short island both say where.
+    private func showFailure(step: VoiceCaptureAttributes.Step, error: Error) {
+        let failed = Self.failure(step: step, error: error, at: environment.now())
+        environment.postFailureNotice(failed)
+        showNotice(phase: .failed, reason: .recordingFailed, errorCode: failed.errorCode, step: step)
+    }
+
     private func showNotice(
         phase: VoiceCaptureAttributes.Phase,
         reason: VoiceCaptureAttributes.Reason,
-        errorCode: Int? = nil
+        errorCode: Int? = nil,
+        step: VoiceCaptureAttributes.Step? = nil
     ) {
         let now = environment.now()
         failedStartAt = now
@@ -660,6 +691,7 @@ final class VoiceCaptureController {
             phase: phase, startedAt: now, endedAt: now, reason: reason
         )
         notice.errorCode = errorCode
+        notice.failedStep = step
         do {
             let activity = try environment.requestActivity(notice)
             Task {
