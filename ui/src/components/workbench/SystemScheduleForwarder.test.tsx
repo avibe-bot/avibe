@@ -102,11 +102,6 @@ describe('SystemScheduleForwarder', () => {
     'releases a stalled claim %s without overlapping owners or losing cancel and receipt progress',
     async (phase) => {
       vi.useFakeTimers();
-      let reactivate: (() => void) | undefined;
-      activity.onPageReactivated.mockImplementation((callback: () => void) => {
-        reactivate = callback;
-        return () => undefined;
-      });
       const cancelRequest = {
         requestId: 'cancel-after-stall',
         operationId: request.operationId,
@@ -186,13 +181,10 @@ describe('SystemScheduleForwarder', () => {
       expect(uploadedReceipts).toEqual([]);
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(abortedClaims).toBe(1);
-      // Nothing resumes on a timer; returning to the page does.
-      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-      expect(claimCalls).toBe(2);
-      await act(async () => {
-        reactivate?.();
-        await vi.advanceTimersByTimeAsync(10_005);
-      });
+      // The create finished while the claim stalled: the reconcile it asked
+      // for runs once the stalled one ends, so the cancel and the receipts
+      // complete without waiting for the page to come back.
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_005); });
 
       expect(acceptedLeases).toEqual(new Set([createClaim.leaseToken, 'lease-cancel']));
       expect(createReceiptAttempts).toBe(2);
@@ -202,6 +194,11 @@ describe('SystemScheduleForwarder', () => {
       expect(maxActiveClaims).toBe(1);
       expect(activeClaims).toBe(0);
       expect(uploadedReceipts).toEqual([receipt, receipt, cancelReceipt]);
+
+      // And then it settles: nothing more on a timer.
+      const settled = claimCalls;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+      expect(claimCalls).toBe(settled);
     },
   );
 
@@ -229,6 +226,34 @@ describe('SystemScheduleForwarder', () => {
     expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
     await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
     expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
+  });
+
+  it('sends a finished call\'s receipt even while another claim is still running', async () => {
+    vi.useFakeTimers();
+    let releaseSecondClaim: ((response: Response) => void) | undefined;
+    let claimCalls = 0;
+    apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/system-schedule/receipt') return Response.json({ ok: true });
+      claimCalls += 1;
+      if (claimCalls === 1) return Response.json({ ok: true, claim: createClaim });
+      if (claimCalls === 2) {
+        return new Promise<Response>((resolve) => { releaseSecondClaim = resolve; });
+      }
+      return Response.json({ ok: true, claim: null });
+    });
+
+    render(<SystemScheduleForwarder />);
+    // The create's Native call has finished while the second claim is held.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce();
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(0);
+
+    await act(async () => {
+      releaseSecondClaim?.(Response.json({ ok: true, claim: null }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1);
   });
 
   it('shares the closed create, cancel, and terminal receipt vectors across layers', () => {

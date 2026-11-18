@@ -111,6 +111,9 @@ export const SystemScheduleForwarder: FC = () => {
   const active = capabilities.can_chat && hasNativeCapability('systemSchedule');
   const enabledRef = useRef(false);
   const claimMutexRef = useRef(false);
+  // A reconcile asked for while another runs (for example when a Native call
+  // finishes): run once more after it, instead of dropping the request.
+  const rerunRequestedRef = useRef(false);
   const inFlightLeasesRef = useRef(new Map<
     string,
     { leaseToken: string; action: ScheduleClaim['action'] }
@@ -188,14 +191,15 @@ export const SystemScheduleForwarder: FC = () => {
   }, []);
 
   const reconcile = useCallback(async () => {
-    if (
-      !enabledRef.current
-      || claimMutexRef.current
-      || document.visibilityState !== 'visible'
-    ) {
+    if (!enabledRef.current || document.visibilityState !== 'visible') {
+      return;
+    }
+    if (claimMutexRef.current) {
+      rerunRequestedRef.current = true;
       return;
     }
     claimMutexRef.current = true;
+    rerunRequestedRef.current = false;
     try {
       const identity = await readIdentity();
       if (!identity) return;
@@ -233,6 +237,10 @@ export const SystemScheduleForwarder: FC = () => {
       // Opening or returning to the App retries; this path owns no visible error UI.
     } finally {
       claimMutexRef.current = false;
+      if (rerunRequestedRef.current) {
+        rerunRequestedRef.current = false;
+        window.setTimeout(() => void reconcileRef.current(), 0);
+      }
     }
   }, [startClaim, startReceiptDelivery]);
 
