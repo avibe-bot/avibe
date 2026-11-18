@@ -43,6 +43,7 @@ def test_gc_observation_is_thresholded_bounded_and_removed_on_stop(caplog, monke
         watchdog._report_gc()
         assert not _messages(caplog, logging.WARNING)
 
+        info["candidates"] = 4321
         callback("start", info)
         now[0] = 0.45
         callback("stop", info)
@@ -51,6 +52,7 @@ def test_gc_observation_is_thresholded_bounded_and_removed_on_stop(caplog, monke
         (message,) = _messages(caplog, logging.WARNING)
         assert "duration_ms=250.0 generation=2 collected=17 uncollectable=3" in message
         assert f"thread_id={threading.get_ident()} ended_at_unix=" in message
+        assert "candidates=4321 active_requests=0" in message
         assert parse_watchdog_event(RedactingFormatter(APPLICATION_LOG_FORMAT).format(caplog.records[-1])) is None
 
         for _ in range(100):
@@ -63,6 +65,20 @@ def test_gc_observation_is_thresholded_bounded_and_removed_on_stop(caplog, monke
         watchdog.stop()
         loop.close()
     assert callbacks == [unrelated_callback]
+
+
+def test_turn_end_and_job_start_stack_labels_resolve_real_code():
+    from core.agent_core.tools.jobs import LocalJobHost
+    from core.session_turns import SessionTurnManager
+
+    loop = asyncio.new_event_loop()
+    try:
+        watchdog = EventLoopWatchdog(loop)
+        watchdog._refresh_code_labels()
+        for fn in (LocalJobHost.start, LocalJobHost._spawn, SessionTurnManager._resume_linked_control_successor):
+            assert watchdog._code_labels[id(fn.__code__)][1][1] == fn.__qualname__
+    finally:
+        loop.close()
 
 
 def _wait_for(condition, timeout: float = 5.0) -> None:

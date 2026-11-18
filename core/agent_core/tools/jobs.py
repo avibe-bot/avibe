@@ -67,7 +67,7 @@ import psutil
 
 from core.agent_core.tools import windows_files, windows_job
 from core.agent_core.tools.base import CallInstance, JobStatus
-from core.agent_core.tools.paths import os_reason, run_to_end
+from core.agent_core.tools.paths import os_reason, read_in_worker, run_to_end
 from core.agent_core.tools.shell import Shell, default_shell
 from core.frozen_script import FrozenScript
 from core.process_isolation import (
@@ -340,15 +340,25 @@ class LocalJobHost:
         """
         if not sys.executable:
             raise JobStartError("No Python interpreter is available to run the command.")
-        # The host's own steps are small and synchronous, so the only await is the wait for the pid: a cancel
-        # can land nowhere else, and never between publishing ``go`` and returning the job id.
-        job_id, proc, marker, meta = self._spawn(command, cwd, env, timeout_s, call)
+        # A queued launch can be skipped. Once it starts, join the worker on cancellation so we
+        # know which undecided wrapper to abandon, even if cancellation raced its return.
+        spawned: list[str] = []
+
+        def spawn(host, command, cwd, env, timeout_s, call):
+            result = host._spawn(command, cwd, env, timeout_s, call)
+            spawned.append(result[0])
+            return result
+
         try:
+            job_id, proc, marker, meta = await read_in_worker(spawn, self, command, cwd, env, timeout_s, call)
             identity = await self._await_pid(job_id, proc, marker)
         except asyncio.CancelledError:
-            # Undecided: abandon the wrapper now rather than leave it waiting 30 s for a decision.
-            self._create_decision(job_id, _ABANDON)
+            if spawned:
+                # The same atomic decision used before worker-based spawn. Do not queue Stop
+                # behind unrelated default-executor work while the wrapper awaits its decision.
+                self._create_decision(spawned[0], _ABANDON)
             raise
+        # No await between publishing go and transferring ownership to the caller.
         decision = self._record_and_decide(job_id, meta, identity)
         if decision != _GO:
             raise JobStartError("The command did not start.")
