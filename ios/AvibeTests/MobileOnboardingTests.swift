@@ -945,15 +945,21 @@ final class MobileOnboardingTests: XCTestCase {
             }
             let authenticator = FakePasskeyAuthenticator()
             authenticator.result = .failure(ending)
-            var created = 0
+            let store = makeAccountStore(defaults: defaults)
+            // The store the attempt ran in, taken once options answered (after the start's own rotation).
+            var attemptStore: UUID?
+            let started = transport.primaryPasskeyStartHandler
+            transport.primaryPasskeyStartHandler = {
+                attemptStore = store.identifier
+                return try await started()
+            }
             let coordinator = makeCoordinator(
                 defaults: defaults,
+                websiteDataStore: store,
                 transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
-                passkeyAuthenticator: authenticator,
-                onCreateTransport: { created += 1 }
+                passkeyAuthenticator: authenticator
             )
             coordinator.activateAccountSurface()
-            let before = created
             do {
                 _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
                 XCTFail("Expected \(ending.code)")
@@ -962,7 +968,8 @@ final class MobileOnboardingTests: XCTestCase {
             }
             XCTAssertEqual(transport.primaryPasskeyCancellations, ["flow-1"])
             XCTAssertTrue(transport.primaryPasskeyVerifications.isEmpty)
-            XCTAssertGreaterThan(created, before, "a failed attempt leaves a fresh signed-out store")
+            let attempted = try XCTUnwrap(attemptStore)
+            XCTAssertNotEqual(store.identifier, attempted, "a failed attempt leaves a fresh signed-out store")
         }
     }
 
@@ -983,6 +990,92 @@ final class MobileOnboardingTests: XCTestCase {
             XCTAssertEqual(error, .providerUnavailable)
         }
         XCTAssertTrue(authenticator.requests.isEmpty)
+    }
+
+    // avibe.bot's backend §6: never discard a store that holds an accepted passkey sign-in before
+    // its session is read. A failed read keeps it; trying again reads it again, in that store,
+    // without a second sheet or a second verify (each verify spends the account's grant budget).
+    func testAnAcceptedPasskeySignInWhoseSessionReadFailsKeepsItsStoreAndReadsItAgain() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        var attemptStore: UUID?
+        transport.primaryPasskeyStartHandler = {
+            attemptStore = store.identifier
+            return MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        acceptPasskeyButFailTheSessionRead(transport)
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+
+        do {
+            _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+            XCTFail("Expected network")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .network)
+        }
+        let attempted = try XCTUnwrap(attemptStore)
+        XCTAssertEqual(store.identifier, attempted, "the store holding the accepted session is kept")
+        XCTAssertNil(coordinator.currentAccount, "nothing is published before the session is read")
+
+        let fresh = snapshot(accountID: "account-1", instances: [])
+        letTheSessionReadSucceed(transport, fresh)
+        let state = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        XCTAssertEqual(store.identifier, attempted)
+        XCTAssertEqual(authenticator.requests.count, 1, "no second passkey sheet")
+        XCTAssertEqual(transport.primaryPasskeyVerifications.count, 1, "no second verify")
+    }
+
+    // A late assertion after an account change is never verified.
+    func testALatePasskeyAssertionAfterSigningOutIsDropped() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.primaryPasskeyStartHandler = {
+            MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        let authenticator = FakePasskeyAuthenticator()
+        let opened = expectation(description: "sheet open")
+        var release: CheckedContinuation<MobilePasskeyAssertion, Error>?
+        authenticator.handler = { _ in
+            try await withCheckedThrowingContinuation { continuation in
+                release = continuation
+                opened.fulfill()
+            }
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithPasskey(presentationAnchor: UIWindow()) }
+        await fulfillment(of: [opened], timeout: 30)
+        // The account changes while the sheet is up; the sheet answers afterwards.
+        let state = try await coordinator.logout()
+        XCTAssertEqual(state, .signedOut)
+        release?.resume(returning: passkeyAssertion())
+        switch await attempt.result {
+        case .success:
+            XCTFail("A late assertion must not sign in")
+        case .failure(let error):
+            XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+        }
+        XCTAssertTrue(transport.primaryPasskeyVerifications.isEmpty)
+        XCTAssertNil(coordinator.currentAccount)
     }
 
     func testProviderSecretsAreRandomUnpaddedBase64URLWithAnS256Challenge() throws {
@@ -5519,6 +5612,8 @@ private final class FakePasskeyAuthenticator: MobilePasskeyAuthenticating {
     var result: Result<MobilePasskeyAssertion, MobileAccountError> = .failure(
         .passkeyCancelled
     )
+    /// When set, answers instead of `result` (a sheet held open).
+    var handler: ((MobilePasskeyRequest) async throws -> MobilePasskeyAssertion)?
     private(set) var requests: [MobilePasskeyRequest] = []
 
     func assert(
@@ -5526,8 +5621,34 @@ private final class FakePasskeyAuthenticator: MobilePasskeyAuthenticating {
         presentationAnchor: ASPresentationAnchor
     ) async throws -> MobilePasskeyAssertion {
         requests.append(request)
+        if let handler {
+            return try await handler(request)
+        }
         return try result.get()
     }
+}
+
+private func passkeyAssertion() -> MobilePasskeyAssertion {
+    MobilePasskeyAssertion(
+        credentialID: Data("cred-1".utf8),
+        clientDataJSON: Data("{}".utf8),
+        authenticatorData: Data([1]),
+        signature: Data([2]),
+        userHandle: Data("account-1".utf8)
+    )
+}
+
+/// avibe.bot accepted the passkey (its cookies are in the store) but the session read after it
+/// failed. Before the fix the transport answered both in one call that failed as `network`.
+@MainActor
+private func acceptPasskeyButFailTheSessionRead(_ transport: FakeMobileAuthTransport) {
+    transport.primaryPasskeyVerifyHandler = { _, _ in throw MobileAccountError.network }
+}
+
+@MainActor
+private func letTheSessionReadSucceed(_ transport: FakeMobileAuthTransport, _ session: MobileSessionSnapshot) {
+    transport.session = session
+    transport.primaryPasskeyVerifyHandler = { _, _ in .signedIn(session) }
 }
 
 private extension MobileSecondFactorProof {

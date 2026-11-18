@@ -227,7 +227,9 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             ("exchange dependency", .providerExchange, .exchange, 503, "unavailable", nil, "network"),
             ("exchanged session signed out", .providerExchange, .session, 401, nil, nil, "invalid_or_expired"),
             ("passkey sign-in off", .primaryPasskey, .passkeyOptions, 503, "unavailable", nil, "provider_unavailable"),
-            ("passkey sign-in closed audience", .primaryPasskey, .passkeyOptions, 403, "forbidden", nil, "provider_unavailable"),
+            // 403 is avibe.bot's HTTP boundary refusing the request, not an audience answer.
+            ("passkey sign-in boundary refusal", .primaryPasskey, .passkeyOptions, 403, "forbidden", nil, "network"),
+            ("passkey verify boundary refusal", .primaryPasskey, .passkeyVerify, 403, "forbidden", nil, "network"),
             ("passkey sign-in throttle", .primaryPasskey, .passkeyOptions, 429, "rate_limited", 9, "rate_limited"),
             ("passkey rejected", .primaryPasskey, .passkeyVerify, 400, "verification_failed", nil, "invalid"),
             ("passkey flow ended", .primaryPasskey, .passkeyVerify, 409, "flow_cancelled", nil, "passkey_cancelled"),
