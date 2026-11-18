@@ -222,8 +222,10 @@ python3 scripts/incus_regression.py release --target worktree --slug <slug>
 ```
 
 The instance itself stores `user.avibe-regression.hold.owner`, `.hold.reason`,
-and `.hold.since` (UTC), so another checkout sees the same hold. `hold` sets or
-replaces it; `release` clears only these fields. `status` and `reconcile` show
+and `.hold.since` (UTC), so another checkout sees the same hold. `hold` sets it,
+or refreshes it for the same owner; it refuses an environment a different owner
+holds unless `--take-over` is given after that handover is agreed (a `--dry-run`
+checks the live hold too). `release` clears only these fields. `status` and `reconcile` show
 the owner, reason, and time, including for instances without runner metadata.
 `delete` refuses a held environment before removing anything, even with
 `--yes`; only an explicit `--ignore-hold` overrides it. Deletion previews

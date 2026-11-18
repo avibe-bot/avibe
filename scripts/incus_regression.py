@@ -3125,12 +3125,22 @@ def cmd_hold(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
     target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
-    if not args.dry_run:
-        require_incus()
+    require_incus()
     with target_update_lock(repo_root, args.remote, target.project, dry_run=args.dry_run, blocking=False):
         runner = Runner(dry_run=args.dry_run)
-        if not args.dry_run and instance_record(runner, args.remote, target.project, target.instance) is None:
+        # Read the live hold even for a preview, so a dry run reports the same refusal.
+        reader = Runner(dry_run=False) if args.dry_run else runner
+        record = instance_record(reader, args.remote, target.project, target.instance)
+        if record is None:
             raise RegressionError(f"Regression instance {target.project}/{target.instance} does not exist.")
+        if not releasing:
+            current = describe_instance_hold(record)
+            held_owner = str((record.get("config") or {}).get(HOLD_CONFIG_KEYS[0]) or "").strip()
+            if current is not None and held_owner != values[0] and not args.take_over:
+                raise RegressionError(
+                    f"{target.slug} is already held by {held_owner or 'unknown'}: {current}. "
+                    "Wait for that owner to release it, or pass --take-over after agreeing the handover."
+                )
         # One config update for all three fields; empty values clear the marker.
         runner.run(incus(
             "config", "set", remote_ref(args.remote, target.instance),
@@ -3457,6 +3467,11 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "hold":
             sub.add_argument("--owner", required=True, help="Session id or name holding this environment.")
             sub.add_argument("--reason", required=True, help="Why this environment must be kept.")
+            sub.add_argument(
+                "--take-over",
+                action="store_true",
+                help="Replace a hold that a different owner currently has.",
+            )
         sub.set_defaults(func=func)
 
     reconcile = subparsers.add_parser(
