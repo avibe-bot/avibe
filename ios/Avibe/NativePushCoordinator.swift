@@ -401,7 +401,7 @@ final class NativePushCoordinator {
         let installation = try await ensureBound(to: account)
         try await reconcilePendingOperations(
             for: installation,
-            subscribingOrigin: instanceOrigin
+            subscribing: (instanceOrigin, vapidKeyHash)
         )
         try await requestPermission()
         let provider = try await ensureProvider(installation: installation)
@@ -810,16 +810,18 @@ final class NativePushCoordinator {
         return installation
     }
 
-    /// With `subscribingOrigin`, a pending revoke for another origin that
-    /// fails stays queued for retry instead of failing the subscription; one
-    /// for that origin, and the account-wide revoke, still fail it.
+    /// With `subscribing`, a pending revoke that fails stays queued for retry
+    /// instead of failing the subscription, unless the new registration
+    /// depends on it: one for the same origin, or one with the same VAPID key
+    /// (the relay refuses a create while another registration with that key
+    /// is active). The account-wide revoke still fails it.
     private func reconcilePendingOperations(
         for installation: PushInstallationState,
-        subscribingOrigin: String? = nil
+        subscribing: (origin: String, vapidKeyHash: String)? = nil
     ) async throws {
         try await reconcilePendingRevokes(
             for: installation,
-            failingOnlyFor: subscribingOrigin
+            failingOnlyFor: subscribing
         )
         try await reconcileRegistrationCreates(
             for: installation,
@@ -882,11 +884,11 @@ final class NativePushCoordinator {
 
     /// Tries every pending revoke: one the relay keeps refusing must not hold
     /// back the others. The first failure is reported after, or, with
-    /// `origin`, only the first failure for that instance origin; the others
-    /// stay pending for the next pass.
+    /// `subscription`, only the first failure a registration for that origin
+    /// and VAPID key depends on; the others stay pending for the next pass.
     private func reconcilePendingRevokes(
         for installation: PushInstallationState,
-        failingOnlyFor origin: String? = nil
+        failingOnlyFor subscription: (origin: String, vapidKeyHash: String)? = nil
     ) async throws {
         var firstFailure: Error?
         let records = try keychain.listRecords()
@@ -911,7 +913,11 @@ final class NativePushCoordinator {
                 }
                 throw Self.managementError(response)
             } catch {
-                if firstFailure == nil, origin == nil || record.instanceOrigin == origin {
+                let blocks = subscription.map {
+                    record.instanceOrigin == $0.origin
+                        || record.vapidKeyHash == $0.vapidKeyHash
+                } ?? true
+                if firstFailure == nil, blocks {
                     firstFailure = error
                 }
             }

@@ -1142,10 +1142,22 @@ final class NativePushCoordinatorTests: XCTestCase {
     /// A revoke the relay keeps refusing for one origin (an instance that left
     /// the account) stays queued for retry, and does not stop another
     /// origin from subscribing (turning notifications back on after a
-    /// sign-in). A stuck revoke for the subscribing origin itself still does.
+    /// sign-in). One the new registration depends on still does: for the
+    /// subscribing origin itself, or with the same VAPID key (the relay
+    /// refuses a create while another registration with that key is active,
+    /// as when the same instance moved to a new address).
     func testAStuckRevokeForAnotherOriginDoesNotBlockSubscribing() async throws {
-        for stuckOrigin in ["https://gone.example", Self.instanceOrigin] {
-            let ownOrigin = stuckOrigin == Self.instanceOrigin
+        let subscribingHash = SHA256.hash(
+            data: try XCTUnwrap(PushBase64URL.decode(Self.vapidPublicKey))
+        ).map { String(format: "%02x", $0) }.joined()
+        let rows: [(name: String, origin: String, vapidKeyHash: String, blocks: Bool)] = [
+            ("another origin", "https://gone.example", String(repeating: "a", count: 64), false),
+            ("own origin", Self.instanceOrigin, String(repeating: "a", count: 64), true),
+            ("another origin, same VAPID key", "https://moved-from.example", subscribingHash, true),
+        ]
+        for row in rows {
+            let ownOrigin = row.blocks
+            let stuckOrigin = row.origin
             let store = makeInstallationStore(
                 providerGeneration: 1,
                 provider: PushProviderState(
@@ -1164,7 +1176,7 @@ final class NativePushCoordinatorTests: XCTestCase {
                 bindGeneration: 1,
                 privateKey: Data(),
                 authSecret: Data(),
-                vapidKeyHash: String(repeating: "a", count: 64),
+                vapidKeyHash: row.vapidKeyHash,
                 state: .retiring,
                 pendingRevoke: true,
                 replacementRegistrationIDs: []
@@ -1180,16 +1192,16 @@ final class NativePushCoordinatorTests: XCTestCase {
             }
             let coordinator = makeCoordinator(store: store, management: recorder)
 
-            let name = ownOrigin ? "own origin" : "another origin"
+            let name = row.name
             do {
                 let subscription = try await coordinator.subscribe(
                     vapidPublicKey: Self.vapidPublicKey,
                     instanceOrigin: Self.instanceOrigin
                 )
-                XCTAssertFalse(ownOrigin, "A stuck revoke for its own origin must stop it: \(name)")
+                XCTAssertFalse(ownOrigin, "A revoke it depends on must stop it: \(name)")
                 XCTAssertNotNil(subscription["endpoint"] as? String, name)
             } catch {
-                XCTAssertTrue(ownOrigin, "Blocked by another origin's revoke: \(error)")
+                XCTAssertTrue(ownOrigin, "Blocked by an unrelated revoke: \(error), \(name)")
             }
 
             let creates = recorder.requests.filter {
