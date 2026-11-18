@@ -515,6 +515,11 @@ final class MobileSessionCoordinator {
     /// When each instance was last opened as the selected runtime, per
     /// account: `[accountID: [instanceID: seconds since 1970]]`.
     private static let instanceUseKey = "avibe.mobile.instanceUse"
+    /// The account whose push stayed bound while its session only owed the
+    /// second factor. It survives a relaunch, so a factor still owed after
+    /// the App restarts keeps the same answer.
+    private static let pushKeptForSecondFactorKey =
+        "avibe.mobile.pushKeptForSecondFactor"
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -529,6 +534,9 @@ final class MobileSessionCoordinator {
     private let onDetachActiveOwnerForAuthenticatedAccount: @MainActor (String) -> Bool
     private let onAuthenticatedAccount: @MainActor (String) -> Bool
     private let onPreparePushLogout: @MainActor () async -> Void
+    /// Revokes this device's notification registration for one instance
+    /// origin, leaving the account's others bound.
+    private let onRevokeInstancePush: @MainActor (String) async -> Void
 
     private var transport: MobileAuthTransporting?
     private var snapshot: MobileSessionSnapshot?
@@ -618,7 +626,8 @@ final class MobileSessionCoordinator {
         onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
         onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
-        onPreparePushLogout: @escaping @MainActor () async -> Void = {}
+        onPreparePushLogout: @escaping @MainActor () async -> Void = {},
+        onRevokeInstancePush: @escaping @MainActor (String) async -> Void = { _ in }
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
@@ -632,6 +641,7 @@ final class MobileSessionCoordinator {
         self.onDetachActiveOwnerForAuthenticatedAccount = onDetachActiveOwnerForAuthenticatedAccount
         self.onAuthenticatedAccount = onAuthenticatedAccount
         self.onPreparePushLogout = onPreparePushLogout
+        self.onRevokeInstancePush = onRevokeInstancePush
         transport = nil
     }
 
@@ -754,6 +764,14 @@ final class MobileSessionCoordinator {
                 return .signedOut
             }
             self.signedOutStoreIsFresh = false
+            if case .secondFactorRequired = discovery {
+                self.keepPushWhileSecondFactorIsOwed(
+                    by: self.storedSelection()?.accountID
+                )
+            }
+            try await self.settleKeptPush(
+                for: discovery, generation: requestGeneration
+            )
             return try self.state(for: discovery)
         }
     }
@@ -795,6 +813,9 @@ final class MobileSessionCoordinator {
                     code: code
                 )
                 try self.requireCurrentGeneration(loginGeneration)
+                try await self.settleKeptPush(
+                    for: discovery, generation: loginGeneration
+                )
                 self.clearStoredSelection()
                 self.signedOutStoreIsFresh = false
                 self.secondFactorEmail = normalizedEmail
@@ -830,6 +851,9 @@ final class MobileSessionCoordinator {
                     password: password
                 )
                 try self.requireCurrentGeneration(loginGeneration)
+                try await self.settleKeptPush(
+                    for: result.discovery, generation: loginGeneration
+                )
                 self.clearStoredSelection()
                 self.signedOutStoreIsFresh = false
                 self.secondFactorEmail = normalizedEmail
@@ -895,25 +919,48 @@ final class MobileSessionCoordinator {
                     )
                     return .signedOut
                 }
-                if self.selectedRuntimeOriginIsMissing(in: fresh) {
-                    try await self.preparePushLogout(
-                        publishing: .signedIn(
-                            snapshot: self.orderedByUse(fresh, current: nil),
-                            selectedInstanceID: nil
-                        ),
-                        generation: requestGeneration
-                    )
+                try await self.settleKeptPush(
+                    for: discovery, generation: requestGeneration
+                )
+                if let selection = self.selectionMissing(from: fresh) {
+                    // The account stays. Only an instance that left the
+                    // account's list loses this device's notifications; one
+                    // still listed at another address keeps them.
+                    if
+                        !fresh.instances.contains(where: { $0.id == selection.instanceID }),
+                        let origin = WebOrigin(url: selection.url)
+                    {
+                        try await self.revokeInstancePush(
+                            origin: origin.serialized,
+                            publishing: .signedIn(
+                                snapshot: self.orderedByUse(fresh, current: nil),
+                                selectedInstanceID: nil
+                            ),
+                            generation: requestGeneration
+                        )
+                    }
                     self.beginRuntimeInvalidation(with: fresh)
                 }
                 self.signedOutStoreIsFresh = false
                 return self.state(for: fresh)
             case .secondFactorRequired(let requirement):
-                try await self.preparePushLogout(
-                    publishing: .twoFactorRequired(
-                        requirement.withEmail(fallback: self.secondFactorEmail)
-                    ),
-                    generation: requestGeneration
-                )
+                // Owing the second factor does not end the session or change
+                // the account: push stays bound to the account that owes
+                // it, and is settled once a session is known again. With no
+                // account to name, it is cleaned up as before.
+                let owingAccountID = self.pushKeptForSecondFactor
+                    ?? previousAccountID
+                    ?? self.storedSelection()?.accountID
+                if owingAccountID == nil {
+                    try await self.preparePushLogout(
+                        publishing: .twoFactorRequired(
+                            requirement.withEmail(fallback: self.secondFactorEmail)
+                        ),
+                        generation: requestGeneration
+                    )
+                } else {
+                    self.keepPushWhileSecondFactorIsOwed(by: owingAccountID)
+                }
                 if previousAccountID != nil {
                     // A live account lost its authorization. A cold launch
                     // that already owes a second factor has no runtime to
@@ -1129,6 +1176,7 @@ final class MobileSessionCoordinator {
         )
         invalidateAccount(clearSelection: true, prepareRuntime: false)
         secondFactorEmail = nil
+        pushKeptForSecondFactor = nil
 
         if let oldTransport = transport {
             await oldTransport.cancelAll()
@@ -1184,6 +1232,7 @@ final class MobileSessionCoordinator {
         do {
             let discovery = try await operation()
             try requireCurrentGeneration(requestGeneration)
+            try await settleKeptPush(for: discovery, generation: requestGeneration)
             signedOutStoreIsFresh = false
             return try state(for: discovery)
         } catch let error as MobileAccountError
@@ -1237,6 +1286,14 @@ final class MobileSessionCoordinator {
     }
 
     private func preparePushLogout() async {
+        await runPushCleanup { await self.onPreparePushLogout() }
+        // Every registration is gone: nothing is kept for an owed factor.
+        pushKeptForSecondFactor = nil
+    }
+
+    /// Runs push work that must reach avibe.bot while this operation holds
+    /// the account (`pushManagementRequest` passes during `.pushLogout`).
+    private func runPushCleanup(_ body: () async -> Void) async {
         let resumePhase = phase
         let cleanupPhase: Phase
         switch resumePhase {
@@ -1255,7 +1312,64 @@ final class MobileSessionCoordinator {
                 phase = resumePhase
             }
         }
-        await onPreparePushLogout()
+        await body()
+    }
+
+    /// Revokes this device's registration for one instance origin, the
+    /// account and its other instances staying as they are.
+    private func revokeInstancePush(
+        origin: String,
+        publishing state: MobileSessionState,
+        generation requestGeneration: Int
+    ) async throws {
+        try requireCurrentGeneration(requestGeneration)
+        let publicationID = UUID()
+        authoritativeTransition = (publicationID, state)
+        defer {
+            if authoritativeTransition?.id == publicationID {
+                authoritativeTransition = nil
+            }
+        }
+        await runPushCleanup { await self.onRevokeInstancePush(origin) }
+        try requireCurrentGeneration(requestGeneration)
+    }
+
+    private var pushKeptForSecondFactor: String? {
+        get { defaults.string(forKey: Self.pushKeptForSecondFactorKey) }
+        set { defaults.set(newValue, forKey: Self.pushKeptForSecondFactorKey) }
+    }
+
+    /// The session owes the second factor: the account that owes it keeps
+    /// its push bound until a session is known again.
+    private func keepPushWhileSecondFactorIsOwed(by accountID: String?) {
+        guard pushKeptForSecondFactor == nil, let accountID else { return }
+        pushKeptForSecondFactor = accountID
+    }
+
+    /// Ends the grace `keepPushWhileSecondFactorIsOwed` gave. The same
+    /// account signed in keeps its push; any other account first gets the
+    /// sign-out push cleanup, before it is published.
+    private func settleKeptPush(
+        for discovery: MobileSessionDiscovery,
+        generation requestGeneration: Int
+    ) async throws {
+        guard
+            let kept = pushKeptForSecondFactor,
+            case .signedIn(let fresh) = discovery
+        else {
+            return
+        }
+        if fresh.account.id == kept {
+            pushKeptForSecondFactor = nil
+            return
+        }
+        try await preparePushLogout(
+            publishing: .signedIn(
+                snapshot: orderedByUse(fresh, current: nil),
+                selectedInstanceID: nil
+            ),
+            generation: requestGeneration
+        )
     }
 
     private func differentAuthenticatedAccountID(
@@ -1284,20 +1398,23 @@ final class MobileSessionCoordinator {
         ensureTransport()
     }
 
-    private func selectedRuntimeOriginIsMissing(
-        in fresh: MobileSessionSnapshot
-    ) -> Bool {
+    /// The stored selection when the refreshed list no longer has it at the
+    /// same address (same account as before).
+    private func selectionMissing(
+        from fresh: MobileSessionSnapshot
+    ) -> StoredMobileSelection? {
         guard
             let previous = snapshot,
             previous.account.id == fresh.account.id,
             let selection = storedSelection(),
-            selection.accountID == fresh.account.id
+            selection.accountID == fresh.account.id,
+            !fresh.instances.contains(where: {
+                $0.id == selection.instanceID && $0.url == selection.url
+            })
         else {
-            return false
+            return nil
         }
-        return !fresh.instances.contains {
-            $0.id == selection.instanceID && $0.url == selection.url
-        }
+        return selection
     }
 
     private func state(
