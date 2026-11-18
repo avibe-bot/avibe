@@ -4188,8 +4188,17 @@ final class DirectPathAppTests: XCTestCase {
         capture(window, app, "2a-skeleton-connecting-dark")
         window.overrideUserInterfaceStyle = .light
         let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
+        // 2b: the same open past the 8 s mark: the slow banner with Cancel.
+        timing.advance(by: .seconds(8))
+        try await Task.sleep(for: .milliseconds(1200))
+        capture(window, app, "2b-skeleton-slow-cancel-light")
+        window.overrideUserInterfaceStyle = .dark
+        try await Task.sleep(for: .milliseconds(1200))
+        capture(window, app, "2b-skeleton-slow-cancel-dark")
+        window.overrideUserInterfaceStyle = .light
 
-        // 1a and 3b (mock page with the Workbench's top bar and tab bar).
+        // Over the last page (mock pages with the Workbench's and the Bot
+        // chat's real geometry): the line, the 8 s banner, the timeout banner.
         let page = MockCachedPage()
         let mock = UIWindow(windowScene: scene)
         mock.frame = scene.screen.bounds
@@ -4200,55 +4209,64 @@ final class DirectPathAppTests: XCTestCase {
         mock.makeKeyAndVisible()
         func show(_ view: some View) async throws {
             host.rootView = AnyView(view)
-            try await Task.sleep(for: .milliseconds(900))
+            try await Task.sleep(for: .milliseconds(1500))
         }
-        try await page.load()
-        // The first WebKit paint of the mock page takes a while on CI.
-        try await Task.sleep(for: .seconds(3))
         var connecting = attempt
         connecting.phase = .connecting
         connecting.isTakingLong = false
-        try await show(ZStack(alignment: .top) {
-            page.view
-            RuntimeOpenStatusPill(attempt: connecting, cancel: {})
-        })
-        try await Task.sleep(for: .seconds(2))
-        captureWindow(mock, "1a-pill-connecting-over-cached-page-light")
+        let slow = RuntimeOpenSlowBanner(instanceName: "Studio", showsLastContent: true, dismiss: {})
+
         try await page.loadChat()
-        try await Task.sleep(for: .seconds(2))
-        try await show(ZStack(alignment: .top) {
-            page.view
-            RuntimeOpenStatusPill(attempt: connecting, cancel: {})
-        })
-        try await Task.sleep(for: .seconds(1))
-        captureWindow(mock, "1a-pill-connecting-over-cached-chat-light")
-        print("[top bar overlap] chat: \(await page.topBarOverlaps(windowWidth: Double(mock.bounds.width)))")
-        // A regular session instead: TitleField's rename button, a long title.
-        _ = try? await page.webView.evaluateJavaScript(
-            "document.querySelector('.bot').outerHTML = '<button class=\"bot\" data-tap=\"标题（点按改名）\" style=\"flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis\"><b>冷启动方案评审与三张帧图的修改意见</b></button>'"
-        )
-        try await Task.sleep(for: .milliseconds(500))
-        captureWindow(mock, "1a-pill-connecting-over-cached-session-light")
-        print("[top bar overlap] session: \(await page.topBarOverlaps(windowWidth: Double(mock.bounds.width)))")
+        // The first WebKit paint of a mock page takes a while on CI.
+        try await Task.sleep(for: .seconds(3))
+        try await show(ZStack { page.view; RuntimeOpenProgressLine(attempt: connecting) })
+        captureWindow(mock, "1a-line-over-cached-chat-light")
+        try await show(ZStack { page.view; RuntimeOpenProgressLine(attempt: connecting); slow })
+        captureWindow(mock, "1b-slow-banner-over-cached-chat-light")
+
         try await page.load()
-        try await Task.sleep(for: .seconds(2))
+        try await Task.sleep(for: .seconds(3))
+        try await show(ZStack { page.view; RuntimeOpenProgressLine(attempt: connecting) })
+        captureWindow(mock, "1a-line-over-cached-list-light")
+        try await show(ZStack { page.view; RuntimeOpenProgressLine(attempt: connecting); slow })
+        captureWindow(mock, "1b-slow-banner-over-cached-list-light")
         try await show(ZStack(alignment: .bottom) {
             page.view
             CachedPageTimeoutBannerProposal(instanceName: "Studio")
         })
-        captureWindow(mock, "3b-timeout-banner-over-cached-page-light")
+        captureWindow(mock, "3b-timeout-banner-over-cached-list-light")
+
         mock.overrideUserInterfaceStyle = .dark
-        try await page.load(dark: true)
-        try await show(ZStack(alignment: .top) {
-            page.view
-            RuntimeOpenStatusPill(attempt: connecting, cancel: {})
-        })
-        captureWindow(mock, "1a-pill-connecting-over-cached-page-dark")
-        try await show(ZStack(alignment: .bottom) {
-            page.view
-            CachedPageTimeoutBannerProposal(instanceName: "Studio")
-        })
-        captureWindow(mock, "3b-timeout-banner-over-cached-page-dark")
+        try await page.loadChat(dark: true)
+        try await Task.sleep(for: .seconds(3))
+        try await show(ZStack { page.view; RuntimeOpenProgressLine(attempt: connecting); slow })
+        captureWindow(mock, "1b-slow-banner-over-cached-chat-dark")
+
+        // Does each banner line fit on one line? Text width against the room
+        // the banner leaves it, at 375 and 402 pt.
+        func width(_ view: some View) -> CGFloat {
+            UIHostingController(rootView: view.fixedSize())
+                .sizeThatFits(in: CGSize(width: 2000, height: 200)).width
+        }
+        let spinner = width(ProgressView().controlSize(.small))
+        let xmark = width(Image(systemName: "xmark"))
+        let cancel = width(Button("取消", action: {}).buttonStyle(.bordered).controlSize(.small))
+        for name in ["Studio", "Cyh 的 MacBook Pro"] {
+            for (key, trailing) in [
+                ("runtime.open.slow.last_content.named", xmark),
+                ("runtime.open.slow.named", cancel),
+            ] {
+                let text = String(format: NSLocalizedString(key, comment: ""), name)
+                let textWidth = width(Text(text).font(.subheadline.weight(.semibold)))
+                for screen in [375.0, 402.0] {
+                    let room = screen - 32 - 28 - spinner - 10 - 10 - trailing
+                    print(String(
+                        format: "[banner fit] %@ @%.0f: text %.0f pt, room %.0f pt, %@",
+                        text, screen, textWidth, room, textWidth <= room ? "fits" : "TRUNCATES"
+                    ))
+                }
+            }
+        }
         // Leave the windows alive past the test's own teardown (the earlier
         // run crashed releasing them mid-teardown).
         Self.retainedWindows += [mock, window]
@@ -7610,22 +7628,26 @@ private final class MockCachedPage {
     /// ChatHeaderBar and BotConversationTitle: a 44 pt bar with a 28 pt back
     /// button, the Bot switch (26 pt face, name, chevron), and on the right
     /// the Show Page control and the session menu.
-    func loadChat() async throws {
+    func loadChat(dark: Bool = false) async throws {
+        let bg = dark ? "#111" : "#fff", fg = dark ? "#eee" : "#111"
+        let bar = dark ? "rgba(17,17,17,.92)" : "rgba(255,255,255,.92)"
+        let rule = dark ? "#2a2a2e" : "#e5e5ea", edge = dark ? "#3a3a40" : "#d9d9e0"
+        let bubble = dark ? "#222226" : "#f2f2f7"
         let html = """
             <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
             <style>
-            body{margin:0;font-family:-apple-system,"PingFang SC";background:#fff;color:#111}
+            body{margin:0;font-family:-apple-system,"PingFang SC";background:\(bg);color:\(fg)}
             button{font:inherit;color:inherit;background:none;border:0;padding:0;-webkit-appearance:none}
-            .hdr{position:fixed;top:0;left:0;right:0;height:44px;padding:env(safe-area-inset-top) 16px 0;display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.92);border-bottom:1px solid #e5e5ea}
-            .back{width:28px;height:28px;border:1px solid #d9d9e0 !important;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+            .hdr{position:fixed;top:0;left:0;right:0;height:44px;padding:env(safe-area-inset-top) 16px 0;display:flex;align-items:center;gap:12px;background:\(bar);border-bottom:1px solid \(rule)}
+            .back{width:28px;height:28px;border:1px solid \(edge) !important;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
             .bot{margin-left:-6px;display:flex;align-items:center;gap:8px;padding:2px 8px 2px 6px;border-radius:999px;min-width:0}
             .face{width:26px;height:26px;border-radius:13px;background:#f5b041;flex-shrink:0}
             .bot b{font-size:16px;white-space:nowrap}.chev{color:#888;font-size:12px}
-            .right{margin-left:auto;display:flex;gap:6px}.icon{width:28px;height:28px;border-radius:8px;border:1px solid #d9d9e0 !important}
+            .right{margin-left:auto;display:flex;gap:6px}.icon{width:28px;height:28px;border-radius:8px;border:1px solid \(edge) !important}
             main{padding:calc(env(safe-area-inset-top) + 56px) 16px 120px}
             .msg{max-width:78%;padding:10px 12px;border-radius:16px;margin:8px 0;font-size:15px;line-height:1.45}
-            .me{margin-left:auto;background:#10b981;color:#fff}.it{background:#f2f2f7}
-            .composer{position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom) + 8px);height:44px;border-radius:22px;border:1px solid #d9d9e0;background:#fff;color:#999;display:flex;align-items:center;padding:0 16px;font-size:15px}
+            .me{margin-left:auto;background:#10b981;color:#fff}.it{background:\(bubble)}
+            .composer{position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom) + 8px);height:44px;border-radius:22px;border:1px solid \(edge);background:\(bg);color:#999;display:flex;align-items:center;padding:0 16px;font-size:15px}
             </style></head><body>
             <div class="hdr"><button class="back" data-tap="返回">←</button>
             <button class="bot" data-tap="切换伙伴"><span class="face"></span><b>奶酪包</b><span class="chev">⌄</span></button>
@@ -7641,28 +7663,6 @@ private final class MockCachedPage {
             """
         webView.loadHTMLString(html, baseURL: nil)
         try await Task.sleep(for: .milliseconds(800))
-    }
-
-    /// Each tappable element in the top bar, and whether it intersects the
-    /// band the status pill can occupy: horizontally centred, at most
-    /// `pillMaxWidth` wide, inside the top-bar row.
-    func topBarOverlaps(windowWidth: Double) async -> String {
-        let band = (windowWidth - Double(AvibeStyle.pillMaxWidth)) / 2
-        let script = """
-            JSON.stringify([...document.querySelectorAll('[data-tap]')].map(e => {
-              const r = e.getBoundingClientRect();
-              return {name: e.dataset.tap, left: r.left, right: r.right};
-            }))
-            """
-        let json = (try? await webView.evaluateJavaScript(script) as? String) ?? "[]"
-        let items = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]]) ?? []
-        return items.map { item in
-            let name = item["name"] as? String ?? "?"
-            let left = item["left"] as? Double ?? 0
-            let right = item["right"] as? Double ?? 0
-            let overlap = max(0, min(right, band + Double(AvibeStyle.pillMaxWidth)) - max(left, band))
-            return String(format: "%@ [%.0f–%.0f] overlap %.0f pt", name, left, right, overlap)
-        }.joined(separator: "; ") + String(format: " (pill band %.0f–%.0f)", band, band + Double(AvibeStyle.pillMaxWidth))
     }
 
     func markLive() async throws {
@@ -7719,7 +7719,7 @@ private struct CachedPageTimeoutBannerProposal: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
         .padding(.horizontal, 16)
-        // Above the page's tab bar, never over it.
-        .padding(.bottom, AvibeStyle.tabBarHeight + 8)
+        // Above the page's tab bar or composer, never over it.
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
     }
 }
