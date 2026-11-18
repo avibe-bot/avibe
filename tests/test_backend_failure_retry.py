@@ -14,6 +14,7 @@ from modules.agents.catalog import AGENT_BACKENDS
 from storage import message_deliveries, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import create_sqlite_engine
+from storage.models import message_deliveries as message_deliveries_table
 from storage.models import (
     agent_events,
     agent_sessions,
@@ -1522,6 +1523,18 @@ def test_workspace_notice_of_an_unwritten_input_offers_retry(isolated_state, tmp
     session_id, notice, _turn, _inputs = _retry_notice(tmp_path, not_written=True)
     workspace_notice = _workspace_notice_for(notice)
     assert workspace_notice["content"]["failure_source"] == {"session_id": session_id, "retry": True}
+
+
+def test_workspace_thread_reads_when_an_unwritten_input_is_gone(isolated_state, tmp_path):
+    """Found on regression: the read must not fail where the retry would refuse (``retry_original_unavailable``)."""
+    session_id, notice, _turn, inputs = _retry_notice(tmp_path, not_written=True)
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(update(message_deliveries_table).where(message_deliveries_table.c.id == inputs[0]["id"]).values(state="retired"))
+    workspace_notice = _workspace_notice_for(notice)
+    assert workspace_notice["content"]["failure_source"] == {"session_id": session_id, "retry": False}
+    with create_sqlite_engine().connect() as conn:
+        page = messages_service.list_session_messages(conn, session_id=workspace_notice["session_id"])
+    assert [row["id"] for row in page["messages"]] == [workspace_notice["id"]]
 
 
 @pytest.mark.parametrize("gate", ["detached", "watch_ids", "harness_source"])

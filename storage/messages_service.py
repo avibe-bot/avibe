@@ -139,7 +139,11 @@ def _row_to_payload(
     ):
         from storage.message_deliveries import workspace_notice_source
 
-        source_session_id, turn_id = workspace_notice_source(conn, metadata)
+        try:
+            source_session_id, turn_id = workspace_notice_source(conn, metadata)
+        except Exception:  # a transcript read never fails on what it adds for display
+            logger.debug("workspace notice source unavailable for %s", row.get("id"), exc_info=True)
+            source_session_id, turn_id = None, None
         if source_session_id:
             from core.backend_failure_retry import workspace_notice_retry_available
 

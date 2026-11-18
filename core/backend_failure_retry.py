@@ -307,16 +307,17 @@ def workspace_notice_retry_available(
         return False
     # An input that never reached the backend stays queued; the retry takes it
     # over (``reserve_retry``), so it is not pending work in the way of one.
-    turn = deliveries.get_turn(conn, turn_id)
-    retained = (
-        _retained_inputs(conn, turn)
-        if turn is not None
-        and turn["session_id"] == session_id
-        and turn["state"] == "terminal"
-        and turn["terminal_outcome"] == "not_written"
-        else []
-    )
+    # A read must never fail on a retry it cannot offer: any refusal is "no Retry".
     try:
+        turn = deliveries.get_turn(conn, turn_id)
+        retained = (
+            _retained_inputs(conn, turn)
+            if turn is not None
+            and turn["session_id"] == session_id
+            and turn["state"] == "terminal"
+            and turn["terminal_outcome"] == "not_written"
+            else []
+        )
         _validate_boundary(
             conn,
             {"session_id": session_id, "metadata": {"turn_id": turn_id}},
