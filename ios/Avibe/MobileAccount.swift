@@ -1699,6 +1699,12 @@ final class MobileSessionCoordinator {
         defaults.set(all, forKey: Self.instanceUseKey)
     }
 
+    /// Whether this device has an instance selected from before: a cold
+    /// start will try to open it, so its skeleton may show meanwhile.
+    var hasStoredSelection: Bool {
+        storedSelection() != nil
+    }
+
     func restorableRuntime(
         from state: MobileSessionState
     ) -> MobileRuntimeContext? {
