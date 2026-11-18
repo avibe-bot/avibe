@@ -963,7 +963,7 @@ describe('mobile onboarding', () => {
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
     };
 
-    it('starts each provider natively under the lock and lands on the list it answers', async () => {
+    it('AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances', async () => {
       await openWelcome();
       const pending = deferred<MobileSessionState>();
       mobile.signInWithProvider.mockReturnValueOnce(pending.promise);
@@ -981,6 +981,9 @@ describe('mobile onboarding', () => {
       });
       pending.resolve(signedIn());
       await screen.findByText('Personal Avibe');
+      // Authorized selection, as after the email code (AUTH-SETUP-148).
+      fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
+      await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
     });
 
     it('says nothing when the person closes the window, and names the provider when its email is unverified', async () => {
