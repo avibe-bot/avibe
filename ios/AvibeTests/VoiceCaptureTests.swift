@@ -448,6 +448,101 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(denied.activations, 0)
     }
 
+    // MARK: Where a start stopped (the owner's one-press diagnosis, 11-19)
+
+    /// The real recorder names the step that refused and keeps the system's
+    /// error: setting up the session, activating it, or the recorder.
+    func testTheRecorderNamesTheStepThatRefused() throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "take-\(UUID().uuidString).m4a")
+        func failure(_ session: FakeSession, engine: @escaping (URL) throws -> VoiceCaptureRecordingEngine = { _ in FakeEngine() })
+            -> VoiceCaptureRecorder.StartFailure?
+        {
+            let recorder = VoiceCaptureRecorder(url: url, session: session, permission: { true }, makeEngine: engine)
+            do { try recorder.start(); return nil } catch { return error as? VoiceCaptureRecorder.StartFailure }
+        }
+        let cannotInterrupt = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+
+        let category = FakeSession()
+        category.configureError = cannotInterrupt
+        XCTAssertEqual(failure(category)?.step, .sessionCategory)
+        XCTAssertFalse(category.active)
+
+        let activation = FakeSession()
+        activation.activateError = cannotInterrupt
+        let activationFailure = failure(activation)
+        XCTAssertEqual(activationFailure?.step, .sessionActivate)
+        XCTAssertEqual(VoiceCaptureController.systemCode(try XCTUnwrap(activationFailure)), 560557684)
+
+        let made = FakeSession()
+        XCTAssertEqual(failure(made, engine: { _ in throw cannotInterrupt })?.step, .recorder)
+        XCTAssertFalse(made.active)
+
+        let refusing = FakeEngine()
+        refusing.records = false
+        let refused = failure(FakeSession(), engine: { _ in refusing })
+        XCTAssertEqual(refused?.step, .recorder)
+        XCTAssertNil(VoiceCaptureController.systemCode(try XCTUnwrap(refused)), "record() false has no system code")
+    }
+
+    /// One press that cannot record leaves one notification, which stays in
+    /// Notification Center, naming the step and the system's code; the
+    /// island says the same.
+    func testAFailedStartPostsOneLastingNoticeWithItsStepAndCode() async {
+        let world = World()
+        world.recorderStartError = VoiceCaptureRecorder.StartFailure(
+            step: .sessionActivate, underlying: NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+        )
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.toggle()
+        clock = clock.addingTimeInterval(0.3)
+        _ = await controller.toggle()  // the system running the same press again
+
+        XCTAssertEqual(world.failureNotices.count, 1)
+        let notice = world.failureNotices.first
+        XCTAssertEqual(notice?.reason, .recordingFailed)
+        XCTAssertEqual(notice?.failedStep, .sessionActivate)
+        XCTAssertEqual(notice?.errorCode, 561145187)
+        XCTAssertEqual(world.activities.first?.ended?.failedStep, .sessionActivate)
+        XCTAssertEqual(world.activities.first?.ended?.errorCode, 561145187)
+    }
+
+    /// No island at all: the notification is still posted.
+    func testAnIslandThatCannotStartStillLeavesTheNotice() async {
+        let world = World()
+        world.activityRequestFails = true
+        let outcome = await world.controller().toggle()
+        XCTAssertEqual(outcome, .needsApp(.activityFailed))
+        XCTAssertEqual(world.failureNotices.count, 1)
+        XCTAssertEqual(world.failureNotices.first?.failedStep, .liveActivity)
+        XCTAssertEqual(world.failureNotices.first?.errorCode, 7)
+    }
+
+    func testATakeFileThatCannotBeMadeNamesThatStep() async {
+        let world = World()
+        world.takeFileFails = true
+        _ = await world.controller().toggle()
+        XCTAssertEqual(world.failureNotices.first?.failedStep, .takeFile)
+    }
+
+    func testTheFailureLineReadsPlainlyInBothLanguages() throws {
+        func format(_ language: String, _ key: String) throws -> String {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+            return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: "VoiceCapture")
+        }
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.recordingFailedAt %@ %lld"), "录音没能开始（%1$@，错误 %2$lld）。")
+        XCTAssertEqual(try format("en", "voiceCapture.reason.recordingFailedAt %@ %lld"), "Recording couldn't start (%1$@, error %2$lld).")
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.recordingFailedAt %@"), "录音没能开始（%@）。")
+        let steps: [(VoiceCaptureAttributes.Step, String)] = [
+            (.takeFile, "准备录音文件"), (.sessionCategory, "设置音频会话"), (.sessionActivate, "激活音频会话"),
+            (.recorder, "启动录音器"), (.liveActivity, "启动实时活动"),
+        ]
+        for (step, zh) in steps {
+            XCTAssertEqual(try format("zh-Hans", "voiceCapture.step.\(step.rawValue)"), zh)
+        }
+    }
+
     func testANoGivenSinceStopsWithoutRetry() async {
         let world = World()
         world.instance.transcribeResult = .failure(Failure.consentRequired)
@@ -500,6 +595,8 @@ private final class World {
     var takeFileFails = false
     var leftoverAudioDiscarded = 0
     var now: () -> Date = Date.init
+    /// The failure notifications posted (each stays in Notification Center).
+    var failureNotices: [VoiceCaptureAttributes.ContentState] = []
 
     func controller() -> VoiceCaptureController {
         VoiceCaptureController(environment: VoiceCaptureEnvironment(
@@ -515,13 +612,17 @@ private final class World {
             microphoneAllowed: { self.microphone },
             activitiesEnabled: { self.activitiesEnabled },
             requestActivity: { state in
-                if self.activityRequestFails { throw CancellationError() }
+                if self.activityRequestFails {
+                    // ActivityKit's ActivityAuthorizationError.targetMaximumExceeded-like failure.
+                    throw NSError(domain: "com.apple.ActivityKit.ActivityAuthorizationError", code: 7)
+                }
                 let activity = FakeActivity(state)
                 self.activities.append(activity)
                 return activity
             },
             existingActivities: { (self.leftovers + self.activities).filter { $0.ended == nil } },
             discardLeftoverAudio: { self.leftoverAudioDiscarded += 1 },
+            postFailureNotice: { self.failureNotices.append($0) },
             now: { self.now() },
             sleep: { _ in await Task.yield(); try? await Task.sleep(for: .seconds(3600)) }
         ))
@@ -634,7 +735,16 @@ private final class FakeSession: VoiceCaptureAudioSession {
     var active = false
     var activations = 0
     var deactivations = 0
-    func activateForRecording() throws { active = true; activations += 1 }
+    var configureError: Error?
+    var activateError: Error?
+    func configureForRecording() throws {
+        if let configureError { throw configureError }
+    }
+    func activate() throws {
+        if let activateError { throw activateError }
+        active = true
+        activations += 1
+    }
     func deactivate() { active = false; deactivations += 1 }
 }
 
