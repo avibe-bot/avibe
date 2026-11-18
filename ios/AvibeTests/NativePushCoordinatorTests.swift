@@ -1593,7 +1593,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             provider: nil,
             providerPatchPending: false
         )
-        func record(_ kid: String, _ origin: String, account: String = Self.accountA.id, generation: Int64 = 1) -> PushKeyRecord {
+        func record(_ kid: String, _ origin: String, account: String = Self.accountA.id, generation: Int64 = 1, state: PushKeyRecord.State = .active) -> PushKeyRecord {
             PushKeyRecord(
                 kid: kid,
                 instanceOrigin: origin,
@@ -1603,12 +1603,14 @@ final class NativePushCoordinatorTests: XCTestCase {
                 privateKey: Data(repeating: 13, count: 32),
                 authSecret: Data(repeating: 14, count: 16),
                 vapidKeyHash: String(repeating: "a", count: 64),
-                state: .active,
+                state: state,
                 pendingRevoke: false,
                 replacementRegistrationIDs: []
             )
         }
         try store.saveRecord(record("listed", Self.instanceOrigin))
+        // A create whose answer was lost, for a removed origin.
+        try store.saveRecord(record("removed-3", "https://removed-three.example", state: .pending))
         try store.saveRecord(record("removed-1", "https://removed-one.example"))
         try store.saveRecord(record("removed-2", "https://removed-two.example"))
         try store.saveRecord(record("other-account", "https://removed-one.example", account: Self.accountB.id))
@@ -1632,10 +1634,12 @@ final class NativePushCoordinatorTests: XCTestCase {
             [
                 "/api/push/apns/registrations/removed-1",
                 "/api/push/apns/registrations/removed-2",
+                "/api/push/apns/registrations/removed-3",
             ]
         )
-        // The first one failing does not hold back the second.
+        // The first one failing does not hold back the others.
         XCTAssertNil(try store.loadRecord(kid: "removed-2"))
+        XCTAssertNil(try store.loadRecord(kid: "removed-3"))
         let pending = try XCTUnwrap(try store.loadRecord(kid: "removed-1"))
         XCTAssertEqual(pending.state, .retiring)
         XCTAssertTrue(pending.pendingRevoke)

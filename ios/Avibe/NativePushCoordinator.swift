@@ -575,8 +575,10 @@ final class NativePushCoordinator {
         else {
             return
         }
+        // A create whose answer was lost (`.pending`) may exist on the relay
+        // too: its DELETE either revokes it or answers not found.
         let stale = try keychain.listRecords().filter {
-            $0.state == .active
+            ($0.state == .active || $0.state == .pending)
                 && !$0.pendingRevoke
                 && $0.accountID == account.id
                 && $0.bindGeneration == installation.bindGeneration
