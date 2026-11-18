@@ -1705,6 +1705,9 @@ final class MobileSessionCoordinator {
         storedSelection() != nil
     }
 
+    /// Mutation stub (draft only): nothing is restored before the check.
+    func restoreLastGoodSession() -> MobileSessionState? { nil }
+
     func restorableRuntime(
         from state: MobileSessionState
     ) -> MobileRuntimeContext? {
