@@ -78,6 +78,9 @@ import {
 import { AnnotationMessage } from './AnnotationMessage';
 import { FailureDetails } from './FailureDetails';
 import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
+import { WorkspaceNoticeActions } from './WorkspaceNoticeActions';
+import { workspaceNoticeSource } from '../../lib/workspaceNoticeSource';
+import { requestFailureRetry, retryAdmitted } from '../../lib/failureRetryRequest';
 import { FailureNextStep } from './FailureNextStep';
 import { settingsOverlayContinuationState } from '../../lib/settingsOverlay';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
@@ -2790,15 +2793,10 @@ export const ChatPage: React.FC = () => {
       // A notice-bound action does not read, clear, or restore the composer.
       // ``continueOnBackend`` moves the session to that backend's built-in Agent
       // first, in the same server transaction as the retry.
-      const response = await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          retry_for: messageId,
-          ...(options?.continueOnBackend ? { continue_on_backend: options.continueOnBackend } : {}),
-        }),
-      });
-      const body = await response.json().catch(() => null);
+      const { response, body: replied } = await requestFailureRetry(sid, messageId, options);
+      const body = replied as (Partial<WorkbenchMessage> & {
+        retry_notice?: WorkbenchMessage; state?: string; queued?: boolean; delivery_state?: string;
+      }) | null;
       if (sid !== sessionIdRef.current) return false;
       if (body?.retry_notice) {
         const notice = body.retry_notice as WorkbenchMessage;
@@ -2827,7 +2825,7 @@ export const ChatPage: React.FC = () => {
       void refreshQueue();
       // The header shows the Agent the session moved to.
       if (options?.continueOnBackend) void refreshSessionRow();
-      return ['queued', 'claimed', 'accepted'].includes(body?.delivery_state ?? body?.state ?? '');
+      return retryAdmitted(body);
     } catch (err) {
       if (sid === sessionIdRef.current) setError(errorMessage(err) ?? t('chat.retryFailed'));
       return false;
@@ -6576,6 +6574,8 @@ export const MessageRow = memo(function MessageRow({
 
   // ----- Notify: compact gold pill, left-aligned (a status marker) -----
   if (isNotify) {
+    // A notice in the workspace thread reports on another Session (ui/design: chat/workspace-notices/*).
+    const failureSource = workspaceNoticeSource(message);
     return (
       <div data-message-id={message.id} className={rowClass('justify-start')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
@@ -6594,6 +6594,9 @@ export const MessageRow = memo(function MessageRow({
               <FailureDetails message={message} />
             </span>
           </div>
+          {failureSource ? (
+            <WorkspaceNoticeActions message={message} source={failureSource} />
+          ) : (
           <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
             <FailureNextStep
               message={message}
@@ -6610,6 +6613,7 @@ export const MessageRow = memo(function MessageRow({
               />
             )}
           </div>
+          )}
           {time}
         </div>
       </div>

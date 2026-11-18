@@ -121,6 +121,33 @@ def _row_to_payload(
         # A transcript row's model payload (the Avibe Agent's context) is not display:
         # no reader of a message payload uses it, and it can be large or private.
         content.pop("model", None)
+    try:
+        metadata = json.loads(row.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    # A failure notice in the workspace Session reports on another Session: name it,
+    # and say whether that failed Turn can be retried from here (the same boundary
+    # the retry checks when pressed). Its retry lives in that Session.
+    retry_session_id = row.get("session_id")
+    if (
+        conn is not None
+        and isinstance(content, dict)
+        and isinstance(metadata, dict)
+        and row.get("session_id") == WORKSPACE_NOTICE_SESSION_ID
+        and row.get("type") == NOTIFY_TYPE
+        and metadata.get("event") == "backend_failure"
+    ):
+        from storage.message_deliveries import workspace_notice_source
+
+        source_session_id, turn_id = workspace_notice_source(conn, metadata)
+        if source_session_id:
+            from core.backend_failure_retry import workspace_notice_retry_available
+
+            retry_session_id = source_session_id
+            content["failure_source"] = {
+                "session_id": source_session_id,
+                "retry": bool(turn_id) and workspace_notice_retry_available(conn, source_session_id, turn_id),
+            }
     link = content.get("failure_retry") if isinstance(content, dict) else None
     if conn is not None and isinstance(link, dict):
         from storage.message_deliveries import failure_retry_state, get_delivery
@@ -130,14 +157,10 @@ def _row_to_payload(
             "delivery_id": link.get("delivery_id"),
             "state": (
                 failure_retry_state(delivery)
-                if delivery is not None and delivery["session_id"] == row.get("session_id")
+                if delivery is not None and delivery["session_id"] == retry_session_id
                 else "retired"
             ),
         }
-    try:
-        metadata = json.loads(row.get("metadata_json") or "{}")
-    except json.JSONDecodeError:
-        metadata = {}
     if not isinstance(metadata, dict):
         metadata = {}
     elif not include_private_metadata:

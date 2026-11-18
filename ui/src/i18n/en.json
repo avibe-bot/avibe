@@ -5631,6 +5631,9 @@
     },
     "notifyLabel": "Notify",
     "retryRequested": "Retry requested",
+    "workspaceNotice": {
+      "openSession": "Open session"
+    },
     "failureNextStep": {
       "openModels": "Open Models",
       "askAdmin": "Ask an Avibe admin to fix this in Models.",

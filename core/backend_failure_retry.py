@@ -28,8 +28,32 @@ class RetryUnavailable(ValueError):
         super().__init__(code)
 
 
+def _workspace_notice(conn: Connection, session_id: str, notice_id: str) -> dict[str, Any] | None:
+    """A workspace-addressed notice of a failed Turn of ``session_id``, as that Session's notice.
+
+    The notice row stays in the workspace Session (``row_session_id``); its Turn and
+    Session are the ones its ``failure_id`` names, never ones a caller supplies.
+    """
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    notice = messages_service.get_message(conn, notice_id, session_id=WORKSPACE_NOTICE_SESSION_ID)
+    if notice is None:
+        return None
+    source_session_id, turn_id = deliveries.workspace_notice_source(conn, notice.get("metadata") or {})
+    if source_session_id != session_id or not turn_id:
+        return None
+    return {
+        **notice,
+        "session_id": session_id,
+        "row_session_id": WORKSPACE_NOTICE_SESSION_ID,
+        "metadata": {**(notice.get("metadata") or {}), "turn_id": turn_id},
+    }
+
+
 def _notice(conn: Connection, session_id: str, notice_id: str) -> dict[str, Any]:
     notice = messages_service.get_message(conn, notice_id, session_id=session_id)
+    if notice is None:
+        notice = _workspace_notice(conn, session_id, notice_id)
     metadata = (notice or {}).get("metadata") or {}
     if (
         notice is None
@@ -238,7 +262,7 @@ def reserve_retry(
     content["failure_retry"] = {"delivery_id": delivery_id}
     conn.execute(
         update(messages)
-        .where(messages.c.id == notice_id, messages.c.session_id == session_id)
+        .where(messages.c.id == notice_id, messages.c.session_id == notice.get("row_session_id", session_id))
         .values(content_json=json.dumps(content, ensure_ascii=False))
     )
     saved = deliveries.get_delivery(conn, delivery_id)
@@ -261,3 +285,20 @@ def admission_denial(conn: Connection, delivery: dict[str, Any]) -> str | None:
     except RetryUnavailable as error:
         return error.code
     return None
+
+
+def workspace_notice_retry_available(conn: Connection, session_id: str, turn_id: str) -> bool:
+    """Whether a retry of this failed Turn would be accepted now (read-only).
+
+    The same boundary ``reserve_retry`` checks, so the workspace thread offers
+    Retry only where pressing it can start one.
+    """
+    try:
+        _validate_boundary(
+            conn,
+            {"session_id": session_id, "metadata": {"turn_id": turn_id}},
+            exclude_ids=set(),
+        )
+    except RetryUnavailable:
+        return False
+    return True

@@ -1447,3 +1447,98 @@ def test_continue_on_vibey_refuses_a_message_the_old_backend_already_ran(isolate
             select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == failed_session)
         ).scalar_one()
     assert unchanged == "codex"
+
+
+def _workspace_notice_for(notice, *, run_id=None):
+    """The same failure, reported only to the workspace Session (no Session of its own to reach)."""
+    from storage.agent_session_rows import resolve_workspace_notice_session
+
+    with create_sqlite_engine().begin() as conn:
+        workspace = resolve_workspace_notice_session(conn)
+        conn.execute(update(messages).where(messages.c.id == notice["id"]).values(session_id=None))
+        return messages_service.append(
+            conn,
+            session_id=workspace,
+            scope_id=None,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="notify",
+            text="Backend interrupted",
+            # Cross-Session reports carry no turn_id: the failure_id names the Turn.
+            metadata={
+                "event": "backend_failure",
+                "backend": notice["metadata"]["backend"],
+                "failure_id": notice["metadata"]["failure_id"],
+                **({"run_id": run_id} if run_id else {}),
+            },
+        )
+
+
+def test_workspace_notice_names_its_session_and_retries_there(isolated_state, tmp_path):
+    """Owner, 11-18: a 工作区通知 error opens its Session and retries it, through the chat page's retry."""
+    from vibe.ui_server import app
+
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path)
+    workspace_notice = _workspace_notice_for(notice)
+    with create_sqlite_engine().connect() as conn:
+        shown = messages_service.get_message(conn, workspace_notice["id"])
+    assert shown["content"]["failure_source"] == {"session_id": session_id, "retry": True}
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    with patch("vibe.internal_client.dispatch_async", _accepted_dispatch(session_id)):
+        # The workspace Session itself takes no retry; the Session the failure names does.
+        refused = client.post(
+            f"/api/sessions/{workspace_notice['session_id']}/messages",
+            headers=headers, json={"retry_for": workspace_notice["id"]},
+        )
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", headers=headers, json={"retry_for": workspace_notice["id"]},
+        )
+        again = client.post(
+            f"/api/sessions/{session_id}/messages", headers=headers, json={"retry_for": workspace_notice["id"]},
+        )
+    assert refused.status_code >= 400
+    assert response.status_code == 201
+    assert again.get_json()["id"] == response.get_json()["id"]
+    with create_sqlite_engine().connect() as conn:
+        shown = messages_service.get_message(conn, workspace_notice["id"])
+    # Started: the retry is the notice's, and no second one is offered.
+    assert shown["content"]["failure_retry"]["state"] == "accepted"
+    assert shown["content"]["failure_source"] == {"session_id": session_id, "retry": False}
+
+
+def test_workspace_notice_another_session_cannot_claim(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path)
+    workspace_notice = _workspace_notice_for(notice)
+    other_session = "sesotherws01"
+    with create_sqlite_engine().begin() as conn:
+        row = dict(conn.execute(select(agent_sessions).where(agent_sessions.c.id == session_id)).mappings().one())
+        conn.execute(agent_sessions.insert().values({**row, "id": other_session, "session_anchor": other_session}))
+    client = app.test_client()
+    with patch("vibe.internal_client.dispatch_async", AsyncMock()) as dispatch:
+        response = client.post(
+            f"/api/sessions/{other_session}/messages",
+            headers=csrf_headers(client),
+            json={"retry_for": workspace_notice["id"]},
+        )
+    assert response.status_code == 409
+    dispatch.assert_not_awaited()
+
+
+def test_workspace_notice_without_a_turn_opens_but_does_not_retry(isolated_state, tmp_path):
+    from storage.models import agent_runs
+
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path)
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(agent_runs.insert().values(
+            id="run_ws", run_type="agent_run", status="failed", session_id=session_id, metadata_json="{}",
+            created_at="2026-11-18T00:00:00Z", updated_at="2026-11-18T00:00:00Z",
+        ))
+    workspace_notice = _workspace_notice_for({**notice, "metadata": {**notice["metadata"], "failure_id": "run:run_ws"}}, run_id="run_ws")
+    with create_sqlite_engine().connect() as conn:
+        shown = messages_service.get_message(conn, workspace_notice["id"])
+    assert shown["content"]["failure_source"] == {"session_id": session_id, "retry": False}
