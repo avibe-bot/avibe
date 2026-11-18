@@ -3586,6 +3586,7 @@ export const ChatPage: React.FC = () => {
           ref={setShowPageIframe}
           onLoad={annotation.handleIframeLoad}
           title={t('chat.showPage.title')}
+          data-avibe-show-session={sessionId}
           src={showPageUrl}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"

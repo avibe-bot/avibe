@@ -20,6 +20,7 @@ struct NativeShellMetadata: Equatable {
         "accountPresentation": 2,
         "app": 1,
         "badge": 1,
+        "c1.share_draft": 1,
         "haptics": 1,
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
@@ -112,6 +113,8 @@ enum NativeBridgeMethod: String, CaseIterable {
     case pushOpenedAck = "push.openedAck"
     case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
+    case shareCapabilities = "share.capabilities"
+    case sharePresent = "share.present"
 }
 
 /// The parameterized Account root belongs to instancePresentation v1;
@@ -253,6 +256,7 @@ enum NativeBridgeConfiguration {
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        showShare: ShowShareCoordinator? = nil,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -308,6 +312,7 @@ enum NativeBridgeConfiguration {
             showInstances: showInstances,
             instanceName: instanceName,
             directStatus: directStatus,
+            showShare: showShare,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
             pushUnsubscribe: pushUnsubscribe,
@@ -574,6 +579,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let showInstances: () -> Void
     private let instanceName: () -> String?
     private let directStatus: DirectStatusProvider?
+    private let showShare: ShowShareCoordinator?
     private let pushStatus: @MainActor (
         String?,
         WebOrigin
@@ -611,6 +617,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         showInstances: @escaping () -> Void,
         instanceName: @escaping () -> String?,
         directStatus: DirectStatusProvider?,
+        showShare: ShowShareCoordinator?,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -647,6 +654,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.showInstances = showInstances
         self.instanceName = instanceName
         self.directStatus = directStatus
+        self.showShare = showShare
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
         self.pushUnsubscribe = pushUnsubscribe
@@ -840,6 +848,24 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
+        case .shareCapabilities:
+            guard request.params.isEmpty else {
+                reply(replyHandler, error: .unsupported)
+                return
+            }
+            reply(replyHandler, result: ShowShareCoordinator.capabilities)
+        case .sharePresent:
+            guard let sourceWebView else {
+                reply(replyHandler, error: .unsupported)
+                return
+            }
+            guard let share = ShowShareRequest.parse(request.params) else {
+                reply(replyHandler, error: .invalidArgument("share.present requires operationId (UUIDv4), kind and sessionId."))
+                return
+            }
+            (showShare ?? .shared).share(share, from: sourceWebView, origin: policy.instanceOrigin) { [weak self] result in
+                self?.reply(replyHandler, result: result.jsonObject)
+            }
         case .appearanceColorSchemeChanged:
             let rawScheme = request.params["scheme"]
             let scheme = (rawScheme as? String).flatMap(PageColorScheme.init(rawValue:))

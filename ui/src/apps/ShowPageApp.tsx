@@ -85,6 +85,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
       ref={setIframe}
       onLoad={handleIframeLoad}
       title={t('chat.showPage.title')}
+      data-avibe-show-session={sessionId}
       src={src}
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
       allow="clipboard-write"

@@ -110,6 +110,122 @@ async function callNative<T>(
   return native.call<T>(method, params);
 }
 
+/** The capability a shell advertises when it can present the system share sheet for a Show. */
+export const NATIVE_SHARE_CAPABILITY = 'c1.share_draft';
+export type NativeShareKind = 'link' | 'pdf' | 'image';
+export type NativeShareStatus = 'completed' | 'cancelled' | 'failed' | 'expired';
+/**
+ * The terminal outcome of one `share.present`. `completed` means only that the system sheet
+ * reported a successful handoff. A refusal the Web UI decides on its own (no capability, a probe
+ * that does not offer the kind) reads as `failed` with `capability_mismatch`.
+ */
+export type NativeShareResult = {
+  operationId: string;
+  kind: NativeShareKind;
+  status: NativeShareStatus;
+  error?: { code: string };
+};
+
+const NATIVE_SHARE_STATUSES: readonly NativeShareStatus[] = ['completed', 'cancelled', 'failed', 'expired'];
+const NATIVE_SHARE_MAX_SESSION_ID_LENGTH = 200;
+
+/** Whether this shell can share a Show through `share.present` (any kind). */
+export function hasNativeShare(): boolean {
+  return hasNativeCapability(NATIVE_SHARE_CAPABILITY);
+}
+
+function newShareOperationId(): string | null {
+  const crypto = globalThis.crypto;
+  if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
+  if (typeof crypto?.getRandomValues !== 'function') return null;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function offersShareKind(capabilities: unknown, kind: NativeShareKind): boolean {
+  if (!capabilities || typeof capabilities !== 'object') return false;
+  const { version, outbound_kinds: outbound } = capabilities as {
+    version?: unknown;
+    outbound_kinds?: unknown;
+  };
+  return version === 1 && Array.isArray(outbound) && outbound.includes(kind);
+}
+
+function bridgeErrorCode(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object' && 'code' in error) {
+    const { code } = error as { code?: unknown };
+    if (typeof code === 'string' && code) return code;
+  }
+  return fallback;
+}
+
+/**
+ * Asks the shell to share the Show of `sessionId` as its link, or as a PDF or image of the part of
+ * its page the user sees now. The call names only the kind and the Session: the shell reads the link
+ * and title from this instance's own Show APIs and captures the visible frame itself, so no URL,
+ * title, geometry, or content crosses the bridge, and no permission changes. For `pdf` and `image`
+ * the caller must have removed every overlay above the page first. Never throws.
+ */
+export async function nativeSharePresent(
+  kind: NativeShareKind,
+  sessionId: string,
+): Promise<NativeShareResult> {
+  const operationId = newShareOperationId() ?? '';
+  const failed = (code: string): NativeShareResult => ({
+    operationId,
+    kind,
+    status: 'failed',
+    error: { code },
+  });
+  const native = bridge();
+  if (!native || (native.capabilities[NATIVE_SHARE_CAPABILITY] ?? 0) < 1) {
+    return failed('capability_mismatch');
+  }
+  if (!operationId) return failed('unavailable');
+  if (!sessionId || sessionId.length > NATIVE_SHARE_MAX_SESSION_ID_LENGTH) {
+    return failed('invalid_request');
+  }
+  try {
+    const capabilities = await native.call<unknown>('share.capabilities');
+    if (!offersShareKind(capabilities, kind)) return failed('capability_mismatch');
+  } catch (error) {
+    return failed(bridgeErrorCode(error, 'unavailable'));
+  }
+  let result: unknown;
+  try {
+    result = await native.call<unknown>('share.present', { operationId, kind, sessionId });
+  } catch (error) {
+    return failed(bridgeErrorCode(error, 'unavailable'));
+  }
+  if (!result || typeof result !== 'object') return failed('invalid_response');
+  const { operationId: echoedId, kind: echoedKind, status, error } = result as {
+    operationId?: unknown;
+    kind?: unknown;
+    status?: unknown;
+    error?: unknown;
+  };
+  if (
+    echoedId !== operationId
+    || echoedKind !== kind
+    || !NATIVE_SHARE_STATUSES.includes(status as NativeShareStatus)
+  ) {
+    return failed('invalid_response');
+  }
+  const shareStatus = status as NativeShareStatus;
+  if (shareStatus === 'failed' || shareStatus === 'expired') {
+    return {
+      operationId,
+      kind,
+      status: shareStatus,
+      error: { code: bridgeErrorCode(error, shareStatus) },
+    };
+  }
+  return { operationId, kind, status: shareStatus };
+}
+
 export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
   return callNative<NativeAppInfo>('app', 'app.info');
 }

@@ -54,6 +54,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
+            ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
         }
         return true

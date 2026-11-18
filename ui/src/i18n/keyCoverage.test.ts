@@ -929,6 +929,8 @@ const NON_KEY_LITERALS = [
   'auth.verifyPasskey',
   'auth.verifySecondFactor',
   'badge.set',
+  // A native capability key; the shell advertises it beside the method names.
+  'c1.share_draft',
   'direct.status',
   'direct.transportChanged',
   'haptics.impact',
@@ -943,6 +945,8 @@ const NON_KEY_LITERALS = [
   'push.status',
   'push.subscribe',
   'push.unsubscribe',
+  'share.capabilities',
+  'share.present',
   'viewport.setOuterScrollLocked',
   'voice.permission',
 
