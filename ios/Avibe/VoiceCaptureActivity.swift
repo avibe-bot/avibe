@@ -42,6 +42,9 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         /// The system would not start the Live Activity, so nothing was
         /// recorded.
         case activityFailed
+        /// The microphone would not start recording (the audio session or
+        /// the recorder refused); `errorCode` says what the system answered.
+        case recordingFailed
         case interrupted
     }
 
@@ -55,6 +58,8 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         /// The start of what was heard, shown once sent. Bounded so the
         /// activity stays under ActivityKit's 4 KB payload.
         var heard: String?
+        /// The system's error code for `recordingFailed`, shown with it.
+        var errorCode: Int?
 
         static let heardLimit = 160
     }

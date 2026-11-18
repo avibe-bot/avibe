@@ -145,6 +145,20 @@ final class VoiceCaptureController {
 
     /// The longest take; it is then sent as if the user stopped it.
     static let maximumDuration: Duration = .seconds(5 * 60)
+    /// The code the system answered (an OSStatus such as
+    /// `cannotStartRecording`, or a Cocoa file error); nil for Avibe's own
+    /// errors, whose numbers would mean nothing (`record()` returning false).
+    static func systemCode(_ error: Error) -> Int? {
+        if error is VoiceCaptureRecorder.Failure { return nil }
+        let ns = error as NSError
+        return ns.domain == NSOSStatusErrorDomain || ns.domain == NSCocoaErrorDomain
+            || ns.domain == AVFoundationErrorDomain ? ns.code : nil
+    }
+
+    /// A run this soon after a failed start is the same press again.
+    static let repeatWindow: TimeInterval = 1
+    /// When a start last failed with a notice (see `repeatWindow`).
+    private var failedStartAt: Date?
     /// When a listening or sending island goes stale on its own: the cap
     /// plus time to send. Only a take whose process is gone gets there.
     static let staleAfter: TimeInterval = 5 * 60 + 90
@@ -216,6 +230,14 @@ final class VoiceCaptureController {
 
     /// The intent: start a take, or stop and send the one recording.
     func toggle() async -> Outcome {
+        // The system may run the intent twice for one press: a run right
+        // after a start that failed and said so does nothing more.
+        if case .idle = state, let failedStartAt,
+           environment.now().timeIntervalSince(failedStartAt) < Self.repeatWindow
+        {
+            record("ignored a run right after a failed start")
+            return .stopped
+        }
         // A take this process does not hold is a leftover of one whose
         // process is gone (killed, or ended by the system): its recording is
         // lost. A press then ends it and says so; the next press starts anew.
@@ -416,9 +438,10 @@ final class VoiceCaptureController {
         do {
             audio = try environment.makeAudio(id)
         } catch {
+            record("start: take file failed \(error)")
             instance.close()
             state = .idle
-            showNotice(phase: .failed, reason: .microphone)
+            showNotice(phase: .failed, reason: .recordingFailed, errorCode: Self.systemCode(error))
             return .stopped
         }
 
@@ -441,13 +464,18 @@ final class VoiceCaptureController {
         do {
             try audio.start()
         } catch {
-            record("start: recorder failed \(error)")
+            record("start: recorder failed \((error as NSError).domain) \((error as NSError).code) \(error)")
             instance.close()
             state = .idle
+            // Permission was checked above: this is the system refusing to
+            // record, not a missing permission. Say so, with its code.
+            failedStartAt = environment.now()
+            var failed = VoiceCaptureAttributes.ContentState(
+                phase: .failed, startedAt: startedAt, endedAt: startedAt, reason: .recordingFailed
+            )
+            failed.errorCode = Self.systemCode(error)
             await activity.end(
-                VoiceCaptureAttributes.ContentState(
-                    phase: .failed, startedAt: startedAt, endedAt: startedAt, reason: .microphone
-                ),
+                failed,
                 dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal))
             )
             return .stopped
@@ -621,11 +649,17 @@ final class VoiceCaptureController {
     }
 
     /// A short notice for a press that never recorded.
-    private func showNotice(phase: VoiceCaptureAttributes.Phase, reason: VoiceCaptureAttributes.Reason) {
+    private func showNotice(
+        phase: VoiceCaptureAttributes.Phase,
+        reason: VoiceCaptureAttributes.Reason,
+        errorCode: Int? = nil
+    ) {
         let now = environment.now()
-        let notice = VoiceCaptureAttributes.ContentState(
+        failedStartAt = now
+        var notice = VoiceCaptureAttributes.ContentState(
             phase: phase, startedAt: now, endedAt: now, reason: reason
         )
+        notice.errorCode = errorCode
         do {
             let activity = try environment.requestActivity(notice)
             Task {

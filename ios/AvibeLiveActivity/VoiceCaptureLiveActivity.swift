@@ -94,6 +94,17 @@ enum VoiceCaptureCopy {
         }
     }
 
+    /// The reason, with the system's error code where one is known.
+    static func reasonLine(_ reason: VoiceCaptureAttributes.Reason, errorCode: Int?) -> LocalizedStringResource {
+        if reason == .recordingFailed, let errorCode {
+            return LocalizedStringResource(
+                String.LocalizationValue("voiceCapture.reason.recordingFailedCode \(errorCode)"),
+                table: "VoiceCapture"
+            )
+        }
+        return self.reason(reason)
+    }
+
     static func reason(_ reason: VoiceCaptureAttributes.Reason) -> LocalizedStringResource {
         switch reason {
         case .offline: return text("voiceCapture.reason.offline")
@@ -108,6 +119,7 @@ enum VoiceCaptureCopy {
         case .voiceUnavailable: return text("voiceCapture.reason.voiceUnavailable")
         case .liveActivities: return text("voiceCapture.reason.liveActivities")
         case .activityFailed: return text("voiceCapture.reason.activityFailed")
+        case .recordingFailed: return text("voiceCapture.reason.recordingFailed")
         case .interrupted: return text("voiceCapture.reason.interrupted")
         }
     }
@@ -221,7 +233,7 @@ struct VoiceCaptureDetail: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else if let reason = state.reason {
-                Text(VoiceCaptureCopy.reason(reason))
+                Text(VoiceCaptureCopy.reasonLine(reason, errorCode: state.errorCode))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
