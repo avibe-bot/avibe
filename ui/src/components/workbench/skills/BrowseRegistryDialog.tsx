@@ -135,7 +135,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
             </div>
           ) : null}
 
-          <div className="flex max-h-[420px] flex-col gap-2.5 overflow-y-auto">
+          <div className="flex max-h-[420px] flex-col gap-2.5 overflow-y-auto p-px">
             {shown.length === 0 && !loading ? (
               <div className="rounded-xl border border-dashed border-border px-4 py-10 text-center text-[12px] text-muted">
                 {t('skills.browse.empty')}
