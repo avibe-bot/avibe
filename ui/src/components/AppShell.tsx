@@ -62,6 +62,7 @@ import { DesktopSettingsCommand } from './DesktopSettingsCommand';
 import { VaultHandoffReturn } from './VaultHandoffReturn';
 import { prefetchRoutePages } from '../routePages';
 import { WebPushReconciler } from './workbench/WebPushReconciler';
+import { SystemScheduleForwarder } from './workbench/SystemScheduleForwarder';
 
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
 const MACOS_SESSION_NOTICE_HEIGHT_VAR = '--macos-stale-login-session-notice-h';
@@ -439,6 +440,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     return (
       <ShellSidebarContext.Provider value={shellDrawsSidebar}>
         <WebPushReconciler />
+        <SystemScheduleForwarder />
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <DesktopSettingsCommand />
@@ -508,6 +510,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     <PendingVaultRequestsContext.Provider value={pendingVaultRequests}>
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <WebPushReconciler />
+    <SystemScheduleForwarder />
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <DesktopSettingsCommand />
     <DesktopClientPresentation />

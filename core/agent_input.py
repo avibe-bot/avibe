@@ -164,7 +164,8 @@ def harness_hint(spec: Mapping[str, Any], *, receiver: Any = None) -> str:
     """Where a dispatched Agent Run's result should be reported.
 
     Successful callbacks are retired. A delegated Session reports to its sender when
-    it needs a decision; ``--no-reply`` replaces that hint with an explicit receipt
+    it is done, needs a decision, or hits a problem that changes the plan (owner wording,
+    2026-11-18); ``--no-reply`` replaces that hint with an explicit receipt
     suppression marker. The sender-Session prefix rule still suppresses the hint.
     """
     if _token(spec.get("task_trigger_kind")) != "agent_run":
@@ -181,7 +182,10 @@ def harness_hint(spec: Mapping[str, Any], *, receiver: Any = None) -> str:
     if spec.get("suppress_report_hint") is True:
         return ""
     name, command = _address(sender)
-    return f"When the work is done or you need a decision, you can report to {name} with `{command}`."
+    return (
+        "Write back when the work is done, when you need a decision, or when a problem changes the plan; "
+        f"not for progress. Open with which of the three it is. Report to {name} with `{command}`."
+    )
 
 
 def harness_hints(spec: Mapping[str, Any]) -> tuple[str, ...]:

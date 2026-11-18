@@ -486,6 +486,7 @@ _EDITOR_HTTP_NAMESPACES = (
     "/api/dock",
     "/api/harness",
     "/api/terminal",
+    "/api/system-schedule",
 )
 _VIEWER_HTTP_NAMESPACES = (
     "/api/web-push",

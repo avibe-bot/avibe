@@ -7519,6 +7519,76 @@ def _web_push_normal_delivery_diagnostics() -> dict:
     return evaluation
 
 
+@app.route("/api/system-schedule/claim", methods=["POST"])
+def system_schedule_claim():
+    """Lease the next Agent-created request to this exact iOS installation."""
+
+    from config.v2_config import V2Config
+    from storage import system_schedule_service
+
+    payload = request.json
+    expected = {
+        "instance_id",
+        "device_id",
+        "exclude_lease_tokens",
+        "allow_create",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected:
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    configured_instance_id = str(
+        V2Config.load().remote_access.vibe_cloud.instance_id or ""
+    ).strip()
+    if not configured_instance_id:
+        return jsonify({"ok": False, "error": "instance_not_paired"}), 409
+    if payload.get("instance_id") != configured_instance_id:
+        return jsonify({"ok": False, "error": "instance_mismatch"}), 409
+    if not isinstance(payload.get("allow_create"), bool):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    try:
+        claim = system_schedule_service.claim_next(
+            instance_id=configured_instance_id,
+            device_id=payload.get("device_id"),
+            exclude_lease_tokens=payload.get("exclude_lease_tokens"),
+            allow_create=payload["allow_create"],
+        )
+    except system_schedule_service.SystemScheduleServiceError as exc:
+        return jsonify({"ok": False, "error": exc.code}), 400
+    return jsonify({"ok": True, "claim": claim})
+
+
+@app.route("/api/system-schedule/receipt", methods=["POST"])
+def system_schedule_receipt():
+    """Persist one terminal native receipt for the current device lease."""
+
+    from config.v2_config import V2Config
+    from storage import system_schedule_service
+
+    payload = request.json
+    expected = {"instance_id", "device_id", "lease_token", "receipt"}
+    if not isinstance(payload, dict) or set(payload) != expected:
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    configured_instance_id = str(
+        V2Config.load().remote_access.vibe_cloud.instance_id or ""
+    ).strip()
+    if not configured_instance_id:
+        return jsonify({"ok": False, "error": "instance_not_paired"}), 409
+    if payload.get("instance_id") != configured_instance_id:
+        return jsonify({"ok": False, "error": "instance_mismatch"}), 409
+    try:
+        result = system_schedule_service.record_receipt(
+            instance_id=configured_instance_id,
+            device_id=payload.get("device_id"),
+            lease_token=payload.get("lease_token"),
+            receipt=payload.get("receipt"),
+        )
+    except system_schedule_service.SystemScheduleServiceError as exc:
+        status = 409 if exc.code in {
+            "receipt_mismatch", "receipt_conflict", "stale_receipt"
+        } else 400
+        return jsonify({"ok": False, "error": exc.code}), status
+    return jsonify({"ok": True, **result})
+
+
 @app.route("/api/web-push/status", methods=["GET", "POST"])
 def web_push_status():
     from core.web_push import load_or_create_vapid_keys

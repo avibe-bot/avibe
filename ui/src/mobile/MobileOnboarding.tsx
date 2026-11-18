@@ -137,7 +137,8 @@ type MobileErrorKey =
   | 'mobileApp.twoFactor.codeInvalid'
   | 'mobileApp.twoFactor.recoveryInvalid'
   | 'mobileApp.twoFactor.rateLimited'
-  | 'mobileApp.errors.network';
+  | 'mobileApp.errors.network'
+  | 'mobileApp.errors.localRecords';
 type SecondFactorSession = Extract<MobileSessionState, { status: 'twoFactorRequired' }>;
 type SecondFactorStep = 'passkey' | 'totp' | 'recovery' | 'setup';
 
@@ -243,6 +244,9 @@ const pageErrorKey = (
   error: MobileBridgeError,
   operation: MobileOperation,
 ): MobileErrorKey => {
+  if (error.code === 'local_state_unavailable' || error.code === 'local_state_write_failed') {
+    return 'mobileApp.errors.localRecords';
+  }
   if (operation === 'password') {
     if (error.code === 'invalid_credentials') return 'mobileApp.password.invalid';
     if (error.code === 'email_not_confirmed') return 'mobileApp.password.unconfirmed';

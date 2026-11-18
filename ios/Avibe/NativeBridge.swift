@@ -28,6 +28,7 @@ struct NativeShellMetadata: Equatable {
         "keyboardResizesViewport": 1,
         "notifications": 1,
         "push": 1,
+        "systemSchedule": 1,
         "viewport": 1,
         "voice": 1,
     ]
@@ -114,6 +115,9 @@ enum NativeBridgeMethod: String, CaseIterable {
     case pushSubscribe = "push.subscribe"
     case pushUnsubscribe = "push.unsubscribe"
     case pushOpenedAck = "push.openedAck"
+    case systemScheduleCapabilities = "systemSchedule.capabilities"
+    case systemScheduleRequest = "systemSchedule.request"
+    case systemScheduleCancel = "systemSchedule.cancel"
     case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
 }
@@ -256,6 +260,8 @@ enum NativeBridgeConfiguration {
         showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
+        instanceID: @escaping () -> String? = { nil },
+        deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushStatus: @escaping @MainActor (
@@ -293,6 +299,27 @@ enum NativeBridgeConfiguration {
             WebOrigin
         ) -> Bool = { _, _ in
             false
+        },
+        systemScheduleAdmission: @escaping @MainActor (WKWebView, WebOrigin) -> SystemScheduleAdmission? = { _, _ in nil },
+        systemScheduleCapabilities: @escaping @MainActor (
+            WKWebView,
+            WebOrigin
+        ) -> [String: Any]? = { _, _ in
+            nil
+        },
+        systemScheduleRequest: @escaping @MainActor (
+            WKWebView,
+            SystemScheduleRequest,
+            SystemScheduleAdmission
+        ) async -> [String: Any]? = { _, _, _ in
+            nil
+        },
+        systemScheduleCancel: @escaping @MainActor (
+            WKWebView,
+            SystemScheduleCancelRequest,
+            SystemScheduleAdmission
+        ) async -> [String: Any]? = { _, _, _ in
+            nil
         }
     ) -> WKWebViewConfiguration {
         // `direct` exists only with a provider: a shell with no direct
@@ -312,6 +339,8 @@ enum NativeBridgeConfiguration {
             showAccountRoot: showAccountRoot,
             showInstances: showInstances,
             instanceName: instanceName,
+            instanceID: instanceID,
+            deviceID: deviceID,
             directStatus: directStatus,
             healthConnect: healthConnect,
             pushStatus: pushStatus,
@@ -319,7 +348,11 @@ enum NativeBridgeConfiguration {
             pushUnsubscribe: pushUnsubscribe,
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
-            reconcileNotifications: reconcileNotifications
+            reconcileNotifications: reconcileNotifications,
+            systemScheduleAdmission: systemScheduleAdmission,
+            systemScheduleCapabilities: systemScheduleCapabilities,
+            systemScheduleRequest: systemScheduleRequest,
+            systemScheduleCancel: systemScheduleCancel
         )
         controller.addScriptMessageHandler(
             handler,
@@ -580,6 +613,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let showInstances: () -> Void
     private let instanceName: () -> String?
     private let healthConnect: HealthConnectAction
+    private let instanceID: () -> String?
+    private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
     private let pushStatus: @MainActor (
         String?,
@@ -605,6 +640,21 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         NotificationReconcile,
         WebOrigin
     ) -> Bool
+    private let systemScheduleAdmission: @MainActor (WKWebView, WebOrigin) -> SystemScheduleAdmission?
+    private let systemScheduleCapabilities: @MainActor (
+        WKWebView,
+        WebOrigin
+    ) -> [String: Any]?
+    private let systemScheduleRequest: @MainActor (
+        WKWebView,
+        SystemScheduleRequest,
+        SystemScheduleAdmission
+    ) async -> [String: Any]?
+    private let systemScheduleCancel: @MainActor (
+        WKWebView,
+        SystemScheduleCancelRequest,
+        SystemScheduleAdmission
+    ) async -> [String: Any]?
 
     init(
         policy: NativeBridgePolicy,
@@ -617,6 +667,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         showAccountRoot: @escaping () -> Void,
         showInstances: @escaping () -> Void,
         instanceName: @escaping () -> String?,
+        instanceID: @escaping () -> String?,
+        deviceID: @escaping () -> String?,
         directStatus: DirectStatusProvider?,
         healthConnect: @escaping HealthConnectAction,
         pushStatus: @escaping @MainActor (
@@ -642,7 +694,22 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         reconcileNotifications: @escaping @MainActor (
             NotificationReconcile,
             WebOrigin
-        ) -> Bool
+        ) -> Bool,
+        systemScheduleAdmission: @escaping @MainActor (WKWebView, WebOrigin) -> SystemScheduleAdmission? = { _, _ in nil },
+        systemScheduleCapabilities: @escaping @MainActor (
+            WKWebView,
+            WebOrigin
+        ) -> [String: Any]?,
+        systemScheduleRequest: @escaping @MainActor (
+            WKWebView,
+            SystemScheduleRequest,
+            SystemScheduleAdmission
+        ) async -> [String: Any]?,
+        systemScheduleCancel: @escaping @MainActor (
+            WKWebView,
+            SystemScheduleCancelRequest,
+            SystemScheduleAdmission
+        ) async -> [String: Any]?
     ) {
         self.policy = policy
         self.metadata = metadata
@@ -654,6 +721,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
         self.instanceName = instanceName
+        self.instanceID = instanceID
+        self.deviceID = deviceID
         self.directStatus = directStatus
         self.healthConnect = healthConnect
         self.pushStatus = pushStatus
@@ -662,6 +731,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
+        self.systemScheduleAdmission = systemScheduleAdmission
+        self.systemScheduleCapabilities = systemScheduleCapabilities
+        self.systemScheduleRequest = systemScheduleRequest
+        self.systemScheduleCancel = systemScheduleCancel
     }
 
     func userContentController(
@@ -692,6 +765,18 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             {
                 handlePush(
                     request,
+                    instanceOrigin: policy.instanceOrigin,
+                    replyHandler: replyHandler
+                )
+                return
+            }
+            if request.method == .systemScheduleCapabilities
+                || request.method == .systemScheduleRequest
+                || request.method == .systemScheduleCancel
+            {
+                handleSystemSchedule(
+                    request,
+                    sourceWebView: message.webView,
                     instanceOrigin: policy.instanceOrigin,
                     replyHandler: replyHandler
                 )
@@ -843,6 +928,100 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         }
     }
 
+    private func handleSystemSchedule(
+        _ request: NativeBridgeRequest,
+        sourceWebView: WKWebView?,
+        instanceOrigin: WebOrigin,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        guard let sourceWebView else {
+            reply(replyHandler, error: .forbidden)
+            return
+        }
+        switch request.method {
+        case .systemScheduleCapabilities:
+            guard request.params.isEmpty else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "systemSchedule.capabilities does not accept parameters."
+                    )
+                )
+                return
+            }
+            guard let result = systemScheduleCapabilities(
+                sourceWebView,
+                instanceOrigin
+            ) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: result)
+        case .systemScheduleRequest:
+            guard let schedule = SystemScheduleRequest.parse(request.params) else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "systemSchedule.request requires the version 1 product request with a null recurrence."
+                    )
+                )
+                return
+            }
+            guard let admission = systemScheduleAdmission(sourceWebView, instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self, let sourceWebView else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                guard let result = await self.systemScheduleRequest(
+                    sourceWebView,
+                    schedule,
+                    admission
+                ) else {
+                    self.reply(replyHandler, error: .forbidden)
+                    return
+                }
+                self.reply(replyHandler, result: result)
+            }
+        case .systemScheduleCancel:
+            guard let cancellation = SystemScheduleCancelRequest.parse(
+                request.params
+            ) else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "systemSchedule.cancel requires requestId, operationId, kind, and purpose."
+                    )
+                )
+                return
+            }
+            guard let admission = systemScheduleAdmission(sourceWebView, instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self, let sourceWebView else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                guard let result = await self.systemScheduleCancel(
+                    sourceWebView,
+                    cancellation,
+                    admission
+                ) else {
+                    self.reply(replyHandler, error: .forbidden)
+                    return
+                }
+                self.reply(replyHandler, result: result)
+            }
+        default:
+            reply(replyHandler, error: .unsupported)
+        }
+    }
+
     private func handle(
         _ request: NativeBridgeRequest,
         sourceWebView: WKWebView?,
@@ -895,7 +1074,18 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         case .appInfo:
             var info = metadata.jsonObject
             let name = instanceName()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            info["instance"] = ["name": name.isEmpty ? "Avibe" : name]
+            var instance: [String: String] = ["name": name.isEmpty ? "Avibe" : name]
+            if let id = instanceID()?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !id.isEmpty
+            {
+                instance["id"] = id
+            }
+            info["instance"] = instance
+            if let id = deviceID()?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !id.isEmpty
+            {
+                info["device"] = ["id": id]
+            }
             reply(replyHandler, result: info)
         case .appOpenExternal:
             guard
@@ -1051,7 +1241,9 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     self.reply(replyHandler, result: status.jsonObject)
                 }
             }
-        case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck:
+        case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck,
+             .systemScheduleCapabilities, .systemScheduleRequest,
+             .systemScheduleCancel:
             reply(replyHandler, error: .unsupported)
         case .hapticsImpact:
             guard

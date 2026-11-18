@@ -1,0 +1,141 @@
+{
+  "contract": 1,
+  "createRequests": [
+    {
+      "requestId": "request-ascii",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "title": "Take medicine",
+      "fireAt": "2026-11-18T01:00:00.123Z",
+      "timeZone": "America/Los_Angeles",
+      "recurrence": null,
+      "instanceId": "instance-1",
+      "sessionId": "session-1",
+      "expiresAt": "2026-11-17T23:05:00.456Z"
+    },
+    {
+      "requestId": "request-unicode",
+      "operationId": "operation-unicode",
+      "kind": "reminder",
+      "title": "吃药 💊",
+      "fireAt": "2026-11-18T09:30:00.789Z",
+      "timeZone": "Asia/Shanghai",
+      "recurrence": null,
+      "instanceId": "实例-一",
+      "sessionId": "会话-一",
+      "expiresAt": "2026-11-18T08:05:00.987Z"
+    }
+  ],
+  "cancelRequests": [
+    {
+      "requestId": "cancel-user",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "purpose": "user"
+    },
+    {
+      "requestId": "cancel-user-unicode",
+      "operationId": "operation-unicode",
+      "kind": "reminder",
+      "purpose": "user"
+    }
+  ],
+  "receipts": [
+    {
+      "contract": 1,
+      "requestId": "receipt-scheduled",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "state": "scheduled",
+      "systemIdentifier": "opaque-system-1",
+      "fireAt": "2026-11-18T01:00:00.123Z",
+      "timeZone": "America/Los_Angeles",
+      "authorization": "authorized",
+      "error": null
+    },
+    {
+      "contract": 1,
+      "requestId": "receipt-user-denied",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "state": "user_denied",
+      "systemIdentifier": null,
+      "fireAt": "2026-11-18T01:00:00.123Z",
+      "timeZone": "America/Los_Angeles",
+      "authorization": "not_determined",
+      "error": {"code": "user_denied", "message": "The user did not approve this system schedule."}
+    },
+    {
+      "contract": 1,
+      "requestId": "receipt-permission-denied",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "state": "permission_denied",
+      "systemIdentifier": null,
+      "fireAt": "2026-11-18T01:00:00.123Z",
+      "timeZone": "America/Los_Angeles",
+      "authorization": "denied",
+      "error": {"code": "permission_denied", "message": "Avibe doesn't have permission. Allow it in iPhone Settings, then try again."}
+    },
+    {
+      "contract": 1,
+      "requestId": "receipt-unsupported",
+      "operationId": "operation-unicode",
+      "kind": "reminder",
+      "state": "unsupported",
+      "systemIdentifier": null,
+      "fireAt": "2026-11-18T09:30:00.789Z",
+      "timeZone": "Asia/Shanghai",
+      "authorization": "unsupported",
+      "error": {"code": "unsupported", "message": "This system schedule is not available on this iPhone."}
+    },
+    {
+      "contract": 1,
+      "requestId": "receipt-failed",
+      "operationId": "operation-unicode",
+      "kind": "reminder",
+      "state": "failed",
+      "systemIdentifier": "opaque-system-2",
+      "fireAt": "2026-11-18T09:30:00.789Z",
+      "timeZone": "Asia/Shanghai",
+      "authorization": "authorized",
+      "error": {"code": "lookup_unknown", "message": "The system item could not be inspected."}
+    },
+    {
+      "contract": 1,
+      "requestId": "receipt-expired",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "state": "expired",
+      "systemIdentifier": null,
+      "fireAt": "2026-11-18T01:00:00.123Z",
+      "timeZone": "America/Los_Angeles",
+      "authorization": "not_determined",
+      "error": {"code": "expired", "message": "The system schedule request expired before it was created."}
+    },
+    {
+      "contract": 1,
+      "requestId": "receipt-stale",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "state": "stale_context",
+      "systemIdentifier": null,
+      "fireAt": "2026-11-18T01:00:00.123Z",
+      "timeZone": "America/Los_Angeles",
+      "authorization": "authorized",
+      "error": {"code": "stale_context", "message": "The request context changed."}
+    },
+    {
+      "contract": 1,
+      "requestId": "receipt-cancelled",
+      "operationId": "operation-ascii",
+      "kind": "alarm",
+      "state": "cancelled",
+      "systemIdentifier": null,
+      "fireAt": "2026-11-18T01:00:00.123Z",
+      "timeZone": "America/Los_Angeles",
+      "authorization": "authorized",
+      "error": null
+    }
+  ]
+}

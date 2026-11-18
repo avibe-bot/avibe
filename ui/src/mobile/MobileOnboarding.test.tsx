@@ -713,6 +713,27 @@ describe('mobile onboarding', () => {
     expect(mobile.logout).not.toHaveBeenCalled();
   });
 
+  it.each(['local_state_unavailable', 'local_state_write_failed'])(
+    'keeps %s on the existing recovery surface and retries discovery, not logout',
+    async (code) => {
+      mobile.bootstrap
+        .mockRejectedValueOnce({ code, message: 'local records unavailable' })
+        .mockRejectedValueOnce({ code, message: 'local records unavailable' })
+        .mockResolvedValueOnce(signedIn());
+      render(<MobileOnboarding />);
+      expect(await screen.findByText('mobileApp.errors.localRecords')).toBeTruthy();
+      expect(screen.queryByText('mobileApp.errors.network')).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+      await waitFor(() => expect(mobile.bootstrap).toHaveBeenCalledTimes(2));
+      expect(await screen.findByText('mobileApp.errors.localRecords')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+      expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+      expect(screen.queryByText('mobileApp.errors.localRecords')).toBeNull();
+      expect(mobile.logout).not.toHaveBeenCalled();
+      expect(mobile.requestOtp).not.toHaveBeenCalled();
+    },
+  );
+
   it('enters Welcome only from an explicit signed-out result', async () => {
     render(<MobileOnboarding />);
     expect(await screen.findByRole('button', {

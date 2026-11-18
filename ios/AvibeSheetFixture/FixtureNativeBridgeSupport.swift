@@ -49,6 +49,20 @@ enum NativePushError: Error, Equatable {
     }
 }
 
+enum SystemScheduleAdmission {}
+
+struct SystemScheduleRequest {
+    static func parse(_ params: [String: Any]) -> SystemScheduleRequest? {
+        nil
+    }
+}
+
+struct SystemScheduleCancelRequest {
+    static func parse(_ params: [String: Any]) -> SystemScheduleCancelRequest? {
+        nil
+    }
+}
+
 struct NotificationReconcile: Equatable {
     static let maximumSessions = 1000
     static let maximumSessionIDLength = 200
