@@ -55,16 +55,19 @@ protocol DirectIrohEngine: Sendable {
     /// A new key. Opens no socket and starts no endpoint.
     func makeLaunchKey() throws -> DirectIrohLaunchKey
 
-    /// Binds an endpoint for `secretKey` with the minimal preset: no relay,
-    /// no discovery, nothing accepted. This is the first UDP socket.
-    func bind(secretKey: Data) async throws -> any DirectIrohEndpoint
+    /// Binds an endpoint for `secretKey` with the minimal preset: no
+    /// discovery or address lookup, nothing accepted. `relayURLs` is its
+    /// relay map; empty means no relay at all. This is the first UDP socket.
+    func bind(secretKey: Data, relayURLs: [String]) async throws -> any DirectIrohEndpoint
 }
 
 protocol DirectIrohEndpoint: AnyObject, Sendable {
-    /// Dials `endpointID` at exactly `addresses`, offering `alpn`.
+    /// Dials `endpointID` at exactly `addresses` and, if set, through
+    /// `relayURL`, offering `alpn`. The address is built from these alone.
     func connect(
         to endpointID: DirectEndpointID,
         addresses: [String],
+        relayURL: String?,
         alpn: Data
     ) async throws -> any DirectIrohConnection
 

@@ -13,11 +13,15 @@ struct DirectIrohBinding: DirectIrohEngine {
         return DirectIrohLaunchKey(secret: key.toBytes(), endpointID: endpointID)
     }
 
-    func bind(secretKey: Data) async throws -> any DirectIrohEndpoint {
+    func bind(secretKey: Data, relayURLs: [String]) async throws -> any DirectIrohEndpoint {
+        // The minimal preset adds no address lookup: no n0 DNS or pkarr
+        // lookup and no publishing. Only the given relays, or none.
         let options = IrohLib.EndpointOptions(
             preset: IrohLib.presetMinimal(),
             secretKey: secretKey,
-            relayMode: IrohLib.RelayMode.disabled()
+            relayMode: relayURLs.isEmpty
+                ? IrohLib.RelayMode.disabled()
+                : IrohLib.RelayMode.custom(map: try IrohLib.RelayMap.fromUrls(urls: relayURLs))
         )
         return Bound(endpoint: try await IrohLib.Endpoint.bind(options: options))
     }
@@ -32,11 +36,12 @@ struct DirectIrohBinding: DirectIrohEngine {
         func connect(
             to endpointID: DirectEndpointID,
             addresses: [String],
+            relayURL: String?,
             alpn: Data
         ) async throws -> any DirectIrohConnection {
             let address = IrohLib.EndpointAddr(
                 id: try IrohLib.EndpointId.fromBytes(bytes: endpointID.bytes),
-                relayUrl: nil,
+                relayUrl: relayURL,
                 addresses: addresses
             )
             return Live(connection: try await endpoint.connect(addr: address, alpn: alpn))

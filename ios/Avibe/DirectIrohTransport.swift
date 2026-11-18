@@ -663,10 +663,13 @@ final class DirectIrohTransport {
             if
                 let session,
                 session.offer.generation == offer.generation,
-                session.offer.endpointID == offer.endpointID
+                session.offer.endpointID == offer.endpointID,
+                session.offer.relay == offer.relay
             {
-                // The same endpoint and addresses: the path stays, under
-                // the new answer's deadline.
+                // The same endpoint, addresses and relay: the path stays,
+                // under the new answer's deadline. The instance advances
+                // the generation when its relay or relay policy changes;
+                // a changed relay under the same generation is retired too.
                 lease = accepted
                 session.authority.renew(deadline: accepted.deadline)
                 armLeaseTimer()
@@ -686,7 +689,7 @@ final class DirectIrohTransport {
                 }
                 return
             }
-            // A new endpoint key or address set. The old path is retired
+            // A new endpoint key, address set or relay. The old path is retired
             // before the new one is dialled: new connections use the
             // public origin until the new path answers.
             guard endSessionReportingLoss() else {
@@ -910,7 +913,9 @@ final class DirectIrohTransport {
                     allowed: allowed,
                     discard: closeEndpoint,
                     { () async throws -> any DirectIrohEndpoint in
-                        try await engine.bind(secretKey: key.secret)
+                        // Relays only for an answer under a known relay
+                        // policy; otherwise none, as before.
+                        try await engine.bind(secretKey: key.secret, relayURLs: offer.relay?.relayURLs ?? [])
                     }
                 )
             }
@@ -931,6 +936,7 @@ final class DirectIrohTransport {
                         try await endpoint.connect(
                             to: offer.endpointID,
                             addresses: addresses,
+                            relayURL: offer.relay?.url,
                             alpn: alpn
                         )
                     }

@@ -53,7 +53,7 @@ final class DirectIrohBindingTests: XCTestCase {
         let peer = try await makePeer()
         let binding = DirectIrohBinding()
         let key = try binding.makeLaunchKey()
-        let endpoint = try await binding.bind(secretKey: key.secret)
+        let endpoint = try await binding.bind(secretKey: key.secret, relayURLs: [])
 
         let completions = CompletionCounter()
         let connectTask = Task {
@@ -61,6 +61,7 @@ final class DirectIrohBindingTests: XCTestCase {
             return try await endpoint.connect(
                 to: peer.id,
                 addresses: [peer.address],
+                relayURL: nil,
                 alpn: Self.alpn
             )
         }
@@ -348,13 +349,14 @@ final class DirectIrohBindingTests: XCTestCase {
         let peer = try await makePeer()
         let binding = DirectIrohBinding()
         let key = try binding.makeLaunchKey()
-        let endpoint = try await binding.bind(secretKey: key.secret)
+        let endpoint = try await binding.bind(secretKey: key.secret, relayURLs: [])
         let accepting = Task {
             try await peer.acceptConnection()
         }
         let client = try await endpoint.connect(
             to: peer.id,
             addresses: [peer.address],
+            relayURL: nil,
             alpn: Self.alpn
         )
         let server = try await accepting.value
