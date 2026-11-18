@@ -1139,6 +1139,76 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
     }
 
+    /// A revoke the relay keeps refusing for one origin (an instance that left
+    /// the account) stays queued for retry, and does not stop another
+    /// origin from subscribing (turning notifications back on after a
+    /// sign-in). A stuck revoke for the subscribing origin itself still does.
+    func testAStuckRevokeForAnotherOriginDoesNotBlockSubscribing() async throws {
+        for stuckOrigin in ["https://gone.example", Self.instanceOrigin] {
+            let ownOrigin = stuckOrigin == Self.instanceOrigin
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: PushProviderState(
+                    deviceToken: Data(repeating: 15, count: 32),
+                    environment: "sandbox",
+                    topic: "bot.avibe.ios",
+                    generation: 1
+                ),
+                providerPatchPending: false
+            )
+            try store.saveRecord(PushKeyRecord(
+                kid: "stuck-revoke",
+                instanceOrigin: stuckOrigin,
+                accountID: Self.accountA.id,
+                accountGeneration: 1,
+                bindGeneration: 1,
+                privateKey: Data(),
+                authSecret: Data(),
+                vapidKeyHash: String(repeating: "a", count: 64),
+                state: .retiring,
+                pendingRevoke: true,
+                replacementRegistrationIDs: []
+            ))
+            let recorder = ManagementRecorder()
+            recorder.responseHandler = { request in
+                request.method == "DELETE" && request.path.hasSuffix("/stuck-revoke")
+                    ? PushManagementResponse(
+                        statusCode: 503,
+                        body: ["error": ["code": "relay_unavailable"]]
+                    )
+                    : Self.successResponse
+            }
+            let coordinator = makeCoordinator(store: store, management: recorder)
+
+            let name = ownOrigin ? "own origin" : "another origin"
+            do {
+                let subscription = try await coordinator.subscribe(
+                    vapidPublicKey: Self.vapidPublicKey,
+                    instanceOrigin: Self.instanceOrigin
+                )
+                XCTAssertFalse(ownOrigin, "A stuck revoke for its own origin must stop it: \(name)")
+                XCTAssertNotNil(subscription["endpoint"] as? String, name)
+            } catch {
+                XCTAssertTrue(ownOrigin, "Blocked by another origin's revoke: \(error)")
+            }
+
+            let creates = recorder.requests.filter {
+                $0.method == "PUT" && $0.path.contains("/registrations/")
+            }
+            XCTAssertEqual(creates.count, ownOrigin ? 0 : 1, name)
+            XCTAssertTrue(
+                recorder.requests.contains {
+                    $0.method == "DELETE" && $0.path.hasSuffix("/stuck-revoke")
+                },
+                "The stuck revoke was tried: \(name)"
+            )
+            // Still queued for retry either way.
+            let stuck = try XCTUnwrap(try store.loadRecord(kid: "stuck-revoke"), name)
+            XCTAssertTrue(stuck.pendingRevoke, name)
+            XCTAssertEqual(stuck.state, .retiring, name)
+        }
+    }
+
     /// UIKit hands the device token back as a main-queue block. When it is
     /// queued while the subscription asks for it again, it runs after the
     /// subscription's provider reconciliation has found nothing pending and
