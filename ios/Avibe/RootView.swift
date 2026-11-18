@@ -545,7 +545,10 @@ enum AvibeStyle {
     })
     /// The Workbench's top bar (instance name, account), below the status
     /// bar: native chrome over a page stays below it.
-    static let topBarHeight: CGFloat = 52
+    static let topBarHeight: CGFloat = 44
+    /// The status pill fits inside the top-bar row.
+    static let pillHeight: CGFloat = 30
+    static let pillMaxWidth: CGFloat = 180
     /// The Workbench's bottom tab bar, above the Home indicator.
     static let tabBarHeight: CGFloat = 56
 }
@@ -558,38 +561,32 @@ struct RuntimeOpenStatusPill: View {
     let cancel: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: 6) {
             ProgressView()
-                .controlSize(.small)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(
-                    runtimeOpenPhaseText(
-                        attempt.phase,
-                        instanceName: attempt.runtime.instance.name
-                    )
+                .controlSize(.mini)
+            Text(
+                runtimeOpenPhaseText(
+                    attempt.phase,
+                    instanceName: attempt.runtime.instance.name
                 )
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                if attempt.isTakingLong {
-                    Text("runtime.open.long_wait")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            )
+            .font(.footnote.weight(.semibold))
+            .lineLimit(1)
+            .truncationMode(.middle)
             Button("common.cancel", action: cancel)
                 .buttonStyle(.bordered)
-                .controlSize(.small)
+                .controlSize(.mini)
                 .tint(AvibeStyle.accent)
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 8)
-        .padding(.vertical, 8)
+        .padding(.leading, 10)
+        .padding(.trailing, 4)
+        .frame(height: AvibeStyle.pillHeight)
         .background(.regularMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
-        .padding(.horizontal, 16)
-        // Below the page's top bar (instance name, account), never over it.
-        .padding(.top, AvibeStyle.topBarHeight + 8)
+        .shadow(color: .black.opacity(0.10), radius: 8, y: 2)
+        // In the middle of the page's top-bar row, between what its left and
+        // right ends hold.
+        .frame(maxWidth: AvibeStyle.pillMaxWidth)
+        .padding(.top, (AvibeStyle.topBarHeight - AvibeStyle.pillHeight) / 2)
         .frame(maxWidth: .infinity, alignment: .top)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("runtime-open-progress")
@@ -603,13 +600,13 @@ struct RuntimeSkeleton: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Circle().frame(width: 32, height: 32)
-                RoundedRectangle(cornerRadius: 6).frame(width: 120, height: 14)
+                RoundedRectangle(cornerRadius: 6).frame(width: 44, height: 14)
                 Spacer()
                 Circle().frame(width: 28, height: 28)
             }
             .padding(.horizontal, 20)
             .frame(height: AvibeStyle.topBarHeight)
-            .padding(.bottom, 52)
+            .padding(.bottom, 16)
             ForEach(0..<7, id: \.self) { index in
                 HStack(alignment: .top, spacing: 12) {
                     Circle().frame(width: 40, height: 40)
