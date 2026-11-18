@@ -278,11 +278,14 @@ the outbox. Lost authority (epoch change, pause, account, binding, cleanup or
 suspension) stops the pass. A transient failure is recorded, later steps still
 run, and one retry is scheduled at the end through the single foreground retry
 slot (at least five seconds, Retry-After when set, otherwise 30 seconds). The
-manifest is due again for every epoch and every resume entry, and is cleared only
-when it succeeds in the same epoch; the pairing setup manifest does not clear it.
+manifest is due again for every epoch, every resume entry and every change in
+whether background delivery is enabled. A successful send clears it only in the
+same epoch, when nothing made it due again meanwhile and the background delivery
+it reported is still current; the pairing setup manifest does not clear it.
 
 Entries: resume restores the identity, marks the manifest due, joins the pass and
-then performs one activation refresh only when foreground; a pass never queries
+then performs one activation refresh only when foreground; a resume that meets a
+restoration already in progress marks the manifest due and requests a pass; a pass never queries
 for freshness, so an upload ACK cannot trigger another query. ACK success, a
 retired terminal payload, a successful HealthKit delivery and a committed
 connection (whatever its first sync did) request a pass. Transient upload,
