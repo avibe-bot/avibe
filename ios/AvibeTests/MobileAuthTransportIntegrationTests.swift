@@ -1029,7 +1029,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     return .json(#"{"transaction_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE","nonce":"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNI"}"#)
                 }
                 if body["state"] as? String == "state-short" {
-                    return .json(#"{"transaction_id":"short","browser_url":"\#(state.baseURL!.absoluteString)api/mobile/auth/browser?launch=x"}"#)
+                    return .json(#"{"transaction_id":"short","browser_url":"\#(state.baseURL!.absoluteString)/api/mobile/auth/browser?launch=x"}"#)
                 }
                 if body["provider"] as? String == "github" {
                     return LocalHTTPResponse(
@@ -1039,7 +1039,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     )
                 }
                 return .json(
-                    #"{"transaction_id":"GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA","browser_url":"\#(state.baseURL!.absoluteString)api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA"}"#
+                    #"{"transaction_id":"GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA","browser_url":"\#(state.baseURL!.absoluteString)/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA"}"#
                 )
             case ("POST", "/api/mobile/auth/exchange"):
                 return LocalHTTPResponse(
@@ -1078,7 +1078,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             google,
             .browser(
                 transactionID: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA",
-                url: URL(string: "\(baseURL.absoluteString)api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+                url: URL(string: "\(baseURL.absoluteString)/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
             )
         )
         do {
