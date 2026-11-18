@@ -607,7 +607,6 @@ struct RuntimeOpenProgress: View {
             RuntimeOpenProgressLine(attempt: attempt)
             if attempt.isTakingLong {
                 RuntimeOpenSlowBanner(
-                    instanceName: attempt.runtime.instance.name,
                     showsLastContent: false,
                     cancel: cancel
                 )
@@ -623,25 +622,18 @@ struct RuntimeOpenProgress: View {
 /// says that content is shown; with nothing to show it offers Cancel, back
 /// to the instances.
 struct RuntimeOpenSlowBanner: View {
-    let instanceName: String
     let showsLastContent: Bool
     var cancel: (() -> Void)?
     var dismiss: (() -> Void)?
 
     var body: some View {
+        // No spinner: the progress line at the top already shows the open is
+        // under way, and the instance's name is on the page.
         HStack(alignment: .center, spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
             Text(
-                String(
-                    format: NSLocalizedString(
-                        showsLastContent
-                            ? "runtime.open.slow.last_content.named"
-                            : "runtime.open.slow.named",
-                        comment: ""
-                    ),
-                    instanceName
-                )
+                showsLastContent
+                    ? "runtime.open.slow.last_content"
+                    : "runtime.open.slow"
             )
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)

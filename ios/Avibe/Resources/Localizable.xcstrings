@@ -354,34 +354,34 @@
         }
       }
     },
-    "runtime.open.slow.last_content.named" : {
+    "runtime.open.slow" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Still connecting to %@. Showing what was here last."
+            "value" : "Still connecting…"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "还在连接 %@，先显示上次的内容"
+            "value" : "还在连接…"
           }
         }
       }
     },
-    "runtime.open.slow.named" : {
+    "runtime.open.slow.last_content" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Still connecting to %@…"
+            "value" : "Still connecting. Showing what was here last."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "还在连接 %@…"
+            "value" : "还在连接，先显示上次的内容"
           }
         }
       }
