@@ -1,4 +1,4 @@
-// Proposed 2026-11-18: a small 「直连」 tag beside the instance name while this page's live stream runs
+// Approved by Product 2026-11-18 and shipped with #3940: a small 「直连」 tag beside the instance name while this page's live stream runs
 // through the instance's direct ingress, as that stream's own handshake said (`via` on `/api/events`'
 // `connected` frame). Any other way in shows nothing: no vendor name and no counts in the header.
 // The details live in Settings · Remote access (settings/remote-access/direct-*).
@@ -21,7 +21,7 @@ function frame(name: string, title: string, lang: 'zh' | 'en', via: 'direct' | '
     name,
     title,
     ...IPHONE_17_PRO,
-    status: 'proposed',
+    status: 'shipped',
     themes: ['light', 'dark'],
     route: '/',
     wait: 300,

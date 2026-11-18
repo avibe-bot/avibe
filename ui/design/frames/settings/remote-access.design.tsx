@@ -49,7 +49,7 @@ const automaticWait = settingsFixtures({
   },
 });
 
-// Proposed 2026-11-18: direct, as current facts only. Shown while direct is turned on; the page line
+// Approved by Product 2026-11-18 and shipped with #3940: direct, as current facts only. Shown while direct is turned on; the page line
 // only once this page's live stream has answered for itself.
 const directOn = (state: string, reason: string, pageVia?: 'direct' | 'other') => settingsFixtures({
   ...paired.api,
@@ -62,7 +62,7 @@ const directOn = (state: string, reason: string, pageVia?: 'direct' | 'other') =
   },
 }, pageVia ? { stream: [{ after: 0, event: 'connected', raw: true, data: { sub_id: 1, via: pageVia } }] } : {});
 const directFrame = (name: string, title: string, fixtures: ReturnType<typeof directOn>) => (
-  { name, title, width: 390, height: 1000, status: 'proposed' as const, route, fixtures, render: page, wait: 300 }
+  { name, title, width: 390, height: 1000, status: 'shipped' as const, route, fixtures, render: page, wait: 300 }
 );
 
 const designFrames = frames([
