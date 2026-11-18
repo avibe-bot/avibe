@@ -468,7 +468,7 @@ final class VoiceCaptureController {
             audio.discard()
             record("start: activity request failed \((error as NSError).domain) \((error as NSError).code) \(error)")
             failedStartAt = environment.now()
-            environment.postFailureNotice(Self.failure(
+            postFailure(Self.failure(
                 step: .liveActivity, error: error, at: environment.now()
             ))
             return .needsApp(.activityFailed)
@@ -484,7 +484,7 @@ final class VoiceCaptureController {
             failedStartAt = environment.now()
             let step = (error as? VoiceCaptureRecorder.StartFailure)?.step ?? .recorder
             let failed = Self.failure(step: step, error: error, at: startedAt)
-            environment.postFailureNotice(failed)
+            postFailure(failed)
             await activity.end(
                 failed,
                 dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal))
@@ -660,6 +660,16 @@ final class VoiceCaptureController {
     }
 
     /// A short notice for a press that never recorded.
+    /// The last start that failed, with its step and code. When the
+    /// notification cannot be shown (notifications off), the alert Avibe
+    /// shows on coming forward carries the same line.
+    private(set) var lastFailure: VoiceCaptureAttributes.ContentState?
+
+    private func postFailure(_ failure: VoiceCaptureAttributes.ContentState) {
+        lastFailure = failure
+        environment.postFailureNotice(failure)
+    }
+
     static func failure(
         step: VoiceCaptureAttributes.Step, error: Error, at date: Date
     ) -> VoiceCaptureAttributes.ContentState {
@@ -675,7 +685,7 @@ final class VoiceCaptureController {
     /// a short island both say where.
     private func showFailure(step: VoiceCaptureAttributes.Step, error: Error) {
         let failed = Self.failure(step: step, error: error, at: environment.now())
-        environment.postFailureNotice(failed)
+        postFailure(failed)
         showNotice(phase: .failed, reason: .recordingFailed, errorCode: failed.errorCode, step: step)
     }
 

@@ -519,6 +519,19 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.failureNotices.first?.errorCode, 7)
     }
 
+    /// Notifications off: the alert Avibe shows on coming forward carries
+    /// the same step and code.
+    func testTheForegroundAlertCarriesTheStepAndCodeToo() async {
+        let world = World()
+        world.activityRequestFails = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        XCTAssertEqual(controller.lastFailure?.failedStep, .liveActivity)
+        let message = VoiceCaptureAlert.message(.activityFailed, failure: controller.lastFailure)
+        XCTAssertTrue(message.contains("7"), message)
+        XCTAssertNotEqual(message, VoiceCaptureAlert.message(.activityFailed, failure: nil))
+    }
+
     func testATakeFileThatCannotBeMadeNamesThatStep() async {
         let world = World()
         world.takeFileFails = true
