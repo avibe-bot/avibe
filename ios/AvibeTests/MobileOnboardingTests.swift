@@ -1780,50 +1780,182 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(pushLogouts, 0)
     }
 
-    /// The selected instance gone from the account's list revokes only that
-    /// instance's registration; listed at another address, it keeps it. The
-    /// account's push logout runs in neither case.
-    func testARefreshedListRevokesOnlyARemovedInstancesPush() async throws {
-        let moved = MobileInstance(
-            id: instance.id,
-            name: instance.name,
-            host: "alex-new.avibe.bot",
-            url: URL(string: "https://alex-new.avibe.bot")!,
-            relationship: "owner",
-            ownerEmail: nil,
-            available: true
-        )
-        for (name, instances, expected) in [
-            ("removed", [MobileInstance](), ["https://alex-app.avibe.bot"]),
-            ("moved", [moved], [String]()),
-        ] {
+    /// Instances gone from the account's list (by id) lose only their own
+    /// registrations, and the account's push logout runs in no case:
+    /// - the selected one removed: revoked within the refresh, which releases
+    ///   the runtime as before;
+    /// - the selected one listed at another address: kept;
+    /// - a non-selected one removed: revoked after the refresh, while the
+    ///   selected runtime stays selected throughout;
+    /// - two removed, one of whose origins a listed instance still uses: only
+    ///   the unused origin goes.
+    func testARefreshedListRevokesOnlyRemovedInstancesPush() async throws {
+        func instance(_ id: String, _ host: String) -> MobileInstance {
+            MobileInstance(
+                id: id, name: id, host: host,
+                url: URL(string: "https://\(host)")!,
+                relationship: "owner", ownerEmail: nil, available: true
+            )
+        }
+        let selected = self.instance
+        let team = instance("instance-2", "team-app.avibe.bot")
+        let lab = instance("instance-3", "lab-app.avibe.bot")
+        let shared = instance("instance-4", "team-app.avibe.bot")
+        let moved = instance(selected.id, "alex-new.avibe.bot")
+        let rows: [(name: String, before: [MobileInstance], after: [MobileInstance], revoked: [String], keepsRuntime: Bool)] = [
+            ("selected removed", [selected], [], ["https://alex-app.avibe.bot"], false),
+            ("selected moved", [selected], [moved], [], false),
+            ("other removed", [selected, team], [selected], ["https://team-app.avibe.bot"], true),
+            ("two removed, one origin shared", [selected, team, lab, shared], [selected, shared], ["https://lab-app.avibe.bot"], true),
+        ]
+        for row in rows {
             let first = FakeMobileAuthTransport()
-            first.session = snapshot(accountID: "account-1")
+            first.session = snapshot(accountID: "account-1", instances: row.before)
             let refreshTransport = FakeMobileAuthTransport()
-            refreshTransport.session = snapshot(accountID: "account-1", instances: instances)
+            refreshTransport.session = snapshot(accountID: "account-1", instances: row.after)
             var pushLogouts = 0
             var revoked: [String] = []
+            var runtime: MobileRuntimeContext?
+            var selectedDuringRevoke: [Bool] = []
+            weak var weakCoordinator: MobileSessionCoordinator?
             let coordinator = makeCoordinator(
                 defaults: makeDefaults(),
                 transports: [first, refreshTransport, FakeMobileAuthTransport()],
+                onOpen: { runtime = $0 },
                 onPreparePushLogout: { pushLogouts += 1 },
-                onRevokeInstancePush: { revoked.append($0) }
+                onRevokeInstancePush: { origin in
+                    revoked.append(origin)
+                    if let weakCoordinator, let runtime {
+                        selectedDuringRevoke.append(weakCoordinator.keepsSelectedRuntime(runtime))
+                    }
+                }
             )
+            weakCoordinator = coordinator
             coordinator.activateAccountSurface()
             _ = try await coordinator.bootstrap()
-            _ = try coordinator.selectInstance(id: instance.id)
+            _ = try coordinator.selectInstance(id: selected.id)
+            let opened = try XCTUnwrap(runtime)
             coordinator.activateAccountSurface()
 
             let state = try await coordinator.refresh()
+            try await settlePush()
 
-            guard case .signedIn(_, let selected) = state else {
-                return XCTFail("Expected the account to stay: \(name)")
+            guard case .signedIn(_, let selectedID) = state else {
+                return XCTFail("Expected the account to stay: \(row.name)")
             }
-            XCTAssertNil(selected, name)
-            XCTAssertEqual(coordinator.currentAccount?.id, "account-1", name)
-            XCTAssertEqual(revoked, expected, name)
-            XCTAssertEqual(pushLogouts, 0, name)
+            XCTAssertEqual(selectedID, row.keepsRuntime ? selected.id : nil, row.name)
+            XCTAssertEqual(coordinator.isSelectedRuntime(opened), row.keepsRuntime, row.name)
+            XCTAssertEqual(coordinator.currentAccount?.id, "account-1", row.name)
+            XCTAssertEqual(revoked, row.revoked, row.name)
+            XCTAssertEqual(pushLogouts, 0, row.name)
+            if row.keepsRuntime {
+                XCTAssertEqual(selectedDuringRevoke, row.revoked.map { _ in true }, row.name)
+            }
         }
+    }
+
+    /// The first launch of this build after one that never recorded
+    /// `pushAccountID`: the saved selection names the account its push may
+    /// be bound to, and that survives a sign-in clearing the selection.
+    /// Owing the factor, then signing in as someone else with an email code,
+    /// still cleans the previous account's push before publishing the new
+    /// one; the same account again does not.
+    func testTheFirstLaunchOfThisBuildRemembersThePushAccount() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        for (name, next, expected) in [("other account", "account-2", 1), ("same account", "account-1", 0)] {
+            let defaults = makeDefaults()
+            let before = FakeMobileAuthTransport()
+            before.session = snapshot(accountID: "account-1")
+            let previous = makeCoordinator(defaults: defaults, transports: [before])
+            previous.activateAccountSurface()
+            _ = try await previous.bootstrap()
+            _ = try previous.selectInstance(id: instance.id)
+            // As the previous build left it: a selection, no record.
+            defaults.removeObject(forKey: "avibe.mobile.pushAccount")
+
+            let owing = FakeMobileAuthTransport()
+            owing.secondFactor = requirement
+            let signingIn = FakeMobileAuthTransport()
+            signingIn.verifyOTPHandler = { _, _ in self.snapshot(accountID: next) }
+            var pushLogouts = 0
+            let updated = makeCoordinator(
+                defaults: defaults,
+                transports: [owing, signingIn] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { pushLogouts += 1 }
+            )
+            updated.activateAccountSurface()
+            XCTAssertEqual(try await updated.bootstrap(), .twoFactorRequired(requirement), name)
+            _ = try await updated.requestOTP(email: "\(next)@example.com")
+            let state = try await updated.verifyOTP(email: "\(next)@example.com", code: "123456")
+            guard case .signedIn(let signedIn, _) = state else {
+                return XCTFail("Expected a signed-in account: \(name)")
+            }
+            XCTAssertEqual(signedIn.account.id, next, name)
+            XCTAssertEqual(pushLogouts, expected, name)
+        }
+    }
+
+    /// A sign-out that borrows an account cleanup still in flight, then a new
+    /// sign-in: when the old cleanup finally returns, it must not erase the
+    /// new account's record. That account later owes its factor, and the
+    /// next sign-in as someone else still gets the cleanup.
+    func testALateCleanupKeepsTheNewerAccountsPushRecord() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-2@example.com", gate: .challenge, methods: [.totp]
+        )
+        var discovery: MobileSessionDiscovery? = .signedIn(snapshot(accountID: "account-1"))
+        var otpAccount = "account-2"
+        let transports = (0..<12).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.fetchSessionHandler = { discovery }
+            transport.verifyOTPHandler = { _, _ in self.snapshot(accountID: otpAccount) }
+            return transport
+        }
+        let oldCleanup = expectation(description: "account-1 cleanup")
+        let releaseOld = expectation(description: "release account-1 cleanup")
+        var cleanups = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: transports,
+            onPreparePushLogout: {
+                cleanups += 1
+                if cleanups == 1 {
+                    oldCleanup.fulfill()
+                    await self.fulfillment(of: [releaseOld], timeout: 30)
+                }
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        coordinator.activateAccountSurface()
+
+        // account-1's session ends: its cleanup starts and is held.
+        discovery = nil
+        let ended = Task { try await coordinator.refresh() }
+        await fulfillment(of: [oldCleanup], timeout: 30)
+        // Sign out (borrowing it), then sign in as account-2.
+        XCTAssertEqual(try await coordinator.logout(), .signedOut)
+        discovery = .signedIn(snapshot(accountID: "account-2"))
+        _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-2")
+        releaseOld.fulfill()
+        _ = await ended.result
+        XCTAssertEqual(cleanups, 1)
+
+        // account-2 owes its factor; someone else signs in with a code.
+        coordinator.activateAccountSurface()
+        discovery = .secondFactorRequired(requirement)
+        XCTAssertEqual(try await coordinator.refresh(), .twoFactorRequired(requirement))
+        XCTAssertEqual(cleanups, 1)
+        otpAccount = "account-3"
+        _ = try await coordinator.requestOTP(email: "account-3@example.com")
+        discovery = .signedIn(snapshot(accountID: "account-3"))
+        _ = try await coordinator.verifyOTP(email: "account-3@example.com", code: "123456")
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-3")
+        XCTAssertEqual(cleanups, 2)
     }
 
     /// Gives the push coordinator's queued main-actor work (resume,

@@ -641,6 +641,12 @@ final class MobileSessionCoordinator {
         self.onPreparePushLogout = onPreparePushLogout
         self.onRevokeInstancePush = onRevokeInstancePush
         transport = nil
+        // A build from before `pushAccountID` was recorded: the saved
+        // selection's account is the one its push may be bound to. Record it
+        // now, before any sign-in clears the selection.
+        if defaults.object(forKey: Self.pushAccountKey) == nil {
+            pushAccountID = storedSelection()?.accountID
+        }
     }
 
     func activateAccountSurface() {
@@ -923,22 +929,32 @@ final class MobileSessionCoordinator {
                     from: fresh,
                     selection: missingSelection
                 )
-                if !removedOrigins.isEmpty {
-                    try await self.revokeInstancePush(
-                        origins: removedOrigins,
-                        publishing: .signedIn(
-                            snapshot: self.orderedByUse(fresh, current: nil),
-                            selectedInstanceID: missingSelection == nil
-                                ? self.storedSelection()?.instanceID
-                                : nil
-                        ),
-                        generation: requestGeneration
-                    )
-                }
                 if missingSelection != nil {
+                    // The runtime goes anyway: revoke within this operation.
+                    if !removedOrigins.isEmpty {
+                        try await self.revokeInstancePush(
+                            origins: removedOrigins,
+                            publishing: .signedIn(
+                                snapshot: self.orderedByUse(fresh, current: nil),
+                                selectedInstanceID: nil
+                            ),
+                            generation: requestGeneration
+                        )
+                    }
                     self.beginRuntimeInvalidation(with: fresh)
+                } else if !removedOrigins.isEmpty {
+                    // The selection stays: revoke once this operation has
+                    // ended, as ordinary push requests that keep it. One
+                    // refused as busy stays pending for push recovery.
+                    let revoke = self.onRevokeInstancePush
+                    Task { @MainActor in
+                        for origin in removedOrigins {
+                            await revoke(origin)
+                        }
+                    }
                 }
                 self.signedOutStoreIsFresh = false
+                self.pushAccountID = fresh.account.id
                 return self.state(for: fresh)
             case .secondFactorRequired:
                 // Owing the second factor neither ends the session nor names
@@ -1143,7 +1159,7 @@ final class MobileSessionCoordinator {
         let borrowsCleanup: Bool
         // Only the account's own push cleanup can stand in for this one;
         // one instance's revoke cannot.
-        if case .pushLogout = phase, accountPushCleanupInFlight {
+        if case .pushLogout = phase, accountPushCleanup != nil {
             borrowsCleanup = true
         } else {
             borrowsCleanup = false
@@ -1272,11 +1288,18 @@ final class MobileSessionCoordinator {
 
     private func preparePushLogout() async {
         await runPushCleanup {
-            self.accountPushCleanupInFlight = true
-            defer { self.accountPushCleanupInFlight = false }
-            await self.onPreparePushLogout()
-            // Every registration is gone: no account's push is bound.
+            // Committed from here: the push coordinator keeps its own pending
+            // revoke. Clearing first means a cleanup that finishes after a
+            // newer sign-in cannot erase that account's record.
             self.pushAccountID = nil
+            let cleanup = UUID()
+            self.accountPushCleanup = cleanup
+            defer {
+                if self.accountPushCleanup == cleanup {
+                    self.accountPushCleanup = nil
+                }
+            }
+            await self.onPreparePushLogout()
         }
     }
 
@@ -1327,18 +1350,16 @@ final class MobileSessionCoordinator {
         try requireCurrentGeneration(requestGeneration)
     }
 
-    /// Set while `onPreparePushLogout` runs, so a sign-out arriving then can
+    /// The account push cleanup running now, so a sign-out arriving then can
     /// borrow it; an instance revoke leaves it unset.
-    private var accountPushCleanupInFlight = false
+    private var accountPushCleanup: UUID?
 
-    /// The account this device's push may still be bound to. Before this
-    /// was recorded, the saved selection's account stands in.
+    /// The account this device's push may still be bound to ("" once its
+    /// cleanup has run; `init` records it on a first launch of this build).
     private var pushAccountID: String? {
         get {
-            if let recorded = defaults.string(forKey: Self.pushAccountKey) {
-                return recorded.isEmpty ? nil : recorded
-            }
-            return storedSelection()?.accountID
+            let recorded = defaults.string(forKey: Self.pushAccountKey) ?? ""
+            return recorded.isEmpty ? nil : recorded
         }
         set { defaults.set(newValue ?? "", forKey: Self.pushAccountKey) }
     }
