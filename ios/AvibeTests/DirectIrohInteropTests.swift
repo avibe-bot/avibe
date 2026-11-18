@@ -183,8 +183,8 @@ final class DirectIrohInteropTests: XCTestCase {
                 while true {
                     attempts += 1
                     do {
-                        let endpoint = try await budget.run { try await setupEngine.bind(secretKey: setupEngine.key.secret) }
-                        let connection = try await budget.run { try await endpoint.connect(to: offer.endpoint, addresses: offer.addresses, alpn: Data("avibe-direct/1".utf8)) }
+                        let endpoint = try await budget.run { try await setupEngine.bind(secretKey: setupEngine.key.secret, relayURLs: []) }
+                        let connection = try await budget.run { try await endpoint.connect(to: offer.endpoint, addresses: offer.addresses, relayURL: nil, alpn: Data("avibe-direct/1".utf8)) }
                         defer { connection.close() }
                         try interopRequire(connection.remoteEndpointID == offer.endpoint, "setup identity mismatch")
                         let lease = DirectIrohLeaseDeadline(deadline: ProcessInfo.processInfo.systemUptime + budget.remaining,
@@ -211,9 +211,9 @@ final class DirectIrohInteropTests: XCTestCase {
             if tier == "transport" { try startTransport(offer) }
             else {
                 let engine = engine
-                let endpoint = try await budget.run { try await engine.bind(secretKey: engine.key.secret) }
+                let endpoint = try await budget.run { try await engine.bind(secretKey: engine.key.secret, relayURLs: []) }
                 do {
-                    let connection = try await budget.run { try await endpoint.connect(to: offer.endpoint, addresses: offer.addresses, alpn: Data("avibe-direct/1".utf8)) }
+                    let connection = try await budget.run { try await endpoint.connect(to: offer.endpoint, addresses: offer.addresses, relayURL: nil, alpn: Data("avibe-direct/1".utf8)) }
                     try interopRequire(connection.remoteEndpointID == offer.endpoint, "case identity mismatch")
                     connectionWatch = Task { await connection.closed() }
                     // Wrong identity must never establish. Admission is checked

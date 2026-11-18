@@ -729,7 +729,7 @@ final class DirectPathAppTests: XCTestCase {
             (try? await webView.evaluateJavaScript(
                 """
                 Array.from(document.querySelectorAll('button')).some(b =>
-                  ['Delete account', 'Sign in / Create account'].includes(b.textContent.trim()) && !b.disabled)
+                  ['Delete account', 'Continue with email'].includes(b.textContent.trim()) && !b.disabled)
                 """
             ) as? Bool) == true
         }
@@ -902,7 +902,7 @@ final class DirectPathAppTests: XCTestCase {
             try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
                 for page in self.bundledWebViews(in: window) {
                     if (try? await page.evaluateJavaScript(
-                        "document.body.textContent.includes('Sign in / Create account')"
+                        "document.body.textContent.includes('Continue with email')"
                     ) as? Bool) == true { return true }
                 }
                 return false

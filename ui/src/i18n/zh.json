@@ -207,6 +207,14 @@
     "boot": {
       "loading": "正在恢复你的账号…"
     },
+    "provider": {
+      "unavailable": "暂时无法使用这种方式登录，请改用邮箱验证码。",
+      "googleEmailUnverified": "请先在 Google 验证这个邮箱，或改用邮箱验证码。",
+      "githubEmailUnverified": "请先在 GitHub 验证这个邮箱，或改用邮箱验证码。",
+      "googleFailed": "没能通过 Google 登录，请重试。",
+      "githubFailed": "没能通过 GitHub 登录，请重试。",
+      "appleFailed": "没能通过 Apple 登录，请重试。"
+    },
     "welcome": {
       "mascotAlt": "Vibey 云团子",
       "greeting": "你好，我是 Vibey",
@@ -214,9 +222,13 @@
       "titleLine2": "随身同行。",
       "bodyLine1": "电脑上的 Avibe，",
       "bodyLine2": "现在也在你的口袋里。",
-      "action": "登录 / 注册",
       "footerLine1": "Vibey，你的内置 AI 伙伴。",
-      "footerLine2": "连接自己的实例，也可以加入别人共享的实例。"
+      "footerLine2": "连接自己的实例，也可以加入别人共享的实例。",
+      "continueWithEmail": "使用邮箱继续",
+      "or": "或",
+      "continueWithGoogle": "使用 Google 继续",
+      "continueWithGitHub": "使用 GitHub 继续",
+      "continueWithApple": "通过 Apple 继续"
     },
     "email": {
       "title": "从一封邮件开始。",
@@ -293,6 +305,8 @@
       "offlineBody": "在这台电脑上启动 Avibe 并连接网络，然后刷新列表，或选择其他在线实例。"
     },
     "empty": {
+      "newAccount": "已经有 Avibe 账号？这是刚新建的账号，请退出后用原来的方式登录。",
+      "newAccountSignOut": "退出登录",
       "title": "让电脑与手机相连。",
       "subtitle": "在电脑上运行，从手机上连接",
       "body": "还没有可用实例。先在电脑上安装 Avibe，并配对这个账号。",
@@ -5638,6 +5652,9 @@
     },
     "notifyLabel": "通知",
     "retryRequested": "已请求重试",
+    "workspaceNotice": {
+      "openSession": "打开会话"
+    },
     "failureNextStep": {
       "openModels": "打开「模型」页",
       "askAdmin": "请联系 Avibe 管理员在「模型」页处理。",

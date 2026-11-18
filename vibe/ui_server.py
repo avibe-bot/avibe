@@ -8475,7 +8475,9 @@ def direct_rendezvous():
             reason="hostname_not_direct",
         )
     else:
+        auth = getattr(g, "authorization_context", None)
         result = rendezvous_state.rendezvous.offer(
+            is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
             subject=subject,
@@ -14206,15 +14208,20 @@ async def sessions_messages_create(session_id: str):
 
     def _current_delivery_response() -> dict:
         from storage import message_deliveries
+        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
         with engine.connect() as conn:
             current = message_deliveries.get_delivery(conn, str(message["id"]))
+            # A workspace-addressed notice retries in the Session its failure names
+            # (``core.backend_failure_retry``); its row stays in the workspace Session.
             retry_notice = (
-                messages_service.get_message(
-                    conn, retry_for, session_id=session_id, include_local_error_detail=True,
-                )
+                messages_service.get_message(conn, retry_for, include_local_error_detail=True)
                 if retry_for else None
             )
+            if retry_notice is not None and retry_notice.get("session_id") not in {
+                session_id, WORKSPACE_NOTICE_SESSION_ID,
+            }:
+                retry_notice = None
         if current is None:
             return dict(message)
         payload = message_deliveries.public_delivery_payload(current)

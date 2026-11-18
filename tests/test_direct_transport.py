@@ -98,7 +98,14 @@ SIDECAR = textwrap.dedent(
         message = json.loads(sys.stdin.readline())
         event({"kind": "admission_notice", "message": message})
 
-    if mode == "ready_addresses":
+    if mode in {"relay_trial", "relay_invalid"}:
+        ready()
+        send({"type": "relay_status", "url": "https://aps1-1.relay.n0.iroh.link./"})
+        send({"type": "relay_status", "url": None})
+        if mode == "relay_invalid":
+            send({"type": "relay_status", "url": "https://other.invalid/"})
+        wait_for_stop()
+    elif mode == "ready_addresses":
         ready()
         time.sleep(0.1)
         send({"type": "addresses", "addresses": ["192.168.1.21:51235"]})
@@ -239,6 +246,32 @@ def _events(path: Path) -> list[dict]:
 
 def _admission_notices(path: Path) -> list[dict]:
     return [item["message"] for item in _events(path) if item["kind"] == "admission_notice"]
+
+
+@pytest.mark.asyncio
+async def test_public_trial_start_bytes_status_withdrawal_and_nonmember_rejection(sidecar, monkeypatch):
+    path, events, env = sidecar
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DIRECT_TEST_MODE", "relay_invalid")
+    rv = RecordingRendezvous()
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), rv, relay_policy="public-trial-v1", restart_initial_delay_seconds=10)
+    try:
+        await supervisor.start()
+        await _wait_until(lambda: any(reason == "invalid_relay_url" for _, reason in rv.published))
+        assert _events(events)[0]["start"]["relay"] == {"policy": "public-trial-v1"}
+        assert [ep.relay_origin for ep, _ in rv.published if ep] == [None, "https://aps1-1.relay.n0.iroh.link./", None]
+        assert rv.published[-1][0] is None
+    finally:
+        await supervisor.stop()
+    monkeypatch.setenv("DIRECT_TEST_MODE", "legacy")
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), rv)
+    try:
+        await supervisor.start()
+        await _wait_until(lambda: len(_events(events)) >= 2)
+        assert "relay" not in _events(events)[-1]["start"]
+    finally:
+        await supervisor.stop()
 
 
 @pytest.mark.asyncio

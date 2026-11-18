@@ -18,12 +18,22 @@ export type MobileSecondFactorMethod = 'passkey' | 'totp';
 export type MobileSessionState =
   | {
       status: 'signedOut';
+      /**
+       * The sign-ins avibe.bot offers the App now (`mobile_providers` in its auth config). Native
+       * adds it to every signed-out session answer; absent means the page keeps what it had.
+       */
+      providers?: ('google' | 'github' | 'apple')[];
     }
   | {
       status: 'signedIn';
       account: MobileAccount;
       instances: MobileInstance[];
       selected_instance_id: string | null;
+      /**
+       * This account was just created by a Google, GitHub or Apple sign-in in the App, as the backend
+       * attested; native keeps it for this account generation only. A hint for the empty state.
+       */
+      new_account?: true;
     }
   | {
       /** The email code passed; this session still owes avibe.bot's second factor. */
@@ -124,6 +134,18 @@ export const signInMobileWithPassword = (
   password: string,
 ): Promise<MobilePasswordSignInResult> =>
   call('auth.signInWithPassword', { email, password });
+
+/**
+ * Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then the backend's
+ * one-time exchange, natively.
+ * Resolves like `verifyMobileOtp`. Errors: `provider_cancelled` (show nothing),
+ * `provider_unavailable`, `provider_email_unverified`, `invalid_or_expired`, `rate_limited`
+ * (with `retry_after_seconds`), and `network`.
+ */
+export const signInMobileWithProvider = (
+  provider: 'google' | 'github' | 'apple',
+): Promise<MobileSessionState> =>
+  call('auth.signInWithProvider', { provider });
 
 export const refreshMobileSession = (): Promise<MobileSessionState> =>
   call('session.refresh');

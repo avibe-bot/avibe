@@ -282,6 +282,7 @@ final class DirectIrohFakeEndpoint: DirectIrohEndpoint, @unchecked Sendable {
     struct Dial: Equatable {
         let endpointID: DirectEndpointID
         let addresses: [String]
+        let relayURL: String?
         let alpn: Data
     }
 
@@ -302,11 +303,12 @@ final class DirectIrohFakeEndpoint: DirectIrohEndpoint, @unchecked Sendable {
     func connect(
         to endpointID: DirectEndpointID,
         addresses: [String],
+        relayURL: String?,
         alpn: Data
     ) async throws -> any DirectIrohConnection {
         log.add("connect")
         lock.withLock {
-            storedDials.append(Dial(endpointID: endpointID, addresses: addresses, alpn: alpn))
+            storedDials.append(Dial(endpointID: endpointID, addresses: addresses, relayURL: relayURL, alpn: alpn))
         }
         return try await connection.wait()
     }
@@ -327,6 +329,7 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
     private var prepared: [DirectIrohFakeEndpoint] = []
     private var storedBound: [DirectIrohFakeEndpoint] = []
     private var storedSecrets: [Data] = []
+    private var storedRelayMaps: [[String]] = []
     private var storedBindGate: DirectIrohPending<Void>?
 
     init(log: DirectIrohEventLog) {
@@ -340,6 +343,11 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
 
     var secrets: [Data] {
         lock.withLock { storedSecrets }
+    }
+
+    /// The relay map of each bind so far, in order; empty for no relay.
+    var relayMaps: [[String]] {
+        lock.withLock { storedRelayMaps }
     }
 
     /// The endpoint the next bind returns.
@@ -365,7 +373,7 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
         return gate
     }
 
-    func bind(secretKey: Data) async throws -> any DirectIrohEndpoint {
+    func bind(secretKey: Data, relayURLs: [String]) async throws -> any DirectIrohEndpoint {
         log.add("bind")
         let gate = lock.withLock { storedBindGate }
         if let gate {
@@ -374,6 +382,7 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
         let fresh = DirectIrohFakeEndpoint(log: log)
         let endpoint: DirectIrohFakeEndpoint = lock.withLock {
             storedSecrets.append(secretKey)
+            storedRelayMaps.append(relayURLs)
             let next = prepared.isEmpty ? fresh : prepared.removeFirst()
             storedBound.append(next)
             return next
@@ -578,12 +587,13 @@ enum DirectIrohFixtures {
         addresses: [[String: String]] = [
             ["kind": "lan", "address": "192.168.1.20:51234"],
             ["kind": "lan", "address": "[fd12::1]:51234"],
-        ]
+        ],
+        relay: [String: String]? = nil
     ) -> Data {
         let endpointObject: [String: Any] = [
             "id": endpoint.hex,
             "addresses": addresses,
-            "relay": NSNull(),
+            "relay": relay.map { $0 as Any } ?? NSNull(),
         ]
         let clientObject: [String: Any] = [
             "endpoint_id": client.hex,

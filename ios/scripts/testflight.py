@@ -61,6 +61,7 @@ ASSOCIATED_DOMAINS = [
     "webcredentials:avibe.bot",
     "webcredentials:sandbox.avibe.bot",
 ]
+SIGN_IN_WITH_APPLE = "com.apple.developer.applesignin"
 MAIN_REQUIRED_ENTITLEMENTS = {
     "aps-environment": ["production"],
     "com.apple.developer.healthkit": True,
@@ -71,6 +72,8 @@ MAIN_REQUIRED_ENTITLEMENTS = {
         PRIVATE_KEYCHAIN_ACCESS_GROUP,
         SHARED_KEYCHAIN_ACCESS_GROUP,
     ],
+    # Sign in with Apple, in the app only.
+    SIGN_IN_WITH_APPLE: ["Default"],
 }
 NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS = {
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
@@ -80,18 +83,21 @@ LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS: dict[str, list[str]] = {}
 FORBIDDEN_ENTITLEMENTS = {
     "com.apple.developer.usernotifications.filtering",
 }
-# Extensions never carry push or HealthKit; the Live Activity carries no shared state.
+# Extensions never carry push, HealthKit or Sign in with Apple; the Live Activity carries
+# no shared state.
 EXTENSION_FORBIDDEN_ENTITLEMENTS = {
     NOTIFICATION_SERVICE_BUNDLE_ID: {
         "aps-environment",
         "com.apple.developer.healthkit",
         "com.apple.developer.healthkit.background-delivery",
+        SIGN_IN_WITH_APPLE,
     },
     LIVE_ACTIVITY_BUNDLE_ID: {
         "aps-environment",
         "com.apple.security.application-groups",
         "com.apple.developer.healthkit",
         "com.apple.developer.healthkit.background-delivery",
+        SIGN_IN_WITH_APPLE,
     },
 }
 # The extensions an archive must contain, exactly.
@@ -514,7 +520,7 @@ def check_signed_bundle(
                 "keychain-access-groups values"
             )
         if (
-            key == "com.apple.developer.associated-domains"
+            key in ("com.apple.developer.associated-domains", SIGN_IN_WITH_APPLE)
             and actual_values != set(required)
         ):
             raise TestFlightError(

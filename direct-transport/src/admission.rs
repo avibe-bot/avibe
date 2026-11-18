@@ -117,6 +117,14 @@ impl Admissions {
 
     // This check also rejects a connection from an ended admission if the same
     // endpoint ID was immediately admitted again. A new admission needs a dial.
+    pub fn contains(&self, id: &str) -> bool {
+        let state = self.state.lock().expect("admissions poisoned");
+        state
+            .entries
+            .get(id)
+            .is_some_and(|entry| entry.deadline > Instant::now())
+    }
+
     pub fn allows_connection(&self, connection: &Connection) -> bool {
         let mut state = self.state.lock().expect("admissions poisoned");
         state.expire(Instant::now());

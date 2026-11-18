@@ -13,7 +13,9 @@ Welcome → email → six-digit email OTP → instance selection. Preserve the s
 account, instance ownership/sharing, availability and recovery semantics. A uses
 Avibe's high-resolution cloud mascot, subtle mint/cyan/violet background, raised
 rounded surfaces and pill actions. Every approved design exists in Chinese and English,
-and light and dark. No Apple/Google/GitHub choices or browser-login instructions.
+and light and dark. The original contract had no Apple/Google/GitHub choices or
+browser-login instructions; the owner reversed that on 2026-11-18 (see Sign-in
+providers below). There are still no browser-login instructions.
 
 Acceptance invariants:
 
@@ -33,6 +35,39 @@ Acceptance invariants:
 - Scope is `ui/design/` only. No new tokens, dependencies, production components,
   authentication/native/backend behavior, runtime/config changes or plans edits.
 
+## Sign-in providers (approved, 2026-11-18)
+
+Owner decisions 2026-11-18: the App signs in with Google, GitHub and Sign in
+with Apple as well as email. Google and GitHub run in the system sign-in
+window (`ASWebAuthenticationSession`), Apple in its native sheet; the bundled
+page only starts them. The owner picked layout B at 13:12:
+
+- Welcome keeps email as the one primary action, 「使用邮箱继续」 /
+  "Continue with email", and the large Vibey illustration. Below avibe.bot's
+  divider 「或」 / "or" one row holds three round marks in avibe.bot's login
+  card order, then Apple: Google, GitHub, Apple. Each mark is 48 pt and is
+  labelled for VoiceOver with the full wording: 「使用 Google 继续」,
+  「使用 GitHub 继续」, and Apple's own Simplified Chinese title
+  「通过 Apple 继续」 / "Continue with Apple".
+- Google and GitHub use Google's light sign-in button theme in both
+  appearances (`provider-button` tokens): `#FFFFFF` fill, `#747775` outline,
+  `#1F1F1F` mark; Google allows its light, dark or neutral theme on any
+  background. Apple keeps its HIG styles (`apple-sign-in` tokens): white with
+  a black outline on light, white on dark. So in dark mode all three are
+  white circles of equal weight (Product, 2026-11-18).
+- A mark appears only while avibe.bot advertises its provider for the App
+  (`mobile_providers`); with none, Welcome is email alone, as before.
+- Unlike the avibe.bot card, where the providers come first, email stays
+  first here because the App expects most people to use it (owner: hierarchy
+  by expected use).
+- A provider sign-in that did not finish says so in one line above the email
+  button (`welcome/providers-row-error`); closing the window or sheet says
+  nothing.
+- An account a provider sign-in in the App just created, with no instances,
+  shows one small grey line right after the install hint, ending in a text
+  link 「退出登录」 (`empty/new-account`). No card and no button: most people
+  there are new, and the install choices stay the main path.
+
 ## Frame inventory
 
 Prefix IDs with `mobile-app/`; append `-zh` or `-en` to approved states. Existing
@@ -41,8 +76,8 @@ flow, and `account/long-email` verifies the account wrapping policy.
 
 | File / surface | States |
 | --- | --- |
-| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small` |
-| `empty` | `default` (desktop + CLI choices), `cli` |
+| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, `providers-row`, `providers-row-error` |
+| `empty` | `default` (desktop + CLI choices), `cli`, `new-account` |
 | `account` | `default`, `no-instance`, `long-email` |
 | `native` | `instance-error`, `window-topbar` |
 | `alignment` — shipped references, no locale suffix | `account-reference`, `error-reference` |

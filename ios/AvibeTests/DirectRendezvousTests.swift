@@ -144,6 +144,7 @@ final class DirectRendezvousTests: XCTestCase {
                             address: "[240e:b86:551:7700::1]:51234"
                         )!,
                     ],
+                    relay: nil,
                     lifetimeSeconds: 300
                 )
             )
@@ -286,6 +287,81 @@ final class DirectRendezvousTests: XCTestCase {
             },
             300
         )
+    }
+
+    // MARK: The public-relay owner trial
+
+    func testEachPinnedRelayIsAcceptedUnderThePublicTrialPolicy() throws {
+        XCTAssertEqual(DirectTrialRelay.publicTrialRelayURLs, [
+            "https://use1-1.relay.n0.iroh.link./",
+            "https://usw1-1.relay.n0.iroh.link./",
+            "https://euc1-1.relay.n0.iroh.link./",
+            "https://aps1-1.relay.n0.iroh.link./",
+        ])
+        for url in DirectTrialRelay.publicTrialRelayURLs {
+            let offer = try readyOffer(relay: ["policy": "public-trial-v1", "url": url])
+            XCTAssertEqual(offer.relay, DirectTrialRelay(policy: .publicTrialV1, url: url))
+            XCTAssertEqual(offer.addresses.count, 2)
+        }
+    }
+
+    func testAnUnknownPolicyOrAnotherURLIsNoRelayAndTheAddressesStay() throws {
+        let relays: [Any] = [
+            ["policy": "public-trial-v2", "url": "https://aps1-1.relay.n0.iroh.link./"],
+            ["url": "https://aps1-1.relay.n0.iroh.link./"],
+            ["policy": "public-trial-v1"],
+            ["policy": "public-trial-v1", "url": "https://aps1-1.relay.n0.iroh.link/"],
+            ["policy": "public-trial-v1", "url": "https://APS1-1.relay.n0.iroh.link./"],
+            ["policy": "public-trial-v1", "url": "http://aps1-1.relay.n0.iroh.link./"],
+            ["policy": "public-trial-v1", "url": "https://relay.example./"],
+            ["policy": "public-trial-v1", "url": "https://aps1-1.relay.n0.iroh.link./x"],
+            ["version": 1, "url": "https://relay.example", "expires_at": 1_800_000_300] as [String: Any],
+            ["policy": 1, "url": ["x"]] as [String: Any],
+            "public-trial-v1",
+            7,
+            NSNull(),
+        ]
+        for relay in relays {
+            let offer = try readyOffer(relay: relay)
+            XCTAssertNil(offer.relay, "\(relay)")
+            XCTAssertEqual(offer.addresses.count, 2, "\(relay)")
+        }
+    }
+
+    func testARelayAloneIsDialableAndNothingAtAllIsNot() throws {
+        let relayOnly = try readyOffer(
+            addresses: [],
+            relay: ["policy": "public-trial-v1", "url": "https://aps1-1.relay.n0.iroh.link./"]
+        )
+        XCTAssertEqual(relayOnly.addresses, [])
+        XCTAssertEqual(relayOnly.relay?.url, "https://aps1-1.relay.n0.iroh.link./")
+
+        for relay in [NSNull(), ["policy": "unknown", "url": "https://aps1-1.relay.n0.iroh.link./"]] as [Any] {
+            var object = readyObject()
+            object["endpoint"] = ["id": instance.hex, "addresses": [] as [Any], "relay": relay] as [String: Any]
+            XCTAssertThrowsError(try DirectRendezvous.answer(from: data(object), expecting: expectation)) {
+                XCTAssertEqual($0 as? DirectRendezvousRejection, .noAdmittedAddress)
+            }
+        }
+    }
+
+    private func readyOffer(
+        addresses: [[String: String]]? = nil,
+        relay: Any
+    ) throws -> DirectRendezvousOffer {
+        var object = readyObject()
+        guard var endpoint = object["endpoint"] as? [String: Any] else {
+            throw DirectIrohTestError.scripted
+        }
+        if let addresses {
+            endpoint["addresses"] = addresses
+        }
+        endpoint["relay"] = relay
+        object["endpoint"] = endpoint
+        guard case .ready(let offer) = try DirectRendezvous.answer(from: data(object), expecting: expectation) else {
+            throw DirectIrohTestError.scripted
+        }
+        return offer
     }
 
     func testAtMostEightCheckedAddressesAreKeptAndTheRestOfTheListIsSkipped() throws {

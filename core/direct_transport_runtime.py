@@ -102,11 +102,16 @@ class DirectTransportRuntimeManager(ManagedRuntimeManager):
             return self._failure(self._install_reason or self._reason("platform_unsupported"), manifest=manifest)
         return super().ensure(**kwargs)
 
-    def resolve_binary(self) -> Path | None:
+    def resolve_binary(self, *, require_public_trial: bool = False) -> Path | None:
         # The shared core deliberately permits older admitted disk snapshots.
         # A network-facing direct transport instead requires the current pin.
         manifest = self._load_manifest(allow_network=False)
         if manifest is None:
+            return None
+        if require_public_trial and (manifest.payload.get("provenance") or {}).get("source_sha") != (
+            "578659184dfa38bc87261a6fa832f9b4c65a1c90"
+        ):
+            # Only the reviewed implementation supports this control protocol.
             return None
         archive = self._manifest_archive_for_platform(manifest)
         if archive is None:

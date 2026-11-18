@@ -121,6 +121,41 @@ def _row_to_payload(
         # A transcript row's model payload (the Avibe Agent's context) is not display:
         # no reader of a message payload uses it, and it can be large or private.
         content.pop("model", None)
+    try:
+        metadata = json.loads(row.get("metadata_json") or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    # A failure notice in the workspace Session reports on another Session: name it,
+    # and say whether that failed Turn can be retried from here (the same boundary
+    # the retry checks when pressed). Its retry lives in that Session.
+    retry_session_id = row.get("session_id")
+    if (
+        conn is not None
+        and isinstance(content, dict)
+        and isinstance(metadata, dict)
+        and row.get("session_id") == WORKSPACE_NOTICE_SESSION_ID
+        and row.get("type") == NOTIFY_TYPE
+        and metadata.get("event") == "backend_failure"
+    ):
+        from storage.message_deliveries import workspace_notice_source
+
+        # A transcript read, or the write that delivers the notice, never fails on what is added for display.
+        try:
+            source_session_id, turn_id = workspace_notice_source(conn, metadata)
+            if source_session_id:
+                retry_session_id = source_session_id
+                content["failure_source"] = {"session_id": source_session_id, "retry": False}
+                if turn_id:
+                    from core.backend_failure_retry import workspace_notice_retry_available
+
+                    content["failure_source"]["retry"] = workspace_notice_retry_available(
+                        conn,
+                        {"type": row.get("type"), "author": row.get("author"), "source": row.get("source"), "metadata": metadata},
+                        source_session_id,
+                        str(turn_id),
+                    )
+        except Exception:
+            logger.debug("workspace notice source unavailable for %s", row.get("id"), exc_info=True)
     link = content.get("failure_retry") if isinstance(content, dict) else None
     if conn is not None and isinstance(link, dict):
         from storage.message_deliveries import failure_retry_state, get_delivery
@@ -130,14 +165,10 @@ def _row_to_payload(
             "delivery_id": link.get("delivery_id"),
             "state": (
                 failure_retry_state(delivery)
-                if delivery is not None and delivery["session_id"] == row.get("session_id")
+                if delivery is not None and delivery["session_id"] == retry_session_id
                 else "retired"
             ),
         }
-    try:
-        metadata = json.loads(row.get("metadata_json") or "{}")
-    except json.JSONDecodeError:
-        metadata = {}
     if not isinstance(metadata, dict):
         metadata = {}
     elif not include_private_metadata:
@@ -688,7 +719,14 @@ def append(
         "read_at": read_at,
     }
     conn.execute(messages.insert().values(**payload))
-    return _row_to_payload(payload, include_local_error_detail=include_local_error_detail)
+    # The live ``message.new`` is this payload: a workspace failure notice names its
+    # Session (``failure_source``) here, as a later transcript read does.
+    workspace_notice = session_id == WORKSPACE_NOTICE_SESSION_ID and resolved_type == NOTIFY_TYPE
+    return _row_to_payload(
+        payload,
+        include_local_error_detail=include_local_error_detail,
+        conn=conn if workspace_notice else None,
+    )
 
 
 def get_message(

@@ -20,6 +20,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let showAccount: () -> Void
     let showAccountRoot: () -> Void
     let showInstances: () -> Void
+    let showSignIn: () -> Void
     let instanceName: () -> String?
     let healthConnect: HealthConnectAction
     let instanceID: () -> String?
@@ -55,6 +56,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         showAccount: @escaping () -> Void,
         showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
+        showSignIn: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
@@ -91,6 +93,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.showAccount = showAccount
         self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
+        self.showSignIn = showSignIn
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
@@ -127,6 +130,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             showAccount: showAccount,
             showAccountRoot: showAccountRoot,
             showInstances: showInstances,
+            showSignIn: showSignIn,
             instanceName: instanceName,
             instanceID: instanceID,
             deviceID: deviceID,

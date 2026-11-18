@@ -43,7 +43,7 @@ struct Source {
 struct State {
     global: Bucket,
     active: usize,
-    sources: HashMap<IpAddr, Source>,
+    sources: HashMap<Option<IpAddr>, Source>,
 }
 
 #[derive(Clone)]
@@ -51,7 +51,7 @@ pub struct HandshakeLimit(Arc<Mutex<State>>);
 
 pub struct HandshakePermit {
     limit: HandshakeLimit,
-    source: IpAddr,
+    source: Option<IpAddr>,
 }
 
 impl HandshakeLimit {
@@ -63,17 +63,23 @@ impl HandshakeLimit {
         })))
     }
 
-    pub fn acquire(&self, source: IpAddr) -> Option<HandshakePermit> {
+    #[cfg(test)]
+    fn acquire(&self, source: IpAddr) -> Option<HandshakePermit> {
+        self.acquire_source(Some(source))
+    }
+
+    // All arrivals via the single authorized relay share one source budget.
+    pub fn acquire_source(&self, source: Option<IpAddr>) -> Option<HandshakePermit> {
         // One LAN prefix must not get a fresh budget for every temporary IPv6
         // address. IPv4 remains /32; IPv6 accounting is /64.
-        let source = match source {
+        let source = source.map(|source| match source {
             IpAddr::V6(address) => {
                 let mut bytes = address.octets();
                 bytes[8..].fill(0);
                 IpAddr::V6(bytes.into())
             }
             address => address,
-        };
+        });
         let now = Instant::now();
         let mut state = self.0.lock().expect("handshake accounting poisoned");
         state.global.refill(now, GLOBAL_BURST, 8.0);

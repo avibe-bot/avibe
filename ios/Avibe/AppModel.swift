@@ -586,6 +586,20 @@ final class AppModel: ObservableObject {
         showRuntimeSheet(startScreen: .sheet, fallback: .account)
     }
 
+    /// A Google, GitHub or Apple sign-in tapped inside an instance page: that page asked avibe.bot to
+    /// sign in, so the App's avibe.bot session has lapsed. Reading it settles that the
+    /// explicit way (a `401` signs out and the App shows its own sign-in screen, which offers
+    /// Google, GitHub and Apple); a session that still reads signed in shows the instance list.
+    func showSignIn() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let state = try? await self.sessionCoordinator.refresh()
+            if case .signedIn = state {
+                self.showInstancePicker()
+            }
+        }
+    }
+
     func showAccountRoot() {
         showRuntimeSheet(startScreen: .sheetAccount, fallback: .account)
     }

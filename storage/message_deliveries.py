@@ -2767,3 +2767,29 @@ def deliveries_for_turn(conn: Connection, turn_id: str) -> list[dict[str, Any]]:
             )
         ).mappings()
     ]
+
+
+def workspace_notice_source(conn: Connection, metadata: dict[str, Any]) -> tuple[str | None, str | None]:
+    """The Session a workspace-addressed failure notice reports on, and its failed Turn.
+
+    A notice in the reserved workspace Session has no Session of its own. Its
+    ``failure_id`` names the failed Turn (``turn:<id>``), whose row names the
+    Session; a failure without a Turn names only its Run, whose row names the
+    Session. Returns ``(session_id, turn_id)``; ``turn_id`` is set only when the
+    failure is a Turn of that Session, which is what a retry continues.
+    """
+    from storage.models import agent_runs
+
+    failure_id = str(metadata.get("failure_id") or "")
+    if failure_id.startswith("turn:"):
+        turn = get_turn(conn, failure_id[len("turn:"):])
+        if turn is not None and turn.get("session_id"):
+            return str(turn["session_id"]), str(turn["id"])
+    run_id = str(metadata.get("run_id") or "").strip()
+    if run_id:
+        session_id = conn.execute(
+            select(agent_runs.c.session_id).where(agent_runs.c.id == run_id)
+        ).scalar_one_or_none()
+        if session_id:
+            return str(session_id), None
+    return None, None

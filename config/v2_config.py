@@ -3880,6 +3880,8 @@ class VibeCloudRemoteAccessConfig:
     # Optional direct iOS path. Additive and intentionally off by default;
     # this is configuration/CLI state until the later settings-page change.
     direct: bool = False
+    # Operator-local consent; generic Web saves cannot change this field.
+    public_relay_trial: bool = False
 
     def __post_init__(self) -> None:
         """Refuse a value that is not the kind this class declares.

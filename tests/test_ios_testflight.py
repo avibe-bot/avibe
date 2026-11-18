@@ -62,6 +62,7 @@ def app_store_profile(**overrides) -> dict:
                 testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
                 testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
             ],
+            testflight.SIGN_IN_WITH_APPLE: ["Default"],
             "get-task-allow": False,
         },
     }
@@ -257,7 +258,8 @@ def signed(info=None, entitlements=None):
                          "keychain-access-groups": [
                              testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
                              testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
-                         ]}
+                         ],
+                         testflight.SIGN_IN_WITH_APPLE: ["Default"]}
     return {**base_info, **(info or {})}, {**base_entitlements, **(entitlements or {})}
 
 
@@ -280,6 +282,7 @@ def test_a_distribution_signed_notification_service_with_shared_entitlements_pas
     entitlements.pop("aps-environment", None)
     for key in HEALTHKIT_ENTITLEMENTS:
         entitlements.pop(key)
+    entitlements.pop(testflight.SIGN_IN_WITH_APPLE, None)
     testflight.check_signed_bundle(
         info,
         entitlements,
@@ -317,6 +320,7 @@ def test_signed_keychain_groups_remain_exact_and_target_isolated():
     service_entitlements.pop("aps-environment", None)
     for key in HEALTHKIT_ENTITLEMENTS:
         service_entitlements.pop(key)
+    service_entitlements.pop(testflight.SIGN_IN_WITH_APPLE, None)
     with pytest.raises(testflight.TestFlightError, match="exactly"):
         testflight.check_signed_bundle(
             service_info,
@@ -416,7 +420,7 @@ def _live_activity_signed(entitlements: dict | None = None) -> tuple[dict, dict]
     )
     for key in ("aps-environment", "com.apple.developer.associated-domains",
                 "com.apple.security.application-groups", "keychain-access-groups",
-                *HEALTHKIT_ENTITLEMENTS):
+                *HEALTHKIT_ENTITLEMENTS, testflight.SIGN_IN_WITH_APPLE):
         signed_entitlements.pop(key, None)
     signed_entitlements.update(entitlements or {})
     return info, signed_entitlements
@@ -638,6 +642,8 @@ def test_archive_verification_requires_health_only_in_the_main_app_manifest(
         (None, {"application-identifier": "ZZZZZZZZZZ.bot.avibe.ios"}, "not signed for"),
         (None, {"aps-environment": "development"}, "aps-environment"),
         (None, {"com.apple.developer.usernotifications.filtering": True}, "forbidden entitlements"),
+        (None, {testflight.SIGN_IN_WITH_APPLE: []}, "applesignin"),
+        (None, {testflight.SIGN_IN_WITH_APPLE: ["Default", "Other"]}, "exactly"),
     ],
     ids=[
         "bundle",
@@ -651,6 +657,8 @@ def test_archive_verification_requires_health_only_in_the_main_app_manifest(
         "team",
         "development-aps",
         "filtering",
+        "sign-in-with-apple-missing",
+        "sign-in-with-apple-extra",
     ],
 )
 def test_an_archive_that_testflight_would_reject_or_mis_sign_fails_here(info, entitlements, message):
@@ -959,3 +967,15 @@ def test_the_testflight_workflow_runs_by_hand_from_master_and_scopes_its_secrets
     cleanup = steps[-1]
     assert cleanup["name"] == "Remove Apple signing material"
     assert cleanup["if"] == "always()"
+
+
+def test_sign_in_with_apple_is_the_apps_alone():
+    assert testflight.MAIN_REQUIRED_ENTITLEMENTS[testflight.SIGN_IN_WITH_APPLE] == ["Default"]
+    profile = app_store_profile()
+    del profile["Entitlements"][testflight.SIGN_IN_WITH_APPLE]
+    with pytest.raises(testflight.TestFlightError, match="applesignin"):
+        testflight.check_profile(profile, now=NOW)
+    for bundle_id in testflight.EXTENSION_BUNDLE_IDS:
+        assert testflight.SIGN_IN_WITH_APPLE in testflight.forbidden_entitlements(bundle_id)
+    entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
+    assert entitlements[testflight.SIGN_IN_WITH_APPLE] == ["Default"]

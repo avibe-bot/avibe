@@ -84,7 +84,13 @@ class DirectEndpoint:
     endpoint_id: str
     # Socket addresses the endpoint is bound to, as "ip:port" or "[ip]:port".
     addresses: tuple[str, ...]
+    # Set only for a connected relay selected by this generation's supervisor.
+    relay_origin: str | None = None
+    relay_policy: str | None = None
 
+
+PUBLIC_TRIAL = "public-trial-v1"
+PUBLIC_TRIAL_RELAYS = frozenset(f"https://{region}-1.relay.n0.iroh.link./" for region in ("use1", "usw1", "euc1", "aps1"))
 
 AdmissionListener = Callable[[str, int], None]
 
@@ -147,9 +153,18 @@ class DirectRendezvous:
         with self._lock:
             previous_id = self._endpoint.endpoint_id if self._endpoint is not None else None
             current_id = endpoint.endpoint_id if endpoint is not None else None
-            if previous_id != current_id:
+            previous_policy = self._endpoint.relay_policy if self._endpoint else None
+            current_policy = endpoint.relay_policy if endpoint else None
+            if current_policy not in (None, PUBLIC_TRIAL) or (endpoint and endpoint.relay_origin is not None and (current_policy != PUBLIC_TRIAL or endpoint.relay_origin not in PUBLIC_TRIAL_RELAYS)):
+                raise ValueError("invalid relay publication")
+            if previous_id != current_id or previous_policy != current_policy:
+                if self._admission_listener:
+                    for key in self._admissions:
+                        self._admission_listener(key, 0)
                 self._admissions.clear()
-            if previous_id != current_id or candidates != self._candidates:
+            previous_origin = self._endpoint.relay_origin if self._endpoint else None
+            current_origin = endpoint.relay_origin if endpoint else None
+            if previous_id != current_id or candidates != self._candidates or previous_origin != current_origin or previous_policy != current_policy:
                 self._revision += 1
             self._endpoint = endpoint
             self._candidates = candidates
@@ -162,6 +177,7 @@ class DirectRendezvous:
         hostname: str,
         subject: str,
         client_endpoint_id: str,
+        is_owner: bool = False,
     ) -> dict[str, Any]:
         """Describe the endpoint to one authenticated session and admit its client."""
 
@@ -169,7 +185,14 @@ class DirectRendezvous:
         base = {"version": RENDEZVOUS_VERSION, "instance_id": instance_id, "hostname": hostname}
         with self._lock:
             endpoint = self._endpoint
-            if endpoint is None or not self._candidates:
+            generation = f"{self._boot}:{self._revision}"
+            relay = None
+            if endpoint and endpoint.relay_policy == PUBLIC_TRIAL:
+                if not is_owner:
+                    return unavailable(instance_id=instance_id, hostname=hostname, reason="owner_required")
+                if endpoint.relay_origin is not None:
+                    relay = {"policy": PUBLIC_TRIAL, "url": endpoint.relay_origin}
+            if endpoint is None or (not self._candidates and relay is None):
                 reason = self._unavailable_reason if endpoint is None else "no_reachable_address"
                 return unavailable(instance_id=instance_id, hostname=hostname, reason=reason)
             expires_at = now + RENDEZVOUS_TTL_SECONDS
@@ -178,14 +201,14 @@ class DirectRendezvous:
             response = {
                 **base,
                 "status": "ready",
-                "generation": f"{self._boot}:{self._revision}",
+                "generation": generation,
                 "issued_at": now,
                 "expires_at": expires_at,
                 "alpn": DIRECT_ALPN,
                 "endpoint": {
                     "id": endpoint.endpoint_id,
                     "addresses": [dict(candidate) for candidate in self._candidates],
-                    "relay": None,
+                    "relay": relay,
                 },
                 "client": {"endpoint_id": client_endpoint_id, "admitted_until": expires_at},
             }
