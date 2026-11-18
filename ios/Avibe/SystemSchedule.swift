@@ -541,17 +541,7 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
         var records: [StoredSystemSchedule]
     }
 
-    /// Checkpoints surround actual IO, including cold-open durability. They
-    /// allow the same writer to be exercised under deterministic IO failures.
-    enum IOCheckpoint {
-        case beforeFileSync
-        case beforeRename
-        case beforeDirectorySync
-        case beforeParentDirectorySync
-        case beforeColdOpenSync
-    }
-
-    private enum StoreError: Error {
+    fileprivate enum StoreError: Error {
         case invalidEvidence
         case posix(String, Int32)
     }
@@ -561,10 +551,8 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
     private static let legacySuffix = "-v1.json"
     private static let logger = Logger(subsystem: "bot.avibe.ios", category: "system-schedule-store")
     private let fileURL: URL
-    private let fileManager: FileManager
+    private let fileIO: SystemScheduleFileIO
     private let legacyEvidence: SystemScheduleDeviceIdentity.LegacyEvidence
-    private let beforeRename: (() throws -> Void)?
-    private let checkpoint: ((IOCheckpoint) throws -> Void)?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var committed: Envelope?
@@ -592,14 +580,11 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
         fileURL: URL? = nil,
         fileManager: FileManager = .default,
         legacyEvidence: SystemScheduleDeviceIdentity.LegacyEvidence = .absent,
-        beforeRename: (() throws -> Void)? = nil,
-        checkpoint: ((IOCheckpoint) throws -> Void)? = nil
+        fileIO: SystemScheduleFileIO? = nil
     ) {
         self.fileURL = fileURL ?? Self.defaultFileURL(fileManager: fileManager)
-        self.fileManager = fileManager
+        self.fileIO = fileIO ?? SystemScheduleFileIO(fileManager: fileManager)
         self.legacyEvidence = legacyEvidence
-        self.beforeRename = beforeRename
-        self.checkpoint = checkpoint
         bootstrap()
     }
 
@@ -830,7 +815,7 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
     private func legacySources() throws -> [URL] {
         let root = fileURL.deletingLastPathComponent()
         guard try entryExists(root, directory: true) else { return [] }
-        return try fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        return try fileIO.contentsOfDirectory(at: root)
             .filter { $0.lastPathComponent.hasPrefix(Self.legacyPrefix) }
             .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
     }
@@ -862,23 +847,13 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// lstat distinguishes absence from denied access and rejects symlinks and
-    /// non-regular namespace entries instead of treating them as an empty store.
     private func entryExists(_ url: URL, directory: Bool = false) throws -> Bool {
-        var status = stat()
-        let result = url.path.withCString { lstat($0, &status) }
-        if result != 0 {
-            if errno == ENOENT { return false }
-            throw StoreError.posix("lstat", errno)
-        }
-        let expected = directory ? S_IFDIR : S_IFREG
-        guard status.st_mode & S_IFMT == expected else { throw StoreError.invalidEvidence }
-        return true
+        try fileIO.entryExists(url, directory: directory)
     }
 
     private func readIfPresent(_ url: URL) throws -> Data? {
         guard try entryExists(url) else { return nil }
-        return try Data(contentsOf: url)
+        return try fileIO.readData(at: url)
     }
 
     private func requiredData(_ url: URL) throws -> Data {
@@ -896,56 +871,104 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
             try validate(envelope)
             try validateProvenance(envelope, sources: legacySources())
             if coldOpen {
-                try checkpoint?(.beforeColdOpenSync)
-                try syncFile(fileURL)
+                try fileIO.syncExistingFile(fileURL)
             } else {
-                try ensureDurableDirectory(directory)
+                try fileIO.ensureDurableDirectory(directory)
                 try writeAndSync(try encoder.encode(envelope), to: temporaryURL)
-                try checkpoint?(.beforeRename)
-                try beforeRename?()
-                try replaceAtomically(temporaryURL: temporaryURL)
+                try fileIO.replaceAtomically(temporaryURL: temporaryURL, destinationURL: fileURL)
             }
-            try checkpoint?(.beforeDirectorySync)
-            try syncDirectory(directory)
+            try fileIO.syncDirectory(directory)
             // The Application Support entry itself may have just been created.
             // Creation of any further missing ancestors is synced recursively
             // before the first envelope write in ensureDurableDirectory.
-            try checkpoint?(.beforeParentDirectorySync)
-            try syncDirectory(directory.deletingLastPathComponent())
+            try fileIO.syncParentDirectory(of: directory)
             committed = envelope
             pending = nil
             pendingColdOpen = false
             persistenceState = .ready
             return true
         } catch {
-            try? fileManager.removeItem(at: temporaryURL)
+            try? fileIO.removeItem(at: temporaryURL)
             persistenceState = .writeFailed
             Self.logger.error("System schedule commit failed: \(String(describing: error), privacy: .public)")
             return false
         }
     }
 
-    private func ensureDurableDirectory(_ directory: URL) throws {
+    private func writeAndSync(_ data: Data, to url: URL) throws {
+        let descriptor = try fileIO.openNewFile(url)
+        var needsClose = true
+        defer { if needsClose { try? fileIO.closeFile(descriptor) } }
+        try fileIO.write(data, to: descriptor)
+        try fileIO.syncFile(descriptor)
+        do {
+            try fileIO.closeFile(descriptor)
+        } catch {
+            needsClose = false
+            throw error
+        }
+        needsClose = false
+    }
+}
+
+/// Filesystem operations used by the envelope's durability barrier. The store
+/// owns commit/publication order; this implementation owns the actual file IO.
+@MainActor
+class SystemScheduleFileIO {
+    private typealias StoreError = FileSystemSystemScheduleStore.StoreError
+    private let fileManager: FileManager
+
+    init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+    }
+
+    /// lstat distinguishes absence from denied access and rejects symlinks and
+    /// non-regular namespace entries instead of treating them as an empty store.
+    func entryExists(_ url: URL, directory: Bool = false) throws -> Bool {
+        var status = stat()
+        let result = url.path.withCString { lstat($0, &status) }
+        if result != 0 {
+            if errno == ENOENT { return false }
+            throw StoreError.posix("lstat", errno)
+        }
+        let expected = directory ? S_IFDIR : S_IFREG
+        guard status.st_mode & S_IFMT == expected else { throw StoreError.invalidEvidence }
+        return true
+    }
+
+    func readData(at url: URL) throws -> Data {
+        try Data(contentsOf: url)
+    }
+
+    func contentsOfDirectory(at url: URL) throws -> [URL] {
+        try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+    }
+
+    func removeItem(at url: URL) throws {
+        try fileManager.removeItem(at: url)
+    }
+
+    func ensureDurableDirectory(_ directory: URL) throws {
         if try entryExists(directory, directory: true) {
             // Retry also re-establishes a previously failed parent-entry sync.
             try syncDirectory(directory)
-            try checkpoint?(.beforeParentDirectorySync)
-            try syncDirectory(directory.deletingLastPathComponent())
+            try syncParentDirectory(of: directory)
             return
         }
         let parent = directory.deletingLastPathComponent()
         try ensureDurableDirectory(parent)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
         try syncDirectory(directory)
-        try checkpoint?(.beforeParentDirectorySync)
-        try syncDirectory(parent)
+        try syncParentDirectory(of: directory)
     }
 
-    private func writeAndSync(_ data: Data, to url: URL) throws {
+    func openNewFile(_ url: URL) throws -> Int32 {
         let descriptor = url.path.withCString { open($0, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR) }
         guard descriptor >= 0 else { throw StoreError.posix("open", errno) }
-        var needsClose = true
-        defer { if needsClose { _ = close(descriptor) } }
+        return descriptor
+    }
+
+    func write(_ data: Data, to descriptor: Int32) throws {
         try data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else { return }
             var offset = 0
@@ -956,34 +979,39 @@ final class FileSystemSystemScheduleStore: SystemScheduleStoring {
                 offset += count
             }
         }
-        try checkpoint?(.beforeFileSync)
-        guard fsync(descriptor) == 0 else { throw StoreError.posix("fsync-file", errno) }
-        guard close(descriptor) == 0 else {
-            needsClose = false
-            throw StoreError.posix("close", errno)
-        }
-        needsClose = false
     }
 
-    private func syncFile(_ url: URL) throws {
+    func syncFile(_ descriptor: Int32) throws {
+        guard fsync(descriptor) == 0 else { throw StoreError.posix("fsync-file", errno) }
+    }
+
+    func closeFile(_ descriptor: Int32) throws {
+        guard close(descriptor) == 0 else { throw StoreError.posix("close", errno) }
+    }
+
+    func syncExistingFile(_ url: URL) throws {
         let descriptor = url.path.withCString { open($0, O_RDONLY | O_NOFOLLOW) }
         guard descriptor >= 0 else { throw StoreError.posix("open-file", errno) }
         defer { _ = close(descriptor) }
         guard fsync(descriptor) == 0 else { throw StoreError.posix("fsync-file", errno) }
     }
 
-    private func replaceAtomically(temporaryURL: URL) throws {
+    func replaceAtomically(temporaryURL: URL, destinationURL: URL) throws {
         let result = temporaryURL.path.withCString { temporaryPath in
-            fileURL.path.withCString { rename(temporaryPath, $0) }
+            destinationURL.path.withCString { rename(temporaryPath, $0) }
         }
         guard result == 0 else { throw StoreError.posix("rename", errno) }
     }
 
-    private func syncDirectory(_ directory: URL) throws {
+    func syncDirectory(_ directory: URL) throws {
         let descriptor = directory.path.withCString { open($0, O_RDONLY) }
         guard descriptor >= 0 else { throw StoreError.posix("open-directory", errno) }
         defer { _ = close(descriptor) }
         guard fsync(descriptor) == 0 else { throw StoreError.posix("fsync-directory", errno) }
+    }
+
+    func syncParentDirectory(of directory: URL) throws {
+        try syncDirectory(directory.deletingLastPathComponent())
     }
 }
 

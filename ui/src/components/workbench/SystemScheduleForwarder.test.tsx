@@ -25,7 +25,10 @@ vi.mock('@/context/InstanceAuthorizationContext', () => ({
     capabilities: { can_chat: state.canChat },
   }),
 }));
-vi.mock('@/lib/apiFetch', () => ({ apiFetch }));
+vi.mock('@/lib/apiFetch', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/lib/apiFetch')>(),
+  apiFetch,
+}));
 vi.mock('@/lib/native', () => native);
 vi.mock('@/lib/pageActivity', () => activity);
 
@@ -95,6 +98,102 @@ afterEach(() => {
 });
 
 describe('SystemScheduleForwarder', () => {
+  it.each(['fetch', 'body'] as const)(
+    'releases a stalled claim %s without overlapping owners or losing cancel and receipt progress',
+    async (phase) => {
+      vi.useFakeTimers();
+      const cancelRequest = {
+        requestId: 'cancel-after-stall',
+        operationId: request.operationId,
+        kind: request.kind,
+        purpose: 'user' as const,
+      };
+      const cancelReceipt = {
+        ...receipt,
+        requestId: cancelRequest.requestId,
+        state: 'cancelled' as const,
+      };
+      native.nativeSystemScheduleCancel.mockResolvedValue(cancelReceipt);
+      let claimCalls = 0;
+      let activeClaims = 0;
+      let maxActiveClaims = 0;
+      let abortedClaims = 0;
+      const acceptedLeases = new Set<string>();
+      const uploadedReceipts: (typeof receipt | typeof cancelReceipt)[] = [];
+      let createReceiptAttempts = 0;
+      apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
+        const body = JSON.parse(init.body as string);
+        if (path === '/api/system-schedule/receipt') {
+          uploadedReceipts.push(body.receipt);
+          if (body.lease_token === createClaim.leaseToken && ++createReceiptAttempts === 1) {
+            throw new Error('receipt temporarily offline');
+          }
+          acceptedLeases.add(body.lease_token);
+          return Response.json({ ok: true });
+        }
+        claimCalls += 1;
+        activeClaims += 1;
+        maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
+        if (claimCalls === 2) {
+          const stalled = new Promise<Response>((_, reject) => {
+            init.signal?.addEventListener('abort', () => {
+              activeClaims -= 1;
+              abortedClaims += 1;
+              reject(init.signal?.reason);
+            }, { once: true });
+          });
+          if (phase === 'fetch') return stalled;
+          return { ok: true, json: () => stalled };
+        }
+        const claim = claimCalls === 1
+          ? createClaim
+          : !acceptedLeases.has('lease-cancel')
+            && !body.exclude_lease_tokens.includes('lease-cancel')
+            ? {
+              ...createClaim,
+              action: 'cancel',
+              leaseToken: 'lease-cancel',
+              request: cancelRequest,
+            }
+            : null;
+        const response = Response.json({ ok: true, claim });
+        const readBody = response.json.bind(response);
+        response.json = async () => {
+          try {
+            return await readBody();
+          } finally {
+            activeClaims -= 1;
+          }
+        };
+        return response;
+      });
+
+      render(<SystemScheduleForwarder />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(claimCalls).toBe(2);
+      expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce();
+      expect(native.nativeSystemScheduleCancel).not.toHaveBeenCalled();
+      expect(uploadedReceipts).toEqual([]);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(14_999); });
+      expect(claimCalls).toBe(2);
+      expect(maxActiveClaims).toBe(1);
+      expect(uploadedReceipts).toEqual([]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(abortedClaims).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_005); });
+
+      expect(acceptedLeases).toEqual(new Set([createClaim.leaseToken, 'lease-cancel']));
+      expect(createReceiptAttempts).toBe(2);
+      expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce();
+      expect(native.nativeSystemScheduleCancel).toHaveBeenCalledOnce();
+      expect(native.nativeSystemScheduleCancel).toHaveBeenCalledWith(cancelRequest);
+      expect(maxActiveClaims).toBe(1);
+      expect(activeClaims).toBe(0);
+      expect(uploadedReceipts).toEqual([receipt, receipt, cancelReceipt]);
+    },
+  );
+
   it('shares the closed create, cancel, and terminal receipt vectors across layers', () => {
     expect(contractVectors.contract).toBe(1);
     expect(contractVectors.createRequests.map((item: { title: string }) => item.title)).toEqual([

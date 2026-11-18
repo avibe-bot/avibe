@@ -5291,7 +5291,7 @@ final class DirectPathAppTests: XCTestCase {
         runtimeOpenNotificationCenter: NotificationCenter = .default,
         systemSchedulePlatform: SystemSchedulePlatforming? = nil,
         systemScheduleNow: @escaping @MainActor () -> Date = Date.init,
-        systemScheduleCheckpoint: ((FileSystemSystemScheduleStore.IOCheckpoint) throws -> Void)? = nil,
+        systemScheduleCheckpoint: ((FaultingSystemScheduleFileIO.Checkpoint) throws -> Void)? = nil,
         systemScheduleFileURL: URL? = nil,
         launchesWithInstanceOneSelected: Bool = false,
         notifications: NotificationsOn? = nil,
@@ -5369,7 +5369,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         let scheduleLedgerURL = systemScheduleFileURL ?? scheduleDirectory.appendingPathComponent("ledger.json")
         let scheduleStore = FileSystemSystemScheduleStore(fileURL: scheduleLedgerURL,
-                                                         checkpoint: systemScheduleCheckpoint)
+                                                         fileIO: FaultingSystemScheduleFileIO(checkpoint: systemScheduleCheckpoint))
         appScheduleStore = scheduleStore
         appScheduleLedgerURL = scheduleLedgerURL
         addTeardownBlock {

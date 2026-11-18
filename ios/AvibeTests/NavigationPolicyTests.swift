@@ -2427,7 +2427,7 @@ final class NavigationPolicyTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         var failing = true
         let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
-            checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } })
+            fileIO: FaultingSystemScheduleFileIO(checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } }))
         let webView = WKWebView(frame: .zero, configuration: NativeBridgeConfiguration.make(
             instanceOrigin: instance, setOuterScrollLocked: { _, _ in false },
             deviceID: { store.installationID }))

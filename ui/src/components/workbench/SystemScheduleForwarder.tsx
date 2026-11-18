@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, type FC } from 'react';
 
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import { apiFetch } from '@/lib/apiFetch';
+import { apiFetch, withApiDeadline } from '@/lib/apiFetch';
 import {
   hasNativeCapability,
   nativeAppInfo,
@@ -15,6 +15,7 @@ import { onPageReactivated } from '@/lib/pageActivity';
 
 const POLL_INTERVAL_MS = 5_000;
 const MAX_CLAIMS_PER_RECONCILE = 16;
+const CLAIM_TIMEOUT_MS = 15_000;
 const RECEIPT_TIMEOUT_MS = 15_000;
 const PERMANENT_RECEIPT_ERRORS = new Set([
   'invalid_receipt',
@@ -59,19 +60,22 @@ async function claimNext(
   excludeLeaseTokens: string[],
   allowCreate: boolean,
 ): Promise<ScheduleClaim | null> {
-  const response = await apiFetch('/api/system-schedule/claim', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      instance_id: identity.instanceId,
-      device_id: identity.deviceId,
-      exclude_lease_tokens: excludeLeaseTokens,
-      allow_create: allowCreate,
-    }),
+  return withApiDeadline(CLAIM_TIMEOUT_MS, undefined, async (signal) => {
+    const response = await apiFetch('/api/system-schedule/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instance_id: identity.instanceId,
+        device_id: identity.deviceId,
+        exclude_lease_tokens: excludeLeaseTokens,
+        allow_create: allowCreate,
+      }),
+      signal,
+    });
+    if (!response.ok) throw new Error(`system schedule claim failed (${response.status})`);
+    const payload = await response.json();
+    return payload?.claim ?? null;
   });
-  if (!response.ok) throw new Error(`system schedule claim failed (${response.status})`);
-  const payload = await response.json();
-  return payload?.claim ?? null;
 }
 
 async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'discard' | 'retry'> {

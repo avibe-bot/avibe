@@ -186,16 +186,16 @@ final class SystemScheduleTests: XCTestCase {
 
     @MainActor
     func testBootstrapWithholdsUncommittedIdentityAcrossEveryWriterPhaseAndColdOpen() throws {
-        for phase in [FileSystemSystemScheduleStore.IOCheckpoint.beforeFileSync,
+        for phase in [FaultingSystemScheduleFileIO.Checkpoint.beforeFileSync,
                       .beforeRename, .beforeDirectorySync, .beforeParentDirectorySync] {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("I3Bootstrap.\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: directory) }
             let url = directory.appendingPathComponent("ledger.json")
             var failing = true
-            let store = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+            let store = FileSystemSystemScheduleStore(fileURL: url, fileIO: FaultingSystemScheduleFileIO(checkpoint: {
                 if $0 == phase && failing { throw CocoaError(.fileWriteUnknown) }
-            })
+            }))
             XCTAssertEqual(store.persistenceState, .writeFailed)
             XCTAssertNil(store.installationID)
             XCTAssertNil(store.managementOwner(accountID: "account-1"))
@@ -206,9 +206,9 @@ final class SystemScheduleTests: XCTestCase {
             XCTAssertTrue(store.retryCommit())
             let identifier = try XCTUnwrap(store.installationID)
             if let visibleID { XCTAssertEqual(identifier, visibleID) }
-            let failedColdOpen = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+            let failedColdOpen = FileSystemSystemScheduleStore(fileURL: url, fileIO: FaultingSystemScheduleFileIO(checkpoint: {
                 if $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
-            })
+            }))
             XCTAssertEqual(failedColdOpen.persistenceState, .writeFailed)
             XCTAssertNil(failedColdOpen.installationID)
             XCTAssertFalse(failedColdOpen.retryCommit())
@@ -239,7 +239,7 @@ final class SystemScheduleTests: XCTestCase {
         try FileManager.default.removeItem(at: url)
         var migrationFailure = true
         let interrupted = FileSystemSystemScheduleStore(fileURL: url,
-            beforeRename: { if migrationFailure { throw CocoaError(.fileWriteUnknown) } })
+            fileIO: FaultingSystemScheduleFileIO(beforeRename: { if migrationFailure { throw CocoaError(.fileWriteUnknown) } }))
         XCTAssertEqual(interrupted.persistenceState, .writeFailed)
         XCTAssertNil(interrupted.installationID)
         migrationFailure = false
@@ -387,9 +387,9 @@ final class SystemScheduleTests: XCTestCase {
             let context = makeContext(owner: owner)
             let platform = SystemSchedulePlatformSpy()
             var failing = false
-            let store = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+            let store = FileSystemSystemScheduleStore(fileURL: url, fileIO: FaultingSystemScheduleFileIO(checkpoint: {
                 if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
-            })
+            }))
             let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
             XCTAssertNil(coordinator.prepare(makeRequest(), context: context))
             failing = true
@@ -406,9 +406,9 @@ final class SystemScheduleTests: XCTestCase {
                 stillCurrent: { true })
             XCTAssertEqual(cancel.error?.code, "local_state_write_failed", code)
             XCTAssertEqual(cancel.systemIdentifier, failed.systemIdentifier)
-            let coldFailed = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+            let coldFailed = FileSystemSystemScheduleStore(fileURL: url, fileIO: FaultingSystemScheduleFileIO(checkpoint: {
                 if $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
-            })
+            }))
             let coldCoordinator = SystemScheduleCoordinator(platform: platform, store: coldFailed)
             XCTAssertEqual(coldCoordinator.prepare(makeRequest(), context: context)?.error?.code,
                            "local_state_write_failed", code)
@@ -436,7 +436,7 @@ final class SystemScheduleTests: XCTestCase {
             let platform = SystemSchedulePlatformSpy()
             var failing = false
             let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
-                checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } })
+                fileIO: FaultingSystemScheduleFileIO(checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } }))
             let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
             XCTAssertNil(coordinator.prepare(makeRequest(), context: context))
             if scenario == "absent" {
@@ -480,9 +480,9 @@ final class SystemScheduleTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: directory) }
             let url = directory.appendingPathComponent("ledger.json")
             var promotionFailing = false
-            let initial = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+            let initial = FileSystemSystemScheduleStore(fileURL: url, fileIO: FaultingSystemScheduleFileIO(checkpoint: {
                 if promotionFailing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
-            })
+            }))
             let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
             let request = makeRequest()
             let platform = SystemSchedulePlatformSpy()
@@ -503,7 +503,7 @@ final class SystemScheduleTests: XCTestCase {
             }
             var failing = true
             let reopened = FileSystemSystemScheduleStore(fileURL: url,
-                checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } })
+                fileIO: FaultingSystemScheduleFileIO(checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } }))
             XCTAssertEqual(reopened.persistenceState, .writeFailed)
             XCTAssertNil(reopened.installationID)
             let coordinator = SystemScheduleCoordinator(platform: platform, store: reopened, now: { self.now })
@@ -563,9 +563,9 @@ final class SystemScheduleTests: XCTestCase {
             }
             var failWrite = true
             let store = FileSystemSystemScheduleStore(fileURL: url, fileManager: manager,
-                checkpoint: {
+                fileIO: FaultingSystemScheduleFileIO(fileManager: manager, checkpoint: {
                     if failWrite && $0 == .beforeFileSync { throw CocoaError(.fileWriteUnknown) }
-                })
+                }))
             XCTAssertEqual(store.persistenceState, .unavailable, failure)
             XCTAssertNil(store.record(operationID: request.operationID,
                                       instanceID: request.instanceID, owner: owner), failure)
@@ -598,9 +598,9 @@ final class SystemScheduleTests: XCTestCase {
         let url = directory.appendingPathComponent("ledger.json")
         let identifier = initial.installationID
         var failing = false
-        let store = FileSystemSystemScheduleStore(fileURL: url, checkpoint: {
+        let store = FileSystemSystemScheduleStore(fileURL: url, fileIO: FaultingSystemScheduleFileIO(checkpoint: {
             if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) }
-        })
+        }))
         failing = true
         XCTAssertNil(store.managementOwner(accountID: "account-1"))
         XCTAssertEqual(store.persistenceState, .writeFailed)
@@ -891,9 +891,9 @@ final class SystemScheduleTests: XCTestCase {
 
         let interrupted = FileSystemSystemScheduleStore(
             fileURL: directory.appendingPathComponent("ledger.json"),
-            beforeRename: {
+            fileIO: FaultingSystemScheduleFileIO(beforeRename: {
                 throw NSError(domain: "intentional-pre-rename", code: 1)
-            }
+            })
         )
         var changed = original
         changed.lifecycle = .managedScheduled
@@ -938,9 +938,9 @@ final class SystemScheduleTests: XCTestCase {
 
         let interrupted = FileSystemSystemScheduleStore(
             fileURL: directory.appendingPathComponent("ledger.json"),
-            beforeRename: {
+            fileIO: FaultingSystemScheduleFileIO(beforeRename: {
                 throw NSError(domain: "intentional-pre-rename", code: 1)
-            }
+            })
         )
         XCTAssertFalse(interrupted.detachActiveOwner())
 
@@ -1557,10 +1557,10 @@ final class SystemScheduleTests: XCTestCase {
             let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
             var commits = 0
             let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
-                beforeRename: {
+                fileIO: FaultingSystemScheduleFileIO(beforeRename: {
                     commits += 1
                     if commits == failAt { throw CocoaError(.fileWriteUnknown) }
-                })
+                }))
             let platform = SystemSchedulePlatformSpy()
             let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
             let request = makeRequest()
@@ -1591,7 +1591,7 @@ final class SystemScheduleTests: XCTestCase {
         let owner = try XCTUnwrap(initial.managementOwner(accountID: "account-1"))
         var failCommits = false
         let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
-            beforeRename: { if failCommits { throw CocoaError(.fileWriteUnknown) } })
+            fileIO: FaultingSystemScheduleFileIO(beforeRename: { if failCommits { throw CocoaError(.fileWriteUnknown) } }))
         let platform = SystemSchedulePlatformSpy()
         platform.respectSystemItems = true
         platform.suspendScheduleAfterWrite = true
@@ -2939,6 +2939,68 @@ private final class SystemScheduleStoreSpy: SystemScheduleStoring {
             records[index].updatedAt = Date()
         }
         return true
+    }
+}
+
+/// Faults replace actual filesystem operations while every successful call
+/// delegates to the production implementation and uses real temporary files.
+@MainActor
+final class FaultingSystemScheduleFileIO: SystemScheduleFileIO {
+    enum Checkpoint {
+        case beforeFileSync
+        case beforeRename
+        case beforeDirectorySync
+        case beforeParentDirectorySync
+        case beforeColdOpenSync
+    }
+
+    private let checkpoint: ((Checkpoint) throws -> Void)?
+    private let beforeRename: (() throws -> Void)?
+    private var awaitingFinalDirectorySync = false
+
+    init(
+        fileManager: FileManager = .default,
+        checkpoint: ((Checkpoint) throws -> Void)? = nil,
+        beforeRename: (() throws -> Void)? = nil
+    ) {
+        self.checkpoint = checkpoint
+        self.beforeRename = beforeRename
+        super.init(fileManager: fileManager)
+    }
+
+    override func ensureDurableDirectory(_ directory: URL) throws {
+        awaitingFinalDirectorySync = false
+        try super.ensureDurableDirectory(directory)
+    }
+
+    override func syncFile(_ descriptor: Int32) throws {
+        try checkpoint?(.beforeFileSync)
+        try super.syncFile(descriptor)
+    }
+
+    override func syncExistingFile(_ url: URL) throws {
+        awaitingFinalDirectorySync = false
+        try checkpoint?(.beforeColdOpenSync)
+        try super.syncExistingFile(url)
+        awaitingFinalDirectorySync = true
+    }
+
+    override func replaceAtomically(temporaryURL: URL, destinationURL: URL) throws {
+        try checkpoint?(.beforeRename)
+        try beforeRename?()
+        try super.replaceAtomically(temporaryURL: temporaryURL, destinationURL: destinationURL)
+        awaitingFinalDirectorySync = true
+    }
+
+    override func syncDirectory(_ directory: URL) throws {
+        if awaitingFinalDirectorySync { try checkpoint?(.beforeDirectorySync) }
+        try super.syncDirectory(directory)
+        awaitingFinalDirectorySync = false
+    }
+
+    override func syncParentDirectory(of directory: URL) throws {
+        try checkpoint?(.beforeParentDirectorySync)
+        try super.syncParentDirectory(of: directory)
     }
 }
 
