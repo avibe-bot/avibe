@@ -552,7 +552,7 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(second.dials[0].relayURL, "https://use1-1.relay.n0.iroh.link./")
         await assertCancelled { try await old.write(Data("x".utf8)) }
 
-        // The relay is withdrawn (A to null) while B's dial is still under
+        // The relay is withdrawn (B to null) while B's dial is still under
         // way: B's dial is given up, and what it produces late is closed.
         let third = harness.engine.prepare()
         third.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
@@ -574,6 +574,30 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertNil(third.dials[0].relayURL)
         await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:2", path: 9)) }
         _ = try await harness.transport.openStream(for: harness.tag("boot:3", path: 9))
+    }
+
+    func testARelayDialHasItsOwnLongerBoundAndADirectDialKeepsItsOwn() async throws {
+        XCTAssertEqual(DirectIrohTiming().dialSeconds, 1.5)
+        XCTAssertEqual(DirectIrohTiming().relayDialSeconds, 5)
+
+        var timing = Harness.patientTiming
+        timing.dialSeconds = 0.05
+        let harness = Harness(timing: timing)
+        let endpoint = harness.engine.prepare()
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(
+                generation: "boot:1", client: harness.engine.key.endpointID, addresses: [], relay: Self.relayA
+            )
+        )
+        harness.select()
+        try await eventually("the instance is dialled through the relay") { endpoint.dials.count == 1 }
+        // Well past the direct bound: the relay dial is still waiting.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(harness.log.count(of: "endpoint.close"), 0)
+        endpoint.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
+        try await eventually("the relayed path is reported") {
+            harness.reports == [.usable(generation: "boot:1")]
+        }
     }
 
     func testARelayChangeUnderTheSameGenerationIsNotARenewal() async throws {
@@ -1753,6 +1777,7 @@ final class DirectIrohTransportTests: XCTestCase {
             timing.fetchSeconds = 120
             timing.bindSeconds = 120
             timing.dialSeconds = 120
+            timing.relayDialSeconds = 120
             timing.probeSeconds = 120
             return timing
         }()

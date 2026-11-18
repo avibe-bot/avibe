@@ -926,7 +926,7 @@ final class DirectIrohTransport {
             let addresses = offer.addresses.map(\.socketAddress)
             let alpn = Data(DirectRendezvous.alpn.utf8)
             let connection: any DirectIrohConnection = try await directIrohDeadline(
-                timing.dialSeconds,
+                offer.relay == nil ? timing.dialSeconds : timing.relayDialSeconds,
                 discard: closeConnection
             ) {
                 try await directIrohCall(

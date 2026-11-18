@@ -14,6 +14,22 @@ final class DirectIrohBindingTests: XCTestCase {
     // Full native endpoint drain is separate from pending-call settlement.
     private static let endpointDrainBound: Duration = .seconds(5)
 
+    /// The real binding's relay map takes the four pinned URLs exactly as
+    /// the custom-relay branch of `DirectIrohBinding.bind` passes them.
+    /// Building a map and a mode opens no socket.
+    func testRealRelayMapTakesTheFourPinnedRelaysExactly() throws {
+        let urls = DirectTrialRelay.publicTrialRelayURLs
+        let map = try IrohLib.RelayMap.fromUrls(urls: urls)
+        for url in urls {
+            XCTAssertEqual(try map.get(url: url)?.url, url)
+        }
+        XCTAssertNil(try map.get(url: "https://relay.example./"))
+        let mode = IrohLib.RelayMode.custom(map: map)
+        for url in urls {
+            XCTAssertNotNil(try mode.relayMap().get(url: url))
+        }
+    }
+
     func testRealBindingLoopbackEchoAndCleanHalfClose() async throws {
         let pair = try await makePair()
         defer {

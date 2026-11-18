@@ -459,6 +459,10 @@ struct DirectIrohTiming: Sendable {
     /// The handshake with the instance's endpoint, at every admitted
     /// address at once.
     var dialSeconds: TimeInterval = 1.5
+    /// The same through a relay of the public-relay owner trial: DNS, TCP,
+    /// TLS and the relay handshake come first, then QUIC over two legs.
+    /// To be measured in the trial.
+    var relayDialSeconds: TimeInterval = 5
     /// One stream opened and its CONNECT answered.
     var probeSeconds: TimeInterval = 1
     /// How soon to ask again while the runtime's page is still loading,
