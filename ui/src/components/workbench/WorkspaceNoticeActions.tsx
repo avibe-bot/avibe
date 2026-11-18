@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
+import { isRetriedFailureNotice } from '../../lib/chatMessageTypes';
 import { requestFailureRetry, retryAdmitted } from '../../lib/failureRetryRequest';
 import { selectApiErrorFields } from '../../context/apiErrorParse';
 import { Button } from '../ui/button';
@@ -34,7 +35,9 @@ export function WorkspaceNoticeActions({ message, source }: { message: Workbench
     }
     return false;
   }, [showToast, source.session_id, t]);
-  const retryShown = source.retry || Boolean((message.content as { failure_retry?: unknown } | undefined)?.failure_retry);
+  // Retry where it can still start one, or where one already started (drawn as started). A retry that
+  // was retired leaves no button: it would be refused.
+  const retryShown = source.retry || isRetriedFailureNotice(message);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <Button asChild type="button" size="2xs" variant="secondary">

@@ -1481,6 +1481,8 @@ def test_workspace_notice_names_its_session_and_retries_there(isolated_state, tm
 
     session_id, notice, _turn, _inputs = _retry_notice(tmp_path)
     workspace_notice = _workspace_notice_for(notice)
+    # The live ``message.new`` payload names it too, not only a later read.
+    assert workspace_notice["content"]["failure_source"] == {"session_id": session_id, "retry": True}
     with create_sqlite_engine().connect() as conn:
         shown = messages_service.get_message(conn, workspace_notice["id"])
     assert shown["content"]["failure_source"] == {"session_id": session_id, "retry": True}
@@ -1506,6 +1508,34 @@ def test_workspace_notice_names_its_session_and_retries_there(isolated_state, tm
         shown = messages_service.get_message(conn, workspace_notice["id"])
     # Started: the retry is the notice's, and no second one is offered.
     assert shown["content"]["failure_retry"]["state"] == "accepted"
+    assert shown["content"]["failure_source"] == {"session_id": session_id, "retry": False}
+    # The stored row keeps only the retry link: whether it can be retried is read, never stored.
+    with create_sqlite_engine().connect() as conn:
+        stored = json.loads(conn.execute(
+            select(messages.c.content_json).where(messages.c.id == workspace_notice["id"])
+        ).scalar_one())
+    assert "failure_source" not in stored
+
+
+def test_workspace_notice_of_an_unwritten_input_offers_retry(isolated_state, tmp_path):
+    """The input that never reached the backend stays queued for the retry; it is not work in the way."""
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path, not_written=True)
+    workspace_notice = _workspace_notice_for(notice)
+    assert workspace_notice["content"]["failure_source"] == {"session_id": session_id, "retry": True}
+
+
+@pytest.mark.parametrize("gate", ["detached", "watch_ids", "harness_source"])
+def test_workspace_notice_that_the_press_would_refuse_offers_no_retry(isolated_state, tmp_path, gate):
+    """The read applies the same notice checks as the press, so it draws no Retry the press refuses."""
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path)
+    workspace_notice = _workspace_notice_for(notice)
+    with create_sqlite_engine().begin() as conn:
+        if gate == "harness_source":
+            conn.execute(update(messages).where(messages.c.id == workspace_notice["id"]).values(source="harness"))
+        else:
+            meta = {**workspace_notice["metadata"], gate: True if gate == "detached" else ["wat_1"]}
+            conn.execute(update(messages).where(messages.c.id == workspace_notice["id"]).values(metadata_json=json.dumps(meta)))
+        shown = messages_service.get_message(conn, workspace_notice["id"])
     assert shown["content"]["failure_source"] == {"session_id": session_id, "retry": False}
 
 

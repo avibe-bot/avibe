@@ -55,3 +55,8 @@ it('shows a retry already started as started', () => {
   draw(notice({ failure_retry: { delivery_id: 'dlv_1', state: 'accepted' } }), false);
   expect((screen.getByRole('button', { name: /chat.retryRequested/ }) as HTMLButtonElement).disabled).toBe(true);
 });
+
+it('draws no Retry for a retry that was retired: it would be refused', () => {
+  draw(notice({ failure_retry: { delivery_id: 'dlv_1', state: 'retired' } }), false);
+  expect(screen.queryByRole('button')).toBeNull();
+});

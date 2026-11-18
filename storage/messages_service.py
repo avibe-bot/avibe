@@ -146,7 +146,12 @@ def _row_to_payload(
             retry_session_id = source_session_id
             content["failure_source"] = {
                 "session_id": source_session_id,
-                "retry": bool(turn_id) and workspace_notice_retry_available(conn, source_session_id, turn_id),
+                "retry": bool(turn_id) and workspace_notice_retry_available(
+                    conn,
+                    {"type": row.get("type"), "author": row.get("author"), "source": row.get("source"), "metadata": metadata},
+                    source_session_id,
+                    str(turn_id),
+                ),
             }
     link = content.get("failure_retry") if isinstance(content, dict) else None
     if conn is not None and isinstance(link, dict):
@@ -711,7 +716,14 @@ def append(
         "read_at": read_at,
     }
     conn.execute(messages.insert().values(**payload))
-    return _row_to_payload(payload, include_local_error_detail=include_local_error_detail)
+    # The live ``message.new`` is this payload: a workspace failure notice names its
+    # Session (``failure_source``) here, as a later transcript read does.
+    workspace_notice = session_id == WORKSPACE_NOTICE_SESSION_ID and resolved_type == NOTIFY_TYPE
+    return _row_to_payload(
+        payload,
+        include_local_error_detail=include_local_error_detail,
+        conn=conn if workspace_notice else None,
+    )
 
 
 def get_message(
