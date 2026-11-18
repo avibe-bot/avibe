@@ -36,9 +36,10 @@ its action:
   (the system prompt lists Avibe in the pane) and opens **Privacy & Security →
   Accessibility**.
 - Screen & System Audio Recording's **Open Settings** runs the same request the
-  tray switch does, which lists Avibe in the pane where macOS allows it, opens
-  **Privacy & Security → Screen & System Audio Recording**, and shows the
-  **+** / drag guidance.
+  tray switch does, which lists Avibe in the pane where macOS allows it, and
+  opens **Privacy & Security → Screen & System Audio Recording**. The step
+  itself carries the **+** / drag guidance, so unlike the tray switch it shows
+  no extra Avibe alert; the same holds when **Turn on** opens that pane.
 
 While the page is visible it reads the status about every 1.5 seconds, so a
 step turns done within seconds of macOS reporting the grant; it stops reading

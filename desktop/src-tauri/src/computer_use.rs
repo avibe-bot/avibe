@@ -166,6 +166,21 @@ impl PermissionPane {
     }
 }
 
+/// Who explains the Screen Recording `+`/drag recovery once its pane opens.
+/// The Settings guide shows it beside the action, so only the native menu
+/// switch, which has no page, adds an alert.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PermissionGuide {
+    NativeAlert,
+    SettingsPage,
+}
+
+impl PermissionGuide {
+    fn alerts_for(self, pane: PermissionPane) -> bool {
+        self == Self::NativeAlert && pane == PermissionPane::ScreenRecording
+    }
+}
+
 enum Event {
     Toggle,
     Enable,
@@ -515,10 +530,10 @@ impl RuntimeState {
                         break;
                     };
                     match event {
-                        Event::Toggle => self.toggle().await,
+                        Event::Toggle => self.toggle(PermissionGuide::NativeAlert).await,
                         Event::Enable => {
                             if !self.lifecycle.enabled() {
-                                self.toggle().await;
+                                self.toggle(PermissionGuide::SettingsPage).await;
                             }
                         }
                         Event::Disable(reply) => {
@@ -551,7 +566,7 @@ impl RuntimeState {
         }
     }
 
-    async fn toggle(&mut self) {
+    async fn toggle(&mut self, guide: PermissionGuide) {
         self.update_view(|view| {
             view.runtime_refused = false;
             view.invalid_state = false;
@@ -573,7 +588,7 @@ impl RuntimeState {
         }
         let grants = request_permissions(&self.app, &self.diagnostics).await;
         if grants.missing_reason().is_some() {
-            open_missing_permission_settings(&self.app, grants);
+            open_missing_permission_settings(&self.app, grants, guide);
         }
         let directive = self.lifecycle.toggle_on(self.capabilities.current(), grants);
         self.apply(directive).await;
@@ -599,7 +614,7 @@ impl RuntimeState {
                 self.setup_resume_armed = arm_setup_resume(&self.paths.state_dir, SystemTime::now()).is_ok();
             }
         }
-        open_permission_settings(&self.app, pane);
+        open_permission_settings(&self.app, pane, PermissionGuide::SettingsPage);
         self.activated().await;
         self.settle_setup_resume();
     }
@@ -2350,18 +2365,18 @@ fn record_permission_request(diagnostics: &BootstrapLog, result: &PermissionRequ
     );
 }
 
-fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
+fn open_missing_permission_settings(app: &AppHandle, grants: Grants, guide: PermissionGuide) {
     let pane = if grants.accessibility {
         PermissionPane::ScreenRecording
     } else {
         PermissionPane::Accessibility
     };
-    open_permission_settings(app, pane);
+    open_permission_settings(app, pane, guide);
 }
 
-fn open_permission_settings(app: &AppHandle, pane: PermissionPane) {
+fn open_permission_settings(app: &AppHandle, pane: PermissionPane, guide: PermissionGuide) {
     let _ = tauri_plugin_opener::open_url(pane.settings_url(), None::<&str>);
-    if pane == PermissionPane::ScreenRecording {
+    if guide.alerts_for(pane) {
         let catalog = crate::native_catalog_for_locales(sys_locale::get_locales()).computer_use;
         app.dialog()
             .message(catalog.screen_recording_guide)
@@ -3081,6 +3096,14 @@ done
         drop(receiver);
         assert!(controller.turn_on().is_err());
         assert!(controller.open_permission(PermissionPane::ScreenRecording).is_err());
+    }
+
+    #[test]
+    fn only_the_menu_switch_explains_screen_recording_in_an_alert() {
+        assert!(PermissionGuide::NativeAlert.alerts_for(PermissionPane::ScreenRecording));
+        assert!(!PermissionGuide::NativeAlert.alerts_for(PermissionPane::Accessibility));
+        assert!(!PermissionGuide::SettingsPage.alerts_for(PermissionPane::ScreenRecording));
+        assert!(!PermissionGuide::SettingsPage.alerts_for(PermissionPane::Accessibility));
     }
 
     #[test]
