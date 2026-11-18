@@ -1297,18 +1297,24 @@ async function reconcileWebPushOnce(
         // notifications: turn them on, as the user had them. Never when
         // permission is not yet asked, so the system prompt never appears
         // on its own.
-        const restoresByDefault = nativeState.permission === 'granted';
-        const rememberedEndpoints = await getRememberedWebPushEndpoints();
-        const rememberedEndpoint = rememberedEndpoints[0];
-        const rememberedStatus = rememberedEndpoint
-          ? await api.getWebPushStatus({ endpoint: rememberedEndpoint })
-          : null;
-        if (
-          !restoresByDefault
-          && !rememberedStatus?.current_subscription_enabled
-          && !rememberedStatus?.current_subscription_repairable
-        ) {
-          return { support, status: 'disabled' };
+        const restoresByDefault = nativeState.permission === 'granted'
+          && intentState.userIntent !== 'disabled';
+        if (!restoresByDefault) {
+          // Otherwise only a remembered subscription the instance still
+          // knows is turned back on.
+          const rememberedEndpoint = (await getRememberedWebPushEndpoints())[0];
+          if (!rememberedEndpoint) {
+            return { support, status: 'disabled' };
+          }
+          const rememberedStatus = await api.getWebPushStatus({
+            endpoint: rememberedEndpoint,
+          });
+          if (
+            !rememberedStatus.current_subscription_enabled
+            && !rememberedStatus.current_subscription_repairable
+          ) {
+            return { support, status: 'disabled' };
+          }
         }
         await runIntentOperation(() => enableNativeWebPush(
           api,

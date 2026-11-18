@@ -1488,7 +1488,9 @@ describe('web push recovery', () => {
     it.each([
       ['not yet asked', { state: 'off', revokeState: 'absent', permission: 'notDetermined' }],
       ['an older shell that does not say', { state: 'off', revokeState: 'absent' }],
-      ['denied', { state: 'unavailable', revokeState: 'absent', permission: 'denied' }],
+      // The shell reports a denied permission as unavailable, which never
+      // reaches the restore; the row records the rule table.
+      ['denied (reported as unavailable)', { state: 'unavailable', revokeState: 'absent', permission: 'denied' }],
     ])('leaves them off when iOS permission is %s', async (_name, status) => {
       const { call, api } = setup(status);
 
@@ -1497,6 +1499,18 @@ describe('web push recovery', () => {
       });
       expect(call).not.toHaveBeenCalledWith('push.subscribe', expect.anything());
       expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    });
+
+    it('restores without asking the instance about a remembered endpoint', async () => {
+      const storage = writableLocalStorage();
+      storage.setItem('vibe.webPush.endpoints', JSON.stringify(['https://avibe.bot/api/push/apns/old']));
+      const { call, api } = setup({ state: 'off', revokeState: 'absent', permission: 'granted' }, storage);
+      (api.getWebPushStatus as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('instance unreachable'));
+
+      await expect(reconcileWebPush(api, pendingRegistrationStore())).resolves.toMatchObject({
+        status: 'enabled',
+      });
+      expect(call).toHaveBeenCalledWith('push.subscribe', { vapidPublicKey: 'AQIDBA' });
     });
 
     it('leaves them off once the user turned them off', async () => {
