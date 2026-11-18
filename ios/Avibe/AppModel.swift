@@ -260,9 +260,6 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
-    /// The account transport's deadlines; tests on the CI simulator give its
-    /// page as long as a web content launch takes there.
-    private let accountTransportDeadlines: MobileAuthTransportDeadlines
     private let runtimeOpenTiming: any RuntimeOpenTiming
     private let runtimeOpenBudget: Duration
     private let runtimeOpenLongWait: Duration
@@ -332,13 +329,6 @@ final class AppModel: ObservableObject {
         defaults: defaults,
         controlPlane: controlPlane,
         websiteDataStore: websiteDataStore,
-        transportFactory: { [accountTransportDeadlines] url, store in
-            MobileAuthTransport(
-                controlPlaneURL: url,
-                websiteDataStore: store,
-                deadlines: accountTransportDeadlines
-            )
-        },
         onOpenRuntime: { [weak self] runtime in
             _ = self?.openRuntime(runtime)
         },
@@ -466,12 +456,10 @@ final class AppModel: ObservableObject {
         runtimeOpenBudget: Duration = AppModel.runtimeOpenAutomaticBudget,
         runtimeOpenLongWait: Duration = .seconds(8),
         runtimeOpenNotificationCenter: NotificationCenter = .default,
-        badgeCenter: AppBadgeCentering? = nil,
-        accountTransportDeadlines: MobileAuthTransportDeadlines = .standard
+        badgeCenter: AppBadgeCentering? = nil
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
-        self.accountTransportDeadlines = accountTransportDeadlines
         let directFaultMarker = directFaultMarker
             ?? UserDefaultsDirectFaultMarker(defaults: defaults)
         self.directFaultMarker = directFaultMarker

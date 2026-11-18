@@ -15,9 +15,16 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
     )
 
     /// For a test about what happens after the control-plane document is
-    /// ready (a redirect the request must not follow). The readiness deadline
-    /// itself is tested by the deadline tests, which keep theirs.
-    private static let readyAfterWebContentLaunch = WebKitReadiness.afterWebContentLaunch
+    /// ready (a redirect the request must not follow): its readiness may
+    /// take as long as WebKit's web content launch, so a slow launch is not
+    /// mistaken for the network error the test expects. Requests keep the
+    /// App's own deadlines. The readiness deadline itself is tested by the
+    /// deadline tests, which keep theirs.
+    private static let readyAfterWebContentLaunch = MobileAuthTransportDeadlines(
+        readinessMilliseconds: Int(WebKitReadiness.webContentLaunch.components.seconds) * 1_000,
+        requestMilliseconds: MobileAuthTransportDeadlines.standard.requestMilliseconds,
+        logoutMilliseconds: MobileAuthTransportDeadlines.standard.logoutMilliseconds
+    )
 
     /// How long an operation under `readyAfterWebContentLaunch` may take
     /// before the transport itself ends it, plus a few seconds.
