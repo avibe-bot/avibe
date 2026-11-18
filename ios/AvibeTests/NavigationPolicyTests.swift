@@ -715,12 +715,8 @@ final class NavigationPolicyTests: XCTestCase {
         let health = HealthCoordinatorFixture(directory: healthDirectory, savedIdentity: true)
         health.client.claims = []
         health.client.holdManifest = true
-        addTeardownBlock { @MainActor in
-            health.client.holdManifest = false
-            health.client.releasePending()
-            await health.coordinator.logout()
-            try? FileManager.default.removeItem(at: healthDirectory)
-        }
+        // Once released, restoration never waits on an unacknowledged upload.
+        health.uploader.autoAcknowledge = true
         let (appModel, _) = try await makeFixtureAppModel(healthSync: health.coordinator) { appModel in
             health.credentials.identity?.websiteDataStoreID = appModel.websiteDataStore.identifier
             // Arrives before bootstrap completes, so it is held as pending.
@@ -731,6 +727,14 @@ final class NavigationPolicyTests: XCTestCase {
                     "url": "/chat/pending",
                 ]
             )
+        }
+        // Registered after the fixture so it runs first: the held restoration keeps
+        // bootstrap (which holds the App) running until Health is released.
+        addTeardownBlock { @MainActor in
+            health.client.holdManifest = false
+            health.client.releasePending()
+            await health.coordinator.logout()
+            try? FileManager.default.removeItem(at: healthDirectory)
         }
         _ = try await waitForPushRuntime(appModel, instanceID: "instance-1")
         try await waitUntil("Health restoration holds its manifest") {
