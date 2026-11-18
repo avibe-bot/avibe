@@ -181,3 +181,40 @@ struct FixtureReadinessError: Error, CustomStringConvertible {
 enum WebKitReadinessError: Error {
     case documentNotLoaded
 }
+
+/// Draft probe (not for merge): does a WebView reuse a warm web content
+/// process? Prints each WebView's process identifier and launch time.
+@MainActor
+final class WebContentReuseProbeTests: XCTestCase {
+    private func pid(_ webView: WKWebView) -> Int {
+        (webView.value(forKey: "_webProcessIdentifier") as? Int) ?? -1
+    }
+
+    private func open(_ store: WKWebsiteDataStore, _ label: String) async throws -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = store
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let started = ContinuousClock.now
+        webView.loadHTMLString("<!doctype html><title>\(label)</title>", baseURL: URL(string: "http://127.0.0.1:43127/")!)
+        try await WebKitReadiness.waitForDocument(in: webView)
+        print("[reuse probe] \(label): pid=\(pid(webView)) launch=\(started.duration(to: .now))")
+        return webView
+    }
+
+    func testWhichWebViewsShareAProcess() async throws {
+        for round in 0..<5 {
+            let x = UUID(), y = UUID()
+            let storeX = WKWebsiteDataStore(forIdentifier: x)
+            let storeY = WKWebsiteDataStore(forIdentifier: y)
+            var a: WKWebView? = try await open(storeX, "r\(round) A store X")
+            let b = try await open(storeX, "r\(round) B store X, A alive")
+            let d = try await open(storeY, "r\(round) D store Y, A alive")
+            a = nil
+            try await Task.sleep(for: .milliseconds(300))
+            let c = try await open(storeX, "r\(round) C store X, A released")
+            let e = try await open(.nonPersistent(), "r\(round) E non-persistent")
+            withExtendedLifetime([b, c, d, e]) {}
+            _ = a
+        }
+    }
+}
