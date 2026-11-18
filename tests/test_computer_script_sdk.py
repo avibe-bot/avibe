@@ -68,6 +68,7 @@ _GARBLED_RESPONSE = "<garbled-response>"
 def _fake_controller(
     *,
     click_error: str | None = None,
+    driver_refusal: dict | None = None,
     initial_click_error: str = "observe_first",
     duplicate_within: bool = False,
     dynamic_elements_after_action: bool = False,
@@ -365,7 +366,15 @@ def _fake_controller(
                     )
                 elif tool == "click":
                     clicks += 1
-                    if click_error is not None:
+                    if driver_refusal is not None:
+                        from core.computer_server import _fold_tool_result
+
+                        body = {"ok": False, "result": _fold_tool_result({"result": {
+                            "isError": True,
+                            "structuredContent": driver_refusal,
+                            "content": [],
+                        }}, tool_name="click")}
+                    elif click_error is not None:
                         body = _result(
                             {"code": click_error, "params": {}},
                             is_error=True,
@@ -446,6 +455,7 @@ def _run_node_script(
     source: str,
     *,
     click_error: str | None = None,
+    driver_refusal: dict | None = None,
     initial_click_error: str = "observe_first",
     duplicate_within: bool = False,
     dynamic_elements_after_action: bool = False,
@@ -479,6 +489,7 @@ def _run_node_script(
 
     with _fake_controller(
         click_error=click_error,
+        driver_refusal=driver_refusal,
         initial_click_error=initial_click_error,
         duplicate_within=duplicate_within,
         dynamic_elements_after_action=dynamic_elements_after_action,
@@ -3442,3 +3453,82 @@ export default async () => {
     assert payload == {"ok": True, "result": None}
     sequence = [tool for tool, _arguments in _tool_requests(requests) if tool in {"get_window_state", "drag"}]
     assert sequence == ["get_window_state", "drag", "drag"]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_ownership_refusal_reaches_sdk_without_replay(tmp_path, nested):
+    """CU-TRANSPORT-01: real folding -> HTTP -> SDK retains evidence and guidance."""
+    code = "app_dialog_unresolved"
+    refusal = {
+        "code": code, "reason": "ownership proof unavailable",
+        "diagnostics": {"ax_windows": {"status": "empty", "count": 0}},
+    }
+    envelope = {"effect": "refused", "pid": 41, "window_id": 9, "dispatched": False}
+    envelope.update({"refusal": refusal} if nested else refusal)
+    payload, _server, requests = _run_node_script(tmp_path, '''
+import { computer } from "@avibe/computer";
+export default async () => {
+  const app = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await app.window({ labelContains: "New Message" });
+  try {
+    await window.element({ role: "button", label: "Send", index: 0 }).click();
+  } catch (error) {
+    return { code: error.code, message: error.message, params: error.params,
+             ambiguous: error.ambiguous };
+  }
+  throw new Error("Expected refusal");
+};
+''', driver_refusal=envelope)
+    result = payload["result"]
+    assert result["code"] == code
+    assert result["message"] == (
+        "This dialog is visible, but Computer Use can't confirm that input would reach only this window. Handle it manually, then continue."
+    )
+    evidence = result["params"]["refusal"] if nested else result["params"]
+    for key in ("reason", "diagnostics"):
+        assert evidence[key] == refusal[key]
+    assert result["params"]["driver_detail"] == refusal["reason"]
+    assert result["params"]["effect"] == envelope["effect"]
+    assert result["ambiguous"] is False
+    assert [r["payload"]["tool"] for r in requests
+            if r["payload"].get("tool") == "click"] == ["click"]
+
+
+@pytest.mark.parametrize("selector", [
+    {"bundleId": "com.apple.dock"}, {"value": "com.apple.dock"},
+])
+@pytest.mark.parametrize("method", ["app", "waitFor"])
+@pytest.mark.parametrize("listed", [False, True])
+def test_dock_selector_is_actionable_without_driver_calls(tmp_path, selector, method, listed):
+    apps = [{"pid": 99, "bundle_id": "com.apple.dock", "name": "Dock", "running": True}]
+    payload, _server, requests = _run_node_script(tmp_path, f'''
+import {{ computer }} from "@avibe/computer";
+export default async () => {{
+  try {{
+    await computer.{method}({json.dumps(selector)}, {{ timeoutMs: 1 }});
+  }} catch (error) {{
+    return {{ code: error.code, message: error.message, ambiguous: error.ambiguous }};
+  }}
+  throw new Error("Expected Dock refusal");
+}};
+''', apps=apps if listed else [])
+    assert payload["result"] == {
+        "code": "dock_unsupported",
+        "message": "Computer Use cannot control the Dock. To remove an icon, drag it out of the Dock manually.",
+        "ambiguous": False,
+    }
+    assert not [r for r in requests if r["path"].endswith("/request")]
+
+
+@pytest.mark.parametrize("selector", [
+    {"bundleId": "com.apple.dock.other"}, {"name": "Dock"},
+])
+def test_non_dock_bundle_selectors_keep_not_found(tmp_path, selector):
+    payload, _server, _requests = _run_node_script(tmp_path, f'''
+import {{ computer }} from "@avibe/computer";
+export default async () => {{
+  try {{ await computer.app({json.dumps(selector)}); }}
+  catch (error) {{ return error.code; }}
+}};
+''', apps=[])
+    assert payload["result"] == "not_found"

@@ -670,6 +670,12 @@ class Computer {
 
   async _resolveApp(selector = {}, deadline) {
     validateSelector(selector, APP_SELECTOR_FIELDS, "Application");
+    if (selector.bundleId === "com.apple.dock" || selector.value === "com.apple.dock") {
+      throw new Unavailable(
+        "Computer Use cannot control the Dock. To remove an icon, drag it out of the Dock manually.",
+        { code: "dock_unsupported", params: { selector } },
+      );
+    }
     const apps = structured(await callToolBefore("list_apps", {}, deadline)).apps;
     const records = Array.isArray(apps) ? apps : [];
     const record = selectOne(
