@@ -14,8 +14,10 @@ Avibe desktop shell is running.
    Recording**.
 5. Return to Avibe after granting access. Avibe silently checks the grants
    while it is active and every five seconds. If Screen & System Audio
-   Recording is missing, Avibe opens that pane and tells you to click **+** or
-   drag Avibe into the list, then enable it. Return to Avibe after both
+   Recording is missing, Avibe opens that pane, and the menu item reads that
+   Screen Recording is needed: click **+** or drag Avibe into the list, then
+   enable it. Avibe shows no extra alert of its own; **Settings → System →
+   Computer Use** carries the full steps. Return to Avibe after both
    permissions are enabled; it observes the grant transition and starts
    computer use when the grants are available.
 6. If macOS requires **Quit & Reopen**, or the same fixed app still reports a
@@ -38,8 +40,7 @@ its action:
 - Screen & System Audio Recording's **Open Settings** runs the same request the
   tray switch does, which lists Avibe in the pane where macOS allows it, and
   opens **Privacy & Security → Screen & System Audio Recording**. The step
-  itself carries the **+** / drag guidance, so unlike the tray switch it shows
-  no extra Avibe alert; the same holds when **Turn on** opens that pane.
+  itself shows the **+** / drag guidance.
 
 While the page is visible it reads the status about every 1.5 seconds, so a
 step turns done within seconds of macOS reporting the grant; it stops reading

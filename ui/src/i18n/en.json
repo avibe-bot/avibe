@@ -58,8 +58,6 @@
       "needsPermission": "Computer Use — permission needed",
       "needsPermissionAccessibility": "Computer Use — Accessibility permission needed",
       "needsPermissionScreenRecording": "Computer Use — Screen Recording needed; add Avibe in System Settings",
-      "screenRecordingTitle": "Screen Recording permission needed",
-      "screenRecordingGuide": "Avibe opened System Settings → Privacy & Security → Screen & System Audio Recording. Click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the Screen Recording grant; return to Avibe when it reopens. It will start automatically after both permissions are granted.",
       "needsRuntime": "Computer Use — restart the Avibe service",
       "runtimeUnavailable": "Computer Use — waiting for the Avibe service",
       "runtimeTooOld": "Computer Use — restart the Avibe service",
