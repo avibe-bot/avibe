@@ -1722,8 +1722,8 @@ final class MobileOnboardingTests: XCTestCase {
             XCTAssertEqual(pushLogouts, 0, name)
         }
 
-        // Nobody to name: a cold launch that owes the factor with no saved
-        // selection cleans up when the page reads the session.
+        // Nobody to name (a cold launch that owes the factor with no saved
+        // selection) is still no definite answer: nothing is revoked.
         let unknown = FakeMobileAuthTransport()
         unknown.secondFactor = requirement
         var pushLogouts = 0
@@ -1735,7 +1735,49 @@ final class MobileOnboardingTests: XCTestCase {
         coordinator.activateAccountSurface()
         XCTAssertEqual(try await coordinator.bootstrap(), .twoFactorRequired(requirement))
         XCTAssertEqual(try await coordinator.refresh(), .twoFactorRequired(requirement))
-        XCTAssertEqual(pushLogouts, 1)
+        XCTAssertEqual(pushLogouts, 0)
+    }
+
+    /// A launch whose session check fails (network, timeout, a 5xx: the
+    /// transport's `network`), and a refresh that fails the same way, are no
+    /// answer at all: push stays, and the account with it.
+    func testAFailedSessionCheckKeepsPush() async throws {
+        let defaults = makeDefaults()
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let previous = makeCoordinator(defaults: defaults, transports: [first])
+        previous.activateAccountSurface()
+        _ = try await previous.bootstrap()
+        _ = try previous.selectInstance(id: instance.id)
+
+        let failing = FakeMobileAuthTransport()
+        failing.fetchSessionError = MobileAccountError.network
+        var pushLogouts = 0
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [failing] + (0..<3).map { _ in FakeMobileAuthTransport() },
+            onPreparePushLogout: { pushLogouts += 1 }
+        )
+        relaunched.activateAccountSurface()
+        do {
+            _ = try await relaunched.bootstrap()
+            XCTFail("A failed session check must be reported")
+        } catch {
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.network.code)
+        }
+        do {
+            _ = try await relaunched.refresh()
+            XCTFail("A failed session check must be reported")
+        } catch {
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.network.code)
+        }
+        XCTAssertEqual(pushLogouts, 0)
+
+        // The check answers again for the same account: still nothing revoked.
+        failing.fetchSessionError = nil
+        failing.session = snapshot(accountID: "account-1")
+        _ = try await relaunched.refresh()
+        XCTAssertEqual(pushLogouts, 0)
     }
 
     /// The selected instance gone from the account's list revokes only that
@@ -2638,7 +2680,8 @@ final class MobileOnboardingTests: XCTestCase {
         )
         _ = requirement
         // An owed second factor runs no push cleanup (the account and its
-        // session stay); the removed instance's own revoke races instead.
+        // session stay); the removed instance's own revoke races instead,
+        // and the sign-out arriving during it still runs the account's own.
         let discoveries: [(String, MobileSessionDiscovery?)] = [
             ("removed origin", .signedIn(snapshot(accountID: "account-1", instances: []))),
             ("signed out", nil),
@@ -2664,6 +2707,7 @@ final class MobileOnboardingTests: XCTestCase {
                 }
                 var opened: MobileRuntimeContext?
                 var created = 0
+                var accountCleanups = 0
                 let coordinator = makeCoordinator(
                     defaults: makeDefaults(),
                     transports: [first, refreshTransport, replacement]
@@ -2671,6 +2715,8 @@ final class MobileOnboardingTests: XCTestCase {
                     onCreateTransport: { created += 1 },
                     onOpen: { opened = $0 },
                     onPreparePushLogout: {
+                        accountCleanups += 1
+                        guard kind != "removed origin" else { return }
                         cleanupStarted.fulfill()
                         await self.fulfillment(of: [allowCleanup], timeout: 30)
                     },
@@ -2723,6 +2769,10 @@ final class MobileOnboardingTests: XCTestCase {
                     XCTAssertFalse(replacement.invalidated, name)
                 }
                 XCTAssertEqual(created, 3, name)
+                if kind == "removed origin" {
+                    // The sign-out did not borrow the instance revoke.
+                    XCTAssertEqual(accountCleanups, 1, name)
+                }
             }
         }
     }
@@ -2738,8 +2788,9 @@ final class MobileOnboardingTests: XCTestCase {
             ("signed out", nil, .signedOut),
             ("other account", .signedIn(snapshot(accountID: "account-2")), .signedOut),
             ("removed origin", .signedIn(reduced), .signedIn(snapshot: reduced, selectedInstanceID: nil)),
-            ("second factor", .secondFactorRequired(requirement), .twoFactorRequired(requirement)),
         ]
+        // An owed second factor runs no push cleanup, so it has no window.
+        _ = requirement
         for (name, discovery, expected) in rows {
             let first = FakeMobileAuthTransport()
             first.session = snapshot(accountID: "account-1")
@@ -2757,6 +2808,10 @@ final class MobileOnboardingTests: XCTestCase {
                 defaults: makeDefaults(),
                 transports: [first, refreshTransport, FakeMobileAuthTransport()],
                 onPreparePushLogout: {
+                    cleanupStarted.fulfill()
+                    await self.fulfillment(of: [allowCleanup], timeout: 30)
+                },
+                onRevokeInstancePush: { _ in
                     cleanupStarted.fulfill()
                     await self.fulfillment(of: [allowCleanup], timeout: 30)
                 }
@@ -3005,10 +3060,10 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    /// An older account's push work still in flight (here the removed
+    /// instance's revoke) neither stands in for the sign-out's cleanup nor
+    /// suppresses the next account's.
     func testAnOlderCleanupDoesNotSuppressANewerAccountsCleanup() async throws {
-        let requirement = MobileSecondFactorRequirement(
-            email: "account-2@example.com", gate: .challenge, methods: [.totp]
-        )
         let initial = FakeMobileAuthTransport()
         initial.session = snapshot(accountID: "account-1")
         let oldRefresh = FakeMobileAuthTransport()
@@ -3016,18 +3071,18 @@ final class MobileOnboardingTests: XCTestCase {
         let replacement = FakeMobileAuthTransport()
         replacement.session = snapshot(accountID: "account-2")
         let newRefresh = FakeMobileAuthTransport()
-        newRefresh.secondFactor = requirement
+        newRefresh.fetchSessionHandler = { nil }
         let oldCleanup = expectation(description: "old account cleanup")
         let releaseOld = expectation(description: "release old account cleanup")
         var cleanups = 0
         let coordinator = makeCoordinator(
-            defaults: makeDefaults(), transports: [initial, oldRefresh, replacement, newRefresh],
-            onPreparePushLogout: {
-                cleanups += 1
-                if cleanups == 1 {
-                    oldCleanup.fulfill()
-                    await self.fulfillment(of: [releaseOld], timeout: 30)
-                }
+            defaults: makeDefaults(),
+            transports: [initial, oldRefresh, replacement, newRefresh]
+                + (0..<3).map { _ in FakeMobileAuthTransport() },
+            onPreparePushLogout: { cleanups += 1 },
+            onRevokeInstancePush: { _ in
+                oldCleanup.fulfill()
+                await self.fulfillment(of: [releaseOld], timeout: 30)
             }
         )
         coordinator.activateAccountSurface()
@@ -3046,9 +3101,10 @@ final class MobileOnboardingTests: XCTestCase {
         case .failure(let error):
             XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
         }
+        // The sign-out's own cleanup, then account-2's ended session.
         XCTAssertEqual(cleanups, 2)
-        XCTAssertEqual(state, .twoFactorRequired(requirement))
-        XCTAssertFalse(coordinator.isAccountSurfaceActive)
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNil(coordinator.currentAccount)
     }
 
     func testRefreshPushLogoutKeepsTheOuterTransportOwner() async throws {
