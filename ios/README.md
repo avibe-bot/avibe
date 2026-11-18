@@ -874,6 +874,12 @@ email as the one primary action and shows the three as one row of marks
 (provisional until its independent security agreement); the App's side is
 below.
 
+- Welcome shows only the providers avibe.bot advertises for the App now:
+  `mobile_providers` in `GET /api/config/auth`, read fresh by the hidden
+  transport and added natively to every signed-out session answer as
+  `providers` (known names once each, in the App's order; absent, malformed
+  or empty means email alone). So the App can ship before the broker
+  serves a provider, and each mark appears when avibe.bot enables it.
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
   `provider` exactly `google`, `github` or `apple`; any other value or an extra key
   is `invalid_argument`, and the sheet forbids it like every auth method. It

@@ -55,6 +55,8 @@ page only starts them. The owner picked layout B at 13:12:
   background. Apple keeps its HIG styles (`apple-sign-in` tokens): white with
   a black outline on light, white on dark. So in dark mode all three are
   white circles of equal weight (Product, 2026-11-18).
+- A mark appears only while avibe.bot advertises its provider for the App
+  (`mobile_providers`); with none, Welcome is email alone, as before.
 - Unlike the avibe.bot card, where the providers come first, email stays
   first here because the App expects most people to use it (owner: hierarchy
   by expected use).

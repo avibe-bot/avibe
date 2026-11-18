@@ -331,7 +331,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 switch request.method {
                 case .sessionBootstrap:
                     let state = try await coordinator.bootstrap()
-                    reply(replyHandler, result: self.sessionResult(state))
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .authRequestOTP:
                     guard let email = request.params["email"] as? String else {
                         throw MobileAccountError.invalidRequest
@@ -352,7 +352,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         email: email,
                         code: code
                     )
-                    reply(replyHandler, result: self.sessionResult(state))
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .authSignInWithPassword:
                     guard
                         let email = request.params["email"] as? String,
@@ -377,7 +377,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         method: method,
                         code: code
                     )
-                    reply(replyHandler, result: self.sessionResult(state))
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .authSignInWithProvider:
                     guard
                         request.params.count == 1,
@@ -396,7 +396,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         provider,
                         presentationAnchor: window
                     )
-                    reply(replyHandler, result: self.sessionResult(state))
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .authVerifyPasskey:
                     guard let window = trustedWebView?.window else {
                         throw MobileAccountError.passkeyUnavailable
@@ -404,10 +404,10 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     let state = try await coordinator.verifyPasskey(
                         presentationAnchor: window
                     )
-                    reply(replyHandler, result: self.sessionResult(state))
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .sessionRefresh:
                     let state = try await coordinator.refresh()
-                    reply(replyHandler, result: self.sessionResult(state))
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .sessionSelectInstance:
                     guard let id = request.params["id"] as? String else {
                         throw MobileAccountError.invalidRequest
@@ -420,7 +420,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     )
                 case .sessionLogout:
                     let state = try await coordinator.logout()
-                    reply(replyHandler, result: self.sessionResult(state))
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .appOpenExternal:
                     guard
                         let rawURL = request.params["url"] as? String,
@@ -476,11 +476,18 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     }
 
     /// A session answer for the page. A signed-in account that this generation's provider
-    /// sign-in created carries `new_account: true`, a hint for the empty state only.
-    private func sessionResult(_ state: MobileSessionState) -> Any {
+    /// sign-in created carries `new_account: true`, a hint for the empty state only. A
+    /// signed-out answer carries `providers`, the sign-ins avibe.bot offers the App now; Welcome
+    /// shows only those.
+    private func sessionResult(_ state: MobileSessionState) async -> Any {
         var object = state.jsonObject
-        if case .signedIn = state, coordinator.accountWasJustCreated {
+        switch state {
+        case .signedIn where coordinator.accountWasJustCreated:
             object["new_account"] = true
+        case .signedOut:
+            object["providers"] = await coordinator.advertisedProviders().map(\.rawValue)
+        default:
+            break
         }
         return object
     }

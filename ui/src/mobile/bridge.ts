@@ -18,6 +18,11 @@ export type MobileSecondFactorMethod = 'passkey' | 'totp';
 export type MobileSessionState =
   | {
       status: 'signedOut';
+      /**
+       * The sign-ins avibe.bot offers the App now (`mobile_providers` in its auth config). Native
+       * adds it to every signed-out session answer; absent means the page keeps what it had.
+       */
+      providers?: ('google' | 'github' | 'apple')[];
     }
   | {
       status: 'signedIn';

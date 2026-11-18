@@ -507,6 +507,9 @@ protocol MobileAuthTransporting: AnyObject {
     func verifySecondFactor(
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
+    /// The providers avibe.bot's mobile broker accepts now: `mobile_providers`
+    /// in `GET /api/config/auth`. Never throws: anything unreadable is none.
+    func advertisedProviders() async -> [MobileSignInProvider]
     /// `POST /api/mobile/auth/start`: a browser address for Google and GitHub,
     /// the server's nonce for Apple. Throws `providerUnavailable`,
     /// `rate_limited`, or `network`.
@@ -856,6 +859,13 @@ final class MobileSessionCoordinator {
                 throw error
             }
         }
+    }
+
+    /// The providers Welcome may offer: those avibe.bot advertises for the App
+    /// right now. A display gate only; the broker still decides each attempt.
+    func advertisedProviders() async -> [MobileSignInProvider] {
+        guard let transport else { return [] }
+        return await transport.advertisedProviders()
     }
 
     /// Whether the signed-in account was created by this generation's provider sign-in, as the

@@ -186,6 +186,23 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         return try decodeDiscovery(response)
     }
 
+    func advertisedProviders() async -> [MobileSignInProvider] {
+        guard
+            let response = try? await evaluateJSON(
+                Self.advertisedProvidersScript,
+                operation: .fetchSession,
+                arguments: [:]
+            ),
+            response.boolean("ok"),
+            let names = response["providers"] as? [Any]
+        else {
+            return []
+        }
+        // Known names, once each, in the App's own order.
+        let advertised = Set(names.compactMap { ($0 as? String).flatMap(MobileSignInProvider.init(rawValue:)) })
+        return MobileSignInProvider.allCases.filter(advertised.contains)
+    }
+
     func providerStart(
         provider: MobileSignInProvider,
         challenge: String,
@@ -1154,6 +1171,23 @@ extension MobileAuthTransport: WKNavigationDelegate {
             );
           }
         \(sessionDiscoveryBody)
+        """
+    )
+
+    // Reads which providers the mobile broker accepts now (`mobile_providers` in the auth
+    // config), fresh each time, so a provider appears as soon as avibe.bot enables it.
+    private static let advertisedProvidersScript = boundedScript(
+        initialStage: .session,
+        body: """
+          const response = await boundedFetch(new URL("/api/config/auth", window.location.origin), {
+            credentials: "omit",
+            cache: "no-store"
+          });
+          const config = await response.json().catch(() => null);
+          const providers = Array.isArray(config?.mobile_providers)
+            ? config.mobile_providers.filter((name) => typeof name === "string")
+            : [];
+          return JSON.stringify({ok: response.ok, stage, status: response.status, providers});
         """
     )
 

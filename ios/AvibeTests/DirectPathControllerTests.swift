@@ -1298,6 +1298,10 @@ private final class StandInAccountTransport: MobileAuthTransporting {
         session.map(MobileSessionDiscovery.signedIn)
     }
 
+    func advertisedProviders() async -> [MobileSignInProvider] {
+        []
+    }
+
     func providerStart(
         provider: MobileSignInProvider,
         challenge: String,

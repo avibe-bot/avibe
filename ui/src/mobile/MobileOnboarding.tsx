@@ -539,11 +539,14 @@ function RecoveryCard({
 export function WelcomeScreen({
   locked,
   errorKey = null,
+  providers = [],
   onContinue,
   onProvider,
 }: {
   locked: boolean;
   errorKey?: MobileErrorKey | ProviderErrorKey | null;
+  /** The sign-ins avibe.bot offers the App now; none shows email alone. */
+  providers?: readonly SignInProvider[];
   onContinue: () => void;
   onProvider?: (provider: SignInProvider) => void;
 }) {
@@ -587,10 +590,10 @@ export function WelcomeScreen({
         <Primary disabled={locked} onClick={onContinue}>
           {t('mobileApp.welcome.continueWithEmail')}
         </Primary>
-        {onProvider ? (
+        {onProvider && providers.length > 0 ? (
           <>
             <SignInDivider />
-            <SignInProviderRow disabled={locked} onProvider={onProvider} />
+            <SignInProviderRow providers={providers} disabled={locked} onProvider={onProvider} />
           </>
         ) : null}
         <p className="text-center text-xs leading-relaxed text-muted">
@@ -2235,7 +2238,14 @@ function MobileOnboardingScreens() {
   const [screen, setScreen] = useState<Screen>('boot');
   // Bundled with the App; absent while it carries no native notices.
   const [licenses, setLicenses] = useState<AppLicenses | null>(null);
-  const [session, setSession] = useState<MobileSessionState>({ status: 'signedOut' });
+  const [session, setSessionState] = useState<MobileSessionState>({ status: 'signedOut' });
+  // The sign-ins avibe.bot offers the App now, from the latest signed-out answer that names
+  // them; none until one does, so Welcome shows email alone.
+  const [providers, setProviders] = useState<readonly SignInProvider[]>([]);
+  const setSession = useCallback((next: MobileSessionState) => {
+    if (next.status === 'signedOut' && next.providers) setProviders(next.providers);
+    setSessionState(next);
+  }, []);
   const [email, setEmail] = useState('');
   const [emailMode, setEmailMode] = useState<EmailMode>('code');
   const [code, setCode] = useState('');
@@ -2860,6 +2870,7 @@ function MobileOnboardingScreens() {
         locked={locked}
         errorKey={errorKey}
         onContinue={showEmail}
+        providers={providers}
         onProvider={(provider) => void signInWithProvider(provider)}
       />
     );

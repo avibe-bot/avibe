@@ -1022,7 +1022,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             let cookies = request.headers["cookie"] ?? ""
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
-                return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon"}"#)
+                return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":["apple","google","bogus","google",7]}"#)
             case ("POST", "/api/mobile/auth/start"):
                 let body = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]) ?? [:]
                 if body["provider"] as? String == "apple" {
@@ -1072,6 +1072,10 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         let dataStore = WKWebsiteDataStore.nonPersistent()
         let transport = MobileAuthTransport(controlPlaneURL: baseURL, websiteDataStore: dataStore)
+
+        // Known names once each, in the App's order; anything else is dropped.
+        let advertised = await transport.advertisedProviders()
+        XCTAssertEqual(advertised, [.google, .apple])
 
         let google = try await transport.providerStart(provider: .google, challenge: "challenge-g", state: "state-g")
         XCTAssertEqual(

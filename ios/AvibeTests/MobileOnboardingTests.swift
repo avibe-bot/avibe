@@ -5313,6 +5313,12 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         return try await verifySecondFactorHandler(proof)
     }
 
+    var advertised: [MobileSignInProvider] = []
+
+    func advertisedProviders() async -> [MobileSignInProvider] {
+        advertised
+    }
+
     func providerStart(
         provider: MobileSignInProvider,
         challenge: String,

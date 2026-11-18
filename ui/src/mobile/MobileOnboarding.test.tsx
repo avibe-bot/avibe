@@ -959,9 +959,30 @@ describe('mobile onboarding', () => {
 
   describe('Google, GitHub and Apple on Welcome', () => {
     const openWelcome = async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github', 'apple'] });
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
     };
+
+    it('offers only the sign-ins avibe.bot advertises, and keeps them when an answer names none', async () => {
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
+      expect(screen.queryByText('mobileApp.welcome.or')).toBeNull();
+      cleanup();
+
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['github'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' });
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithApple' })).toBeNull();
+
+      // A signed-out answer without the list (a failed password sign-in) keeps it.
+      mobile.signInWithProvider.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
+      await waitFor(() => expect(mobile.signInWithProvider).toHaveBeenCalledWith('github'));
+      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeTruthy();
+    });
 
     it('AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances', async () => {
       await openWelcome();

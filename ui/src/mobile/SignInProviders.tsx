@@ -58,16 +58,19 @@ const LABEL_KEYS = {
  * light, white on dark (the `apple-sign-in` tokens). Design: mobile-app/welcome/providers-row-*.
  */
 export function SignInProviderRow({
+  providers,
   disabled,
   onProvider,
 }: {
+  /** The ones avibe.bot offers now; they keep the row's own order. */
+  providers: readonly SignInProvider[];
   disabled?: boolean;
   onProvider: (provider: SignInProvider) => void;
 }) {
   const { t } = useTranslation();
   return (
     <div className="flex justify-center gap-4">
-      {SIGN_IN_PROVIDERS.map((provider) => {
+      {SIGN_IN_PROVIDERS.filter((provider) => providers.includes(provider)).map((provider) => {
         const Mark = MARKS[provider];
         const apple = provider === 'apple';
         return (

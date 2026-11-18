@@ -725,6 +725,10 @@ private final class FixtureMobileAuthTransport: MobileAuthTransporting {
         return .signedIn(session)
     }
 
+    func advertisedProviders() async -> [MobileSignInProvider] {
+        []
+    }
+
     func providerStart(
         provider: MobileSignInProvider,
         challenge: String,
