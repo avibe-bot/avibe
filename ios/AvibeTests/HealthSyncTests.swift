@@ -1753,6 +1753,55 @@ final class HealthSyncTests: XCTestCase {
         try await eventually { fixture.client.pendingClaims.count == claimsBefore + 1 }
     }
 
+    /// A foreground fixture whose poll loop has claimed a refresh and is suspended in
+    /// `synchronize` behind an upload that has not been acknowledged. Whichever sync
+    /// (the activation refresh or the claim's) starts first owns the only upload.
+    @MainActor
+    private func pollLoopWaitingForAnUpload() async throws -> (HealthCoordinatorFixture, HealthFakeUploader.Upload) {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = [[[
+            "id": "refresh-1", "operation": "health.refresh", "claim_token": "lease-1", "metrics": ["steps"],
+        ]]]
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually {
+            fixture.client.calls.contains { $0.path.hasSuffix("/requests/claim") } && fixture.uploader.uploads.count == 1
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(fixture.uploader.uploads.count, 1)
+        return (fixture, fixture.uploader.uploads[0])
+    }
+
+    @MainActor
+    func testARetiredPollLoopCannotClearTheNextLoopsHandle() async throws {
+        let (fixture, waiting) = try await pollLoopWaitingForAnUpload()
+        // Background retires loop A while it still waits; foreground starts loop B.
+        fixture.coordinator.setBackground()
+        await fixture.coordinator.resume(foreground: true)
+        try await eventually { fixture.client.pendingClaims.count == 1 }
+        // Loop A wakes and exits. Authentication starts a pass only if no loop is tracked.
+        await fixture.uploader.acknowledge(waiting)
+        try await Task.sleep(for: .milliseconds(300))
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.pendingClaims.count, 1)
+    }
+
+    @MainActor
+    func testAPausedPollLoopCannotClearTheNextEpochsHandle() async throws {
+        let (fixture, _) = try await pollLoopWaitingForAnUpload()
+        var accountID: String? = "account-1"
+        fixture.coordinator.accountIDProvider = { accountID }
+        accountID = nil
+        fixture.coordinator.accountEvent(.authorizationUnavailable)
+        accountID = "account-1"
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await eventually { fixture.client.pendingClaims.count == 1 }
+        try await Task.sleep(for: .milliseconds(300))
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.pendingClaims.count, 1)
+    }
+
     /// Restores two queued payloads, acknowledges the first and lets its result
     /// delivery fail once with `resultError`.
     @MainActor
