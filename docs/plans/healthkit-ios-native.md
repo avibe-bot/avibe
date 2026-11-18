@@ -318,4 +318,7 @@ synchronization has just enqueued.
 Existing limits remain: `sendResults` stops at its first failing result, and a
 request the instance purged (404 `request_not_found`) keeps failing on later
 passes. Real system event ordering, background session redelivery timing and
-HealthKit observer timing are reviewed in code only.
+HealthKit observer timing are reviewed in code only. After a two-factor pause,
+`cancelAll` does not wait for cancelled transfers; if the user reauthenticates
+quickly, a cancelled transfer's late completion can schedule one spurious retry
+and delay that payload by up to about 30 seconds, without a loop or data loss.
