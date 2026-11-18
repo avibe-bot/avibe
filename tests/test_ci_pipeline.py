@@ -575,7 +575,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     ]
     node_index, node_step = setup_node
     assert node_step["with"] == {
-        "node-version": "22.23.4",
+        "node-version": "26.13.1",
         "cache": "npm",
         "cache-dependency-path": "ui/package-lock.json",
     }
@@ -1016,7 +1016,7 @@ def test_windows_platform_checks_route_prs_and_always_run_on_master() -> None:
     assert "tests/test_vault_control_requests.py" in vault_step["run"]
     assert not vault_step.get("if") and not vault_step.get("continue-on-error")
     node = next(step for step in ipc_steps if step.get("uses", "").startswith("actions/setup-node@"))
-    assert node["with"]["node-version"] == "22.23.4"
+    assert node["with"]["node-version"] == "26.13.1"
     install = next(step for step in ipc_steps if step.get("name") == "Install package and focused test dependency")
     assert "pytest-asyncio" in install["run"]
     assert jobs["windows-agent"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-agent'] == 'run'"
