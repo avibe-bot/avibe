@@ -1763,15 +1763,24 @@ final class MobileOnboardingTests: XCTestCase {
         _ = try await previous.bootstrap()
         _ = try previous.selectInstance(id: instance.id)
 
-        let failing = FakeMobileAuthTransport()
-        failing.fetchSessionError = MobileAccountError.network
+        // Every transport the relaunched App makes reaches the same avibe.bot,
+        // which fails the check until `answer` is set.
+        var answer: MobileSessionDiscovery?
+        let transports = (0..<6).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.fetchSessionHandler = {
+                guard let answer else { throw MobileAccountError.network }
+                return answer
+            }
+            return transport
+        }
         var pushLogouts = 0
         var transitions = 0
         var runtime: MobileRuntimeContext?
         let relaunched = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
-            transports: [failing] + (0..<3).map { _ in FakeMobileAuthTransport() },
+            transports: transports,
             onOpen: { runtime = $0 },
             onPrepareAccountTransition: {
                 transitions += 1
@@ -1798,8 +1807,7 @@ final class MobileOnboardingTests: XCTestCase {
 
         // The check answers again for the same account: the saved selection
         // is still there, nothing was revoked.
-        failing.fetchSessionError = nil
-        failing.session = snapshot(accountID: "account-1")
+        answer = .signedIn(snapshot(accountID: "account-1"))
         let recovered = try await relaunched.refresh()
         XCTAssertEqual(
             recovered,
@@ -1811,7 +1819,7 @@ final class MobileOnboardingTests: XCTestCase {
         _ = try relaunched.selectInstance(id: instance.id)
         let opened = try XCTUnwrap(runtime)
         relaunched.activateAccountSurface()
-        failing.fetchSessionError = MobileAccountError.network
+        answer = nil
         do {
             _ = try await relaunched.refresh()
             XCTFail("A failed session check must be reported")
@@ -1963,6 +1971,10 @@ final class MobileOnboardingTests: XCTestCase {
                 )
                 relaunched.activateAccountSurface()
                 _ = try await relaunched.bootstrap()
+                // Its reconcile runs once the bootstrap has ended, while the
+                // coordinator is alive (the App holds it for its lifetime).
+                try await settlePush()
+                withExtendedLifetime(relaunched) {}
             }
             try await settlePush()
 
