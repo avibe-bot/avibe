@@ -55,6 +55,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             .pushManagement: [.request],
             .providerStart: [.start],
             .providerExchange: [.exchange, .session],
+            .primaryPasskey: [.passkeyOptions, .passkeyVerify, .session],
         ]
         XCTAssertEqual(
             Set(stagesByOperation.keys),
@@ -225,6 +226,13 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             ("exchange throttle", .providerExchange, .exchange, 429, "rate_limited", 12, "rate_limited"),
             ("exchange dependency", .providerExchange, .exchange, 503, "unavailable", nil, "network"),
             ("exchanged session signed out", .providerExchange, .session, 401, nil, nil, "invalid_or_expired"),
+            ("passkey sign-in off", .primaryPasskey, .passkeyOptions, 503, "unavailable", nil, "provider_unavailable"),
+            ("passkey sign-in closed audience", .primaryPasskey, .passkeyOptions, 403, "forbidden", nil, "provider_unavailable"),
+            ("passkey sign-in throttle", .primaryPasskey, .passkeyOptions, 429, "rate_limited", 9, "rate_limited"),
+            ("passkey rejected", .primaryPasskey, .passkeyVerify, 400, "verification_failed", nil, "invalid"),
+            ("passkey flow ended", .primaryPasskey, .passkeyVerify, 409, "flow_cancelled", nil, "passkey_cancelled"),
+            ("passkey flow expired", .primaryPasskey, .passkeyVerify, 410, "flow_expired", nil, "passkey_cancelled"),
+            ("passkey malformed", .primaryPasskey, .passkeyVerify, 400, "invalid_request", nil, "network"),
             ("exchanged session failure", .providerExchange, .session, 500, nil, nil, "network"),
             ("exchanged session throttle", .providerExchange, .session, 429, nil, 9, "network"),
         ]

@@ -122,6 +122,8 @@ enum MobileBridgeMethod: String, CaseIterable {
     case authVerifySecondFactor = "auth.verifySecondFactor"
     case authVerifyPasskey = "auth.verifyPasskey"
     case authSignInWithProvider = "auth.signInWithProvider"
+    /// Passkey sign-in with no email first; not the second-factor `auth.verifyPasskey`.
+    case authSignInWithPasskey = "auth.signInWithPasskey"
     case sessionRefresh = "session.refresh"
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
@@ -322,7 +324,8 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                          .authSignInWithPassword,
                          .authVerifySecondFactor,
                          .authVerifyPasskey,
-                         .authSignInWithProvider:
+                         .authSignInWithProvider,
+                         .authSignInWithPasskey:
                         throw MobileAccountError.forbidden
                     default:
                         break
@@ -394,6 +397,21 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     }
                     let state = try await coordinator.signInWithProvider(
                         provider,
+                        presentationAnchor: window
+                    )
+                    reply(replyHandler, result: await self.sessionResult(state))
+                case .authSignInWithPasskey:
+                    // Closed: the page names no account, credential, origin or relying party.
+                    guard request.params.isEmpty else {
+                        throw MobileAccountError(
+                            code: "invalid_argument",
+                            message: "Passkey sign-in takes no arguments."
+                        )
+                    }
+                    guard let window = trustedWebView?.window else {
+                        throw MobileAccountError.passkeyUnavailable
+                    }
+                    let state = try await coordinator.signInWithPasskey(
                         presentationAnchor: window
                     )
                     reply(replyHandler, result: await self.sessionResult(state))

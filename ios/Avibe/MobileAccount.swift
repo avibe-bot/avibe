@@ -239,6 +239,11 @@ struct MobileAccountError: Error, Equatable {
         code: "passkey_unavailable",
         message: "No passkey for this account is available on this device."
     )
+    /// Passkey sign-in: avibe.bot did not accept the passkey the person chose.
+    static let passkeyRejected = MobileAccountError(
+        code: "invalid",
+        message: "The passkey was not accepted."
+    )
     /// The person closed the system sign-in window: the page shows nothing.
     static let providerCancelled = MobileAccountError(
         code: "provider_cancelled",
@@ -535,6 +540,19 @@ protocol MobileAuthTransporting: AnyObject {
         authorizationCode: String,
         verifier: String
     ) async throws -> MobileProviderExchange
+    /// `POST /api/passkey-primary/options`: a flow and a discoverable request. Throws
+    /// `providerUnavailable` when passkey sign-in is off or not open to every account,
+    /// `rate_limited`, or `network`.
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart
+    /// `POST /api/passkey-primary/verify` in the same store, then the session read. Throws
+    /// `passkeyRejected` when avibe.bot does not accept the passkey, `passkeyCancelled` for an
+    /// ended or expired flow, `rate_limited`, or `network`.
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws -> MobileSessionDiscovery
+    /// `POST /api/passkey-primary/cancel`, best effort: an abandoned flow also expires.
+    func primaryPasskeyCancel(flow: String) async
     func logout() async throws
     func pushManagementRequest(
         _ request: PushManagementRequest
@@ -1153,6 +1171,55 @@ final class MobileSessionCoordinator {
                 try await self.requireTransport().verifySecondFactor(
                     .code(method, normalized)
                 )
+            }
+        }
+    }
+
+    /// Passkey sign-in with no email first (avibe.bot's primary passkey). A login transition like
+    /// the email code: a new generation, the selection cleared, and one fresh signed-out store
+    /// kept through options, the system sheet, verify and the session read, so the binding cookie
+    /// and the new session stay together. Any attempt that does not sign in rotates the store.
+    /// Not the second-factor passkey (`verifyPasskey`), which needs a first factor already.
+    func signInWithPasskey(
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileSessionState {
+        try await runExclusive {
+            let loginGeneration = self.beginAccountTransition(clearSelection: true)
+            do {
+                if !self.signedOutStoreIsFresh {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                let start = try await self.requireTransport().primaryPasskeyStart()
+                try self.requireCurrentGeneration(loginGeneration)
+                // The store holds the binding cookie from here: any ending below retires it.
+                self.signedOutStoreIsFresh = false
+                let assertion: MobilePasskeyAssertion
+                do {
+                    assertion = try await self.passkeyAuthenticator.assert(
+                        start.request,
+                        presentationAnchor: presentationAnchor
+                    )
+                } catch {
+                    if self.generation == loginGeneration, let transport = try? self.requireTransport() {
+                        await transport.primaryPasskeyCancel(flow: start.flow)
+                    }
+                    throw error
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                let discovery = try await self.requireTransport().primaryPasskeyVerify(
+                    flow: start.flow,
+                    response: assertion.authenticationResponseJSON
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                self.clearStoredSelection()
+                self.secondFactorEmail = nil
+                return try self.state(for: discovery)
+            } catch {
+                if self.generation == loginGeneration {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                throw error
             }
         }
     }

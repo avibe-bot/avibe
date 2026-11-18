@@ -1337,6 +1337,19 @@ private final class StandInAccountTransport: MobileAuthTransporting {
         throw MobileAccountError.network
     }
 
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart {
+        throw MobileAccountError.providerUnavailable
+    }
+
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws -> MobileSessionDiscovery {
+        throw MobileAccountError.network
+    }
+
+    func primaryPasskeyCancel(flow: String) async {}
+
     func logout() async throws {}
 
     func pushManagementRequest(

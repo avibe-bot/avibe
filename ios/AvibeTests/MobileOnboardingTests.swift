@@ -549,6 +549,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.returnToInstance",
                 "app.openPage",
                 "auth.signInWithProvider",
+                "auth.signInWithPasskey",
             ]
         )
         XCTAssertThrowsError(
@@ -891,6 +892,98 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     // MARK: Google and GitHub sign-in (contract: _tmp/ios-login/contract-backend.md)
+
+    // AUTH-SETUP-185: passkey sign-in with no email first, apart from the second-factor passkey.
+    func testPasskeySignInIsDiscoverableAndKeepsOneStoreThroughVerify() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        let request = MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+        transport.primaryPasskeyStartHandler = {
+            MobilePrimaryPasskeyStart(flow: "flow-1", request: request)
+        }
+        let fresh = snapshot(accountID: "account-1", instances: [])
+        transport.primaryPasskeyVerifyHandler = { _, _ in .signedIn(fresh) }
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(
+            MobilePasskeyAssertion(
+                credentialID: Data("cred-1".utf8),
+                clientDataJSON: Data("{}".utf8),
+                authenticatorData: Data([1]),
+                signature: Data([2]),
+                userHandle: Data("account-1".utf8)
+            )
+        )
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            // The first store is not fresh: the attempt rotates and runs on the second transport.
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        XCTAssertEqual(authenticator.requests, [request])
+        XCTAssertTrue(authenticator.requests[0].allowedCredentialIDs.isEmpty)
+        let verify = try XCTUnwrap(transport.primaryPasskeyVerifications.first)
+        XCTAssertEqual(verify.flow, "flow-1")
+        XCTAssertNotNil(verify.response["response"])
+        XCTAssertTrue(transport.primaryPasskeyCancellations.isEmpty)
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testPasskeySignInThatDoesNotSignInCancelsItsFlowAndRotatesTheStore() async throws {
+        for ending in [MobileAccountError.passkeyCancelled, .passkeyUnavailable] {
+            let defaults = makeDefaults()
+            let transport = FakeMobileAuthTransport()
+            transport.primaryPasskeyStartHandler = {
+                MobilePrimaryPasskeyStart(
+                    flow: "flow-1",
+                    request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+                )
+            }
+            let authenticator = FakePasskeyAuthenticator()
+            authenticator.result = .failure(ending)
+            var created = 0
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                passkeyAuthenticator: authenticator,
+                onCreateTransport: { created += 1 }
+            )
+            coordinator.activateAccountSurface()
+            let before = created
+            do {
+                _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+                XCTFail("Expected \(ending.code)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error, ending)
+            }
+            XCTAssertEqual(transport.primaryPasskeyCancellations, ["flow-1"])
+            XCTAssertTrue(transport.primaryPasskeyVerifications.isEmpty)
+            XCTAssertGreaterThan(created, before, "a failed attempt leaves a fresh signed-out store")
+        }
+    }
+
+    func testPasskeySignInThatIsOffSaysSoWithoutOpeningTheSheet() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        let authenticator = FakePasskeyAuthenticator()
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        do {
+            _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+            XCTFail("Expected providerUnavailable")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .providerUnavailable)
+        }
+        XCTAssertTrue(authenticator.requests.isEmpty)
+    }
 
     func testProviderSecretsAreRandomUnpaddedBase64URLWithAnS256Challenge() throws {
         // RFC 7636, Appendix B.
@@ -5283,6 +5376,16 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     private(set) var appleExchanges: [
         (transactionID: String, identityToken: String, authorizationCode: String, verifier: String)
     ] = []
+    var primaryPasskeyStartHandler: () async throws -> MobilePrimaryPasskeyStart = {
+        throw MobileAccountError.providerUnavailable
+    }
+    var primaryPasskeyVerifyHandler: (
+        String, [String: Any]
+    ) async throws -> MobileSessionDiscovery = { _, _ in
+        throw MobileAccountError.passkeyRejected
+    }
+    private(set) var primaryPasskeyVerifications: [(flow: String, response: [String: Any])] = []
+    private(set) var primaryPasskeyCancellations: [String] = []
 
     func requestOTP(email: String) async throws -> Int {
         try await requestOTPHandler(email)
@@ -5369,6 +5472,22 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     ) async throws -> MobileProviderExchange {
         appleExchanges.append((transactionID, identityToken, authorizationCode, verifier))
         return try await appleExchangeHandler(transactionID, identityToken, authorizationCode, verifier)
+    }
+
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart {
+        try await primaryPasskeyStartHandler()
+    }
+
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws -> MobileSessionDiscovery {
+        primaryPasskeyVerifications.append((flow, response))
+        return try await primaryPasskeyVerifyHandler(flow, response)
+    }
+
+    func primaryPasskeyCancel(flow: String) async {
+        primaryPasskeyCancellations.append(flow)
     }
 
     func logout() async throws {
