@@ -7615,12 +7615,13 @@ private final class MockCachedPage {
             <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
             <style>
             body{margin:0;font-family:-apple-system,"PingFang SC";background:#fff;color:#111}
+            button{font:inherit;color:inherit;background:none;border:0;padding:0;-webkit-appearance:none}
             .hdr{position:fixed;top:0;left:0;right:0;height:44px;padding:env(safe-area-inset-top) 16px 0;display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.92);border-bottom:1px solid #e5e5ea}
-            .back{width:28px;height:28px;border:1px solid #d9d9e0;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+            .back{width:28px;height:28px;border:1px solid #d9d9e0 !important;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
             .bot{margin-left:-6px;display:flex;align-items:center;gap:8px;padding:2px 8px 2px 6px;border-radius:999px;min-width:0}
             .face{width:26px;height:26px;border-radius:13px;background:#f5b041;flex-shrink:0}
             .bot b{font-size:16px;white-space:nowrap}.chev{color:#888;font-size:12px}
-            .right{margin-left:auto;display:flex;gap:6px}.icon{width:28px;height:28px;border-radius:8px;border:1px solid #d9d9e0}
+            .right{margin-left:auto;display:flex;gap:6px}.icon{width:28px;height:28px;border-radius:8px;border:1px solid #d9d9e0 !important}
             main{padding:calc(env(safe-area-inset-top) + 56px) 16px 120px}
             .msg{max-width:78%;padding:10px 12px;border-radius:16px;margin:8px 0;font-size:15px;line-height:1.45}
             .me{margin-left:auto;background:#10b981;color:#fff}.it{background:#f2f2f7}
