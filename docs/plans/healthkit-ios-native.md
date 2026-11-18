@@ -217,3 +217,46 @@ returning the signed-in state. The existing generation check prevents a refresh
 superseded by logout or an account change during that cleanup from authenticating
 Health. Paths without an await keep their meaning; no account transaction or rotation
 changes.
+
+## Recovery follow-up (2026-11-18)
+
+Review of the integrated head found three recovery gaps. All three are closed by
+the existing owners; no persistent field, protocol, account transaction or new
+background wake is added.
+
+**Network continuation.** After local upload accounting, one coordinator-owned
+continuation sends pending results and then drains the outbox. The two steps fail
+independently, so a transient result failure no longer skips the next payload.
+Authority is checked again after every await and after error handling: a 401,
+revoked or ineligible device stops locally; 422/426 suspends the connection, and
+a suspended connection sends neither results nor uploads; a paused, replaced or
+retired epoch takes no further action. Transient failures (network errors and
+HTTP 403, 408, 429 and 5xx, the existing non-terminal set) schedule one coalesced
+foreground retry of the same continuation. That retry also resends results when
+the outbox is empty. Its delay is at least five seconds, waits for Retry-After
+when one is set, and defaults to 30 seconds otherwise; device requests are still
+refused before Retry-After. An upload error retires a terminal payload, then runs
+the same continuation; a transient upload error schedules the same retry. 409
+`stale_seq` is still never an ACK or success. In the background no timer is
+added: recovery waits for the next HealthKit delivery, background-session event,
+foreground activation, claim or authentication.
+
+**Cleanup of undecodable storage.** An explicit cleanup (logout, account change,
+rollback, confirmed corruption or revoked device) removes the Health sync
+directory without decoding its state, after credentials are cleared and
+background delivery is disabled. Cleanup completes only when the directory is
+removed or the file system reports it missing; any other failure keeps cleanup
+pending with the existing notice. Only a `DecodingError` makes resume start a
+cleanup; protected or otherwise unreadable storage without cleanup intent is left
+in place. Across restarts the existing finite failure domain applies: a writable
+store retries its cleanup marker, a corrupt store is detected again, and a store
+whose marker could not be written relies on the existing credential and binding
+gates. This is not a new durable deletion guarantee.
+
+**Foreground state.** The launch and background URLSession resumes read the
+application state when they run, as bootstrap does, instead of passing `false`.
+A late launch resume therefore cannot stop foreground polling that bootstrap
+started. Foreground entry still passes `true` explicitly, because the
+application state can still read as background during that notification. The
+coordinator behavior is covered by tests; actual system event ordering is not
+reproduced in XCTest and remains unverified.

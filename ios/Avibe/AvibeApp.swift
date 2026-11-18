@@ -30,7 +30,14 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
               let uploader = Self.healthSync.backgroundUploader else { completionHandler(); return }
         uploader.systemCompletion = completionHandler
         uploader.reconnect()
-        Task { await Self.healthSync.resume(foreground: false) }
+        Task { @MainActor in await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
+    }
+
+    /// Read when a launch or background-session resume actually runs, as
+    /// AppModel.bootstrap does; a constant would overwrite a foreground state
+    /// that an earlier resume already applied.
+    @MainActor private static var applicationIsForeground: Bool {
+        UIApplication.shared.applicationState != .background
     }
 
     /// The tag the instance gives the test notification sent from Settings
@@ -72,7 +79,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         Task { @MainActor in
             ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
-            if !Self.isRunningTests { await Self.healthSync.resume(foreground: false) }
+            if !Self.isRunningTests { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }
         return true
     }

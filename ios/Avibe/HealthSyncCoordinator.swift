@@ -612,19 +612,38 @@ final class HealthSyncCoordinator: ObservableObject {
                 }
                 self.finishWaiters(id, result: .failure(error))
                 await self.handle(error, expectedEpoch: token)
-                if !terminal { self.scheduleRetry() }
+                // A retired payload lets its failed result and the next payload
+                // proceed now; a transient failure retries the same continuation.
+                if terminal { await self.continueNetwork(token) } else { self.scheduleRetry(token) }
             }
             return
         }
         // URLSession's completion barrier waits only for local accounting.
         // Network work remains separately owned by this epoch and account.
-        Task { @MainActor [weak self] in
-            guard let self, self.epoch == token, (try? self.requireAccount()) != nil else { return }
-            do {
-                try await self.sendResults()
-                try await self.drainUploads()
-            } catch { await self.handle(error, expectedEpoch: token) }
+        Task { @MainActor [weak self] in await self?.continueNetwork(token) }
+    }
+
+    /// The single network continuation after local upload accounting. Result
+    /// delivery and the outbox recover independently: a transient failure in
+    /// one does not skip the other, and one foreground retry resumes both.
+    private func continueNetwork(_ token: UUID) async {
+        guard networkAuthorized(token) else { return }
+        var transient = false
+        do { try await sendResults() } catch {
+            await handle(error, expectedEpoch: token)
+            transient = !Self.isTerminal(error)
         }
+        // A revoked, suspended, paused or replaced connection takes no second action.
+        guard networkAuthorized(token) else { return }
+        do { try await drainUploads() } catch {
+            await handle(error, expectedEpoch: token)
+            transient = transient || !Self.isTerminal(error)
+        }
+        if transient { scheduleRetry(token) }
+    }
+
+    private func networkAuthorized(_ token: UUID) -> Bool {
+        epoch == token && (try? requireAccount()) != nil && store?.state.suspended != true
     }
 
     private func finishWaiters(_ id: String, result: Result<Void, Error>) {
@@ -632,7 +651,7 @@ final class HealthSyncCoordinator: ObservableObject {
     }
 
     private func sendResults() async throws {
-        guard let store else { return }
+        guard let store, !store.state.suspended else { return }
         let token = epoch
         for result in Array(store.state.completed.values) where result.ready && !result.acknowledged && result.uploadID == nil {
             try requireCurrent(token)
@@ -692,15 +711,16 @@ final class HealthSyncCoordinator: ObservableObject {
         }
     }
 
-    private func scheduleRetry() {
-        guard retryTask == nil, foreground else { return }
-        let token = epoch
+    /// One coalesced foreground retry of the network continuation, never before
+    /// Retry-After. Background recovery waits for existing system events.
+    private func scheduleRetry(_ token: UUID) {
+        guard retryTask == nil, foreground, networkAuthorized(token) else { return }
         retryTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(for: .seconds(max(5, self.retryAfter?.timeIntervalSince(self.now()) ?? 30)))
             guard !Task.isCancelled, self.epoch == token else { return }
             self.retryTask = nil
-            do { try await self.drainUploads() } catch { await self.handle(error, expectedEpoch: token) }
+            await self.continueNetwork(token)
         }
     }
 
@@ -752,7 +772,10 @@ final class HealthSyncCoordinator: ObservableObject {
             }
             if credentialsCleared && disabled {
                 do {
+                    // Explicit cleanup intent: an unreadable store is removed by
+                    // directory, without decoding it.
                     if let cleanupStore { try cleanupStore.clear() }
+                    else { try HealthDeviceStore.removeDirectory(self.directory) }
                     self.cleanupPending = false
                 } catch { self.notice = "health.cleanup_failed" }
             } else { self.notice = "health.cleanup_failed" }

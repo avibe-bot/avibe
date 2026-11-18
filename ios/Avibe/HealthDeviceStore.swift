@@ -197,7 +197,15 @@ final class HealthDeviceStore {
     }
 
     func clear() throws {
-        try FileManager.default.removeItem(at: directory)
+        try Self.removeDirectory(directory)
         state = HealthSyncState()
+    }
+
+    /// Removes the sync directory without decoding its state. Absence counts as
+    /// removed only when the file system reports the directory missing; access
+    /// or other failures are thrown so cleanup stays pending.
+    static func removeDirectory(_ directory: URL) throws {
+        do { try FileManager.default.removeItem(at: directory) }
+        catch let error as CocoaError where error.code == .fileNoSuchFile {}
     }
 }
