@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 from core.agent_core.harness.cache_metrics import CacheTracker
 from core.agent_core.harness.context import _valid_usage
-from core.agent_core.harness.projection import ProjectionError, _index_results, _ordered, context_view
+from core.agent_core.harness.projection import ProjectionError, _borrowed_context_view, _index_results, _ordered
 from core.agent_core.harness.store import ContextEntry
 
 
@@ -62,7 +62,7 @@ def compact_runtime(
     then the old anchor's separate reference set remains necessary.
     """
     ordered = _ordered(rows)
-    view = context_view(ordered)
+    view = _borrowed_context_view(ordered)
     results, pending = _index_results(ordered)
     clocks = dict(prior.response_clocks) if prior is not None else {}
     changes = dict(prior.change_seqs) if prior is not None else {}
