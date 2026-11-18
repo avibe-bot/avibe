@@ -58,8 +58,6 @@
       "needsPermission": "电脑操作 — 需要权限",
       "needsPermissionAccessibility": "电脑操作 — 需要辅助功能权限",
       "needsPermissionScreenRecording": "电脑操作 — 需要屏幕录制权限；请在系统设置中添加 Avibe",
-      "screenRecordingTitle": "需要屏幕录制权限",
-      "screenRecordingGuide": "Avibe 已打开“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”。请点击 +，或将 Avibe 拖入列表，然后启用它。获得“屏幕录制”授权后，macOS 可能会退出并重新打开 Avibe；应用重新打开后请返回。两个权限都授权后，应用会自动启动。",
       "needsRuntime": "电脑操作 — 请重启 Avibe 服务",
       "runtimeUnavailable": "电脑操作 — 正在等待 Avibe 服务",
       "runtimeTooOld": "电脑操作 — 请重启 Avibe 服务",
