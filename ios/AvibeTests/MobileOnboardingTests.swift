@@ -4653,6 +4653,47 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(try coordinator.selectInstance(id: instance.id), instance)
     }
 
+    /// The last session avibe.bot confirmed, kept on the device so a cold
+    /// start can open the selected instance before checking again: restored
+    /// only for the account the selection belongs to, and gone with a
+    /// sign-out (no account data is kept past it).
+    func testTheLastGoodSessionRestoresTheSelectionAndGoesWithASignOut() async throws {
+        let defaults = makeDefaults()
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let signedIn = makeCoordinator(defaults: defaults, transports: [first] + (0..<3).map { _ in FakeMobileAuthTransport() })
+        signedIn.activateAccountSurface()
+        _ = try await signedIn.bootstrap()
+        _ = try signedIn.selectInstance(id: instance.id)
+
+        let relaunched = makeCoordinator(defaults: defaults, transports: [FakeMobileAuthTransport()])
+        let restored = relaunched.restoreLastGoodSession()
+        XCTAssertEqual(
+            restored,
+            .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: instance.id)
+        )
+        XCTAssertEqual(relaunched.currentAccount?.id, "account-1")
+        let runtime = try XCTUnwrap(relaunched.restorableRuntime(from: try XCTUnwrap(restored)))
+        XCTAssertEqual(runtime.instance.id, instance.id)
+
+        // Without a selection there is nothing to open first.
+        let noSelection = makeDefaults()
+        let other = FakeMobileAuthTransport()
+        other.session = snapshot(accountID: "account-1")
+        let signedInOnly = makeCoordinator(defaults: noSelection, transports: [other])
+        signedInOnly.activateAccountSurface()
+        _ = try await signedInOnly.bootstrap()
+        XCTAssertNil(makeCoordinator(defaults: noSelection, transports: []).restoreLastGoodSession())
+
+        // A sign-out takes it with it.
+        signedIn.activateAccountSurface()
+        _ = try await signedIn.logout()
+        let afterSignOut = makeCoordinator(defaults: defaults, transports: [])
+        XCTAssertNil(afterSignOut.restoreLastGoodSession())
+        XCTAssertNil(afterSignOut.currentAccount)
+        XCTAssertNil(defaults.object(forKey: "avibe.mobile.lastGoodSession"))
+    }
+
     func testColdLaunchSecondFactorKeepsTheSelectionForTheSameAccount() async throws {
         let defaults = makeDefaults()
         let firstTransport = FakeMobileAuthTransport()

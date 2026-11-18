@@ -1240,6 +1240,27 @@ final class AppModel: ObservableObject {
         let launch = Self.coldStartSignposter.beginInterval("bootstrap")
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
         await websiteDataStore.sweepOrphans()
+        // Open first: with the last session avibe.bot confirmed and its
+        // selected instance on this device, open that instance now and check
+        // the session behind it. The check's answer decides as a refresh
+        // does (another account, a signed-out session, or the instance gone
+        // closes the runtime; a failed check keeps it).
+        if
+            let restored = sessionCoordinator.restoreLastGoodSession(),
+            let runtime = sessionCoordinator.restorableRuntime(from: restored)
+        {
+            Self.coldStartSignposter.emitEvent("opened before the session check")
+            // A notification tap that launched the App opens its own instance
+            // instead (completeBootstrap below).
+            if pendingInstanceOpen == nil {
+                openRuntime(runtime)
+            }
+            completeBootstrap()
+            let check = Self.coldStartSignposter.beginInterval("session check")
+            defer { Self.coldStartSignposter.endInterval("session check", check) }
+            _ = try? await sessionCoordinator.refresh()
+            return
+        }
         sessionCoordinator.activateAccountSurface()
         do {
             let restore = Self.coldStartSignposter.beginInterval("session restore")
@@ -1260,6 +1281,10 @@ final class AppModel: ObservableObject {
             // confirms signed-out or a different account.
             route = .onboarding(.instances)
         }
+        completeBootstrap()
+    }
+
+    private func completeBootstrap() {
         hasCompletedBootstrap = true
         // Navigation requested before bootstrap is delivered before Health
         // restoration, which may wait on the network and HealthKit.

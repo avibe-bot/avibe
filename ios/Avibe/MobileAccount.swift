@@ -563,6 +563,10 @@ final class MobileSessionCoordinator {
     ) -> MobileAuthTransporting
 
     private static let selectionKey = "avibe.mobile.selection"
+    /// The last session avibe.bot confirmed (the account and its instances,
+    /// no credentials), so a cold start can open the selected instance before
+    /// checking again. It follows `snapshot`: gone whenever that is.
+    private static let lastGoodSessionKey = "avibe.mobile.lastGoodSession"
     /// When each instance was last opened as the selected runtime, per
     /// account: `[accountID: [instanceID: seconds since 1970]]`.
     private static let instanceUseKey = "avibe.mobile.instanceUse"
@@ -603,7 +607,18 @@ final class MobileSessionCoordinator {
     private let onReconcileInstancePush: @MainActor (Set<String>, String) async -> Void
 
     private var transport: MobileAuthTransporting?
-    private var snapshot: MobileSessionSnapshot?
+    private var snapshot: MobileSessionSnapshot? {
+        didSet {
+            // Restoring reads the stored session; it writes nothing back.
+            guard !restoringLastGoodSession else { return }
+            snapshotIsUnconfirmed = false
+            persistLastGoodSession()
+        }
+    }
+    /// `snapshot` came from the device, not yet from avibe.bot in this
+    /// process (a cold start that opened first).
+    private var snapshotIsUnconfirmed = false
+    private var restoringLastGoodSession = false
     /// The email typed for the sign-in that now owes a second factor, shown
     /// when the backend's answer does not name the account.
     private var secondFactorEmail: String?
@@ -1107,6 +1122,9 @@ final class MobileSessionCoordinator {
             // transport; opening a page is not required to fetch the session.
             self.ensureTransport()
             let previousAccountID = self.snapshot?.account.id
+            // A cold start that opened before checking: an owed factor keeps
+            // the selection, as a cold start that checked first does.
+            let wasUnconfirmed = self.snapshotIsUnconfirmed
             let requestGeneration = self.generation
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
@@ -1169,7 +1187,7 @@ final class MobileSessionCoordinator {
                     // that already owes a second factor has no runtime to
                     // revoke: keep its saved selection until the verified
                     // account can decide whether it still belongs to it.
-                    self.beginAccountTransition(clearSelection: true)
+                    self.beginAccountTransition(clearSelection: !wasUnconfirmed)
                 }
                 self.signedOutStoreIsFresh = false
                 return try self.state(for: discovery)
@@ -1738,6 +1756,53 @@ final class MobileSessionCoordinator {
     /// start will try to open it, so its skeleton may show meanwhile.
     var hasStoredSelection: Bool {
         storedSelection() != nil
+    }
+
+    /// A cold start's first step: the last session avibe.bot confirmed, for
+    /// the account the stored selection belongs to, so the App can open that
+    /// instance at once. The session is then checked with `refresh()`, whose
+    /// answer decides as for any refresh. Nil when there is nothing to open
+    /// first (no selection, another account's session, or a selected
+    /// instance that cannot open), or once this process holds a session.
+    func restoreLastGoodSession() -> MobileSessionState? {
+        guard
+            phase == .ready,
+            snapshot == nil,
+            authoritativeTransition == nil,
+            let selection = storedSelection(),
+            let data = defaults.data(forKey: Self.lastGoodSessionKey),
+            let stored = try? JSONDecoder().decode(MobileSessionSnapshot.self, from: data),
+            stored.account.id == selection.accountID,
+            stored.instances.contains(where: {
+                $0.id == selection.instanceID && $0.url == selection.url
+            })
+        else {
+            return nil
+        }
+        restoringLastGoodSession = true
+        defer { restoringLastGoodSession = false }
+        snapshot = stored
+        let restored = state(for: stored)
+        // Only a selection that opens is worth opening first; otherwise this
+        // launch checks the session before anything, as without one.
+        guard restorableRuntime(from: restored) != nil else {
+            snapshot = nil
+            return nil
+        }
+        snapshotIsUnconfirmed = true
+        signedOutStoreIsFresh = false
+        return restored
+    }
+
+    private func persistLastGoodSession() {
+        guard
+            let snapshot,
+            let data = try? JSONEncoder().encode(snapshot)
+        else {
+            defaults.removeObject(forKey: Self.lastGoodSessionKey)
+            return
+        }
+        defaults.set(data, forKey: Self.lastGoodSessionKey)
     }
 
     func restorableRuntime(
