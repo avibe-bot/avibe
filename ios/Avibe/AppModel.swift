@@ -252,6 +252,8 @@ final class AppModel: ObservableObject {
     /// A call of the fault marker's `mark()` has returned in this process.
     /// That is all it says: not that the marker is on disk.
     private var directFaultIsMarked = false
+    let healthSync: HealthSyncCoordinator?
+
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
     private let pushInstallationMarker: PushInstallationMarkerStoring
@@ -293,6 +295,7 @@ final class AppModel: ObservableObject {
             // Signing out or another account: the badge counted this
             // account's Inbox. (A session refresh of the same account keeps it.)
             self?.nativeBadge.clear()
+            await self?.healthSync?.logout()
             await self?.nativePushCoordinator.prepareForLogout()
         }
     )
@@ -386,9 +389,11 @@ final class AppModel: ObservableObject {
         runtimeOpenBudget: Duration = AppModel.runtimeOpenAutomaticBudget,
         runtimeOpenLongWait: Duration = .seconds(8),
         runtimeOpenNotificationCenter: NotificationCenter = .default,
-        badgeCenter: AppBadgeCentering? = nil
+        badgeCenter: AppBadgeCentering? = nil,
+        healthSync: HealthSyncCoordinator? = nil
     ) {
         self.defaults = defaults
+        self.healthSync = healthSync
         self.controlPlane = controlPlane
         let directFaultMarker = directFaultMarker
             ?? UserDefaultsDirectFaultMarker(defaults: defaults)
@@ -418,6 +423,12 @@ final class AppModel: ObservableObject {
             center: pushNotificationCenter ?? SystemPushNotificationCenter()
         )
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
+        healthSync?.targetProvider = { [weak self] in
+            guard let self, let account = self.sessionCoordinator.currentAccount,
+                  let instance = self.sessionCoordinator.selectedInstance,
+                  let origin = WebOrigin(url: instance.url) else { return nil }
+            return HealthConnectionTarget(accountID: account.id, instanceID: instance.id, name: instance.name, origin: origin.serialized)
+        }
         _ = nativePushCoordinator
         _ = directPathController
         runtimeOpenLifecycleObservers = [
@@ -514,6 +525,11 @@ final class AppModel: ObservableObject {
 
     /// App metadata is read by the Runtime on document load. The catalog,
     /// rather than the runtime's creation-time snapshot, owns its display name.
+    func connectHealth(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
+        guard !route.coversRuntime, let healthSync else { return "failed" }
+        return await healthSync.connect(requestID: requestID, pairingCode: pairingCode, origin: origin)
+    }
+
     func selectedInstanceName() -> String? {
         guard let runtime = route.runtime,
               sessionCoordinator.isSelectedRuntime(runtime) else { return nil }
@@ -587,6 +603,7 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         hasCompletedBootstrap = true
+        await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
         if let pendingInstanceOpen {
             self.pendingInstanceOpen = nil
             switch pendingInstanceOpen {
@@ -1017,6 +1034,7 @@ final class AppModel: ObservableObject {
     /// cancelled. Resigning active alone (Control Center, an alert) keeps
     /// WebKit running and keeps charging the budget.
     private func runtimeOpenDidEnterBackground() {
+        healthSync?.setBackground()
         guard runtimeOpenBackgroundedAt == nil else {
             return
         }
@@ -1028,6 +1046,7 @@ final class AppModel: ObservableObject {
     /// remainder. A timer that could not fire on time (no background
     /// interval was reported) ends its attempt here.
     private func runtimeOpenWillEnterForeground() {
+        Task { await healthSync?.resume(foreground: true) }
         if let backgroundedAt = runtimeOpenBackgroundedAt {
             runtimeOpenBackgroundTime += runtimeOpenTiming.now - backgroundedAt
             runtimeOpenBackgroundedAt = nil

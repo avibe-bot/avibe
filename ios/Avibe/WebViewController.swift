@@ -331,6 +331,7 @@ final class WebViewFactory {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let healthConnect: HealthConnectAction
     private let directStatus: DirectStatusProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
@@ -356,6 +357,7 @@ final class WebViewFactory {
         showInstances: showInstances,
         instanceName: instanceName,
         directStatus: directStatus,
+        healthConnect: healthConnect,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
                 return ["state": "unavailable"]
@@ -405,6 +407,7 @@ final class WebViewFactory {
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
@@ -420,6 +423,7 @@ final class WebViewFactory {
         self.showInstances = showInstances
         self.instanceName = instanceName
         self.directStatus = directStatus
+        self.healthConnect = healthConnect
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
@@ -579,6 +583,7 @@ final class WebViewController: UIViewController {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let healthConnect: HealthConnectAction
     private let directStatus: DirectStatusProvider?
     /// Whether this runtime's WebView may be loaded now; `nil` without a
     /// direct transport, which loads as before.
@@ -657,6 +662,7 @@ final class WebViewController: UIViewController {
                 return self.instanceName()
             },
             directStatus: directStatus,
+            healthConnect: healthConnect,
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
             },
@@ -692,6 +698,7 @@ final class WebViewController: UIViewController {
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -711,6 +718,7 @@ final class WebViewController: UIViewController {
         self.showInstances = showInstances
         self.instanceName = instanceName
         self.directStatus = directStatus
+        self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])

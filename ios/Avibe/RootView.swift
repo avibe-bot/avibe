@@ -160,6 +160,7 @@ private struct BrowserScreen: View {
                         showInstances: appModel.showInstances,
                         instanceName: appModel.selectedInstanceName,
                         directStatus: appModel.directStatusProvider,
+                        healthConnect: appModel.connectHealth,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,

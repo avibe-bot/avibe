@@ -164,7 +164,7 @@ protocol PushKeychainItemAccessing {
     func delete(_ query: [String: Any]) -> OSStatus
 }
 
-private struct SystemPushKeychainItemAccess: PushKeychainItemAccessing {
+struct SystemPushKeychainItemAccess: PushKeychainItemAccessing {
     func copyMatching(_ query: [String: Any]) -> (OSStatus, Any?) {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)

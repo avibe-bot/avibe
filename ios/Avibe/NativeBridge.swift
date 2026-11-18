@@ -3,6 +3,8 @@ import Foundation
 import UIKit
 import WebKit
 
+typealias HealthConnectAction = @MainActor (String, String, WebOrigin) async -> String
+
 struct NativeBridgePolicy {
     let instanceOrigin: WebOrigin
 
@@ -21,6 +23,7 @@ struct NativeShellMetadata: Equatable {
         "app": 1,
         "badge": 1,
         "haptics": 1,
+        "health": 1,
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
@@ -101,6 +104,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case appShowInstances = "app.showInstances"
     case badgeSet = "badge.set"
     case directStatus = "direct.status"
+    case healthConnect = "health.connect"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
@@ -253,6 +257,7 @@ enum NativeBridgeConfiguration {
         showInstances: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -308,6 +313,7 @@ enum NativeBridgeConfiguration {
             showInstances: showInstances,
             instanceName: instanceName,
             directStatus: directStatus,
+            healthConnect: healthConnect,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
             pushUnsubscribe: pushUnsubscribe,
@@ -573,6 +579,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let healthConnect: HealthConnectAction
     private let directStatus: DirectStatusProvider?
     private let pushStatus: @MainActor (
         String?,
@@ -611,6 +618,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         showInstances: @escaping () -> Void,
         instanceName: @escaping () -> String?,
         directStatus: DirectStatusProvider?,
+        healthConnect: @escaping HealthConnectAction,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -647,6 +655,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.showInstances = showInstances
         self.instanceName = instanceName
         self.directStatus = directStatus
+        self.healthConnect = healthConnect
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
         self.pushUnsubscribe = pushUnsubscribe
@@ -840,6 +849,26 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
+        case .healthConnect:
+            guard request.params.count == 2,
+                  let requestID = request.params["requestId"] as? String, !requestID.isEmpty, requestID.count <= 256,
+                  let code = request.params["pairingCode"] as? String, !code.isEmpty, code.count <= 256 else {
+                reply(replyHandler, error: .invalidArgument("health.connect requires requestId and pairingCode."))
+                return
+            }
+            let origin = policy.instanceOrigin
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self, let sourceURL = sourceWebView?.url, WebOrigin(url: sourceURL, requiresHTTPS: false) == origin else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                let state = await self.healthConnect(requestID, code, origin)
+                guard let replyURL = sourceWebView?.url, WebOrigin(url: replyURL, requiresHTTPS: false) == origin else {
+                    self.reply(replyHandler, error: .forbidden)
+                    return
+                }
+                self.reply(replyHandler, result: ["state": ["connected", "declined", "failed"].contains(state) ? state : "failed"])
+            }
         case .appearanceColorSchemeChanged:
             let rawScheme = request.params["scheme"]
             let scheme = (rawScheme as? String).flatMap(PageColorScheme.init(rawValue:))

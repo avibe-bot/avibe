@@ -17,6 +17,22 @@ extension Notification.Name {
 final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
+    static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+    @MainActor static let healthSync = HealthSyncCoordinator()
+
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == HealthBackgroundUploader.identifier,
+              let uploader = Self.healthSync.backgroundUploader else { completionHandler(); return }
+        uploader.systemCompletion = completionHandler
+        uploader.reconnect()
+        Task { await Self.healthSync.resume(foreground: false) }
+    }
+
     /// The tag the instance gives the test notification sent from Settings
     /// (`/api/web-push/test`); the notification service extension carries a
     /// push's tag into `threadIdentifier`.
@@ -55,6 +71,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
+            if !Self.isRunningTests { await Self.healthSync.resume(foreground: false) }
         }
         return true
     }
@@ -110,11 +127,12 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
 struct AvibeApp: App {
     @UIApplicationDelegateAdaptor(AvibeAppDelegate.self)
     private var appDelegate
-    @StateObject private var appModel = AppModel()
+    @StateObject private var appModel = AppModel(healthSync: AvibeAppDelegate.isRunningTests ? nil : AvibeAppDelegate.healthSync)
 
     var body: some Scene {
         WindowGroup {
             RootView()
+                .modifier(HealthConsentHost(health: AvibeAppDelegate.healthSync))
                 .environmentObject(appModel)
                 .task {
                     // App Shortcuts (AppShortcuts.swift) reach the model here.
