@@ -49,8 +49,10 @@ final class HealthSyncCoordinator: ObservableObject {
     private var convergeTask: Task<Void, Never>?
     private var convergeEpoch: UUID?
     private var convergeAgain = false
-    // In memory: each epoch and each resume entry make the manifest due again.
+    // In memory: each epoch, each resume entry and each background-delivery change
+    // make the manifest due again; a success clears only what it actually reported.
     private var manifestDue = true
+    private var manifestGeneration = 0
     private var uploadWaiters: [String: [CheckedContinuation<Void, Error>]] = [:]
     private var retryAfter: Date?
     var targetProvider: (() -> HealthConnectionTarget?)?
@@ -336,9 +338,16 @@ final class HealthSyncCoordinator: ObservableObject {
             await stopLocal(unregister: true)
             return
         }
-        guard connecting == nil, !restoring else { return }
+        guard connecting == nil, !restoring else {
+            // Every resume entry converges, including one that meets a running restoration.
+            if identity != nil {
+                markManifestDue()
+                requestConvergence()
+            }
+            return
+        }
         restoring = true
-        manifestDue = true
+        markManifestDue()
         let token = epoch
         defer {
             restoring = false
@@ -417,7 +426,10 @@ final class HealthSyncCoordinator: ObservableObject {
                 if !Self.isTerminal(error) { self.scheduleRetry(token) }
             }
         }
-        if epoch == token { backgroundDelivery = enabled }
+        if epoch == token {
+            if backgroundDelivery != enabled { markManifestDue() }
+            backgroundDelivery = enabled
+        }
     }
 
     private func manifestBody(background: Bool) -> [String: Any] {
@@ -429,8 +441,13 @@ final class HealthSyncCoordinator: ObservableObject {
         ]
     }
 
-    private func manifest() async throws {
-        _ = try await request("PUT", "manifest", manifestBody(background: backgroundDelivery))
+    private func manifest(background: Bool) async throws {
+        _ = try await request("PUT", "manifest", manifestBody(background: background))
+    }
+
+    private func markManifestDue() {
+        manifestDue = true
+        manifestGeneration += 1
     }
 
     private func beginPolling() {
@@ -667,7 +684,7 @@ final class HealthSyncCoordinator: ObservableObject {
         convergeTask = nil
         convergeEpoch = nil
         convergeAgain = false
-        manifestDue = true
+        markManifestDue()
     }
 
     /// Foreground polling first, then the due manifest, unready reservations,
@@ -678,10 +695,15 @@ final class HealthSyncCoordinator: ObservableObject {
         var transient = false
         if foreground { beginPolling() }
         if manifestDue {
-            // The setup manifest from pairing does not clear this.
+            // The setup manifest from pairing does not clear this. A success clears it
+            // only if nothing made it due again and the reported delivery is current.
+            let generation = manifestGeneration
+            let background = backgroundDelivery
             do {
-                try await manifest()
-                if epoch == token { manifestDue = false }
+                try await manifest(background: background)
+                if epoch == token, generation == manifestGeneration, background == backgroundDelivery {
+                    manifestDue = false
+                }
             } catch { transient = await recordFailure(error, token) || transient }
             guard networkAuthorized(token) else { return }
         }
