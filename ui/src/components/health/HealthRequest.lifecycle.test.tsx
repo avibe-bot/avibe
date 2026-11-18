@@ -5,6 +5,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import en from '@/i18n/en.json';
+import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 import { type HealthRequest } from '@/lib/healthRequests';
 import HealthLandingPage, { HealthRequestCard } from './HealthRequest';
 
@@ -21,9 +22,12 @@ const installBridge = (capabilities: Record<string, number> = { health: 1 }) => 
   Object.defineProperty(window, 'avibeNative', { configurable: true, value: { contract: 1, platform: 'ios', shellVersion: '1', capabilities, call, on: vi.fn() } });
   return call;
 };
+let requestNumber = 0;
 let current = request;
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
+  // Each case represents a distinct server request in this document.
+  request.id = `mreq_${(++requestNumber).toString(16).padStart(32, '0')}`;
   current = { ...request };
   document.cookie = 'vibe_csrf_token=synthetic-csrf; path=/';
   fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
@@ -156,7 +160,7 @@ describe('Health request live ownership and bounded network waits', () => {
 
   it('isolates request identity changes from a late read and immediately closes authorization', async () => {
     vi.useFakeTimers(); installBridge();
-    const second = { ...request, id: 'mreq_abcdef0123456789abcdef0123456789' };
+    const second = { ...request, id: `mreq_f${request.id.slice(6)}` };
     let resolveOld!: (value: Response) => void;
     let resolveNew!: (value: Response) => void;
     fetchMock.mockImplementation((url: string) => new Promise<Response>(resolve => {
@@ -188,5 +192,243 @@ describe('Health request live ownership and bounded network waits', () => {
     await act(async () => { resolvePairing(Response.json({ pairing_code: 'late-synthetic-code' })); });
     expect(pairingSignal?.aborted).toBe(true);
     expect(call).not.toHaveBeenCalled();
+  });
+});
+
+describe('Route and completion consumers from the independent review', () => {
+  it.each(['succeeded', 'failed', 'expired', 'canceled'] as const)('keeps %s final while an older Native completion returns', async (state) => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockImplementation(() => new Promise(resolve => { resolveNative = resolve; }));
+    let gets = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/mobile/pairings') return Response.json({ pairing_code: 'one-local-code' });
+      gets++;
+      return Response.json(gets === 1 ? request : { ...request, state });
+    });
+    mount(<HealthRequestCard request={request} />); await tick();
+    const button = screen.getByRole('button', { name: 'Authorize on iPhone' });
+    fireEvent.click(button); fireEvent.click(button); await tick();
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
+    expect(call).toHaveBeenCalledTimes(1);
+    await tick(3000);
+    expect(screen.getByText(en.health.note[state])).toBeTruthy();
+    await act(async () => { resolveNative({ state: 'connected' }); });
+    await tick(30000);
+    expect(screen.getByText(en.health.note[state])).toBeTruthy();
+    expect(gets).toBe(2);
+  });
+
+  it('does not apply an old Native receipt to the replacement request', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockImplementation(() => new Promise(resolve => { resolveNative = resolve; }));
+    const second = { ...request, id: `mreq_f${request.id.slice(6)}` };
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/mobile/pairings') return Response.json({ pairing_code: 'old-local-code' });
+      return Response.json(url.endsWith(second.id) ? second : request);
+    });
+    const renderCard = (value: HealthRequest) => <I18nextProvider i18n={i18n}><MemoryRouter><HealthRequestCard request={value} /></MemoryRouter></I18nextProvider>;
+    const view = render(renderCard(request)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    view.rerender(renderCard(second)); await tick();
+    const blocked = screen.getByRole('button', { name: 'Authorize on iPhone' }) as HTMLButtonElement;
+    expect(blocked.disabled).toBe(true);
+    expect(screen.queryByText(en.health.opening)).toBeNull();
+    fireEvent.click(blocked); await tick();
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
+    await act(async () => { resolveNative({ state: 'declined' }); });
+    expect(screen.queryByText(en.health.note.declined)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Authorize on iPhone' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it('retires an inactive pairing and allows one fresh action after reactivation', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolveOld!: (value: Response) => void;
+    let pairs = 0;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url !== '/api/mobile/pairings') return Response.json(request);
+      pairs++;
+      if (pairs === 1) return new Promise<Response>(resolve => { resolveOld = resolve; });
+      return Response.json({ pairing_code: 'new-local-code' });
+    });
+    const renderCard = (active: boolean) => <I18nextProvider i18n={i18n}><MemoryRouter><RouteSurfaceActiveContext.Provider value={active}><HealthRequestCard request={request} /></RouteSurfaceActiveContext.Provider></MemoryRouter></I18nextProvider>;
+    const view = render(renderCard(true)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    view.rerender(renderCard(false)); await tick(30000);
+    await act(async () => { resolveOld(Response.json({ pairing_code: 'retired-local-code' })); });
+    expect(call).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([url]) => url !== '/api/mobile/pairings')).toHaveLength(1);
+    view.rerender(renderCard(true)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    expect(pairs).toBe(2);
+    expect(call).toHaveBeenCalledExactlyOnceWith('health.connect', { requestId: request.id, pairingCode: 'new-local-code' });
+  });
+
+  it('restarts its stopped three-failure read window only when reactivated', async () => {
+    vi.useFakeTimers();
+    let gets = 0;
+    fetchMock.mockImplementation(async () => {
+      gets++;
+      if (gets <= 3) throw new Error('synthetic-outage');
+      return Response.json({ ...request, state: 'succeeded' });
+    });
+    const renderCard = (active: boolean) => <I18nextProvider i18n={i18n}><MemoryRouter><RouteSurfaceActiveContext.Provider value={active}><HealthRequestCard request={request} /></RouteSurfaceActiveContext.Provider></MemoryRouter></I18nextProvider>;
+    const view = render(renderCard(true)); await tick(120000);
+    expect(gets).toBe(3); expect(screen.getByText(en.health.loadError)).toBeTruthy();
+    view.rerender(renderCard(false)); await tick();
+    view.rerender(renderCard(true)); await tick();
+    expect(screen.getByText(en.health.note.succeeded)).toBeTruthy();
+    await tick(30000); expect(gets).toBe(4);
+  });
+});
+
+describe('Retained-surface Native ownership regression from the independent review', () => {
+  it('keeps the existing Native action exclusive while the same retained request is hidden and restored', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    // Native consent/authorization completed, but setup has not returned yet.
+    // S3 does not accept another connect while its connecting token is live.
+    let resolveNative!: (value: { state: string }) => void;
+    let nativeInFlight = false;
+    call.mockImplementation(() => {
+      if (nativeInFlight) return Promise.resolve({ state: 'failed' });
+      nativeInFlight = true;
+      return new Promise(resolve => { resolveNative = resolve; });
+    });
+    const renderCard = (active: boolean) => <I18nextProvider i18n={i18n}><MemoryRouter><RouteSurfaceActiveContext.Provider value={active}><HealthRequestCard request={request} /></RouteSurfaceActiveContext.Provider></MemoryRouter></I18nextProvider>;
+    const view = render(renderCard(true)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    expect(call).toHaveBeenCalledTimes(1);
+    view.rerender(renderCard(false)); await tick();
+    view.rerender(renderCard(true)); await tick();
+    const restored = screen.getByRole('button', { name: /Authorize on iPhone|Opening authorization/ });
+    fireEvent.click(restored); await tick();
+    const pairingCalls = fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings').length;
+    const nativeCalls = call.mock.calls.length;
+    await act(async () => { resolveNative({ state: 'connected' }); });
+    expect({ pairingCalls, nativeCalls, incorrectFailure: !!screen.queryByText(en.health.note.failed) })
+      .toEqual({ pairingCalls: 1, nativeCalls: 1, incorrectFailure: false });
+    expect(screen.getByText(en.health.note.connected)).toBeTruthy();
+  });
+});
+
+
+const activeCard = (active: boolean, value = request) => <I18nextProvider i18n={i18n}><MemoryRouter><RouteSurfaceActiveContext.Provider value={active}><HealthRequestCard request={value} /></RouteSurfaceActiveContext.Provider></MemoryRouter></I18nextProvider>;
+
+// These exercise shipped components with synthetic HTTP and Native peers, not a real iPhone.
+describe('Document-owned connection attempts across consumers', () => {
+  it('retains a completion received while hidden and resumes status polling only on reopen', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockImplementation(() => new Promise(resolve => { resolveNative = resolve; }));
+    const view = render(activeCard(true)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    view.rerender(activeCard(false)); await tick();
+    const reads = fetchMock.mock.calls.filter(([url]) => url !== '/api/mobile/pairings').length;
+    await act(async () => { resolveNative({ state: 'connected' }); });
+    await tick(30000);
+    expect(fetchMock.mock.calls.filter(([url]) => url !== '/api/mobile/pairings')).toHaveLength(reads);
+    view.rerender(activeCard(true)); await tick();
+    expect(screen.getByText(en.health.note.connected)).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url !== '/api/mobile/pairings')).toHaveLength(reads + 1);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['before', 'after'])('reattaches after actual unmount when Native settles %s remount', async (completion) => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockImplementation(() => new Promise(resolve => { resolveNative = resolve; }));
+    const view = mount(<HealthRequestCard request={request} />); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    view.unmount();
+    if (completion === 'before') await act(async () => { resolveNative({ state: 'connected' }); });
+    mount(landing); await tick();
+    if (completion === 'after') {
+      const button = screen.getByRole('button', { name: en.health.opening }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button); await tick();
+      await act(async () => { resolveNative({ state: 'connected' }); });
+    }
+    expect(screen.getByText(en.health.note.connected)).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it('reserves before pairing for two consumers and delivers one receipt to both', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolvePairing!: (value: Response) => void;
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockImplementation(() => new Promise(resolve => { resolveNative = resolve; }));
+    fetchMock.mockImplementation(async (url: string) => url === '/api/mobile/pairings'
+      ? new Promise<Response>(resolve => { resolvePairing = resolve; }) : Response.json(request));
+    mount(<><HealthRequestCard request={request} /><HealthRequestCard request={request} /></>); await tick();
+    const buttons = screen.getAllByRole('button', { name: 'Authorize on iPhone' });
+    act(() => { fireEvent.click(buttons[0]); fireEvent.click(buttons[1]); });
+    await tick();
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: en.health.opening }).every(button => (button as HTMLButtonElement).disabled)).toBe(true);
+    await act(async () => { resolvePairing(Response.json({ pairing_code: 'shared-synthetic-code' })); });
+    expect(call).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveNative({ state: 'connected' }); });
+    expect(screen.getAllByText(en.health.note.connected)).toHaveLength(2);
+  });
+
+  it('does not let an abandoned pairing body dispatch Native or clear its replacement lock', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolveBody!: (value: unknown) => void;
+    let resolveNative!: (value: { state: string }) => void;
+    let pairs = 0;
+    call.mockImplementation(() => new Promise(resolve => { resolveNative = resolve; }));
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url !== '/api/mobile/pairings') return Response.json(request);
+      if (++pairs > 1) return Response.json({ pairing_code: 'replacement-synthetic-code' });
+      const response = Response.json({});
+      response.json = () => new Promise(resolve => { resolveBody = resolve; });
+      return response;
+    });
+    const view = render(activeCard(true)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    view.rerender(activeCard(false)); await tick();
+    view.rerender(activeCard(true)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    await act(async () => { resolveBody({ pairing_code: 'abandoned-synthetic-code' }); });
+    const button = screen.getByRole('button', { name: en.health.opening }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button); await tick();
+    expect(pairs).toBe(2);
+    expect(call).toHaveBeenCalledExactlyOnceWith('health.connect', { requestId: request.id, pairingCode: 'replacement-synthetic-code' });
+    await act(async () => { resolveNative({ state: 'connected' }); });
+    expect(screen.getByText(en.health.note.connected)).toBeTruthy();
+  });
+
+  it.each(['succeeded', 'failed', 'expired', 'canceled'] as const)('keeps Native exclusive after %s and preserves terminal across hide/reopen', async (state) => {
+    vi.useFakeTimers(); const call = installBridge();
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockImplementationOnce(() => new Promise(resolve => { resolveNative = resolve; }));
+    const second = { ...request, id: `mreq_f${request.id.slice(6)}` };
+    fetchMock.mockImplementation(async (url: string) => url === '/api/mobile/pairings'
+      ? Response.json({ pairing_code: 'synthetic-code' }) : Response.json(url.endsWith(second.id) ? second : current));
+    const view = render(activeCard(true)); await tick();
+    fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
+    current = { ...request, state };
+    await tick(3000);
+    expect(screen.getByText(en.health.note[state])).toBeTruthy();
+    view.rerender(activeCard(false)); await tick();
+    // A stale creation-time card must not replace already observed terminal knowledge.
+    view.rerender(activeCard(true)); await tick();
+    expect(screen.getByText(en.health.note[state])).toBeTruthy();
+    mount(<HealthRequestCard request={second} />); await tick();
+    const button = screen.getByRole('button', { name: 'Authorize on iPhone' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button); await tick();
+    expect(call).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveNative({ state: 'connected' }); });
+    expect(screen.getByText(en.health.note[state])).toBeTruthy();
+    expect(screen.queryByText(en.health.note.connected)).toBeNull();
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button); await tick();
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(2);
   });
 });

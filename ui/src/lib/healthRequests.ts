@@ -54,23 +54,78 @@ export async function getHealthRequest(id: string, signal?: AbortSignal): Promis
   });
 }
 
-export async function connectHealthRequest(request: HealthRequest, signal?: AbortSignal) {
-  if (healthRequestView(request) !== 'authorize') throw new Error('health_unavailable');
-  const pairingCode = await withApiDeadline(HEALTH_HTTP_DEADLINE_MS, signal, async (requestSignal) => {
-    const response = await apiFetch('/api/mobile/pairings', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request_id: request.id }), signal: requestSignal,
+type ConnectionResult = 'connected' | 'declined' | 'failed';
+type ConnectionAttempt = {
+  requestId: string;
+  phase: 'pairing' | 'native' | 'settled';
+  result: ConnectionResult | null;
+};
+// S3 admits one connect at a time. This document owns that attempt, not a visible route.
+let connection: ConnectionAttempt | null = null;
+let connectionOwner: { cancelPairing: () => void; terminal: boolean } | null = null;
+const connectionListeners = new Set<() => void>();
+export const getHealthConnection = () => connection;
+export function subscribeHealthConnection(listener: () => void) {
+  connectionListeners.add(listener);
+  return () => { connectionListeners.delete(listener); };
+}
+function publishConnection(next: ConnectionAttempt | null) {
+  connection = next;
+  connectionListeners.forEach(listener => listener());
+}
+
+export function observeHealthTerminal(id: string) {
+  if (connection?.requestId !== id || !connectionOwner) return;
+  connectionOwner.terminal = true;
+  if (connection.phase === 'pairing') connectionOwner.cancelPairing();
+  // A terminal request supersedes the receipt, but cannot end an executing Native call.
+  else if (connection.result) publishConnection({ ...connection, result: null });
+}
+
+export async function connectHealthRequest(request: HealthRequest, signal: AbortSignal) {
+  if (signal.aborted || healthRequestView(request) !== 'authorize'
+    || (connection && connection.phase !== 'settled')
+    || (connection?.requestId === request.id && connection.result)) return;
+  const pairing = new AbortController();
+  const owner = {
+    terminal: false,
+    cancelPairing: () => {
+      if (connectionOwner !== owner || connection?.phase !== 'pairing') return;
+      pairing.abort();
+      connectionOwner = null;
+      publishConnection(null);
+    },
+  };
+  // Reserve synchronously, before POST, including when two consumers act in the same tick.
+  connectionOwner = owner;
+  publishConnection({ requestId: request.id, phase: 'pairing', result: null });
+  signal.addEventListener('abort', owner.cancelPairing, { once: true });
+  try {
+    const pairingCode = await withApiDeadline(HEALTH_HTTP_DEADLINE_MS, pairing.signal, async (requestSignal) => {
+      const response = await apiFetch('/api/mobile/pairings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_id: request.id }), signal: requestSignal,
+      });
+      if (!response.ok) throw new Error('health_pairing_failed');
+      const value = await response.json() as { pairing_code?: unknown };
+      requestSignal.throwIfAborted();
+      if (typeof value.pairing_code !== 'string' || !value.pairing_code) throw new Error('health_pairing_invalid');
+      return value.pairing_code;
     });
-    if (!response.ok) throw new Error('health_pairing_failed');
-    const pairing = await response.json() as { pairing_code?: unknown };
-    requestSignal.throwIfAborted();
-    if (typeof pairing.pairing_code !== 'string' || !pairing.pairing_code) throw new Error('health_pairing_invalid');
-    return pairing.pairing_code;
-  });
-  // This one-time code stays in this call, never in UI state, URLs or storage.
-  // Retired routes may not forward a late code. Native authorization itself is user-paced.
-  signal?.throwIfAborted();
-  const result = await nativeHealthConnect({ requestId: request.id, pairingCode });
-  if (!result || !['connected', 'declined', 'failed'].includes(result.state)) throw new Error('health_connect_failed');
-  return result;
+    pairing.signal.throwIfAborted();
+    signal.throwIfAborted();
+    if (connectionOwner !== owner) return;
+    // The code stays invocation-local. Once dispatched, aborting a route cannot cancel Native.
+    publishConnection({ requestId: request.id, phase: 'native', result: null });
+    signal.removeEventListener('abort', owner.cancelPairing);
+    const result = await nativeHealthConnect({ requestId: request.id, pairingCode });
+    if (!result || !['connected', 'declined', 'failed'].includes(result.state)) throw new Error('health_connect_failed');
+    publishConnection({ requestId: request.id, phase: 'settled', result: owner.terminal ? null : result.state });
+  } catch {
+    if (connectionOwner === owner) {
+      publishConnection({ requestId: request.id, phase: 'settled', result: owner.terminal ? null : 'failed' });
+    }
+  } finally {
+    signal.removeEventListener('abort', owner.cancelPairing);
+  }
 }

@@ -1,27 +1,30 @@
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
-import { useEffect, useRef, useState } from 'react';
-import { connectHealthRequest, getHealthRequest, healthRequestView, type HealthRequest, type HealthViewState } from '@/lib/healthRequests';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { connectHealthRequest, getHealthConnection, getHealthRequest, healthRequestView, observeHealthTerminal, subscribeHealthConnection, type HealthRequest } from '@/lib/healthRequests';
 
 type LiveState = {
   id: string;
   request?: HealthRequest;
   known: boolean;
   loadError: boolean;
-  busy: boolean;
-  connection: HealthViewState | null;
 };
-const unknownState = (id: string): LiveState => ({ id, known: false, loadError: false, busy: false, connection: null });
+const unknownState = (id: string): LiveState => ({ id, known: false, loadError: false });
 const terminal = (request?: HealthRequest) => request && !['queued', 'claimed'].includes(request.state);
 
 export function useHealthRequest(id: string, initial?: HealthRequest) {
   const active = useRouteSurfaceActive();
   const [live, setLive] = useState<LiveState>(() => unknownState(id));
   const owner = useRef<{ id: string; authorize: () => Promise<void> } | null>(null);
+  const confirmedTerminal = useRef<HealthRequest | undefined>(undefined);
+  const connection = useSyncExternalStore(subscribeHealthConnection, getHealthConnection, getHealthConnection);
 
   useEffect(() => {
-    // One lifetime owns both reads and the pairing attempt. A route change retires all of them.
+    // Visibility owns reads and pre-dispatch pairing only. Dispatched Native has its own owner.
     const lifetime = new AbortController();
     let snapshot = unknownState(id);
+    if (confirmedTerminal.current?.id === id) {
+      snapshot = { ...snapshot, request: confirmedTerminal.current, known: true };
+    } else confirmedTerminal.current = undefined;
     let read: AbortController | undefined;
     let sequence = 0;
     let failures = 0;
@@ -41,6 +44,10 @@ export function useHealthRequest(id: string, initial?: HealthRequest) {
         const next = await getHealthRequest(id, attempt.signal);
         if (!ownsRead()) return;
         snapshot = { ...snapshot, request: next, known: true, loadError: false };
+        if (terminal(next)) {
+          confirmedTerminal.current = next;
+          observeHealthTerminal(id);
+        }
         failures = 0;
         publish();
       } catch {
@@ -59,28 +66,25 @@ export function useHealthRequest(id: string, initial?: HealthRequest) {
 
     const authorize = async () => {
       const request = snapshot.request;
-      if (lifetime.signal.aborted || snapshot.busy || !snapshot.known || snapshot.loadError
+      if (lifetime.signal.aborted || !snapshot.known || snapshot.loadError
         || !request || healthRequestView(request) !== 'authorize') return;
-      snapshot = { ...snapshot, busy: true };
-      publish();
-      try {
-        const result = await connectHealthRequest(request, lifetime.signal);
-        if (!lifetime.signal.aborted) snapshot = { ...snapshot, connection: result.state };
-      } catch {
-        if (!lifetime.signal.aborted) snapshot = { ...snapshot, connection: 'failed' };
-      } finally {
-        if (!lifetime.signal.aborted) {
-          snapshot = { ...snapshot, busy: false };
-          publish();
-          void refresh();
-        }
-      }
+      await connectHealthRequest(request, lifetime.signal);
     };
 
     owner.current = active ? { id, authorize } : null;
+    // Reopened consumers read immediately; only a new matching completion supersedes that read.
+    let previousConnection = getHealthConnection();
+    const unsubscribe = subscribeHealthConnection(() => {
+      const next = getHealthConnection();
+      const completed = next !== previousConnection && next?.requestId === id
+        && next.phase === 'settled' && next.result;
+      previousConnection = next;
+      if (active && completed) void refresh();
+    });
     if (active) void refresh();
     return () => {
       owner.current = null;
+      unsubscribe();
       lifetime.abort();
       read?.abort();
       clearTimeout(timer);
@@ -91,10 +95,12 @@ export function useHealthRequest(id: string, initial?: HealthRequest) {
   const current = live.id === id ? live : unknownState(id);
   const request = current.request ?? initial;
   const serverView = request ? healthRequestView(request) : null;
-  const state = request && !terminal(request) && current.connection ? current.connection : serverView;
+  const receipt = connection?.requestId === id ? connection.result : null;
+  const pending = connection !== null && connection.phase !== 'settled';
+  const state = request && !terminal(request) && receipt ? receipt : serverView;
   const authorize = async () => {
     if (active && owner.current?.id === id) await owner.current.authorize();
   };
-  return { request, state, busy: current.busy, loadError: current.loadError,
-    canAuthorize: active && current.known && !current.loadError, authorize };
+  return { request, state, busy: pending && connection.requestId === id, loadError: current.loadError,
+    canAuthorize: active && current.known && !current.loadError && !pending, authorize };
 }
