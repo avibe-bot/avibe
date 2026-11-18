@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
 import json
 import os
@@ -595,6 +596,124 @@ def test_private_identity_covers_hard_links_and_literal_percent_roots(store, tmp
     ordinary.write_text("ordinary")
     assert not boundary.is_private_path(ordinary)
     assert files.file_content(str(ordinary)).data == b"ordinary"
+
+
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.EPERM])
+def test_inaccessible_public_link_does_not_hide_other_listing_or_search_results(
+    store, tmp_path, monkeypatch, error_number,
+):
+    """A target-specific failure refuses that entry, not the traversal's snapshot."""
+    from core import file_browser_service as files
+    from core.mobile_storage_boundary import MobileStorageBoundary
+
+    public = tmp_path / "public"
+    public.mkdir()
+    restricted = tmp_path / "restricted"
+    restricted.mkdir()
+    (restricted / "unreadable.txt").write_text("unreadable")
+    bad = public / "000-denied.txt"
+    bad.symlink_to(restricted / "unreadable.txt")
+    good = public / "public-match.txt"
+    good.write_text("public sentinel")
+    original_stat = os.stat
+
+    def permission_denied(path, *args, **kwargs):
+        # chmod alone cannot reproduce TCC/ACL errors on Windows or as root.
+        if not isinstance(path, int) and Path(path).is_relative_to(restricted):
+            raise PermissionError(error_number, "Synthetic protected location")
+        return original_stat(path, *args, **kwargs)
+
+    restricted.chmod(0)
+    try:
+        monkeypatch.setattr(os, "stat", permission_denied)
+        boundary = MobileStorageBoundary()
+        assert boundary.is_private_path(bad)
+        assert not boundary.is_private_path(good)
+        assert {entry["name"] for entry in files.list_directory(str(public))["entries"]} == {good.name}
+        assert {hit["rel"] for hit in files.search_names(str(public), "match")["results"]} == {good.name}
+        assert {hit["rel"] for hit in files.search(str(public), "sentinel")["results"]} == {good.name}
+    finally:
+        restricted.chmod(0o700)
+
+
+@pytest.mark.parametrize("failure", ["root", "scan"])
+def test_unverifiable_private_snapshot_refuses_every_later_entry(store, tmp_path, monkeypatch, failure):
+    from core.mobile_storage_boundary import MobileStorageBoundary
+
+    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+    first.write_text("ordinary")
+    second.write_text("ordinary")
+    original_stat, original_scandir = os.stat, os.scandir
+    broken = [True]
+
+    def root_stat(path, *args, **kwargs):
+        if broken[0] and not isinstance(path, int) and Path(path) == store.path.parent:
+            raise PermissionError(errno.EACCES, "Synthetic private root failure")
+        return original_stat(path, *args, **kwargs)
+
+    def private_scan(path):
+        if broken[0] and Path(path) == store.path.parent:
+            raise PermissionError(errno.EACCES, "Synthetic private snapshot failure")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "stat", root_stat if failure == "root" else original_stat)
+    monkeypatch.setattr(os, "scandir", private_scan if failure == "scan" else original_scandir)
+    boundary = MobileStorageBoundary()
+    assert boundary.is_private_path(first)
+    broken[0] = False
+    assert boundary.is_private_path(second)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS firmlink with an absent private root")
+def test_absent_private_root_cannot_be_preplanted_through_a_firmlink(tmp_path, monkeypatch):
+    from config import paths
+    from core import file_browser_service as files
+    from core.mobile_storage_boundary import MobileStorageBoundary
+
+    state = tmp_path / "future-home" / "state"
+    monkeypatch.setattr(paths, "get_state_dir", lambda: state)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    alias_home = Path("/System/Volumes/Data" + os.path.realpath(state.parent))
+    assert os.path.samefile(alias_home, state.parent)
+    initial = MobileStorageBoundary()
+    alias_missing_state = alias_home / state.name
+    assert initial.is_private_path(alias_missing_state / "mobile" / "mobile.sqlite3")
+    assert initial.is_private_path(alias_missing_state, include_ancestors=True)
+    assert not initial.is_private_path(alias_home / "ordinary-neighbor")
+    assert not state.exists()
+    state.mkdir(parents=True, exist_ok=True)
+    private = state / "mobile"
+    assert not private.exists()
+    canonical_state = Path(os.path.realpath(state))
+    alias_state = Path("/System/Volumes/Data" + str(canonical_state))
+    assert os.path.samefile(alias_state, state)
+    alias = alias_state / private.name
+    source = tmp_path / "synthetic-source"
+    source.mkdir()
+    with sqlite3.connect(source / "mobile.sqlite3") as conn:
+        conn.execute("PRAGMA user_version=1")
+        conn.execute("CREATE TABLE synthetic_fixture (id TEXT)")
+
+    boundary = MobileStorageBoundary()
+    assert boundary.is_private_path(alias)
+    assert boundary.is_private_path(alias / "new-directory" / "new-file")
+    assert boundary.is_private_path(alias_state, include_ancestors=True)
+    assert not private.exists()  # Inspection must not create the root.
+    for operation in (
+        lambda: files.make_directory(str(alias)),
+        lambda: files.copy_path(str(source), str(alias)),
+        lambda: files.move_path(str(source), str(alias)),
+        lambda: files.write_file(str(alias / "mobile.sqlite3"), "synthetic"),
+    ):
+        with pytest.raises(files.FileBrowserError, match="Permission denied"):
+            operation()
+        assert not private.exists() and source.exists()
+    ordinary = alias_state / "ordinary-neighbor"
+    assert not boundary.is_private_path(ordinary)
+    files.make_directory(str(ordinary))
+    files.write_file(str(ordinary / "ordinary.txt"), "ordinary")
+    assert files.file_content(str(ordinary / "ordinary.txt")).data == b"ordinary"
+    assert not private.exists()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS filesystem identity aliases")

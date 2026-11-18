@@ -38,44 +38,69 @@ class MobileStorageBoundary:
         ))
         self._root_names = tuple(str(root).rstrip("/\\").casefold() for root in self.roots)
         self._root_ids: set[tuple[int, int]] = set()
+        self._root_anchors: list[tuple[tuple[int, int], tuple[str, ...]]] = []
         self._nodes: set[tuple[int, int]] | None = None
         self._ancestors: set[tuple[int, int]] | None = None
         self._unavailable = False
         try:
-            self._root_ids = {identity for root in self.roots if (identity := _identity(root))}
-        except OSError:
+            for root in self.roots:
+                # A missing root still has a physical parent and intended suffix.
+                # This reserves its aliases without creating files while browsing.
+                suffix: tuple[str, ...] = ()
+                for candidate in (root, *root.parents):
+                    identity = _identity(candidate)
+                    if identity is not None:
+                        self._root_anchors.append((identity, suffix))
+                        if not suffix:
+                            self._root_ids.add(identity)
+                        break
+                    if candidate.is_symlink():
+                        raise OSError(errno.ELOOP, "Unverifiable private root")
+                    suffix = (candidate.name.casefold(), *suffix)
+                else:
+                    raise OSError(errno.ENOENT, "Unverifiable private root")
+        except (OSError, RuntimeError, ValueError):
             self._unavailable = True
 
     def _private_nodes(self) -> set[tuple[int, int]]:
         if self._nodes is None:
-            nodes = set(self._root_ids)
-            pending = [root for root in self.roots if root.is_dir()]
-            visited = set()
-            while pending:
-                directory = pending.pop()
-                identity = _identity(directory)
-                if identity is None or identity in visited:
-                    continue
-                visited.add(identity)
-                with os.scandir(directory) as entries:
-                    for entry in entries:
-                        try:
-                            # DirEntry.stat reports zero file IDs on Windows.
-                            info = os.stat(entry.path, follow_symlinks=False)
-                        except FileNotFoundError:
-                            continue
-                        nodes.add((info.st_dev, info.st_ino))
-                        if stat.S_ISDIR(info.st_mode):
-                            pending.append(Path(entry.path))
-            self._nodes = nodes
+            try:
+                nodes = set(self._root_ids)
+                pending = [root for root in self.roots if _identity(root) is not None]
+                visited = set()
+                while pending:
+                    directory = pending.pop()
+                    identity = _identity(directory)
+                    if identity is None or identity in visited:
+                        continue
+                    visited.add(identity)
+                    with os.scandir(directory) as entries:
+                        for entry in entries:
+                            try:
+                                # DirEntry.stat reports zero file IDs on Windows.
+                                info = os.stat(entry.path, follow_symlinks=False)
+                            except FileNotFoundError:
+                                continue
+                            nodes.add((info.st_dev, info.st_ino))
+                            if stat.S_ISDIR(info.st_mode):
+                                pending.append(Path(entry.path))
+                self._nodes = nodes
+            except (OSError, RuntimeError, ValueError):
+                # This snapshot protects every path in the current operation.
+                self._unavailable = True
+                raise
         return self._nodes
 
     def _private_ancestors(self) -> set[tuple[int, int]]:
         if self._ancestors is None:
-            self._ancestors = {
-                identity for root in self.roots for parent in root.parents
-                if (identity := _identity(parent))
-            }
+            try:
+                self._ancestors = {
+                    identity for root in self.roots for parent in root.parents
+                    if (identity := _identity(parent))
+                }
+            except (OSError, RuntimeError, ValueError):
+                self._unavailable = True
+                raise
         return self._ancestors
 
     def _matches(self, raw: str, include_ancestors: bool) -> bool:
@@ -88,16 +113,21 @@ class MobileStorageBoundary:
                 return True
             if include_ancestors and (not name or private.startswith(name + os.sep)):
                 return True
-        if not self._root_ids:
-            return False
+        suffix: tuple[str, ...] = ()
         for candidate in (target, *target.parents):
             identity = _identity(candidate)
-            if identity is None:
-                continue
-            if identity in self._root_ids or identity in self._private_nodes():
-                return True
-            if candidate == target and include_ancestors and identity in self._private_ancestors():
-                return True
+            if identity is not None:
+                for anchor, private_suffix in self._root_anchors:
+                    if identity == anchor and (
+                        suffix[:len(private_suffix)] == private_suffix
+                        or (include_ancestors and private_suffix[:len(suffix)] == suffix)
+                    ):
+                        return True
+                if identity in self._private_nodes():
+                    return True
+                if candidate == target and include_ancestors and identity in self._private_ancestors():
+                    return True
+            suffix = (candidate.name.casefold(), *suffix)
         return False
 
     def is_private_path(self, value: str | Path, *, include_ancestors: bool = False) -> bool:
@@ -114,7 +144,8 @@ class MobileStorageBoundary:
                     break
                 raw = decoded
         except (OSError, RuntimeError, ValueError):
-            self._unavailable = True
+            # A target/ancestor error refuses this entry. Snapshot builders above
+            # alone invalidate the shared boundary when private state is unknown.
             return True
         return False
 

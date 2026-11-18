@@ -87,6 +87,35 @@ Review follow-up on `63e1212e18a4fbc73f48aa784b9a1052d458c931`:
   English-only CLI text and parser-backed examples. Only mobile's own
   description is shortened here.
 
+Review follow-up on `a2fd5038a5f669792ecec5eba5e9ece9dd904359`:
+
+- Exact-head Codex passed, both original threads were resolved, all 49 CI checks
+  passed or were explicitly skipped, and GitHub reported `CLEAN`.
+- The main-assigned independent security delta review closed the original
+  findings but found an operation-wide failure state after one inaccessible
+  public entry, and alias preplanting while the private root did not yet exist.
+  The repeated storage-boundary class triggered the review circuit breaker.
+  Main independently diagnosed the scope and approved these two corrections.
+- Private-root or snapshot failures still refuse the entire operation. A single
+  target/ancestor failure now refuses only that target, preserving other listing
+  and name/content search results. An absent private root is identified by its
+  nearest existing ancestor's device/inode and remaining path components,
+  including reverse ancestor checks. Inspection creates no mobile directory.
+- Five new regression cases include real macOS firmlink mutations against a
+  missing root and a synthetic mode-000 public symlink. The relevant new failures
+  were reproduced before the fix. All 303 focused/adjacent/CLI/scenario/lifecycle
+  cases and 707 Show/authority/instance-operation cases pass.
+- Waiter-lock cleanup is tracked separately by main. Mounting-container traversal
+  remains subject to main's independent scope assessment; the copy-size limit is
+  not an authorization boundary. Independent review of this new storage delta
+  remains required.
+- Max subsequently selected an owner-origin read policy: any instance Agent may
+  serve the owner, while group, other-user and unverified origins must be refused.
+  The source-verification design is under main's decision separately from this
+  storage correction. Current CLI process identity alone does not establish
+  human ownership, and same-user arbitrary shell access is not isolated from the
+  database. This policy is an outstanding delivery gate.
+
 Authorized: implementation and a non-draft English PR through Merge-ready.
 Not authorized: merge, install an S1 package locally, modify Apple App ID or
 profiles, TestFlight, release, production service / state / push or remote access.
