@@ -1693,7 +1693,8 @@ final class MobileOnboardingTests: XCTestCase {
             _ = try coordinator.selectInstance(id: instance.id)
             coordinator.activateAccountSurface()
 
-            XCTAssertEqual(try await coordinator.refresh(), .twoFactorRequired(requirement), name)
+            let answer1 = try await coordinator.refresh()
+            XCTAssertEqual(answer1, .twoFactorRequired(requirement), name)
             XCTAssertEqual(pushLogouts, 0, name)
 
             // A relaunch while the factor is still owed keeps the same answer.
@@ -1709,8 +1710,10 @@ final class MobileOnboardingTests: XCTestCase {
                 onPreparePushLogout: { relaunchLogouts += 1 }
             )
             relaunched.activateAccountSurface()
-            XCTAssertEqual(try await relaunched.bootstrap(), .twoFactorRequired(requirement), name)
-            XCTAssertEqual(try await relaunched.refresh(), .twoFactorRequired(requirement), name)
+            let answer2 = try await relaunched.bootstrap()
+            XCTAssertEqual(answer2, .twoFactorRequired(requirement), name)
+            let answer3 = try await relaunched.refresh()
+            XCTAssertEqual(answer3, .twoFactorRequired(requirement), name)
             XCTAssertEqual(relaunchLogouts, 0, name)
 
             let passed = try await relaunched.verifySecondFactor(method: .totp, code: "123456")
@@ -1733,8 +1736,10 @@ final class MobileOnboardingTests: XCTestCase {
             onPreparePushLogout: { pushLogouts += 1 }
         )
         coordinator.activateAccountSurface()
-        XCTAssertEqual(try await coordinator.bootstrap(), .twoFactorRequired(requirement))
-        XCTAssertEqual(try await coordinator.refresh(), .twoFactorRequired(requirement))
+        let answer4 = try await coordinator.bootstrap()
+        XCTAssertEqual(answer4, .twoFactorRequired(requirement))
+        let answer5 = try await coordinator.refresh()
+        XCTAssertEqual(answer5, .twoFactorRequired(requirement))
         XCTAssertEqual(pushLogouts, 0)
     }
 
@@ -1942,7 +1947,8 @@ final class MobileOnboardingTests: XCTestCase {
 
             if path == "second factor" {
                 coordinator.activateAccountSurface()
-                XCTAssertEqual(try await coordinator.refresh(), .twoFactorRequired(requirement))
+                let answer6 = try await coordinator.refresh()
+                XCTAssertEqual(answer6, .twoFactorRequired(requirement))
                 _ = try await coordinator.verifySecondFactor(method: .totp, code: "123456")
             } else {
                 let relaunch = FakeMobileAuthTransport()
@@ -1995,7 +2001,8 @@ final class MobileOnboardingTests: XCTestCase {
                 onPreparePushLogout: { pushLogouts += 1 }
             )
             updated.activateAccountSurface()
-            XCTAssertEqual(try await updated.bootstrap(), .twoFactorRequired(requirement), name)
+            let answer7 = try await updated.bootstrap()
+            XCTAssertEqual(answer7, .twoFactorRequired(requirement), name)
             _ = try await updated.requestOTP(email: "\(next)@example.com")
             let state = try await updated.verifyOTP(email: "\(next)@example.com", code: "123456")
             guard case .signedIn(let signedIn, _) = state else {
@@ -2046,7 +2053,8 @@ final class MobileOnboardingTests: XCTestCase {
         let ended = Task { try await coordinator.refresh() }
         await fulfillment(of: [oldCleanup], timeout: 30)
         // Sign out (borrowing it), then sign in as account-2.
-        XCTAssertEqual(try await coordinator.logout(), .signedOut)
+        let answer8 = try await coordinator.logout()
+        XCTAssertEqual(answer8, .signedOut)
         discovery = .signedIn(snapshot(accountID: "account-2"))
         _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
         XCTAssertEqual(coordinator.currentAccount?.id, "account-2")
@@ -2057,7 +2065,8 @@ final class MobileOnboardingTests: XCTestCase {
         // account-2 owes its factor; someone else signs in with a code.
         coordinator.activateAccountSurface()
         discovery = .secondFactorRequired(requirement)
-        XCTAssertEqual(try await coordinator.refresh(), .twoFactorRequired(requirement))
+        let answer9 = try await coordinator.refresh()
+        XCTAssertEqual(answer9, .twoFactorRequired(requirement))
         XCTAssertEqual(cleanups, 1)
         otpAccount = "account-3"
         _ = try await coordinator.requestOTP(email: "account-3@example.com")
