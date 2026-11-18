@@ -636,6 +636,8 @@ final class WebViewController: UIViewController {
     private let showAccount: () -> Void
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
+    /// The App's own sign-in screen, for a Google, GitHub or Apple sign-in tapped inside the page.
+    private let showSignIn: () -> Void
     private let instanceName: () -> String?
     private let instanceID: () -> String?
     private let deviceID: () -> String?
@@ -826,6 +828,7 @@ final class WebViewController: UIViewController {
         showAccount: @escaping () -> Void = {},
         showAccountRoot: @escaping () -> Void = {},
         showInstances: @escaping () -> Void = {},
+        showSignIn: @escaping () -> Void = {},
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
@@ -859,6 +862,7 @@ final class WebViewController: UIViewController {
         self.showAccount = showAccount
         self.showAccountRoot = showAccountRoot
         self.showInstances = showInstances
+        self.showSignIn = showSignIn
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
@@ -1380,6 +1384,9 @@ final class WebViewController: UIViewController {
         case .github:
             title = String(localized: "github.title")
             message = String(localized: "github.body")
+        case .apple:
+            title = String(localized: "apple.title")
+            message = String(localized: "apple.body")
         }
         let alert = UIAlertController(
             title: title,
@@ -1387,10 +1394,16 @@ final class WebViewController: UIViewController {
             preferredStyle: .alert
         )
         alert.addAction(
-            UIAlertAction(title: String(localized: "common.ok"), style: .default) { [weak self] _ in
+            UIAlertAction(title: String(localized: "common.cancel"), style: .cancel) { [weak self] _ in
                 self?.presentNextDownloadedFileAfterDismissal()
             }
         )
+        // The App's own sign-in screen offers this provider natively.
+        let signIn = UIAlertAction(title: String(localized: "signin.go"), style: .default) { [weak self] _ in
+            self?.showSignIn()
+        }
+        alert.addAction(signIn)
+        alert.preferredAction = signIn
         let host = topViewController(from: self)
         guard
             host.viewIfLoaded?.window != nil,

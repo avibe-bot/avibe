@@ -42,7 +42,7 @@ for (const colorScheme of ['light', 'dark'] as const) {
 
     // Load the real bundled-page entry and CSS; the only fake is its native bridge.
     await page.goto('/mobile.html');
-    await page.getByRole('button', { name: 'Sign in / Create account', exact: true }).click();
+    await page.getByRole('button', { name: 'Continue with email', exact: true }).click();
     await page.locator('input[type=email]').fill('otp-fixture@example.invalid');
     await page.locator('input[type=email]').press('Enter');
     const input = page.locator('#mobile-login-code');

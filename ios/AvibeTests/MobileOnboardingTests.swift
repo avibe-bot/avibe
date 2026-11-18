@@ -548,6 +548,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.dismiss",
                 "app.returnToInstance",
                 "app.openPage",
+                "auth.signInWithProvider",
             ]
         )
         XCTAssertThrowsError(
@@ -889,6 +890,517 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNil(controller.presentedViewController)
     }
 
+    // MARK: Google and GitHub sign-in (contract: _tmp/ios-login/contract-backend.md)
+
+    func testProviderSecretsAreRandomUnpaddedBase64URLWithAnS256Challenge() throws {
+        // RFC 7636, Appendix B.
+        XCTAssertEqual(
+            MobileProviderSecrets.challenge(for: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        )
+        let first = try MobileProviderSecrets.generate()
+        let second = try MobileProviderSecrets.generate()
+        for value in [first.verifier, first.state, second.verifier, second.state] {
+            XCTAssertEqual(value.count, 43)
+            XCTAssertNotNil(value.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression))
+        }
+        XCTAssertEqual(Set([first.verifier, first.state, second.verifier, second.state]).count, 4)
+    }
+
+    func testTheAppOpensOnlyTheControlPlaneLaunchRoute() {
+        let controlPlane = MobileControlPlaneConfiguration.productionURL
+        let launch = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA"
+        XCTAssertTrue(MobileProviderRoute.isAllowedBrowserURL(
+            URL(string: "https://avibe.bot/api/mobile/auth/browser?launch=\(launch)")!, controlPlane: controlPlane
+        ))
+        for raw in [
+            "http://avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://evil.avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://avibe.bot:8443/api/mobile/auth/browser?launch=\(launch)",
+            "https://user@avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://avibe.bot/api/mobile/auth/browser?launch=abc",
+            "https://avibe.bot/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLB",
+            "https://avibe.bot/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA=",
+            "https://avibe.bot:443/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA",
+            "https://avibe.bot/api/mobile/auth/%62rowser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA",
+            "https://avibe.bot/api/mobile/auth/browser?launch=\(launch)#x",
+            "https://avibe.bot/api/mobile/auth/browser?launch=",
+            "https://avibe.bot/api/mobile/auth/browser",
+            "https://avibe.bot/api/mobile/auth/browser?launch=a&launch=b",
+            "https://avibe.bot/api/mobile/auth/browser?launch=a&next=/",
+            "https://avibe.bot/api/mobile/auth/browser/?launch=\(launch)",
+            "https://accounts.google.com/o/oauth2/v2/auth?launch=\(launch)",
+        ] {
+            XCTAssertFalse(
+                MobileProviderRoute.isAllowedBrowserURL(URL(string: raw)!, controlPlane: controlPlane), raw
+            )
+        }
+    }
+
+    func testTheCallbackIsReadOnlyInItsExactShapeAndState() {
+        let controlPlane = MobileControlPlaneConfiguration.productionURL
+        let state = "state-123"
+        func read(_ raw: String) -> MobileProviderRoute.Callback {
+            MobileProviderRoute.callback(URL(string: raw)!, controlPlane: controlPlane, state: state)
+        }
+        let longCode = String(repeating: "c", count: 4096)
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?code=abc&state=state-123"), .code("abc"))
+        // An empty `#` keeps the browser from carrying an earlier hop's fragment along.
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?code=abc&state=state-123#"), .code("abc"))
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?state=state-123&code=\(longCode)"), .code(longCode))
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?error=cancelled&state=state-123"), .cancelled)
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?error=provider_email_unverified&state=state-123"), .emailUnverified)
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?error=provider_unavailable&state=state-123"), .unavailable)
+        for raw in [
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-124",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-12",
+            "https://avibe.bot/mobile/auth/complete?code=abc",
+            "https://avibe.bot/mobile/auth/complete?state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&error=cancelled&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&code=abd&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-123&extra=1",
+            "https://avibe.bot/mobile/auth/complete?code=&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=\(longCode)c&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-123#fragment",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-123#error=access_denied",
+            "https://avibe.bot/mobile/auth/complete?error=invalid_or_expired&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?error=something_else&state=state-123",
+            "https://avibe.bot:444/mobile/auth/complete?code=abc&state=state-123",
+            "https://evil.avibe.bot/mobile/auth/complete?code=abc&state=state-123",
+            "http://avibe.bot/mobile/auth/complete?code=abc&state=state-123",
+            "https://avibe.bot/mobile/auth/completed?code=abc&state=state-123",
+            "https://avibe.bot/auth/callback?code=abc&state=state-123",
+        ] {
+            XCTAssertEqual(read(raw), .invalid, raw)
+        }
+    }
+
+    func testProviderSignInExchangesTheCallbackCodeWithThisAttemptsVerifier() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        var openedState: String?
+        web.handler = { url, host, path in
+            XCTAssertEqual(url.absoluteString, "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")
+            XCTAssertEqual(host, "127.0.0.1")
+            XCTAssertEqual(path, "/mobile/auth/complete")
+            return URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(openedState!)")!
+        }
+        transport.providerStartHandler = { _, _, state in
+            openedState = state
+            return .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+        }
+        let fresh = snapshot(accountID: "account-1", instances: [])
+        transport.providerExchangeHandler = { _, _, _ in
+            MobileProviderExchange(discovery: .signedIn(fresh), accountCreated: true)
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            // The first store is not fresh: the attempt rotates and starts on the second transport.
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        let start = try XCTUnwrap(transport.providerStarts.first)
+        let exchange = try XCTUnwrap(transport.providerExchanges.first)
+        XCTAssertEqual(start.provider, .github)
+        XCTAssertEqual(exchange.transactionID, "transaction-1")
+        XCTAssertEqual(exchange.code, "one-time")
+        XCTAssertEqual(MobileProviderSecrets.challenge(for: exchange.verifier), start.challenge)
+        XCTAssertNotEqual(exchange.verifier, start.state)
+        XCTAssertTrue(coordinator.accountWasJustCreated)
+
+        // Any account transition retires the hint.
+        _ = try await coordinator.logout()
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testAProviderSignInThatOwesTheSecondFactorKeepsItsStoreAndShowsNoNewAccountHint() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        var sentState = ""
+        transport.providerStartHandler = { _, _, state in
+            sentState = state
+            return .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+        }
+        web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
+        let requirement = MobileSecondFactorRequirement(email: "alex@example.com", gate: .challenge, methods: [.totp])
+        // The store that receives the first-factor cookies is the one in use at the exchange.
+        var exchangedIn: UUID?
+        transport.providerExchangeHandler = { _, _, _ in
+            exchangedIn = store.identifier
+            return MobileProviderExchange(discovery: .secondFactorRequired(requirement), accountCreated: true)
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
+
+        guard case .twoFactorRequired = state else {
+            return XCTFail("Expected the second factor, got \(state)")
+        }
+        XCTAssertNotNil(exchangedIn)
+        XCTAssertEqual(store.identifier, exchangedIn)
+        XCTAssertEqual(transport.providerExchanges.count, 1)
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testAnExchangeThatFailsRotatesTheStoreAndIsNeverRetried() async throws {
+        for failure in [
+            MobileAccountError.invalidOrExpired,
+            .providerEmailUnverified,
+            MobileAccountError(code: "rate_limited", message: "slow down", retryAfterSeconds: 30),
+            .network,
+        ] {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            let web = FakeWebAuthenticator()
+            var sentState = ""
+            transport.providerStartHandler = { _, _, state in
+                sentState = state
+                return .browser(
+                    transactionID: "transaction-1",
+                    url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+                )
+            }
+            web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
+            transport.providerExchangeHandler = { _, _, _ in throw failure }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                webAuthenticator: web
+            )
+            coordinator.activateAccountSurface()
+            let started = store.identifier
+
+            do {
+                _ = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+                XCTFail("Expected \(failure.code)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, failure.code)
+            }
+            XCTAssertEqual(transport.providerExchanges.count, 1, failure.code)
+            XCTAssertNotEqual(store.identifier, started, failure.code)
+            XCTAssertNil(coordinator.currentAccount)
+        }
+    }
+
+    func testProviderSignInThatDoesNotSignInRotatesTheStoreAndNeverExchanges() async throws {
+        let cases: [(callback: (String) -> String, error: String)] = [
+            ({ _ in "cancel" }, MobileAccountError.providerCancelled.code),
+            ({ "https://127.0.0.1/mobile/auth/complete?error=cancelled&state=\($0)" }, MobileAccountError.providerCancelled.code),
+            ({ "https://127.0.0.1/mobile/auth/complete?error=provider_email_unverified&state=\($0)" }, MobileAccountError.providerEmailUnverified.code),
+            ({ "https://127.0.0.1/mobile/auth/complete?error=provider_unavailable&state=\($0)" }, MobileAccountError.providerUnavailable.code),
+            ({ _ in "https://127.0.0.1/mobile/auth/complete?code=one-time&state=someone-else" }, MobileAccountError.invalidOrExpired.code),
+        ]
+        for (callback, expected) in cases {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            let web = FakeWebAuthenticator()
+            var sentState = ""
+            transport.providerStartHandler = { _, _, state in
+                sentState = state
+                return .browser(
+                    transactionID: "transaction-1",
+                    url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+                )
+            }
+            web.handler = { _, _, _ in
+                let raw = callback(sentState)
+                if raw == "cancel" { throw MobileAccountError.providerCancelled }
+                return URL(string: raw)!
+            }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                webAuthenticator: web
+            )
+            coordinator.activateAccountSurface()
+            let started = store.identifier
+
+            do {
+                _ = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
+                XCTFail("Expected \(expected)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, expected)
+            }
+            XCTAssertTrue(transport.providerExchanges.isEmpty, expected)
+            XCTAssertNotEqual(store.identifier, started, expected)
+            XCTAssertNil(coordinator.currentAccount)
+            XCTAssertFalse(coordinator.accountWasJustCreated)
+        }
+    }
+
+    func testProviderSignInRefusesABrowserAddressOffTheControlPlane() async throws {
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        transport.providerStartHandler = { _, _, _ in
+            .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "https://accounts.google.com/o/oauth2/v2/auth?launch=x")!
+            )
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+        do {
+            _ = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
+            XCTFail("Expected network")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error.code, MobileAccountError.network.code)
+        }
+        XCTAssertTrue(web.opened.isEmpty)
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+    }
+
+    func testAppleSignInSendsTheHashedServerNonceAndPostsTheTokenAndCode() async throws {
+        let transport = FakeMobileAuthTransport()
+        let apple = FakeAppleAuthorizer()
+        var sentState = ""
+        transport.providerStartHandler = { _, _, state in
+            sentState = state
+            return .apple(transactionID: "transaction-1", nonce: "server-nonce")
+        }
+        apple.handler = { nonce, state in
+            XCTAssertEqual(nonce, MobileAppleNonce.hashed("server-nonce"))
+            XCTAssertEqual(state, sentState)
+            return MobileAppleCredential(identityToken: "id-token", authorizationCode: "auth-code", state: state)
+        }
+        let fresh = snapshot(accountID: "account-1")
+        transport.appleExchangeHandler = { _, _, _, _ in
+            MobileProviderExchange(discovery: .signedIn(fresh), accountCreated: false)
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            appleAuthorizer: apple
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithProvider(.apple, presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        // Lowercase hex of SHA256 over the raw nonce.
+        XCTAssertEqual(
+            MobileAppleNonce.hashed("server-nonce"),
+            SHA256.hash(data: Data("server-nonce".utf8)).map { String(format: "%02x", $0) }.joined()
+        )
+        let start = try XCTUnwrap(transport.providerStarts.first)
+        let exchange = try XCTUnwrap(transport.appleExchanges.first)
+        XCTAssertEqual(start.provider, .apple)
+        XCTAssertEqual(exchange.transactionID, "transaction-1")
+        XCTAssertEqual(exchange.identityToken, "id-token")
+        XCTAssertEqual(exchange.authorizationCode, "auth-code")
+        XCTAssertEqual(MobileProviderSecrets.challenge(for: exchange.verifier), start.challenge)
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testAppleSignInThatDoesNotSignInRotatesTheStoreAndNeverExchanges() async throws {
+        let cases: [(answer: (String) throws -> MobileAppleCredential, start: MobileProviderStart, error: String)] = [
+            ({ _ in throw MobileAccountError.providerCancelled }, .apple(transactionID: "t", nonce: "n"), "provider_cancelled"),
+            ({ _ in throw MobileAccountError.network }, .apple(transactionID: "t", nonce: "n"), "network"),
+            ({ _ in MobileAppleCredential(identityToken: "i", authorizationCode: "c", state: "someone-else") }, .apple(transactionID: "t", nonce: "n"), "invalid_or_expired"),
+            ({ _ in MobileAppleCredential(identityToken: "i", authorizationCode: "c", state: nil) }, .apple(transactionID: "t", nonce: "n"), "invalid_or_expired"),
+            // The backend answered the browser class for Apple: nothing opens.
+            ({ MobileAppleCredential(identityToken: "i", authorizationCode: "c", state: $0) },
+             .browser(transactionID: "t", url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=l")!), "network"),
+        ]
+        for (answer, start, expected) in cases {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            let apple = FakeAppleAuthorizer()
+            let web = FakeWebAuthenticator()
+            transport.providerStartHandler = { _, _, _ in start }
+            apple.handler = { _, state in try answer(state) }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                webAuthenticator: web,
+                appleAuthorizer: apple
+            )
+            coordinator.activateAccountSurface()
+            let started = store.identifier
+            do {
+                _ = try await coordinator.signInWithProvider(.apple, presentationAnchor: UIWindow())
+                XCTFail("Expected \(expected)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, expected)
+            }
+            XCTAssertTrue(transport.appleExchanges.isEmpty, expected)
+            XCTAssertTrue(web.opened.isEmpty, expected)
+            XCTAssertNotEqual(store.identifier, started, expected)
+        }
+    }
+
+    func testSigningOutWhileTheSignInWindowIsOpenClosesItAndDropsTheAttempt() async throws {
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        let opened = expectation(description: "window open")
+        var close: CheckedContinuation<URL, Error>?
+        web.handler = { _, _, _ in
+            try await withCheckedThrowingContinuation { continuation in
+                close = continuation
+                opened.fulfill()
+            }
+        }
+        web.onCancel = {
+            close?.resume(throwing: MobileAccountError.providerCancelled)
+            close = nil
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow()) }
+        await fulfillment(of: [opened], timeout: 30)
+
+        let state = try await coordinator.logout()
+
+        XCTAssertEqual(state, .signedOut)
+        // One at the attempt's own start, one from the sign-out.
+        XCTAssertGreaterThanOrEqual(web.cancels, 2)
+        switch await attempt.result {
+        case .success:
+            XCTFail("The open attempt must not sign in")
+        case .failure(let error):
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.providerCancelled.code)
+        }
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+    }
+
+    // One token-owning operation at a time: while a sign-in window is open, no other sign-in
+    // may start, and the late result of an attempt never touches a newer generation's store.
+    func testAnOpenProviderAttemptHoldsTheCoordinatorAndItsLateResultLeavesTheNewerStore() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        let opened = expectation(description: "window open")
+        var release: CheckedContinuation<URL, Error>?
+        web.handler = { _, _, _ in
+            try await withCheckedThrowingContinuation { continuation in
+                release = continuation
+                opened.fulfill()
+            }
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow()) }
+        await fulfillment(of: [opened], timeout: 30)
+
+        do {
+            _ = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+            XCTFail("A second attempt must not start")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        do {
+            _ = try await coordinator.requestOTP(email: "alex@example.com")
+            XCTFail("An email code must not start either")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        XCTAssertEqual(transport.providerStarts.count, 1)
+
+        // Sign-out wins; the attempt's window is closed, and its own late answer arrives after.
+        web.onCancel = {}
+        _ = try await coordinator.logout()
+        let afterSignOut = store.identifier
+        release?.resume(returning: URL(string: "https://127.0.0.1/mobile/auth/complete?code=late&state=x")!)
+        _ = await attempt.result
+        XCTAssertEqual(store.identifier, afterSignOut)
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+    }
+
+    // The advertised list decorates signed-out answers; a slow read never holds them up.
+    func testTheAdvertisedListIsReadWithinItsBoundOrLeftOut() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.advertised = [.github, .apple]
+        let coordinator = makeCoordinator(defaults: makeDefaults(), transports: [transport])
+        coordinator.activateAccountSurface()
+
+        let quick = await coordinator.advertisedProviders(within: 5)
+        XCTAssertEqual(quick, [.github, .apple])
+
+        transport.advertisedDelay = 5_000_000_000
+        let clock = ContinuousClock()
+        let started = clock.now
+        let slow = await coordinator.advertisedProviders(within: 0.05)
+        XCTAssertNil(slow)
+        XCTAssertLessThan(clock.now - started, .seconds(2))
+    }
+
+    func testSignInWithProviderAcceptsOnlyGoogleGitHubOrApple() async throws {
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [FakeMobileAuthTransport(), FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+            ),
+            startScreen: .instances
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+        try await WebKitReadiness.waitForDocument(in: webView)
+        for params in [
+            "{}",
+            "{provider: 'microsoft'}",
+            "{provider: 'GOOGLE'}",
+            "{provider: 'google', url: 'https://example.com/'}",
+            "{provider: 1}",
+        ] {
+            let code = try await webView.callAsyncJavaScript(
+                """
+                try {
+                  await window.avibeMobile.call('auth.signInWithProvider', \(params));
+                  return 'missing-error';
+                } catch (error) {
+                  return error.code;
+                }
+                """,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            ) as? String
+            XCTAssertEqual(code, "invalid_argument", params)
+        }
+    }
+
     func testSheetRejectsAuthMethodsWithoutMutatingTheRuntime() async throws {
         for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
             try await exerciseSheetAuthRestriction(mode)
@@ -935,6 +1447,21 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? String
         XCTAssertEqual(result, MobileAccountError.forbidden.code)
         XCTAssertEqual(requestCount, 0)
+        let provider = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.signInWithProvider', {provider: 'google'});
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(provider, MobileAccountError.forbidden.code)
+        XCTAssertTrue(transport.providerStarts.isEmpty)
         XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
     }
 
@@ -4401,6 +4928,8 @@ final class MobileOnboardingTests: XCTestCase {
         websiteDataStore: AccountWebsiteDataStore? = nil,
         transports: [FakeMobileAuthTransport],
         passkeyAuthenticator: MobilePasskeyAuthenticating? = nil,
+        webAuthenticator: MobileWebAuthenticating? = nil,
+        appleAuthorizer: MobileAppleAuthorizing? = nil,
         onCreateTransport: @escaping () -> Void = {},
         onOpen: @escaping (MobileRuntimeContext) -> Void = { _ in },
         onPrepareAccountTransition: @escaping () -> [
@@ -4425,6 +4954,8 @@ final class MobileOnboardingTests: XCTestCase {
                 return queue.removeFirst()
             },
             passkeyAuthenticator: passkeyAuthenticator ?? FakePasskeyAuthenticator(),
+            webAuthenticator: webAuthenticator ?? FakeWebAuthenticator(),
+            appleAuthorizer: appleAuthorizer ?? FakeAppleAuthorizer(),
             onOpenRuntime: onOpen,
             onPrepareAccountTransition: onPrepareAccountTransition,
             onDetachActiveOwner: onDetachActiveOwner,
@@ -4727,6 +5258,31 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     private(set) var cancelled = false
     private(set) var invalidated = false
     var onInvalidate: () -> Void = {}
+    var providerStartHandler: (
+        MobileSignInProvider, String, String
+    ) async throws -> MobileProviderStart = { provider, _, _ in
+        provider == .apple
+            ? .apple(transactionID: "transaction-1", nonce: "server-nonce")
+            : .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+    }
+    private(set) var providerStarts: [(provider: MobileSignInProvider, challenge: String, state: String)] = []
+    var providerExchangeHandler: (
+        String, String, String
+    ) async throws -> MobileProviderExchange = { _, _, _ in
+        throw MobileAccountError.invalidOrExpired
+    }
+    private(set) var providerExchanges: [(transactionID: String, code: String, verifier: String)] = []
+    var appleExchangeHandler: (
+        String, String, String, String
+    ) async throws -> MobileProviderExchange = { _, _, _, _ in
+        throw MobileAccountError.invalidOrExpired
+    }
+    private(set) var appleExchanges: [
+        (transactionID: String, identityToken: String, authorizationCode: String, verifier: String)
+    ] = []
 
     func requestOTP(email: String) async throws -> Int {
         try await requestOTPHandler(email)
@@ -4775,6 +5331,44 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     ) async throws -> MobileSessionDiscovery {
         proofs.append(proof)
         return try await verifySecondFactorHandler(proof)
+    }
+
+    var advertised: [MobileSignInProvider]? = []
+    var advertisedDelay: UInt64 = 0
+
+    func advertisedProviders() async -> [MobileSignInProvider]? {
+        if advertisedDelay > 0 {
+            try? await Task.sleep(nanoseconds: advertisedDelay)
+        }
+        return advertised
+    }
+
+    func providerStart(
+        provider: MobileSignInProvider,
+        challenge: String,
+        state: String
+    ) async throws -> MobileProviderStart {
+        providerStarts.append((provider, challenge, state))
+        return try await providerStartHandler(provider, challenge, state)
+    }
+
+    func providerExchange(
+        transactionID: String,
+        code: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        providerExchanges.append((transactionID, code, verifier))
+        return try await providerExchangeHandler(transactionID, code, verifier)
+    }
+
+    func appleExchange(
+        transactionID: String,
+        identityToken: String,
+        authorizationCode: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        appleExchanges.append((transactionID, identityToken, authorizationCode, verifier))
+        return try await appleExchangeHandler(transactionID, identityToken, authorizationCode, verifier)
     }
 
     func logout() async throws {
@@ -4855,4 +5449,49 @@ private final class QuietPushNotificationCenter: PushNotificationCentering {
     func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
+}
+
+@MainActor
+private final class FakeWebAuthenticator: MobileWebAuthenticating {
+    var handler: (URL, String, String) async throws -> URL = { _, _, _ in
+        throw MobileAccountError.providerCancelled
+    }
+    var onCancel: () -> Void = {}
+    private(set) var opened: [URL] = []
+    private(set) var cancels = 0
+
+    func authenticate(
+        url: URL,
+        callbackHost: String,
+        callbackPath: String,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> URL {
+        opened.append(url)
+        return try await handler(url, callbackHost, callbackPath)
+    }
+
+    func cancel() {
+        cancels += 1
+        onCancel()
+    }
+}
+
+@MainActor
+private final class FakeAppleAuthorizer: MobileAppleAuthorizing {
+    var handler: (String, String) async throws -> MobileAppleCredential = { _, _ in
+        throw MobileAccountError.providerCancelled
+    }
+    private(set) var cancels = 0
+
+    func authorize(
+        nonce: String,
+        state: String,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileAppleCredential {
+        try await handler(nonce, state)
+    }
+
+    func cancel() {
+        cancels += 1
+    }
 }

@@ -56,6 +56,7 @@ import {
   returnToMobileInstance,
   selectMobileInstance,
   signInMobileWithPassword,
+  signInMobileWithProvider,
   type MobileBridgeError,
   type MobileInstance,
   type MobileSessionState,
@@ -81,6 +82,7 @@ import {
 } from './InstanceList';
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
 import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
+import { SignInDivider, SignInProviderRow, type SignInProvider } from './SignInProviders';
 import { AboutSection, AccountDataContent, AccountLinkRow, LicensesContent } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
@@ -107,6 +109,7 @@ type BusyAction =
   | 'verify'
   | 'resend'
   | 'signIn'
+  | 'provider'
   | 'passkey'
   | 'refresh'
   | 'select'
@@ -138,7 +141,16 @@ type MobileErrorKey =
   | 'mobileApp.twoFactor.recoveryInvalid'
   | 'mobileApp.twoFactor.rateLimited'
   | 'mobileApp.errors.network'
-  | 'mobileApp.errors.localRecords';
+  | 'mobileApp.errors.localRecords'
+  | ProviderErrorKey;
+/** What a Google, GitHub or Apple sign-in that did not finish says on Welcome. */
+type ProviderErrorKey =
+  | 'mobileApp.provider.unavailable'
+  | 'mobileApp.provider.googleEmailUnverified'
+  | 'mobileApp.provider.githubEmailUnverified'
+  | 'mobileApp.provider.googleFailed'
+  | 'mobileApp.provider.githubFailed'
+  | 'mobileApp.provider.appleFailed';
 type SecondFactorSession = Extract<MobileSessionState, { status: 'twoFactorRequired' }>;
 type SecondFactorStep = 'passkey' | 'totp' | 'recovery' | 'setup';
 
@@ -277,6 +289,43 @@ const pageErrorKey = (
     return 'mobileApp.code.rateLimited';
   }
   return 'mobileApp.errors.network';
+};
+
+/**
+ * A provider sign-in's failure on Welcome, or `null` when the person closed it (nothing to say).
+ * Copy approved by Product 2026-11-18; the email check names the provider.
+ */
+const providerErrorKey = (
+  error: MobileBridgeError,
+  provider: SignInProvider,
+): MobileErrorKey | null => {
+  // The account signed in but this iPhone could not keep its records: retrying cannot help.
+  if (error.code === 'local_state_unavailable' || error.code === 'local_state_write_failed') {
+    return 'mobileApp.errors.localRecords';
+  }
+  switch (error.code) {
+    // A closed window says nothing; so does an attempt that an account change (a sign-out
+    // elsewhere) ended, since the page follows that change.
+    case 'provider_cancelled':
+    case 'stale_session':
+      return null;
+    case 'provider_unavailable':
+      return 'mobileApp.provider.unavailable';
+    case 'provider_email_unverified':
+      if (provider === 'google') return 'mobileApp.provider.googleEmailUnverified';
+      if (provider === 'github') return 'mobileApp.provider.githubEmailUnverified';
+      return 'mobileApp.provider.appleFailed';
+    case 'rate_limited':
+      return 'mobileApp.code.rateLimited';
+    case 'invalid_or_expired':
+      return provider === 'google'
+        ? 'mobileApp.provider.googleFailed'
+        : provider === 'github'
+          ? 'mobileApp.provider.githubFailed'
+          : 'mobileApp.provider.appleFailed';
+    default:
+      return provider === 'apple' ? 'mobileApp.provider.appleFailed' : 'mobileApp.errors.network';
+  }
 };
 
 /** In the instance sheet (`#sheet`) the page scrolls its document, which native hands to the sheet. */
@@ -482,12 +531,24 @@ function RecoveryCard({
   );
 }
 
-function Welcome({
+/**
+ * Welcome: email is the one primary action; Google, GitHub and Apple follow below avibe.bot's
+ * 「或」 as one row of marks (ui/design: mobile-app/welcome/providers-row). A provider sign-in
+ * that failed says so above them.
+ */
+export function WelcomeScreen({
   locked,
+  errorKey = null,
+  providers = [],
   onContinue,
+  onProvider,
 }: {
   locked: boolean;
+  errorKey?: MobileErrorKey | ProviderErrorKey | null;
+  /** The sign-ins avibe.bot offers the App now; none shows email alone. */
+  providers?: readonly SignInProvider[];
   onContinue: () => void;
+  onProvider?: (provider: SignInProvider) => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -521,9 +582,20 @@ function Welcome({
         </p>
       </div>
       <div className="flex flex-col gap-4 pb-3">
+        {errorKey ? (
+          <p role="alert" className="text-center text-xs leading-6 text-destructive-ink">
+            {t(errorKey)}
+          </p>
+        ) : null}
         <Primary disabled={locked} onClick={onContinue}>
-          {t('mobileApp.welcome.action')}
+          {t('mobileApp.welcome.continueWithEmail')}
         </Primary>
+        {onProvider && providers.length > 0 ? (
+          <>
+            <SignInDivider />
+            <SignInProviderRow providers={providers} disabled={locked} onProvider={onProvider} />
+          </>
+        ) : null}
         <p className="text-center text-xs leading-relaxed text-muted">
           {t('mobileApp.welcome.footerLine1')}
           <br />
@@ -532,6 +604,13 @@ function Welcome({
       </div>
     </CloudScreen>
   );
+}
+
+const Welcome = WelcomeScreen;
+
+/** The empty-instances page as a view (props only); design frames draw it. */
+export function EmptyInstancesScreen(props: Parameters<typeof EmptyInstances>[0]) {
+  return <EmptyInstances {...props} />;
 }
 
 type EmailMode = 'code' | 'password';
@@ -1715,6 +1794,9 @@ function EmptyInstances({
   onOpenGuide,
   onOpenDownload,
   onExit,
+  newAccount = false,
+  signingOut = false,
+  onLogout,
 }: {
   /** In the sheet: Back returns to the instance list there. */
   onExit?: () => void;
@@ -1722,6 +1804,15 @@ function EmptyInstances({
   busy: boolean;
   locked: boolean;
   errorKey: MobileErrorKey | null;
+  /**
+   * A Google, GitHub or Apple sign-in in the App just created this account and it has no
+   * instances (Product, 2026-11-18): one small grey line after the install hint tells someone who
+   * already had an account how to get back, with sign-out as a text link. Most people here are
+   * new, so the install choices stay the main path. A hint only; it decides nothing.
+   */
+  newAccount?: boolean;
+  signingOut?: boolean;
+  onLogout?: () => void;
   onBack: () => void;
   onAccount: () => void;
   onRefresh: () => void;
@@ -1778,7 +1869,23 @@ function EmptyInstances({
         </div>
       ) : (
         <>
-          <p className="mb-6 text-sm leading-7 text-muted">{t('mobileApp.empty.body')}</p>
+          <p className={cn('text-sm leading-7 text-muted', newAccount && onLogout ? 'mb-2' : 'mb-6')}>
+            {t('mobileApp.empty.body')}
+          </p>
+          {newAccount && onLogout ? (
+            <p className="mb-6 text-xs leading-6 text-muted">
+              {t('mobileApp.empty.newAccount')}
+              <Button
+                type="button"
+                variant="link"
+                disabled={locked}
+                className="ml-1 h-auto p-0 align-baseline text-xs"
+                onClick={onLogout}
+              >
+                {signingOut ? t('mobileApp.account.signingOut') : t('mobileApp.empty.newAccountSignOut')}
+              </Button>
+            </p>
+          ) : null}
           <div className="flex flex-col gap-4">
             <button
               type="button"
@@ -2131,7 +2238,14 @@ function MobileOnboardingScreens() {
   const [screen, setScreen] = useState<Screen>('boot');
   // Bundled with the App; absent while it carries no native notices.
   const [licenses, setLicenses] = useState<AppLicenses | null>(null);
-  const [session, setSession] = useState<MobileSessionState>({ status: 'signedOut' });
+  const [session, setSessionState] = useState<MobileSessionState>({ status: 'signedOut' });
+  // The sign-ins avibe.bot offers the App now, from the latest signed-out answer that names
+  // them; none until one does, so Welcome shows email alone.
+  const [providers, setProviders] = useState<readonly SignInProvider[]>([]);
+  const setSession = useCallback((next: MobileSessionState) => {
+    if (next.status === 'signedOut' && next.providers) setProviders(next.providers);
+    setSessionState(next);
+  }, []);
   const [email, setEmail] = useState('');
   const [emailMode, setEmailMode] = useState<EmailMode>('code');
   const [code, setCode] = useState('');
@@ -2406,6 +2520,27 @@ function MobileOnboardingScreens() {
             : PASSWORD_RETRY_SECONDS,
         );
       }
+    } finally {
+      finishOperation(token);
+    }
+  };
+
+  /** Google, GitHub or Apple, natively; closing their window or sheet says nothing. */
+  const signInWithProvider = async (provider: SignInProvider) => {
+    const token = beginOperation('provider');
+    if (token === null) return;
+    setErrorKey(null);
+    pendingWeakPassword.current = null;
+    launchSecondFactor.current = null;
+    try {
+      const next = await signInMobileWithProvider(provider);
+      if (!ownsOperation(token)) return;
+      // A new sign-in owes its own second factor.
+      if (next.status !== 'signedOut') secondFactorRetryAt.current = 0;
+      applySession(token, next, false);
+    } catch (rawError) {
+      if (!ownsOperation(token)) return;
+      setErrorKey(providerErrorKey(normalizeMobileBridgeError(rawError), provider));
     } finally {
       finishOperation(token);
     }
@@ -2729,7 +2864,17 @@ function MobileOnboardingScreens() {
       />
     );
   }
-  if (screen === 'welcome') return <Welcome locked={locked} onContinue={showEmail} />;
+  if (screen === 'welcome') {
+    return (
+      <Welcome
+        locked={locked}
+        errorKey={errorKey}
+        onContinue={showEmail}
+        providers={providers}
+        onProvider={(provider) => void signInWithProvider(provider)}
+      />
+    );
+  }
   if (screen === 'email') {
     return (
       <EmailEntry
@@ -2920,6 +3065,9 @@ function MobileOnboardingScreens() {
         busy={busy === 'refresh'}
         locked={locked}
         errorKey={errorKey}
+        newAccount={signedIn?.new_account === true && signedIn.instances.length === 0}
+        signingOut={busy === 'logout'}
+        onLogout={() => void logout()}
         onBack={() => {
           if (!isOperationLocked()) {
             setErrorKey(null);

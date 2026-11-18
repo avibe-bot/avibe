@@ -44,7 +44,7 @@ export function bilingual(name: string, title: string, render: () => ReactNode, 
           return [`appShell.${key}`, { zh: copy, en: copy }];
         })),
         // Account's shipped rows, its Account and data page, and About.
-        ...Object.fromEntries((['account', 'accountData', 'licenses'] as const).flatMap(section =>
+        ...Object.fromEntries((['account', 'accountData', 'licenses', 'welcome', 'provider', 'empty'] as const).flatMap(section =>
           Object.entries((lang === 'en' ? en : zh).mobileApp[section]).map(([key, text]) =>
             [`mobileApp.${section}.${key}`, { zh: text, en: text }]))),
       },

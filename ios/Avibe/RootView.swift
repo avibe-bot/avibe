@@ -383,6 +383,7 @@ private struct BrowserScreen: View {
                         showAccount: appModel.showAccount,
                         showAccountRoot: appModel.showAccountRoot,
                         showInstances: appModel.showInstances,
+                        showSignIn: appModel.showSignIn,
                         instanceName: appModel.selectedInstanceName,
                         instanceID: { instance.id },
                         deviceID: { appModel.systemScheduleDeviceID },
