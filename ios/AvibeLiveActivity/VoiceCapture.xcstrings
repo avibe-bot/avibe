@@ -289,6 +289,22 @@
         }
       }
     },
+    "voiceCapture.reason.recordingFailed" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recording couldn't start."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "录音没能开始。"
+          }
+        }
+      }
+    },
     "voiceCapture.reason.sendFailed" : {
       "localizations" : {
         "en" : {

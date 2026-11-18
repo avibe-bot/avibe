@@ -108,6 +108,7 @@ enum VoiceCaptureCopy {
         case .voiceUnavailable: return text("voiceCapture.reason.voiceUnavailable")
         case .liveActivities: return text("voiceCapture.reason.liveActivities")
         case .activityFailed: return text("voiceCapture.reason.activityFailed")
+        case .recordingFailed: return text("voiceCapture.reason.recordingFailed")
         case .interrupted: return text("voiceCapture.reason.interrupted")
         }
     }
@@ -221,7 +222,8 @@ struct VoiceCaptureDetail: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else if let reason = state.reason {
-                Text(VoiceCaptureCopy.reason(reason))
+                (Text(VoiceCaptureCopy.reason(reason))
+                    + Text(verbatim: state.errorCode.map { " (\($0))" } ?? ""))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)

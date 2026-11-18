@@ -357,6 +357,11 @@ the main Bot acts on the user's computer.
   one starts a new take. A listening or sending Live Activity also goes stale
   on its own 90 seconds past the five-minute cap, and a stale one is drawn as
   interrupted, so no timer runs on for a take nobody holds.
+- The microphone permission is checked before anything else; a missing one
+  brings Avibe forward. If the audio session or the recorder then refuses to
+  start, the island says 录音没能开始 with the system's error code, never the
+  permission line. A run within a second of a start that failed and said so
+  does nothing, so a press the system runs twice shows one notice.
 - If the system will not start the Live Activity, nothing is recorded. When
   "Talk to Main Bot" has to bring Avibe forward, an alert says why.
 - An account sign-out or change (`AppModel.prepareForAccountTransition`)
