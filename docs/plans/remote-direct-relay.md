@@ -1,4 +1,20 @@
-# Phase 2a: an authenticated relay for one owner trial
+# Remote direct paths: public-relay owner trial
+
+## Current trial (supersedes the dedicated-relay trial below)
+
+**Probe limit — agree this paragraph between writer and reviewer before reviewing punching.** A public-relay user who learns the instance endpoint ID may reach transport registration without an Avibe admission. Before the application refuses that peer, the transport can disclose interface candidates or send UDP probes toward destinations the peer nominates. A handshake rate limit reduces frequency; it does not authorize the destination. The smallest effective boundary is to withhold candidate exchange and peer-directed probing until the peer is admitted, then restrict probing to authorized candidates within a finite budget. Stock traversal does not establish that boundary. Record this as an explicit owner-trial residual and a gate before other users; do not report it as mitigated by a private rendezvous or by inner TLS.
+
+For the opt-in trial on the owner's own instance, use the pinned iroh 1.4.1 `defaults::prod::default_relay_map()` (use1, usw1, euc1, aps1) as introducers and fallback. Prefer a verified direct path when stock NAT traversal succeeds; the initial packets may traverse a relay. The public servers are shared, rate-limited development/testing infrastructure; assume no SLA. n0 can observe connection addresses, endpoint keys, timing, volume and ciphertext, not inner TLS plaintext. There is no dedicated-pair boundary or Avibe admission callout on those servers. Do not deploy an Avibe relay for this trial.
+
+Select this fixed map by a versioned trial policy, never by an arbitrary URL override. Use minimal endpoints with no n0 DNS/pkarr address lookup, publishing or discovery; ordinary DNS resolution of relay hostnames is distinct. Only the authenticated instance rendezvous supplies peer identity and starting candidates. A ready answer may have `addresses: []` **only** with a valid, connected relay candidate from the selected map. Publish the observed relay, not the whole map as if connected; bind it to the same instance, peer, generation and authenticated answer lifetime. No backend relay lease is implied. Without a valid relay or direct address the answer remains unavailable. Keep local peer admission, CONNECT, end-to-end TLS, ordinary remote authorization, per-instance opt-out, control-plane disable and Cloudflare fallback. Disabling the trial withdraws local publication and closes its endpoint; it does not change a public relay's policy.
+
+**Measurement:** the reported Mac trial network carried both UDP and TCP through a Singapore proxy. STUN observed endpoint-independent mapping on that path. This does not establish direct reachability from the phone, inbound filtering behavior or the path used by an application request. Record the selected path during an authenticated request; separately test fallback with direct UDP isolated. Keep exact egress identifiers in private trial notes.
+
+## Deferred: Avibe-operated relay before opening to other users
+
+The following is the dedicated-relay design, not instructions for the public trial. Its backend registration, exact App-key approval, lease/callout fields, operator controls and interop tests are deferred gates. Its single-cohort containment and restart procedures cannot be applied to n0. The earlier relay-first implementation order and no-Avibe-punching assumption below describe that design only.
+
+### Dedicated relay scope
 
 This implements the relay part of [the direct paths plan](remote-direct-paths.md), not hole punching. The relay is a packet forwarder, not an Avibe origin. One dedicated relay serves **one account, one paired instance and only the owner's explicitly approved native App endpoint keys attested by that instance**. It is not a shared service. This contract does not authorize provisioning or enablement.
 
