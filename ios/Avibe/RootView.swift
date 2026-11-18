@@ -55,16 +55,20 @@ struct RootView: View {
                 .ignoresSafeArea(.container, edges: .all)
             }
             if appModel.route == .loading {
+                // Never a blocking spinner: the page's skeleton, and while an
+                // open is under way a small status pill over it.
+                if appModel.runtimeOpenAttempt != nil
+                    || appModel.mobileSessionCoordinator.hasStoredSelection
+                {
+                    RuntimeSkeleton()
+                }
                 if let attempt = appModel.runtimeOpenAttempt {
-                    RuntimeOpenProgressOverlay(
+                    RuntimeOpenStatusPill(
                         attempt: attempt,
                         cancel: {
                             appModel.cancelRuntimeOpen(attemptID: attempt.id)
                         }
                     )
-                } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             if appModel.route == .onboarding(.instances),
@@ -430,7 +434,14 @@ private struct BrowserScreen: View {
                     .ignoresSafeArea(.container, edges: [.top, .bottom])
 
                     if overlay == .loading, let attempt {
-                        RuntimeOpenProgressOverlay(
+                        // Until the page's document commits the WebView is
+                        // blank: its skeleton stands in. The small status
+                        // pill stays until the document finishes and blocks
+                        // nothing else.
+                        if attempt.phase != .loadingPage {
+                            RuntimeSkeleton()
+                        }
+                        RuntimeOpenStatusPill(
                             attempt: attempt,
                             cancel: {
                                 appModel.cancelRuntimeOpen(
@@ -518,41 +529,97 @@ private struct BrowserScreen: View {
     }
 }
 
-private struct RuntimeOpenProgressOverlay: View {
+/// How an open that is under way shows itself: a small capsule at the top
+/// with the current stage and Cancel. Only the capsule takes touches; the
+/// page (or its skeleton) stays visible around it.
+struct RuntimeOpenStatusPill: View {
     let attempt: RuntimeOpenAttempt
     let cancel: () -> Void
 
     var body: some View {
-        VStack(spacing: 14) {
+        HStack(alignment: .center, spacing: 10) {
             ProgressView()
-                .controlSize(.large)
-            Text(
-                runtimeOpenPhaseText(
-                    attempt.phase,
-                    instanceName: attempt.runtime.instance.name
+                .controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    runtimeOpenPhaseText(
+                        attempt.phase,
+                        instanceName: attempt.runtime.instance.name
+                    )
                 )
-            )
-                .font(.headline)
-                .multilineTextAlignment(.center)
-            if attempt.isTakingLong {
-                Text("runtime.open.long_wait")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                if attempt.isTakingLong {
+                    Text("runtime.open.long_wait")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Button("common.cancel", action: cancel)
                 .buttonStyle(.bordered)
+                .controlSize(.small)
         }
-        .padding(22)
-        .frame(maxWidth: 320)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.08))
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, alignment: .top)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("runtime-open-progress")
+    }
+}
+
+/// The page's shape before its first paint, with no data: a header, a few
+/// list rows, and the tab bar. It takes no touches.
+struct RuntimeSkeleton: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Circle().frame(width: 32, height: 32)
+                RoundedRectangle(cornerRadius: 6).frame(width: 120, height: 14)
+                Spacer()
+                Circle().frame(width: 28, height: 28)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 64)
+            .padding(.bottom, 20)
+            ForEach(0..<7, id: \.self) { index in
+                HStack(alignment: .top, spacing: 12) {
+                    Circle().frame(width: 40, height: 40)
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 5)
+                            .frame(width: index.isMultiple(of: 2) ? 150 : 110, height: 12)
+                        RoundedRectangle(cornerRadius: 5)
+                            .frame(maxWidth: index.isMultiple(of: 3) ? 220 : 260)
+                            .frame(height: 10)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            }
+            Spacer(minLength: 0)
+            HStack {
+                ForEach(0..<4, id: \.self) { _ in
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 6).frame(width: 28, height: 28)
+                    Spacer()
+                }
+            }
+            .padding(.vertical, 14)
+            .padding(.bottom, 20)
+        }
+        .foregroundStyle(Color(uiColor: .tertiarySystemFill))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .accessibilityIdentifier("runtime-skeleton")
     }
 }
 
