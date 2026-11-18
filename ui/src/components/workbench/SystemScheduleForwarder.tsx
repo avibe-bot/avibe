@@ -100,7 +100,7 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
     }
   } catch {
     // The lease and receipt remain in memory for the next claim (page open,
-    // reactivation, or an Agent turn end).
+    // reactivation, an Agent turn end or a stream reconnect).
   } finally {
     window.clearTimeout(timeout);
   }
@@ -169,7 +169,7 @@ export const SystemScheduleForwarder: FC = () => {
       } catch {
         // Admission may stay unavailable while an account sheet covers Runtime.
         // Retry the sticky lease on the next claim (page open, reactivation,
-        // or an Agent turn end), without spinning.
+        // an Agent turn end or a stream reconnect), without spinning.
         reconcileImmediately = false;
       } finally {
         inFlightLeasesRef.current.delete(key);
@@ -252,9 +252,10 @@ export const SystemScheduleForwarder: FC = () => {
     reconcileRef.current = reconcile;
     enabledRef.current = active;
     // Claims run when the page opens, each time it comes back to the
-    // foreground, and when an Agent turn ends (the turn that asked for an
-    // alarm has queued it by then). Never on a timer. Interim: #3967 replaces
-    // these triggers with a push of the request itself.
+    // foreground, when an Agent turn ends (the turn that asked for an alarm
+    // has queued it by then) and when the event stream (re)connects. Never on
+    // a timer. Interim: #3967 replaces these triggers with a push of the
+    // request itself.
     void reconcile();
     const stopReactivation = onPageReactivated(() => void reconcile());
     return () => {
