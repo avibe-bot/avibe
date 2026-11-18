@@ -1,7 +1,3 @@
-#[cfg(test)]
-#[path = "../tests/support/relay_interop.rs"]
-mod relay_interop;
-
 mod admission;
 mod handshake_limit;
 
@@ -90,10 +86,6 @@ enum TrialPolicy {
 
 impl RelayOffer {
     fn map(self) -> RelayMap {
-        #[cfg(test)]
-        if relay_interop::active() {
-            return RelayMap::from(relay_interop::url());
-        }
         match self.policy {
             TrialPolicy::PublicTrialV1 => iroh::defaults::prod::default_relay_map(),
         }
@@ -483,18 +475,33 @@ async fn relay_updates(
     }
 }
 
-async fn run(control: &Control) -> Result<()> {
+#[cfg(test)]
+type TestRelay = (
+    RelayMap,
+    fn(iroh::endpoint::Builder) -> iroh::endpoint::Builder,
+);
+
+async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin());
     let first = read_command(&mut stdin)
         .await?
         .ok_or(SidecarError("start_required"))?;
-    let config = Arc::new(parse_start(first)?);
+    let config = parse_start(first)?;
+    #[cfg(test)]
+    let config = match (&fixture, config.relay.is_some()) {
+        (Some((map, _)), true) => StartConfig {
+            relay: Some(map.clone()),
+            ..config
+        },
+        (Some(_), false) => return Err(SidecarError("trial_required")),
+        (None, _) => config,
+    };
+    let config = Arc::new(config);
     let builder = endpoint_builder(config.relay.as_ref(), control.admissions.clone());
     #[cfg(test)]
-    let builder = if relay_interop::active() {
-        builder.ca_tls_config(relay_interop::trust())
-    } else {
-        builder
+    let builder = match fixture {
+        Some((_, trust)) => trust(builder),
+        None => builder,
     };
     let endpoint = builder
         .bind()
@@ -672,7 +679,13 @@ mod relay_tests {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let control = Control::new();
-    let status = match run(&control).await {
+    let status = match run(
+        &control,
+        #[cfg(test)]
+        None,
+    )
+    .await
+    {
         Ok(()) => 0,
         Err(error) => {
             control.fatal(error).await;

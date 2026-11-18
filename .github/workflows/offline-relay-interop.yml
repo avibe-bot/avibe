@@ -16,8 +16,8 @@ jobs:
         run: |
           set -eu
           cargo install --locked --version '=1.4.1' --features server --root "$RUNNER_TEMP/stock" iroh-relay
-          cargo test --locked --bin avibe-direct-transport --no-run --message-format=json > "$RUNNER_TEMP/build.jsonl"
-          exe=$(jq -r 'select(.reason=="compiler-artifact" and .target.name=="avibe-direct-transport" and .profile.test and .executable!=null)|.executable' "$RUNNER_TEMP/build.jsonl")
+          cargo test --manifest-path interop/Cargo.toml --locked --test relay_fixture --no-run --message-format=json > "$RUNNER_TEMP/build.jsonl"
+          exe=$(jq -r 'select(.reason=="compiler-artifact" and .target.name=="relay_fixture" and .profile.test and .executable!=null)|.executable' "$RUNNER_TEMP/build.jsonl")
           test -x "$exe"
           echo "TEST_EXE=$exe" >> "$GITHUB_ENV"
           python3 -m venv "$RUNNER_TEMP/peer-python"

@@ -1,14 +1,9 @@
 // Compiled only in the unit-test executable. Neither the test CA nor the
 // loopback relay selector is a feature or an environment input to the binary.
 use super::*;
-use std::sync::OnceLock;
 use tokio::io::AsyncBufReadExt;
 
-static LOCAL: OnceLock<()> = OnceLock::new();
-pub(super) fn active() -> bool {
-    LOCAL.get().is_some()
-}
-pub(super) fn url() -> RelayUrl {
+fn url() -> RelayUrl {
     "https://127.0.0.1:33443/".parse().unwrap()
 }
 pub(super) fn trust() -> iroh_relay::tls::CaTlsConfig {
@@ -18,8 +13,10 @@ pub(super) fn trust() -> iroh_relay::tls::CaTlsConfig {
 #[tokio::test]
 #[ignore = "child of isolated relay interop fixture"]
 async fn sidecar() {
-    LOCAL.set(()).unwrap();
-    run(&Control::new()).await.unwrap();
+    let fixture: TestRelay = (RelayMap::from(url()), |builder| {
+        builder.ca_tls_config(trust())
+    });
+    run(&Control::new(), Some(fixture)).await.unwrap();
     // stdin uses a blocking Tokio reader; same shutdown model as main.
     std::process::exit(0);
 }
