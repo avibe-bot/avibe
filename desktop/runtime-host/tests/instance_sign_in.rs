@@ -1364,3 +1364,306 @@ async fn a_failed_erase_of_the_retired_account_says_so_and_keeps_it_apart() {
     );
     assert_eq!(saved_account(&path).as_deref(), Some("account-xiaoming"));
 }
+
+/// A keychain whose writes and erases can be held at one key until the test
+/// releases them, fail at one key, and are counted.
+#[derive(Default)]
+struct HeldKeychain {
+    keys: Private,
+    hold_write: Mutex<Option<(String, Hold)>>,
+    hold_erase: Mutex<Option<(String, Hold)>>,
+    fail_write: Mutex<Option<String>>,
+    /// Erases of this key fail this many times, then succeed.
+    fail_erase: Mutex<Option<(String, usize)>>,
+    erased: Mutex<Vec<String>>,
+}
+/// Says when a held call arrives; the call waits until released.
+struct Hold {
+    entered: Arc<Notify>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+fn hold_at() -> (Hold, Arc<Notify>, std::sync::mpsc::Sender<()>) {
+    let entered = Arc::new(Notify::new());
+    let (release_tx, release) = std::sync::mpsc::channel();
+    (
+        Hold {
+            entered: entered.clone(),
+            release,
+        },
+        entered,
+        release_tx,
+    )
+}
+impl HeldKeychain {
+    fn wait(slot: &Mutex<Option<(String, Hold)>>, id: &str) {
+        let held = {
+            let mut slot = slot.lock().unwrap();
+            if slot.as_ref().is_some_and(|(key, _)| key == id) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, hold)) = held {
+            hold.entered.notify_one();
+            let _ = hold.release.recv();
+        }
+    }
+    fn jar(&self, id: &str) -> Option<String> {
+        self.keys
+            .0
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|jar| String::from_utf8_lossy(jar).into_owned())
+    }
+}
+impl Credentials for HeldKeychain {
+    fn read(&self, id: &str) -> Result<Option<Vec<u8>>, ClientError> {
+        self.keys.read(id)
+    }
+    fn write(&self, id: &str, bytes: &[u8]) -> Result<(), ClientError> {
+        Self::wait(&self.hold_write, id);
+        if self.fail_write.lock().unwrap().as_deref() == Some(id) {
+            return Err(ClientError::new("credentials_unavailable"));
+        }
+        self.keys.write(id, bytes)
+    }
+    fn erase(&self, id: &str) -> Result<(), ClientError> {
+        Self::wait(&self.hold_erase, id);
+        self.erased.lock().unwrap().push(id.to_owned());
+        let mut fail = self.fail_erase.lock().unwrap();
+        if let Some((key, left)) = fail.as_mut() {
+            if key == id && *left > 0 {
+                *left -= 1;
+                return Err(ClientError::new("credentials_unavailable"));
+            }
+        }
+        drop(fail);
+        self.keys.erase(id)
+    }
+}
+
+/// A stored account restored at launch, owing its second factor, then left
+/// with "continue on this computer"; the next requests answer from `after`.
+struct Left {
+    client: Arc<Coordinator>,
+    keychain: Arc<HeldKeychain>,
+    path: std::path::PathBuf,
+    _root: tempfile::TempDir,
+}
+async fn left_stored_account(id: &str, after: Vec<(&'static str, Response)>, local: bool) -> Left {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("connection.json");
+    let store = ConnectionStore::new(path.clone());
+    let mut record = store.load("Studio").unwrap();
+    record.account_id = Some(id.into());
+    store.save(&record).unwrap();
+    let mut replies = vec![("/api/mobile/session", factor_with("a@example.test", json!(["totp"])))];
+    replies.extend(after);
+    let http = http_of(replies);
+    let jar = NativeSession::new("https://avibe.bot/".parse().unwrap(), http.clone())
+        .persist()
+        .unwrap();
+    let keychain = Arc::new(HeldKeychain::default());
+    keychain.keys.0.lock().unwrap().insert(id.into(), jar);
+    let client = Arc::new(Coordinator::new(
+        ClientState::new("Studio".into(), "0.1.0".into(), json!({})),
+        record,
+        store,
+        http,
+        keychain.clone(),
+        passkeys(Err("x")),
+        Arc::new(View),
+    ));
+    client.restore_account().await.unwrap();
+    assert_eq!(client.state().account.status, AccountStatus::SecondFactorRequired);
+    if local {
+        assert!(act(&client, ClientAction::ReturnLocal).await.ok);
+    }
+    Left {
+        client,
+        keychain,
+        path,
+        _root: root,
+    }
+}
+fn b_signs_in() -> Vec<(&'static str, Response)> {
+    vec![
+        ("/api/config/auth", config(true)),
+        ("/auth/v1/token", tokens()),
+        (
+            "/api/desktop/session",
+            reply(200, signed_in(), Some("account=b; Path=/; Secure; HttpOnly")),
+        ),
+    ]
+}
+const B: &str = "account-xiaoming";
+/// Runs `action` from another task and waits until it has moved the
+/// generation (its fence), while a held keychain call is still waiting.
+async fn fence_with(client: &Arc<Coordinator>, action: ClientAction) -> tokio::task::JoinHandle<ClientReply> {
+    let before = client.state().generation;
+    let racing = {
+        let client = client.clone();
+        tokio::spawn(async move { act(&client, action).await })
+    };
+    for _ in 0..200 {
+        if client.state().generation > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(client.state().generation > before, "the racing action fenced");
+    racing
+}
+
+/// Matrix 1 and 8: a fence or a failure before the commit rolls back with the
+/// stored account untouched: its record and key stay, B's key goes, and
+/// nothing of A is erased. (Pins; the old order passed these too.)
+#[tokio::test]
+async fn a_fence_or_failure_before_the_commit_leaves_the_stored_account_untouched() {
+    let l = left_stored_account("account-a", b_signs_in(), true).await;
+    let a = l.keychain.jar("account-a");
+    let (hold, entered, release) = hold_at();
+    *l.keychain.hold_write.lock().unwrap() = Some((B.into(), hold));
+    let signing = {
+        let client = l.client.clone();
+        tokio::spawn(async move { act(&client, password()).await })
+    };
+    entered.notified().await;
+    let local = fence_with(&l.client, ClientAction::ReturnLocal).await;
+    release.send(()).unwrap();
+    assert!(!signing.await.unwrap().ok);
+    assert!(local.await.unwrap().ok);
+    assert_eq!(saved_account(&l.path).as_deref(), Some("account-a"));
+    assert_eq!(l.keychain.jar("account-a"), a);
+    assert_eq!(l.keychain.jar(B), None);
+    assert!(l.keychain.erased.lock().unwrap().iter().all(|id| id != "account-a"));
+    assert_ne!(l.client.state().account.status, AccountStatus::SignedIn);
+
+    let l = left_stored_account("account-a", b_signs_in(), true).await;
+    let a = l.keychain.jar("account-a");
+    *l.keychain.fail_write.lock().unwrap() = Some(B.into());
+    let failed = act(&l.client, password()).await;
+    assert_eq!(
+        failed.error.map(|error| error.code).as_deref(),
+        Some("credentials_unavailable")
+    );
+    assert_eq!(saved_account(&l.path).as_deref(), Some("account-a"));
+    assert_eq!(l.keychain.jar("account-a"), a);
+    assert_eq!(l.keychain.jar(B), None);
+    assert!(l.keychain.erased.lock().unwrap().iter().all(|id| id != "account-a"));
+}
+
+/// Matrix 2 (red before the fix): the old key is erased only after B is
+/// committed, so a fence that lands while that erase runs no longer rolls B
+/// back onto a record that names A with A's key already gone.
+#[tokio::test]
+async fn the_old_key_is_retired_only_after_the_new_account_is_committed() {
+    let l = left_stored_account("account-a", b_signs_in(), true).await;
+    let (hold, entered, release) = hold_at();
+    *l.keychain.hold_erase.lock().unwrap() = Some(("account-a".into(), hold));
+    let signing = {
+        let client = l.client.clone();
+        tokio::spawn(async move { act(&client, password()).await })
+    };
+    entered.notified().await;
+    let local = fence_with(&l.client, ClientAction::ReturnLocal).await;
+    release.send(()).unwrap();
+    let signed = signing.await.unwrap();
+    assert!(local.await.unwrap().ok);
+    if saved_account(&l.path).as_deref() == Some("account-a") {
+        assert!(
+            l.keychain.jar("account-a").is_some(),
+            "a record that names A keeps A's key"
+        );
+    }
+    assert!(signed.ok, "{:?}", signed.error);
+    assert_eq!(l.client.state().account.status, AccountStatus::SignedIn);
+    assert_eq!(saved_account(&l.path).as_deref(), Some(B));
+    assert!(l.keychain.jar(B).is_some_and(|jar| jar.contains("account=b;")));
+    assert_eq!(l.keychain.jar("account-a"), None);
+}
+
+/// Matrix 3: a sign-out while the old key is being erased waits for it, then
+/// erases B; the signed-out state never shows the retirement's outcome.
+#[tokio::test]
+async fn a_sign_out_during_the_retirement_waits_and_then_erases_everything() {
+    let l = left_stored_account("account-a", b_signs_in(), true).await;
+    let (hold, entered, release) = hold_at();
+    *l.keychain.hold_erase.lock().unwrap() = Some(("account-a".into(), hold));
+    *l.keychain.fail_erase.lock().unwrap() = Some(("account-a".into(), 1));
+    let signing = {
+        let client = l.client.clone();
+        tokio::spawn(async move { act(&client, password()).await })
+    };
+    entered.notified().await;
+    let out = fence_with(&l.client, ClientAction::SignOut { intent_id: None }).await;
+    assert_eq!(l.client.state().account.status, AccountStatus::SignedOut);
+    release.send(()).unwrap();
+    let _ = signing.await.unwrap();
+    assert!(out.await.unwrap().ok);
+    assert_ne!(
+        l.client.state().enrollment.error_code.as_deref(),
+        Some("credentials_unavailable"),
+        "a failed retirement is not shown on the signed-out state"
+    );
+    assert!(
+        l.keychain.keys.0.lock().unwrap().is_empty(),
+        "B, and A left owned, are erased"
+    );
+    assert_eq!(saved_account(&l.path), None);
+}
+
+/// Matrix 4: an erase that fails leaves B committed under its own key, shows
+/// the error, and keeps A owned, so a sign-out in this run erases it.
+#[tokio::test]
+async fn a_failed_retirement_shows_and_a_sign_out_still_erases_the_old_key() {
+    let l = left_stored_account("account-a", b_signs_in(), true).await;
+    *l.keychain.fail_erase.lock().unwrap() = Some(("account-a".into(), 1));
+    let signed = act(&l.client, password()).await;
+    assert!(signed.ok, "{:?}", signed.error);
+    assert_eq!(signed.state.account.status, AccountStatus::SignedIn);
+    assert_eq!(
+        signed.state.enrollment.error_code.as_deref(),
+        Some("credentials_unavailable")
+    );
+    assert_eq!(saved_account(&l.path).as_deref(), Some(B));
+    assert!(l
+        .keychain
+        .jar("account-a")
+        .is_some_and(|jar| !jar.contains("account=b;")));
+    assert!(act(&l.client, ClientAction::SignOut { intent_id: None }).await.ok);
+    assert!(l.keychain.keys.0.lock().unwrap().is_empty());
+}
+
+/// Matrix 5: the stored account finishing its own second factor is no
+/// retirement: its key is rewritten, never erased.
+#[tokio::test]
+async fn the_same_account_finishing_its_second_factor_erases_nothing() {
+    let l = left_stored_account(
+        B,
+        vec![
+            ("/api/two-factor/verify", reply(200, json!({}), None)),
+            (
+                "/api/mobile/session",
+                reply(200, signed_in(), Some("account=done; Path=/; Secure; HttpOnly")),
+            ),
+        ],
+        false,
+    )
+    .await;
+    let done = act(
+        &l.client,
+        ClientAction::VerifySecondFactor {
+            method: CodeMethod::Totp,
+            code: "123456".into(),
+        },
+    )
+    .await;
+    assert!(done.ok, "{:?}", done.error);
+    assert_eq!(done.state.account.status, AccountStatus::SignedIn);
+    assert!(l.keychain.erased.lock().unwrap().is_empty());
+    assert!(l.keychain.jar(B).is_some_and(|jar| jar.contains("account=done;")));
+    assert_eq!(saved_account(&l.path).as_deref(), Some(B));
+}
