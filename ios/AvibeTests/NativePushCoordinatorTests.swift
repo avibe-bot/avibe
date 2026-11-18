@@ -1615,7 +1615,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         try store.saveRecord(record("stale-generation", "https://removed-one.example", generation: 0))
         let recorder = ManagementRecorder()
         recorder.responseHandler = { request in
-            request.path.hasSuffix("/removed-2")
+            request.path.hasSuffix("/removed-1")
                 ? PushManagementResponse(statusCode: 503, body: ["error": ["code": "relay_unavailable"]])
                 : Self.successResponse
         }
@@ -1634,8 +1634,9 @@ final class NativePushCoordinatorTests: XCTestCase {
                 "/api/push/apns/registrations/removed-2",
             ]
         )
-        XCTAssertNil(try store.loadRecord(kid: "removed-1"))
-        let pending = try XCTUnwrap(try store.loadRecord(kid: "removed-2"))
+        // The first one failing does not hold back the second.
+        XCTAssertNil(try store.loadRecord(kid: "removed-2"))
+        let pending = try XCTUnwrap(try store.loadRecord(kid: "removed-1"))
         XCTAssertEqual(pending.state, .retiring)
         XCTAssertTrue(pending.pendingRevoke)
         XCTAssertTrue(pending.privateKey.isEmpty)
@@ -1646,7 +1647,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         // Called again with the same list: the pending one is retried.
         recorder.responseHandler = { _ in Self.successResponse }
         await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
-        XCTAssertNil(try store.loadRecord(kid: "removed-2"))
+        XCTAssertNil(try store.loadRecord(kid: "removed-1"))
         XCTAssertEqual(try store.loadRecord(kid: "listed")?.state, .active)
     }
 

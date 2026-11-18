@@ -871,26 +871,38 @@ final class NativePushCoordinator {
     private func reconcilePendingRevokes(
         for installation: PushInstallationState
     ) async throws {
+        // Every pending revoke gets its try: one the relay keeps refusing must
+        // not hold back the others. The first failure is reported after.
+        var firstFailure: Error?
         let records = try keychain.listRecords()
         for record in records where
             record.state == .retiring && record.pendingRevoke
         {
-            let response = try await request(
-                method: "DELETE",
-                path: "/api/push/apns/registrations/\(record.kid)",
-                installation: installation,
-                body: nil
-            )
-            if (200..<300).contains(response.statusCode)
-                || (
-                    response.statusCode == 404
-                        && Self.errorCode(response) == "registration_not_found"
+            do {
+                let response = try await request(
+                    method: "DELETE",
+                    path: "/api/push/apns/registrations/\(record.kid)",
+                    installation: installation,
+                    body: nil
                 )
-            {
-                try keychain.deleteRecord(kid: record.kid)
-                continue
+                if (200..<300).contains(response.statusCode)
+                    || (
+                        response.statusCode == 404
+                            && Self.errorCode(response) == "registration_not_found"
+                    )
+                {
+                    try keychain.deleteRecord(kid: record.kid)
+                    continue
+                }
+                throw Self.managementError(response)
+            } catch {
+                if firstFailure == nil {
+                    firstFailure = error
+                }
             }
-            throw Self.managementError(response)
+        }
+        if let firstFailure {
+            throw firstFailure
         }
     }
 

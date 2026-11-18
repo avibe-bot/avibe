@@ -1914,8 +1914,7 @@ final class MobileOnboardingTests: XCTestCase {
     /// With no snapshot here (after a second factor, or a relaunch), the
     /// account's next signed-in answer still reconciles push against what
     /// it lists now, so an instance that left meanwhile loses its own
-    /// registration. A sign-in whose account then changes before the pass
-    /// runs reconciles nothing for the old one.
+    /// registration.
     func testInstancesRemovedWhileUnseenAreReconciledOnceTheAccountIsKnown() async throws {
         let team = MobileInstance(
             id: "instance-2", name: "Team", host: "team-app.avibe.bot",
