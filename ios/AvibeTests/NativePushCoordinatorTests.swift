@@ -1582,6 +1582,79 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertNotNil(try store.loadRecord(kid: "b-stale-generation"))
     }
 
+    /// The account's list no longer has some instances: their registrations
+    /// are staged as pending revokes (keys zeroed) and revoked; a listed
+    /// origin, another account's record and a stale generation stay. A
+    /// failed request leaves the revoke pending for recovery, and a call for
+    /// an account that is not the one signed in does nothing.
+    func testRevokingOutsideTheListedOriginsKeepsListedOnes() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        func record(_ kid: String, _ origin: String, account: String = Self.accountA.id, generation: Int64 = 1, state: PushKeyRecord.State = .active) -> PushKeyRecord {
+            PushKeyRecord(
+                kid: kid,
+                instanceOrigin: origin,
+                accountID: account,
+                accountGeneration: generation,
+                bindGeneration: 1,
+                privateKey: Data(repeating: 13, count: 32),
+                authSecret: Data(repeating: 14, count: 16),
+                vapidKeyHash: String(repeating: "a", count: 64),
+                state: state,
+                pendingRevoke: false,
+                replacementRegistrationIDs: []
+            )
+        }
+        try store.saveRecord(record("listed", Self.instanceOrigin))
+        // A create whose answer was lost, for a removed origin.
+        try store.saveRecord(record("removed-3", "https://removed-three.example", state: .pending))
+        try store.saveRecord(record("removed-1", "https://removed-one.example"))
+        try store.saveRecord(record("removed-2", "https://removed-two.example"))
+        try store.saveRecord(record("other-account", "https://removed-one.example", account: Self.accountB.id))
+        try store.saveRecord(record("stale-generation", "https://removed-one.example", generation: 0))
+        let recorder = ManagementRecorder()
+        recorder.responseHandler = { request in
+            request.path.hasSuffix("/removed-1")
+                ? PushManagementResponse(statusCode: 503, body: ["error": ["code": "relay_unavailable"]])
+                : Self.successResponse
+        }
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        // Not the account signed in: nothing.
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountB.id)
+        XCTAssertTrue(recorder.requests.isEmpty)
+
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
+
+        XCTAssertEqual(
+            recorder.requests.map(\.path),
+            [
+                "/api/push/apns/registrations/removed-1",
+                "/api/push/apns/registrations/removed-2",
+                "/api/push/apns/registrations/removed-3",
+            ]
+        )
+        // The first one failing does not hold back the others.
+        XCTAssertNil(try store.loadRecord(kid: "removed-2"))
+        XCTAssertNil(try store.loadRecord(kid: "removed-3"))
+        let pending = try XCTUnwrap(try store.loadRecord(kid: "removed-1"))
+        XCTAssertEqual(pending.state, .retiring)
+        XCTAssertTrue(pending.pendingRevoke)
+        XCTAssertTrue(pending.privateKey.isEmpty)
+        XCTAssertEqual(try store.loadRecord(kid: "listed")?.state, .active)
+        XCTAssertEqual(try store.loadRecord(kid: "other-account")?.state, .active)
+        XCTAssertEqual(try store.loadRecord(kid: "stale-generation")?.state, .active)
+
+        // Called again with the same list: the pending one is retried.
+        recorder.responseHandler = { _ in Self.successResponse }
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
+        XCTAssertNil(try store.loadRecord(kid: "removed-1"))
+        XCTAssertEqual(try store.loadRecord(kid: "listed")?.state, .active)
+    }
+
     func testUnsubscribeRetriesThePersistedConcretePendingRevoke()
         async throws
     {

@@ -1113,6 +1113,10 @@ session_turns = Table(
         sqlite_where=text("state = 'waiting'"),
     ),
     Index(
+        "ix_session_turns_control_successor",
+        "control_successor_turn_id", "control_successor_delivery_id",
+    ),
+    Index(
         "uq_session_turns_control_attempt",
         "control_attempt_id",
         unique=True,

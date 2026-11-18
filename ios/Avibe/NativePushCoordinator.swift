@@ -545,6 +545,65 @@ final class NativePushCoordinator {
         }
     }
 
+    /// Revokes this account's registrations for instance origins the account
+    /// no longer lists. Each is staged as a pending revoke (keys zeroed)
+    /// before its request, so push recovery finishes any that fail; origins
+    /// still listed keep theirs. A no-op unless `accountID` is the account
+    /// signed in and this installation's binding.
+    func revokeRegistrations(
+        outside liveOrigins: Set<String>,
+        accountID: String
+    ) async {
+        _ = try? await enqueueMutation {
+            try await self.revokeRegistrationsNow(
+                outside: liveOrigins,
+                accountID: accountID
+            )
+        }
+    }
+
+    private func revokeRegistrationsNow(
+        outside liveOrigins: Set<String>,
+        accountID: String
+    ) async throws {
+        guard
+            !isFrozen,
+            let account = accountProvider(),
+            account.id == accountID,
+            let installation = try keychain.loadInstallation(),
+            installation.accountID == account.id
+        else {
+            return
+        }
+        // A create whose answer was lost (`.pending`) may exist on the relay
+        // too: its DELETE either revokes it or answers not found.
+        let stale = try keychain.listRecords().filter {
+            ($0.state == .active || $0.state == .pending)
+                && !$0.pendingRevoke
+                && $0.accountID == account.id
+                && $0.bindGeneration == installation.bindGeneration
+                && $0.accountGeneration == generationStore.generation
+                && !liveOrigins.contains($0.instanceOrigin)
+        }
+        for record in stale {
+            try keychain.saveRecord(PushKeyRecord(
+                kid: record.kid,
+                instanceOrigin: record.instanceOrigin,
+                accountID: record.accountID,
+                accountGeneration: record.accountGeneration,
+                bindGeneration: record.bindGeneration,
+                privateKey: Data(),
+                authSecret: Data(),
+                vapidKeyHash: record.vapidKeyHash,
+                state: .retiring,
+                pendingRevoke: true,
+                replacementRegistrationIDs: []
+            ))
+        }
+        // Also retries revokes an earlier pass left pending.
+        try await reconcilePendingRevokes(for: installation)
+    }
+
     func didRegister(deviceToken: Data, environment: String) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -814,26 +873,38 @@ final class NativePushCoordinator {
     private func reconcilePendingRevokes(
         for installation: PushInstallationState
     ) async throws {
+        // Every pending revoke gets its try: one the relay keeps refusing must
+        // not hold back the others. The first failure is reported after.
+        var firstFailure: Error?
         let records = try keychain.listRecords()
         for record in records where
             record.state == .retiring && record.pendingRevoke
         {
-            let response = try await request(
-                method: "DELETE",
-                path: "/api/push/apns/registrations/\(record.kid)",
-                installation: installation,
-                body: nil
-            )
-            if (200..<300).contains(response.statusCode)
-                || (
-                    response.statusCode == 404
-                        && Self.errorCode(response) == "registration_not_found"
+            do {
+                let response = try await request(
+                    method: "DELETE",
+                    path: "/api/push/apns/registrations/\(record.kid)",
+                    installation: installation,
+                    body: nil
                 )
-            {
-                try keychain.deleteRecord(kid: record.kid)
-                continue
+                if (200..<300).contains(response.statusCode)
+                    || (
+                        response.statusCode == 404
+                            && Self.errorCode(response) == "registration_not_found"
+                    )
+                {
+                    try keychain.deleteRecord(kid: record.kid)
+                    continue
+                }
+                throw Self.managementError(response)
+            } catch {
+                if firstFailure == nil {
+                    firstFailure = error
+                }
             }
-            throw Self.managementError(response)
+        }
+        if let firstFailure {
+            throw firstFailure
         }
     }
 

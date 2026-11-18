@@ -1272,6 +1272,9 @@ async def test_a_diagnostic_before_the_failure_is_never_the_cause():
 
 
 async def test_abort_closes_provider_stream_and_allows_a_new_turn():
+    from core import loop_watchdog
+
+    baseline = loop_watchdog._active_requests
     entered = asyncio.Event()
 
     async def blocked(request, cancel):
@@ -1283,8 +1286,10 @@ async def test_abort_closes_provider_stream_and_allows_a_new_turn():
     agent = make_agent(provider)
     run = asyncio.create_task(collect(agent))
     await entered.wait()
+    assert loop_watchdog._active_requests == baseline + 1
     agent.abort("stop")
     events = await asyncio.wait_for(run, 1)
+    assert loop_watchdog._active_requests == baseline
     assert events[-1].reason == "aborted"
     assert provider.closed_streams == 1
     assert [row.kind for row in await agent.store.load("session")] == ["input"]

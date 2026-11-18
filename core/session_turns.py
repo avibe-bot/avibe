@@ -8176,6 +8176,8 @@ class SessionTurnManager:
         start_attempt_id = ""
         with self._sqlite_engine().connect() as conn:
             observed_terminal = delivery_store.get_turn(conn, terminal_turn_id)
+            if not (observed_terminal or {}).get("control_successor_turn_id"):
+                return None  # Ordinary completions have no replacement to resume.
             observed_successor = delivery_store.get_turn(
                 conn,
                 str((observed_terminal or {}).get("control_successor_turn_id") or ""),
@@ -8198,7 +8200,7 @@ class SessionTurnManager:
                         session_turn_rows.c.control_successor_turn_id == successor_id,
                         session_turn_rows.c.control_successor_delivery_id
                         == successor_delivery_id,
-                    )
+                    ).limit(2)  # Two already disprove unique ownership.
                 ).scalars()
             )
             session_status = conn.execute(
