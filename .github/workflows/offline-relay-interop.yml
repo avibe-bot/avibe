@@ -1,0 +1,51 @@
+name: offline-relay-interop
+on:
+  pull_request:
+    paths: ['direct-transport/**', 'vibe/direct_ingress.py', '.github/workflows/offline-relay-interop.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Build test executable and stock relay before isolation
+        working-directory: direct-transport
+        run: |
+          set -eu
+          cargo install --locked --version '=1.4.1' --features server --root "$RUNNER_TEMP/stock" iroh-relay
+          cargo test --locked --bin avibe-direct-transport --no-run --message-format=json > "$RUNNER_TEMP/build.jsonl"
+          exe=$(jq -r 'select(.reason=="compiler-artifact" and .target.name=="avibe-direct-transport" and .profile.test and .executable!=null)|.executable' "$RUNNER_TEMP/build.jsonl")
+          test -x "$exe"
+          echo "TEST_EXE=$exe" >> "$GITHUB_ENV"
+          python3 -m venv "$RUNNER_TEMP/peer-python"
+          "$RUNNER_TEMP/peer-python/bin/pip" install 'uvicorn==0.34.3' 'h11==0.16.0'
+      - name: Verify request through local relay with all UDP blocked
+        run: |
+          set -eu
+          umask 077
+          fixture=$(mktemp -d)
+          trap 'rm -rf "$fixture"' EXIT
+          cd "$fixture"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=FixtureCA -keyout ca.key -out ca.pem
+          openssl x509 -in ca.pem -outform DER -out ca.der
+          for name in relay inner; do
+            san=IP:127.0.0.1
+            if [ "$name" = inner ]; then san=DNS:instance-app.example.test; fi
+            openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$name" -keyout "$name.key" -out "$name.csr"
+            printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "$san" > extensions
+            openssl x509 -req -in "$name.csr" -CA ca.pem -CAkey ca.key -CAcreateserial -days 1 -extfile extensions -out "$name.pem"
+          done
+          cat >relay.toml <<EOF
+          enable_quic_addr_discovery = false
+          enable_metrics = false
+          http_bind_addr = "127.0.0.1:33340"
+          [tls]
+          https_bind_addr = "127.0.0.1:33443"
+          cert_mode = "Manual"
+          manual_cert_path = "$fixture/relay.pem"
+          manual_key_path = "$fixture/relay.key"
+          EOF
+          sudo env TEST_EXE="$TEST_EXE" RELAY_EXE="$RUNNER_TEMP/stock/bin/iroh-relay" unshare --net bash "$GITHUB_WORKSPACE/direct-transport/scripts/relay-interop-netns.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/peer-python/bin/python"

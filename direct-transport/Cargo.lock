@@ -98,6 +98,7 @@ name = "avibe-direct-transport"
 version = "0.1.0"
 dependencies = [
  "iroh",
+ "iroh-relay",
  "serde",
  "serde_json",
  "tokio",

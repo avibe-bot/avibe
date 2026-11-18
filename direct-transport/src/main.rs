@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../tests/support/relay_interop.rs"]
+mod relay_interop;
+
 mod admission;
 mod handshake_limit;
 
@@ -86,6 +90,10 @@ enum TrialPolicy {
 
 impl RelayOffer {
     fn map(self) -> RelayMap {
+        #[cfg(test)]
+        if relay_interop::active() {
+            return RelayMap::from(relay_interop::url());
+        }
         match self.policy {
             TrialPolicy::PublicTrialV1 => iroh::defaults::prod::default_relay_map(),
         }
@@ -481,7 +489,14 @@ async fn run(control: &Control) -> Result<()> {
         .await?
         .ok_or(SidecarError("start_required"))?;
     let config = Arc::new(parse_start(first)?);
-    let endpoint = endpoint_builder(config.relay.as_ref(), control.admissions.clone())
+    let builder = endpoint_builder(config.relay.as_ref(), control.admissions.clone());
+    #[cfg(test)]
+    let builder = if relay_interop::active() {
+        builder.ca_tls_config(relay_interop::trust())
+    } else {
+        builder
+    };
+    let endpoint = builder
         .bind()
         .await
         .map_err(|_| SidecarError("endpoint_bind_failed"))?;
