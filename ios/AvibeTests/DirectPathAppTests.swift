@@ -4203,6 +4203,8 @@ final class DirectPathAppTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(900))
         }
         try await page.load()
+        // The first WebKit paint of the mock page takes a while on CI.
+        try await Task.sleep(for: .seconds(3))
         var connecting = attempt
         connecting.phase = .connecting
         connecting.isTakingLong = false
@@ -4210,6 +4212,7 @@ final class DirectPathAppTests: XCTestCase {
             page.view
             RuntimeOpenStatusPill(attempt: connecting, cancel: {})
         })
+        try await Task.sleep(for: .seconds(2))
         captureWindow(mock, "1a-pill-connecting-over-cached-page-light")
         try await show(ZStack(alignment: .bottom) {
             page.view
