@@ -84,6 +84,31 @@ def test_only_lan_and_global_ipv6_socket_addresses_are_candidates(address, expec
 # --- the published endpoint and its generations -------------------------------
 
 
+def test_public_trial_requires_owner_even_with_direct_addresses_and_fences_old_offers():
+    rendezvous = DirectRendezvous(_Clock())
+    ips = ("192.168.1.20:51234",)
+    a = "https://aps1-1.relay.n0.iroh.link./"
+    b = "https://use1-1.relay.n0.iroh.link./"
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ips))
+    before = _offer(rendezvous)
+    def owner_offer():
+        return rendezvous.offer(instance_id="inst_123", hostname="alex.avibe.bot", subject="owner",
+                                client_endpoint_id=CLIENT_ENDPOINT, is_owner=True)
+    revisions = [before["generation"]]
+    for url in (None, a, b, None):
+        rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ips, url, "public-trial-v1"))
+        assert _offer(rendezvous, client="d" * 64)["status"] == "unavailable"
+        assert not rendezvous.is_admitted("d" * 64)
+        offer = owner_offer()
+        assert offer["endpoint"]["relay"] == ({"policy": "public-trial-v1", "url": url} if url else None)
+        revisions.append(offer["generation"])
+    assert len(set(revisions)) == len(revisions)
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, (), a, "public-trial-v1"))
+    assert owner_offer()["endpoint"]["addresses"] == []
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, (), None, "public-trial-v1"))
+    assert owner_offer()["status"] == "unavailable"
+
+
 def test_offer_describes_the_endpoint_and_admits_the_client():
     clock = _Clock()
     rendezvous = DirectRendezvous(clock)
@@ -262,6 +287,38 @@ def _body(client_endpoint_id: str = CLIENT_ENDPOINT, version: int = 1) -> dict:
 
 def test_any_signed_in_remote_role_may_ask():
     assert http_authorization_policy("POST", PATH).minimum_role == "viewer"
+
+
+@pytest.mark.parametrize("role", ["viewer", "editor"])
+def test_trial_rendezvous_withholds_peer_admission_and_relay_from_nonowners(instance, role):
+    config, rendezvous = instance
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, (), "https://aps1-1.relay.n0.iroh.link./", "public-trial-v1"))
+    payload = _post(_signed_in(config, role=role), _body()).get_json()
+    assert payload["status"] == "unavailable" and "endpoint" not in payload
+    assert not rendezvous.is_admitted(CLIENT_ENDPOINT)
+
+
+def test_trial_consent_only_changes_from_host_shell(instance):
+    from vibe import api, cli
+    from vibe.authorization import AuthorizationContext, invocation_authority
+    from config.v2_config import V2Config
+
+    parser = cli.build_parser()
+    def args(state):
+        return parser.parse_args(["remote", "direct", "relay", "public-trial", state])
+
+    assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    with pytest.raises(ValueError, match="instance host shell"):
+        api.save_config({"remote_access": {"vibe_cloud": {"public_relay_trial": True}}})
+    with invocation_authority(AuthorizationContext(is_remote=True, instance_role="owner")):
+        assert cli.cmd_remote_direct(args("on")) == 1
+    assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    assert cli.cmd_remote_direct(args("on")) == 0
+    assert V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    with pytest.raises(ValueError, match="instance host shell"):
+        api.save_config({"remote_access": {"vibe_cloud": {"public_relay_trial": False}}})
+    assert cli.cmd_remote_direct(args("off")) == 0
+    assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
 
 
 def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):

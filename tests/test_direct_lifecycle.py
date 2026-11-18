@@ -143,7 +143,7 @@ async def _owner(config, reports, *, cert=None, ingress_type=FakeIngress, superv
     owner = DirectAccessLifecycle(
         object(), certificate_client=cert,
         ingress_factory=lambda app, **kw: ingress_type(calls, **kw),
-        supervisor_factory=lambda executable, ingress, rendezvous: supervisor_type(calls, ingress, rendezvous),
+        supervisor_factory=lambda executable, ingress, rendezvous, **kw: supervisor_type(calls, ingress, rendezvous, **kw),
         binary_resolver=options.pop("binary_resolver", lambda config: "/injected/test-sidecar"),
         rendezvous=rendezvous, config_loader=options.pop("config_loader", lambda: config), **options,
     )
@@ -229,6 +229,44 @@ async def test_product_without_binary_never_orders_even_with_fresh_permission(re
         assert not cert.calls
         assert "ingress_start" not in calls and "supervisor_start" not in calls
         assert rv.endpoint is None and rv.reason == "transport_not_installed"
+
+
+async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_then_retires_on_off(reports, published, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    config = _config()
+    config.remote_access.vibe_cloud.public_relay_trial = True
+    manager = DirectTransportRuntimeManager()
+    assert manager.ensure()["ok"]
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    policies = []
+    class Recorder(FakeSupervisor):
+        def __init__(self, *args, relay_policy=None):
+            super().__init__(*args)
+            policies.append(relay_policy)
+
+    async with _owner(config, reports, supervisor_type=Recorder, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == "transport-not-installed")
+        assert not policies
+        await _permission(owner, config, False)
+        payload, manifest, _, _ = published
+        payload["provenance"] = {"source_sha": "578659184dfa38bc87261a6fa832f9b4c65a1c90"}
+        manifest.write_text(json.dumps(payload))
+        assert DirectTransportRuntimeManager().ensure()["ok"]
+        await _wait(lambda: owner.status().state == "waiting-permission")
+        assert not policies
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == ["public-trial-v1"]
+        generation = owner._generation
+        config.remote_access.vibe_cloud.public_relay_trial = False
+        owner.notify_config_changed(config)
+        await _wait(lambda: owner.status().state == "waiting-permission" and rv.endpoint is None)
+        assert owner._generation > generation and "supervisor_stop" in calls
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == ["public-trial-v1", None]
 
 
 async def test_managed_install_reaches_publication_only_after_all_lifecycle_gates(reports, published, monkeypatch):
