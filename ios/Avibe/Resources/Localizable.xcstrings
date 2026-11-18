@@ -226,22 +226,6 @@
         }
       }
     },
-    "runtime.open.long_wait" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This is taking longer than usual. You can cancel at any time."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "等待时间比平时更长，你可以随时取消。"
-          }
-        }
-      }
-    },
     "runtime.open.phase.authenticating.named" : {
       "localizations" : {
         "en" : {
@@ -334,6 +318,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在准备连接 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.slow.last_content.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Still connecting to %@. Showing what was here last."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还在连接 %@，先显示上次的内容"
+          }
+        }
+      }
+    },
+    "runtime.open.slow.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Still connecting to %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还在连接 %@…"
           }
         }
       }

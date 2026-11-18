@@ -56,19 +56,16 @@ struct RootView: View {
             }
             if appModel.route == .loading {
                 // Never a blocking spinner: the page's skeleton, and while an
-                // open is under way a small status pill over it.
+                // open is under way the thin progress line over it.
                 if appModel.runtimeOpenAttempt != nil
                     || appModel.mobileSessionCoordinator.hasStoredSelection
                 {
                     RuntimeSkeleton()
                 }
                 if let attempt = appModel.runtimeOpenAttempt {
-                    RuntimeOpenStatusPill(
-                        attempt: attempt,
-                        cancel: {
-                            appModel.cancelRuntimeOpen(attemptID: attempt.id)
-                        }
-                    )
+                    RuntimeOpenProgress(attempt: attempt) {
+                        appModel.cancelRuntimeOpen(attemptID: attempt.id)
+                    }
                 }
             }
             if appModel.route == .onboarding(.instances),
@@ -436,20 +433,15 @@ private struct BrowserScreen: View {
 
                     if overlay == .loading, let attempt {
                         // Until the page's document commits the WebView is
-                        // blank: its skeleton stands in. The small status
-                        // pill stays until the document finishes and blocks
-                        // nothing else.
+                        // blank: its skeleton stands in. The progress line
+                        // stays until the document finishes and blocks
+                        // nothing.
                         if attempt.phase != .loadingPage {
                             RuntimeSkeleton()
                         }
-                        RuntimeOpenStatusPill(
-                            attempt: attempt,
-                            cancel: {
-                                appModel.cancelRuntimeOpen(
-                                    attemptID: attempt.id
-                                )
-                            }
-                        )
+                        RuntimeOpenProgress(attempt: attempt) {
+                            appModel.cancelRuntimeOpen(attemptID: attempt.id)
+                        }
                     }
 
                     if overlay == .loadFailure {
@@ -546,50 +538,135 @@ enum AvibeStyle {
     /// The Workbench's top bar (instance name, account), below the status
     /// bar: native chrome over a page stays below it.
     static let topBarHeight: CGFloat = 44
-    /// The status pill fits inside the top-bar row.
-    static let pillHeight: CGFloat = 30
-    static let pillMaxWidth: CGFloat = 180
     /// The Workbench's bottom tab bar, above the Home indicator.
     static let tabBarHeight: CGFloat = 56
+    /// What a page keeps at its bottom edge: the tab bar, or a chat's
+    /// composer, whichever is taller. Native banners sit above it.
+    static let bottomChromeHeight: CGFloat = 64
+    /// The open's progress line, at the top edge below the status bar.
+    static let progressLineHeight: CGFloat = 2.5
 }
 
-/// How an open that is under way shows itself: a small capsule at the top
-/// with the current stage and Cancel. Only the capsule takes touches; the
-/// page (or its skeleton) stays visible around it.
-struct RuntimeOpenStatusPill: View {
+/// How an open that is under way shows itself at first: a thin line at the
+/// top edge, below the status bar. No text and no button, and it takes no
+/// touches; VoiceOver hears the stage once.
+struct RuntimeOpenProgressLine: View {
+    let attempt: RuntimeOpenAttempt
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweeping = false
+
+    var body: some View {
+        let label = runtimeOpenPhaseText(
+            attempt.phase,
+            instanceName: attempt.runtime.instance.name
+        )
+        GeometryReader { geometry in
+            let segment = geometry.size.width * 0.3
+            ZStack(alignment: .leading) {
+                Rectangle().fill(AvibeStyle.accent.opacity(0.18))
+                if reduceMotion {
+                    Rectangle().fill(AvibeStyle.accent.opacity(0.6))
+                } else {
+                    Capsule()
+                        .fill(AvibeStyle.accent)
+                        .frame(width: segment)
+                        .offset(x: sweeping ? geometry.size.width : -segment)
+                }
+            }
+        }
+        .frame(height: AvibeStyle.progressLineHeight)
+        .clipped()
+        .frame(maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+                sweeping = true
+            }
+            AccessibilityNotification.Announcement(label).post()
+        }
+        .accessibilityElement()
+        .accessibilityLabel(Text(label))
+        .accessibilityIdentifier("runtime-open-progress")
+    }
+}
+
+/// The open's progress while no page content shows: the line, and past the
+/// long-wait mark the banner with Cancel.
+struct RuntimeOpenProgress: View {
     let attempt: RuntimeOpenAttempt
     let cancel: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 6) {
+        ZStack {
+            RuntimeOpenProgressLine(attempt: attempt)
+            if attempt.isTakingLong {
+                RuntimeOpenSlowBanner(
+                    instanceName: attempt.runtime.instance.name,
+                    showsLastContent: false,
+                    cancel: cancel
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: attempt.isTakingLong)
+    }
+}
+
+/// An open that has run past the long-wait mark says so in one row above
+/// the page's tab bar or composer. Over the last page's content it only
+/// says that content is shown; with nothing to show it offers Cancel, back
+/// to the instances.
+struct RuntimeOpenSlowBanner: View {
+    let instanceName: String
+    let showsLastContent: Bool
+    var cancel: (() -> Void)?
+    var dismiss: (() -> Void)?
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
             ProgressView()
-                .controlSize(.mini)
+                .controlSize(.small)
             Text(
-                runtimeOpenPhaseText(
-                    attempt.phase,
-                    instanceName: attempt.runtime.instance.name
+                String(
+                    format: NSLocalizedString(
+                        showsLastContent
+                            ? "runtime.open.slow.last_content.named"
+                            : "runtime.open.slow.named",
+                        comment: ""
+                    ),
+                    instanceName
                 )
             )
-            .font(.footnote.weight(.semibold))
+            .font(.subheadline.weight(.semibold))
             .lineLimit(1)
-            .truncationMode(.middle)
-            Button("common.cancel", action: cancel)
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-                .tint(AvibeStyle.accent)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let cancel {
+                Button("common.cancel", action: cancel)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(AvibeStyle.accent)
+            }
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
+            }
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 4)
-        .frame(height: AvibeStyle.pillHeight)
-        .background(.regularMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.10), radius: 8, y: 2)
-        // In the middle of the page's top-bar row, between what its left and
-        // right ends hold.
-        .frame(maxWidth: AvibeStyle.pillMaxWidth)
-        .padding(.top, (AvibeStyle.topBarHeight - AvibeStyle.pillHeight) / 2)
-        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
+        .frame(maxHeight: .infinity, alignment: .bottom)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("runtime-open-progress")
+        .accessibilityIdentifier("runtime-open-slow")
     }
 }
 
