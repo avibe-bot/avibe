@@ -18,7 +18,9 @@ _PROC_DESCRIPTOR = re.compile(
 
 
 def _descriptor_namespace(path: str) -> bool:
-    path = os.path.normpath(path)
+    # macOS devfs aliases retain their spelling through realpath on a
+    # case-insensitive root volume.
+    path = os.path.normpath(path).casefold()
     return (
         path == "/dev/fd" or path.startswith("/dev/fd/")
         or path in {"/dev/stdin", "/dev/stdout", "/dev/stderr"}

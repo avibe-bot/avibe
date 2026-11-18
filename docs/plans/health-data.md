@@ -459,6 +459,10 @@ vibe mobile requests await <request-id> [--timeout S]
 - Same continuation rule as Vault approvals: only one continuation owner.
 - After timeout or process exit, hand over to the callback session, defaulting
   to `AVIBE_SESSION_ID`.
+- A later synchronous waiter can reclaim an abandoned reservation only after
+  its deadline expires and its OS lock is verified free in the same write
+  transaction. Replacing the waiter preserves the request/result and callback
+  destination; the old waiter cannot consume the replacement's continuation.
 - Callback messages contain no values.
 
 **Error codes:**
@@ -510,13 +514,16 @@ vibe mobile requests await <request-id> [--timeout S]
   in transcripts, model contexts/caches, historical backups, or model-provider
   systems. This change does not configure system backup exclusions.
 - File-service protection uses one operation's private inode snapshot.
-  Descriptor namespaces are denied before path resolution; file downloads and
-  copy input are checked with `fstat` and read through that same descriptor.
+  Descriptor namespaces are denied without relying on case-sensitive spelling,
+  before path resolution; file downloads, search/replace text readers and copy
+  input are checked with `fstat` and read through that same descriptor.
   Recursive measurement and copying check descendants; cross-filesystem move
   uses the same checked staging and does not publish a rejected tree or delete
   its source. A failed stage cleanup records its path. Ordinary delete and
   same-filesystem move retain their existing semantics; there is no
-  cross-process atomic tree transaction.
+  cross-process atomic tree transaction. Cross-filesystem move retains the
+  previous `copystat` metadata behavior before publishing and removing its
+  source; ordinary copy retains its existing behavior and size budget.
 - This finite boundary does not isolate same-OS arbitrary code, terminals,
   author-controlled Show code, existing copies, or new private inodes linked
   outside the tree after its snapshot. Media/Show path guards are not a general

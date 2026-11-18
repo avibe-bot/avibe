@@ -242,6 +242,141 @@ def test_waiter_and_callback_compete_transactionally_and_dead_process_hands_over
     assert len(sent) == 1 and "987654321" not in json.dumps(sent)
 
 
+@pytest.mark.parametrize("killed,elapsed,reclaimed", [(True, 21, True), (False, 21, False), (True, 19, False)])
+def test_abandoned_waiter_requires_both_expiry_and_a_free_process_lock(
+    store, clock, tmp_path, killed, elapsed, reclaimed,
+):
+    import subprocess
+    import time
+    import psutil
+    from storage.lock import MigrationFileLock, probe_lock_holder
+
+    ready = tmp_path / "waiter-ready.json"
+    waiter = "a" * 32
+    driver = """
+import json, os, sys
+from pathlib import Path
+from storage import mobile_store
+from storage.lock import MigrationFileLock
+mobile_store._now = lambda: sys.argv[4]
+store = mobile_store.MobileStore(Path(sys.argv[1]))
+with MigrationFileLock(store.waiter_path(sys.argv[3]), timeout_seconds=0):
+    request, _ = store.create_request("health.connect",
+        {"id":"inst_123", "owner":"owner@example.test"}, waiter_id=sys.argv[3], wait_seconds=20)
+    ready = Path(sys.argv[2])
+    stage = ready.with_suffix(".tmp")
+    stage.write_text(json.dumps({"id":request["id"], "pid":os.getpid()}))
+    stage.replace(ready)
+    sys.stdin.buffer.read(1)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", driver, str(store.path), str(ready), waiter, clock[0].isoformat()],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    actual = None
+    try:
+        until = time.monotonic() + 10
+        while not ready.exists() and process.poll() is None and time.monotonic() < until:
+            time.sleep(0.01)
+        assert ready.exists(), "Synthetic waiter did not publish its ready marker"
+        record = json.loads(ready.read_text())
+        actual = psutil.Process(record["pid"])
+        launcher = psutil.Process(process.pid)
+        assert actual == launcher or actual in launcher.children(recursive=True)
+        assert probe_lock_holder(store.waiter_path(waiter)) == "held"
+        if killed:
+            actual.kill()
+            process.wait(timeout=10)
+            assert probe_lock_holder(store.waiter_path(waiter)) == "free"
+        clock[0] += timedelta(seconds=elapsed)
+        before = store.show_request(record["id"])
+        new_waiter = "b" * 32
+        with MigrationFileLock(store.waiter_path(new_waiter), timeout_seconds=0):
+            assert store.arm_wait(record["id"], new_waiter, 20) == reclaimed
+        assert store.show_request(record["id"]) == before
+        with store.transaction() as conn:
+            row = conn.execute("SELECT * FROM requests WHERE id=?", (record["id"],)).fetchone()
+            assert row["callback_session"] is None
+            assert row["waiter_id"] == (new_waiter if reclaimed else waiter)
+    finally:
+        if actual is not None and actual.is_running():
+            try:
+                actual.kill()
+            except psutil.NoSuchProcess:
+                pass
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        if process.stdin:
+            process.stdin.close()
+        if process.stderr:
+            process.stderr.close()
+
+
+@pytest.mark.parametrize("callback_session", [None, "ses_synthetic"])
+def test_reclaimed_cli_waiter_keeps_results_and_rejects_the_old_continuation(
+    store, clock, monkeypatch, callback_session,
+):
+    from storage.lock import MigrationFileLock
+
+    request, _ = store.create_request(
+        "health.connect", IDENTITY, names=["steps", "sleep"], callback_session=callback_session,
+    )
+    paired, _ = pair_device(store)
+    device = device_for(store, paired)
+    old_waiter = "a" * 32
+    with MigrationFileLock(store.waiter_path(old_waiter), timeout_seconds=0):
+        assert store.arm_wait(request["id"], old_waiter, 20)
+    clock[0] += timedelta(seconds=21)
+    claim = store.claim(device["id"], maximum=1, request_id=request["id"])["requests"][0]
+    store.upload(device, upload_payload())
+    store.result(device, request["id"], {
+        "claim_token": claim["claim_token"], "outcome": "succeeded",
+        "result": {"metrics": {"steps": "ok", "sleep": "ok"}},
+    })
+    before = store.show_request(request["id"])
+    wait = cli_mobile.wait_for_request
+
+    def old_waiter_arrives_late(*args, **kwargs):
+        assert not store.finish_wait(request["id"], old_waiter, consumed=True)
+        with pytest.raises(MobileError, match="device_wait_timeout"):
+            mobile_health.wait_for_request(store, request["id"], 0, waiter_id=old_waiter)
+        assert store.pending_callbacks() == []
+        return wait(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mobile, "wait_for_request", old_waiter_arrives_late)
+    args = cli.build_parser().parse_args(["mobile", "requests", "await", request["id"], "--timeout", "20"])
+    assert cli_mobile.execute(args)["request"] == before
+    assert store.show_request(request["id"]) == before
+    assert store.pending_callbacks() == []
+    with pytest.raises(MobileError, match="continuation_owned"):
+        cli_mobile.execute(args)
+
+
+def test_concurrent_reclaimers_elect_one_waiter(store, clock):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from storage.lock import MigrationFileLock
+
+    old = "a" * 32
+    with MigrationFileLock(store.waiter_path(old), timeout_seconds=0):
+        request, _ = store.create_request("health.connect", IDENTITY, waiter_id=old, wait_seconds=20)
+    clock[0] += timedelta(seconds=21)
+    barrier = threading.Barrier(2)
+
+    def compete(waiter):
+        with MigrationFileLock(store.waiter_path(waiter), timeout_seconds=0):
+            barrier.wait(timeout=5)
+            return waiter, store.arm_wait(request["id"], waiter, 20)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(compete, ["b" * 32, "c" * 32]))
+    assert sum(armed for _, armed in results) == 1
+    for waiter, armed in results:
+        assert store.finish_wait(request["id"], waiter, consumed=True) == armed
+    assert not store.finish_wait(request["id"], old, consumed=True)
+
+
 def test_refresh_timeout_retains_existing_data_and_never_reports_success(store, monkeypatch, capsys):
     """A phone that does not answer must produce the documented error envelope."""
     paired, _ = pair_device(store)
@@ -599,10 +734,11 @@ def test_private_identity_covers_hard_links_and_literal_percent_roots(store, tmp
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor aliases")
-@pytest.mark.parametrize("surface", ["file", "register", "media", "show", "runtime"])
+@pytest.mark.parametrize("spelling", ["dev", "DEV", "Dev"])
+@pytest.mark.parametrize("surface", ["file", "register", "media", "show", "runtime", "metadata"])
 @pytest.mark.parametrize("alias_kind", ["fd", "symlink"])
 def test_fd_aliases_cannot_publish_private_bytes(
-    store, mobile_http, tmp_path, surface, alias_kind,
+    store, mobile_http, tmp_path, surface, alias_kind, spelling,
 ):
     """All path consumers refuse descriptor aliases, including previously minted media."""
     from urllib.parse import quote
@@ -621,7 +757,9 @@ def test_fd_aliases_cannot_publish_private_bytes(
 
         ensure_sqlite_state()
     with secret.open("rb") as handle:
-        alias = Path(f"/dev/fd/{handle.fileno()}")
+        alias = Path(f"/{spelling}/fd/{handle.fileno()}")
+        if not alias.parent.exists():
+            pytest.skip("This filesystem has no case-insensitive devfs alias")
         if alias_kind == "symlink":
             link = tmp_path / "descriptor-alias.txt"
             link.symlink_to(alias)
@@ -650,9 +788,200 @@ def test_fd_aliases_cannot_publish_private_bytes(
             with ui_server.app.test_request_context("/"):
                 response = ui_server._show_page_file_response(Path("/"), str(alias).lstrip("/"))
                 assert response.status_code == 404
+        elif surface == "metadata":
+            with pytest.raises(files.FileBrowserError) as failure:
+                files.metadata(str(alias))
+            assert failure.value.status_code == 403
         else:
             assert ui_server._is_show_page_runtime_denied_path(f"@fs{alias}", session_id="ses_fake")
     assert files.file_content(str(ordinary)).data == b"ordinary"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor aliases")
+@pytest.mark.parametrize("spelling", ["dev", "DEV", "Dev"])
+@pytest.mark.parametrize("operation", ["search", "replace"])
+@pytest.mark.parametrize("via_symlink", [False, True])
+def test_descriptor_text_operations_refuse_the_namespace(
+    store, tmp_path, spelling, operation, via_symlink,
+):
+    from core import file_browser_service as files
+
+    root = Path(f"/{spelling}/fd")
+    if not root.exists():
+        pytest.skip("This filesystem has no case-insensitive devfs alias")
+    if via_symlink:
+        alias = tmp_path / "descriptor-root"
+        alias.symlink_to(root, target_is_directory=True)
+        root = alias
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_text("synthetic-private-marker")
+    with secret.open("rb"):
+        with pytest.raises(files.FileBrowserError) as failure:
+            if operation == "search":
+                files.search(str(root), "synthetic-private-marker")
+            else:
+                # No match even on the old implementation: this probe must not
+                # attempt a write into devfs before establishing the boundary.
+                files.replace(str(root), "absent-test-query", "replacement")
+        assert failure.value.status_code == 403
+    assert secret.read_text() == "synthetic-private-marker"
+
+
+@pytest.mark.parametrize("lossy", [False, True])
+@pytest.mark.parametrize("replacement_time", ["before_open", "after_open"])
+def test_search_reader_checks_and_consumes_the_same_open_object(
+    store, tmp_path, monkeypatch, lossy, replacement_time,
+):
+    from core import file_browser_service as files
+
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_text("synthetic-private-marker")
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_text("ordinary")
+    original_open = open
+    opened = []
+
+    def substitute_at_open(path, *args, **kwargs):
+        if Path(path) != ordinary:
+            return original_open(path, *args, **kwargs)
+        opened.append(path)
+        if replacement_time == "before_open":
+            return original_open(secret, *args, **kwargs)
+        handle = original_open(path, *args, **kwargs)
+        ordinary.unlink()
+        ordinary.symlink_to(secret)
+        return handle
+
+    monkeypatch.setattr(files, "open", substitute_at_open, raising=False)
+    text, mtime = files._read_file_text(ordinary, lossy=lossy)
+    assert text == (None if replacement_time == "before_open" else "ordinary")
+    assert (mtime is None) == (replacement_time == "before_open")
+    assert len(opened) == 1
+
+
+@pytest.mark.parametrize("operation", ["search", "replace"])
+def test_text_consumers_skip_private_objects_substituted_at_open(
+    store, tmp_path, monkeypatch, operation,
+):
+    from core import file_browser_service as files
+
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_text("synthetic-private-marker")
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_text("ordinary")
+    original_open = open
+
+    def substitute_at_open(path, *args, **kwargs):
+        return original_open(secret if Path(path) == ordinary else path, *args, **kwargs)
+
+    monkeypatch.setattr(files, "open", substitute_at_open, raising=False)
+    if operation == "search":
+        result = files.search(str(tmp_path), "synthetic-private-marker")
+        assert result["total_matches"] == 0
+    else:
+        result = files.replace(str(tmp_path), "synthetic-private-marker", "replacement")
+        assert result["files_changed"] == 0 and result["undo_token"] is None
+    assert ordinary.read_text() == "ordinary"
+    assert secret.read_text() == "synthetic-private-marker"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX named pipes")
+def test_search_reader_keeps_the_early_nonregular_file_screen(store, tmp_path, monkeypatch):
+    from core import file_browser_service as files
+
+    fifo = tmp_path / "ordinary.fifo"
+    os.mkfifo(fifo)
+    monkeypatch.setattr(files, "open", lambda *_a, **_kw: pytest.fail("A FIFO must not be opened"), raising=False)
+    assert files._read_file_text(fifo, lossy=True) == (None, None)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
+def test_cross_device_move_preserves_source_timestamps(store, tmp_path, monkeypatch, kind):
+    from core import file_browser_service as files
+
+    source = tmp_path / "source"
+    if kind == "directory":
+        (source / "nested").mkdir(parents=True)
+        (source / "nested" / "file.txt").write_bytes(b"ordinary")
+    elif kind == "symlink":
+        if os.utime not in os.supports_follow_symlinks:
+            pytest.skip("Symlink timestamps are not supported")
+        ordinary = tmp_path / "ordinary.txt"
+        ordinary.write_bytes(b"ordinary")
+        source.symlink_to(ordinary)
+    else:
+        source.write_bytes(b"ordinary")
+    entries = [source, *source.rglob("*")] if kind == "directory" else [source]
+    expected = {}
+    for entry in entries:
+        os.utime(entry, ns=(1_900_000_000_123456789, 1_600_000_000_987654321), follow_symlinks=False)
+        info = entry.lstat()
+        expected[entry.relative_to(source)] = (info.st_atime_ns, info.st_mtime_ns)
+    destination = tmp_path / "destination"
+    original_rename = files._os_rename_noreplace
+
+    def cross_device(src, dst):
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "Synthetic cross-device move")
+        return original_rename(src, dst)
+
+    monkeypatch.setattr(files, "_os_rename_noreplace", cross_device)
+    assert files.move_path(str(source), str(destination))["ok"]
+    assert not source.exists() and not source.is_symlink()
+    for relative, timestamps in expected.items():
+        info = (destination / relative).lstat()
+        assert (info.st_atime_ns, info.st_mtime_ns) == timestamps
+
+
+@pytest.mark.skipif(not hasattr(os, "setxattr"), reason="Extended attributes are not supported")
+def test_cross_device_move_preserves_extended_attributes(store, tmp_path, monkeypatch):
+    from core import file_browser_service as files
+
+    source = tmp_path / "source"
+    source.write_bytes(b"ordinary")
+    try:
+        os.setxattr(source, "user.avibe-synthetic", b"synthetic metadata")
+    except OSError as error:
+        if error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+            raise
+        pytest.skip("This filesystem has no extended attributes")
+    destination = tmp_path / "destination"
+    original_rename = files._os_rename_noreplace
+
+    def cross_device(src, dst):
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "Synthetic cross-device move")
+        return original_rename(src, dst)
+
+    monkeypatch.setattr(files, "_os_rename_noreplace", cross_device)
+    assert files.move_path(str(source), str(destination))["ok"]
+    assert os.getxattr(destination, "user.avibe-synthetic") == b"synthetic metadata"
+
+
+def test_cross_device_metadata_failure_keeps_source_and_discards_stage(store, tmp_path, monkeypatch):
+    from core import file_browser_service as files
+
+    source = tmp_path / "source"
+    source.write_bytes(b"ordinary")
+    destination = tmp_path / "destination"
+    original_rename = files._os_rename_noreplace
+
+    def cross_device(src, dst):
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "Synthetic cross-device move")
+        return original_rename(src, dst)
+
+    def metadata_failure(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Synthetic metadata failure")
+
+    monkeypatch.setattr(files, "_os_rename_noreplace", cross_device)
+    monkeypatch.setattr(files.shutil, "copystat", metadata_failure)
+    with pytest.raises(files.FileBrowserError, match="Synthetic metadata failure") as failure:
+        files.move_path(str(source), str(destination))
+    assert failure.value.code == "fs_error"
+    assert source.read_bytes() == b"ordinary"
+    assert not destination.exists()
+    assert not list(tmp_path.glob(f"{files._COPY_TEMP_PREFIX}*"))
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Requires real Linux procfs")

@@ -1310,7 +1310,7 @@ def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
 
 def _stage_checked_copy(
     source: Path, target: Path, source_stat: os.stat_result, boundary: MobileStorageBoundary,
-    *, size_cap: int | None = None,
+    *, size_cap: int | None = None, preserve_metadata: bool = False,
 ) -> Path:
     """Measure and consume with one identity snapshot, before publishing anything."""
     source_fd: int | None = None
@@ -1331,22 +1331,33 @@ def _stage_checked_copy(
             if source_fd is not None:
                 copy_fd = _open_copy_directory(".", source_stat, dir_fd=source_fd, boundary=boundary)
                 try:
-                    _copy_directory_from_fd(copy_fd, stage, [0], size_cap, boundary=boundary, source=source)
+                    _copy_directory_from_fd(
+                        copy_fd, stage, [0], size_cap, boundary=boundary, source=source,
+                        preserve_metadata=preserve_metadata,
+                    )
                 finally:
                     os.close(copy_fd)
             else:
-                _copy_directory_from_path(source, source_stat, stage, [0], size_cap, boundary=boundary)
+                _copy_directory_from_path(
+                    source, source_stat, stage, [0], size_cap, boundary=boundary,
+                    preserve_metadata=preserve_metadata,
+                )
         elif stat.S_ISREG(source_stat.st_mode):
             _add_copy_size(0, source_stat.st_size, size_cap)
             source_fd = _open_copy_file(source, source_stat, boundary=boundary)
             stage = _new_copy_stage_path(target)
-            _copy_file_from_fd(source_fd, stage, source_stat, budget=[0], size_cap=size_cap, boundary=boundary)
+            _copy_file_from_fd(
+                source_fd, stage, source_stat, budget=[0], size_cap=size_cap, boundary=boundary,
+                preserve_metadata=preserve_metadata,
+            )
         elif stat.S_ISLNK(source_stat.st_mode):
             link_target = os.readlink(source)
             _require_copy_symlink(source, link_target, boundary)
             if not _same_copy_entry(source_stat, source.lstat()):
                 raise FileBrowserError("fs_error", "Source changed during copy", 400)
             stage = _stage_copy_symlink(target, link_target)
+            if preserve_metadata:
+                shutil.copystat(source, stage, follow_symlinks=False)
         else:
             raise FileBrowserError("fs_error", "Unsupported source type", 400)
         return stage
@@ -1385,7 +1396,7 @@ def _copy_cross_fs_move_to_absent_target(
     temp_target: Path | None = None
     try:
         temp_target = _stage_checked_copy(
-            source, target, source.lstat(), MobileStorageBoundary(),
+            source, target, source.lstat(), MobileStorageBoundary(), preserve_metadata=True,
         )
         _os_rename_noreplace(temp_target, target)
         temp_target = None
@@ -1640,6 +1651,7 @@ def _copy_file_from_fd(
     budget: list[int] | None = None,
     size_cap: int | None = None,
     boundary: MobileStorageBoundary | None = None,
+    preserve_metadata: bool = False,
 ) -> None:
     _require_browser_identity(os.fstat(source_fd), boundary)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
@@ -1663,6 +1675,10 @@ def _copy_file_from_fd(
                 os.fchmod(handle.fileno(), mode)
             else:
                 target.chmod(mode)
+            if preserve_metadata:
+                # Retain copy2's timestamps/flags/xattrs using the verified
+                # source descriptor, without reopening its path.
+                shutil.copystat(source_fd, target)
     finally:
         if target_fd >= 0:
             os.close(target_fd)
@@ -1671,6 +1687,7 @@ def _copy_file_from_fd(
 def _copy_symlink_from_fd(
     source_dir_fd: int, name: str, expected: os.stat_result, target: Path, *,
     boundary: MobileStorageBoundary | None = None, source: Path | None = None,
+    preserve_metadata: bool = False,
 ) -> None:
     link_target = os.readlink(name, dir_fd=source_dir_fd)
     current = os.stat(name, dir_fd=source_dir_fd, follow_symlinks=False)
@@ -1687,11 +1704,14 @@ def _copy_symlink_from_fd(
         if exc.errno != errno.ELOOP:
             raise
     os.symlink(link_target, target)
+    if preserve_metadata and source is not None:
+        shutil.copystat(source / name, target, follow_symlinks=False)
 
 
 def _copy_directory_from_fd(
     dir_fd: int, target: Path, budget: list[int], size_cap: int | None, *,
     boundary: MobileStorageBoundary | None = None, source: Path | None = None,
+    preserve_metadata: bool = False,
 ) -> None:
     directory_stat = os.fstat(dir_fd)
     _require_browser_identity(directory_stat, boundary)
@@ -1707,6 +1727,7 @@ def _copy_directory_from_fd(
                     _copy_directory_from_fd(
                         child_fd, child_target, budget, size_cap, boundary=boundary,
                         source=source / entry.name if source is not None else None,
+                        preserve_metadata=preserve_metadata,
                     )
                 finally:
                     os.close(child_fd)
@@ -1715,16 +1736,20 @@ def _copy_directory_from_fd(
                 try:
                     _copy_file_from_fd(
                         child_fd, child_target, entry_stat, budget=budget, size_cap=size_cap, boundary=boundary,
+                        preserve_metadata=preserve_metadata,
                     )
                 finally:
                     os.close(child_fd)
             elif stat.S_ISLNK(entry_stat.st_mode):
                 _copy_symlink_from_fd(
                     dir_fd, entry.name, entry_stat, child_target, boundary=boundary, source=source,
+                    preserve_metadata=preserve_metadata,
                 )
             else:
                 raise FileBrowserError("fs_error", "Unsupported source type", 400)
     target.chmod(stat.S_IMODE(directory_stat.st_mode))
+    if preserve_metadata:
+        shutil.copystat(dir_fd, target)
 
 
 def _copy_directory_from_path(
@@ -1735,6 +1760,7 @@ def _copy_directory_from_path(
     size_cap: int | None,
     *,
     boundary: MobileStorageBoundary | None = None,
+    preserve_metadata: bool = False,
 ) -> None:
     directory_stat = source.lstat()
     _require_browser_identity(directory_stat, boundary)
@@ -1748,12 +1774,16 @@ def _copy_directory_from_path(
             child_target = target / entry.name
             _require_browser_identity(child_source.lstat(), boundary)
             if stat.S_ISDIR(entry_stat.st_mode):
-                _copy_directory_from_path(child_source, entry_stat, child_target, budget, size_cap, boundary=boundary)
+                _copy_directory_from_path(
+                    child_source, entry_stat, child_target, budget, size_cap, boundary=boundary,
+                    preserve_metadata=preserve_metadata,
+                )
             elif stat.S_ISREG(entry_stat.st_mode):
                 child_fd = _open_copy_file(child_source, entry_stat, boundary=boundary)
                 try:
                     _copy_file_from_fd(
                         child_fd, child_target, entry_stat, budget=budget, size_cap=size_cap, boundary=boundary,
+                        preserve_metadata=preserve_metadata,
                     )
                 finally:
                     os.close(child_fd)
@@ -1764,9 +1794,13 @@ def _copy_directory_from_path(
                     raise FileBrowserError("fs_error", "Source changed during copy", 400)
                 _require_copy_symlink(child_source, link_target, boundary)
                 os.symlink(link_target, child_target)
+                if preserve_metadata:
+                    shutil.copystat(child_source, child_target, follow_symlinks=False)
             else:
                 raise FileBrowserError("fs_error", "Unsupported source type", 400)
     target.chmod(stat.S_IMODE(directory_stat.st_mode))
+    if preserve_metadata:
+        shutil.copystat(source, target, follow_symlinks=False)
 
 
 def _stage_copy_symlink(target: Path, link_target: str) -> Path:
@@ -2560,17 +2594,20 @@ def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | Non
     # The rest of the file browser treats symlinks as no-follow / non-editable; mirror that here so
     # search/replace can't follow a link out of the opened root (e.g. a planted
     # ``secret -> ~/.ssh/id_rsa``) and surface or rewrite content outside the tree.
-    if path.is_symlink() or is_mobile_private_path(path):
+    boundary = MobileStorageBoundary()
+    if path.is_symlink() or boundary.is_private_path(path):
         return None, None
     try:
-        st = path.stat()
-    except OSError:
-        return None, None
-    if not stat.S_ISREG(st.st_mode) or st.st_size > SEARCH_MAX_FILE_BYTES:
-        return None, None
-    mtime = _mtime_seconds(st)
-    try:
+        # Retain the early type/size screen: opening a FIFO just to inspect its
+        # descriptor could block. The opened object still needs its own check.
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > SEARCH_MAX_FILE_BYTES:
+            return None, None
         with open(path, "rb") as handle:
+            st = os.fstat(handle.fileno())
+            if boundary.is_private_stat(st) or not stat.S_ISREG(st.st_mode) or st.st_size > SEARCH_MAX_FILE_BYTES:
+                return None, None
+            mtime = _mtime_seconds(st)
             head = handle.read(_BINARY_SNIFF_BYTES)
             if b"\x00" in head:
                 return None, None

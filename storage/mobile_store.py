@@ -509,10 +509,21 @@ class MobileStore:
             row = conn.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
             if row is None:
                 raise MobileError("request_not_found", 404)
-            if row["callback_state"] != "pending" or row["waiter_id"]:
+            if row["callback_state"] != "pending":
                 return False
+            now = _now()
+            if row["waiter_id"]:
+                # A bounded reservation and an OS lock jointly establish
+                # ownership. An expired deadline alone cannot evict a live
+                # waiter; an unexpired reservation cannot be reclaimed either.
+                if not row["waiter_until"] or row["waiter_until"] > now:
+                    return False
+                if probe_lock_holder(self.waiter_path(row["waiter_id"])) != "free":
+                    return False
+            # BEGIN IMMEDIATE serializes reclaimers with callbacks and
+            # finish_wait; the old ID can no longer consume this continuation.
             conn.execute("UPDATE requests SET waiter_id=?,waiter_until=? WHERE id=?",
-                         (waiter_id, _after(_now(), seconds=seconds), request_id))
+                         (waiter_id, _after(now, seconds=seconds), request_id))
             return True
 
     def pending_callbacks(self) -> list[dict]:

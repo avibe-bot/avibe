@@ -182,6 +182,32 @@ Local repair evidence:
   committed connection; synchronization success still requires upload ACK and
   server-accepted receipt. No device protocol or lease change.
 
+### Namespace and metadata follow-up (November 18, 14:01)
+
+Main's independent reviewer passed `9b4affa1dc5dba582049e3010746d5b278948c08`
+within the finite scope above. Main authorized one follow-up for two findings:
+case-insensitive descriptor namespace spellings and EXDEV metadata preservation.
+The same metadata regression was independently reported by Codex on that head.
+
+- Normalize namespace spelling before checking raw and intermediate paths.
+  Search/replace text readers also validate `fstat` before reading the same fd.
+- EXDEV staging retains `copystat` behavior, including supported timestamps,
+  flags and extended attributes. File and POSIX directory metadata come from
+  the verified source fd. A metadata-copy failure leaves the source in place,
+  refuses publication and cleans this operation's stage.
+- Ordinary copy's metadata behavior and size budget remain unchanged.
+- The verification runner and its import helpers live in a dedicated private
+  temporary directory; the whole `/tmp` directory is not on `PYTHONPATH`.
+
+Main's 14:09 decision also includes Codex's abandoned synchronous-waiter defect:
+`arm_wait` may replace an existing pending waiter only after its reservation
+expires and an OS lock probe establishes that its lock is free, within the same
+write transaction. A held, missing or unverifiable lock does not establish
+abandonment. The request state/result, callback destination and one-continuation
+ownership remain unchanged. A late old waiter cannot consume the replacement.
+Real subprocess-death, active-lock, unexpired-reservation, concurrent-reclaimer
+and CLI/result/callback regressions cover this correction.
+
 Authorized: implementation and a non-draft English PR through Merge-ready.
 Not authorized: merge, install an S1 package locally, modify Apple App ID or
 profiles, TestFlight, release, production service / state / push or remote access.
