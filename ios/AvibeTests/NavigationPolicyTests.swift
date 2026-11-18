@@ -706,6 +706,39 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testATapPendingDuringBootstrapOpensBeforeHealthRestorationFinishes()
+        async throws
+    {
+        // Health restoration is held at its manifest for the whole test.
+        let healthDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NavigationHealth.\(UUID().uuidString)", isDirectory: true)
+        let health = HealthCoordinatorFixture(directory: healthDirectory, savedIdentity: true)
+        health.client.claims = []
+        health.client.holdManifest = true
+        addTeardownBlock { @MainActor in
+            health.client.holdManifest = false
+            health.client.releasePending()
+            await health.coordinator.logout()
+            try? FileManager.default.removeItem(at: healthDirectory)
+        }
+        let (appModel, _) = try await makeFixtureAppModel(healthSync: health.coordinator) { appModel in
+            health.credentials.identity?.websiteDataStoreID = appModel.websiteDataStore.identifier
+            // Arrives before bootstrap completes, so it is held as pending.
+            appModel.pushCoordinator.handleNotificationTap(
+                userInfo: [
+                    "account_id": "account-1",
+                    "instance_origin": "https://instance-one.example",
+                    "url": "/chat/pending",
+                ]
+            )
+        }
+        _ = try await waitForPushRuntime(appModel, instanceID: "instance-1")
+        try await waitUntil("Health restoration holds its manifest") {
+            health.client.manifestContinuation != nil
+        }
+    }
+
+    @MainActor
     func testPendingPushTapRedeliversAcrossNavigationUntilMatchingAck()
         async throws
     {
@@ -3726,7 +3759,8 @@ final class NavigationPolicyTests: XCTestCase {
     private func makeTestAppModel(
         defaults: UserDefaults,
         controlPlane: MobileControlPlaneConfiguration,
-        pushOpenedNow: @escaping () -> Date = Date.init
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        healthSync: HealthSyncCoordinator? = nil
     ) -> AppModel {
         let scheduleDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("I3Fixture.\(UUID().uuidString)", isDirectory: true)
@@ -3744,7 +3778,8 @@ final class NavigationPolicyTests: XCTestCase {
             pushOpenedNow: pushOpenedNow,
             // Never the test host's own badge.
             systemScheduleStore: scheduleStore,
-            badgeCenter: NavigationTestBadgeCenter()
+            badgeCenter: NavigationTestBadgeCenter(),
+            healthSync: healthSync
         )
     }
 
@@ -3776,6 +3811,7 @@ final class NavigationPolicyTests: XCTestCase {
         instanceOneAvailable: Bool = true,
         storedSelection: String? = nil,
         heldSessionReads: HeldSessionReads? = nil,
+        healthSync: HealthSyncCoordinator? = nil,
         whenTheAppExists: @MainActor (AppModel) async throws -> Void = { _ in }
     ) async throws -> (AppModel, FixtureRequestLog) {
         let server = try LocalHTTPServer { request in
@@ -3851,7 +3887,8 @@ final class NavigationPolicyTests: XCTestCase {
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: baseURL
             ),
-            pushOpenedNow: pushOpenedNow
+            pushOpenedNow: pushOpenedNow,
+            healthSync: healthSync
         )
         let storeCleanup = NamedDataStoreCleanup()
         storeCleanup.identifier = appModel.websiteDataStore.identifier

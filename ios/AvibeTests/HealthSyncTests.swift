@@ -1152,13 +1152,20 @@ final class HealthSyncTests: XCTestCase {
         uploader.urlSession(session, dataTask: task, didReceive: data)
         uploader.urlSession(session, task: task, didCompleteWithError: nil)
         uploader.urlSessionDidFinishEvents(forBackgroundURLSession: session)
-        try await eventually { systemFinished && fixture.client.resultContinuation != nil }
+        // The system barrier completes while the manifest and result delivery are both held.
+        try await eventually { systemFinished }
         XCTAssertNotNil(fixture.client.manifestContinuation)
+        XCTAssertNil(fixture.client.resultContinuation)
+        XCTAssertTrue(fixture.client.results.isEmpty)
         XCTAssertTrue(fixture.uploader.uploads.isEmpty)
-        fixture.client.releaseResult()
+        // Releasing the manifest lets the same convergence pass deliver the result once.
         fixture.client.releaseManifest()
+        try await eventually { fixture.client.resultContinuation != nil }
+        fixture.client.releaseResult()
         await restoring.value
         try await eventually { fixture.client.results.count == 1 }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.results.count, 1)
         await coordinator.logout()
     }
 
@@ -1442,6 +1449,219 @@ final class HealthSyncTests: XCTestCase {
         XCTAssertEqual(claims(background), 0)
     }
 
+    @MainActor
+    func testAHeldManifestHoldsTheOutboxOfItsPass() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        _ = try pendingUpload(in: fixture.directory)
+        fixture.client.holdManifest = true
+        let restoring = Task { await fixture.coordinator.resume(foreground: false) }
+        try await eventually { fixture.client.manifestContinuation != nil }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+        fixture.client.holdManifest = false
+        fixture.client.releaseManifest()
+        await restoring.value
+        XCTAssertEqual(fixture.uploader.uploads.count, 1)
+    }
+
+    @MainActor
+    func testATransientManifestFailureStillDeliversResultsAndRetriesOnceAtTheEndOfThePass() async throws {
+        func manifests(_ fixture: HealthCoordinatorFixture) -> Int {
+            fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count
+        }
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        fixture.reader.holdQueries = true
+        try HealthDeviceStore(directory: fixture.directory).update {
+            var result = self.pendingResult()
+            result.ready = true
+            $0.completed[result.id] = result
+        }
+        // 500 sets no Retry-After, so later device requests in the pass are allowed.
+        fixture.client.manifestErrors = [HealthSyncError.http(500, "internal", nil)]
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually { fixture.client.results.count == 1 }
+        XCTAssertEqual(manifests(fixture), 1)
+        // One retry, at the 30-second default delay, resends only the manifest.
+        try await eventually(timeout: .seconds(40)) { manifests(fixture) == 2 }
+        try await Task.sleep(for: .seconds(1))
+        XCTAssertEqual(manifests(fixture), 2)
+        XCTAssertEqual(fixture.client.results.count, 1)
+        fixture.reader.releaseQuery()
+    }
+
+    // MARK: Foreground liveness: one convergence owner
+
+    @MainActor
+    func testForegroundRestorationPollsDespiteTheManifestAndRetriesAFailedManifest() async throws {
+        func manifests(_ fixture: HealthCoordinatorFixture) -> Int {
+            fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count
+        }
+        // A held manifest does not keep claims from starting.
+        let held = try coordinatorFixture(savedIdentity: true)
+        held.client.claims = []
+        held.reader.holdQueries = true
+        held.client.holdManifest = true
+        _ = Task { await held.coordinator.resume(foreground: true) }
+        try await eventually { held.client.manifestContinuation != nil && held.client.pendingClaims.count == 1 }
+        held.client.holdManifest = false
+        held.client.releaseManifest()
+
+        // A transient manifest failure: claims start after Retry-After and one retry resends it.
+        let failing = try coordinatorFixture(savedIdentity: true)
+        failing.client.claims = []
+        failing.reader.holdQueries = true
+        failing.client.manifestErrors = [HealthSyncError.http(503, "unavailable", 1)]
+        _ = Task { await failing.coordinator.resume(foreground: true) }
+        try await eventually(timeout: .seconds(10)) {
+            failing.client.pendingClaims.count == 1 && manifests(failing) == 2
+        }
+        try await Task.sleep(for: .seconds(1))
+        XCTAssertEqual(manifests(failing), 2)
+        held.reader.releaseQuery()
+        failing.reader.releaseQuery()
+    }
+
+    @MainActor
+    func testConnectionPollsAfterItsFirstSyncFails() async throws {
+        let fixture = try coordinatorFixture()
+        // Foreground without a saved device.
+        await fixture.coordinator.resume(foreground: true)
+        fixture.reader.queryErrors = [NSError(domain: "HealthFixture", code: 1)]
+        let connecting = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let reply = await connecting.value
+        XCTAssertEqual(reply, "connected")
+        try await eventually { fixture.client.pendingClaims.count == 1 }
+        try await eventually {
+            (try? HealthDeviceStore(directory: fixture.directory).state.completed["request-1"]?.ready) == true
+        }
+        XCTAssertEqual(fixture.reader.days, [30, 30])
+    }
+
+    @MainActor
+    func testARevokedDeviceReconnectedInTheSameForegroundPollsAgain() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        fixture.client.claimErrors = [HealthSyncError.http(401, "device_unauthorized", nil)]
+        fixture.reader.holdQueries = true
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually { fixture.credentials.identity == nil }
+        fixture.reader.holdQueries = false
+        fixture.reader.releaseQuery()
+        fixture.client.claims = [[claim(token: "claim-2")]]
+        let reconnecting = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let reply = await reconnecting.value
+        XCTAssertEqual(reply, "connected")
+        try await eventually { fixture.client.pendingClaims.count == 1 }
+    }
+
+    @MainActor
+    func testATransientUploadFailureWithoutRetryAfterDoesNotRetransmitImmediately() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        fixture.reader.holdQueries = true
+        let upload = try pendingUpload(in: fixture.directory)
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually { fixture.uploader.uploads.count == 1 }
+        await fixture.uploader.onComplete?(upload.id, .failure(HealthSyncError.http(500, "internal", nil)))
+        try await Task.sleep(for: .seconds(5))
+        XCTAssertEqual(fixture.uploader.uploads.count, 1)
+        XCTAssertEqual(try HealthDeviceStore(directory: fixture.directory).state.uploads, [upload.id])
+        fixture.reader.releaseQuery()
+    }
+
+    @MainActor
+    func testColdRestorationWithAnEarlyAckAndObserverSendsTheManifestOnce() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        let upload = try pendingUpload(in: fixture.directory)
+        fixture.client.holdManifest = true
+        let restoring = Task { await fixture.coordinator.resume(foreground: false) }
+        try await eventually { fixture.client.manifestContinuation != nil }
+        await fixture.uploader.acknowledge(upload)
+        await fixture.reader.observer?()
+        fixture.client.holdManifest = false
+        fixture.client.releaseManifest()
+        await restoring.value
+        try await eventually { fixture.client.results.count == 1 }
+        XCTAssertEqual(fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+    }
+
+    @MainActor
+    func testPausingDuringAHeldManifestLetsTheNextEpochConvergeAfterReauthentication() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var accountID: String? = "account-1"
+        fixture.coordinator.accountIDProvider = { accountID }
+        fixture.client.claims = []
+        fixture.reader.holdQueries = true
+        fixture.client.holdManifest = true
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually { fixture.client.manifestContinuation != nil }
+        accountID = nil
+        fixture.coordinator.accountEvent(.authorizationUnavailable)
+        fixture.client.holdManifest = false
+        accountID = "account-1"
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await eventually {
+            fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count == 2
+                && fixture.client.calls.filter { $0.path.hasSuffix("/requests/claim") }.count >= 1
+                && fixture.reader.starts == 2
+        }
+        fixture.reader.releaseQuery()
+    }
+
+    @MainActor
+    func testEveryForegroundEntrySendsTheManifestAgain() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.claims = []
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertEqual(fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+        fixture.reader.holdQueries = true
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually { fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count == 2 }
+        fixture.reader.releaseQuery()
+    }
+
+    @MainActor
+    func testHealthKitDeliveryConvergesAnUnfinishedRestoration() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.manifestErrors = [NSError(domain: "HealthFixture", code: 2)]
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertEqual(fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+        await fixture.reader.observer?()
+        try await eventually { fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count == 2 }
+    }
+
+    @MainActor
+    func testAuthenticationFinishesAStalledRestorationOnlyWhileItIsUnconverged() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.client.manifestErrors = [NSError(domain: "HealthFixture", code: 3)]
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertEqual(fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await eventually { fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count == 2 }
+        let calls = fixture.client.calls.count
+        // A converged identity triggers no network.
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.calls.count, calls)
+    }
+
+    @MainActor
+    func testEnteringTheBackgroundCancelsAPendingRetry() async throws {
+        let (fixture, _) = try await acknowledgedFirstOfTwo(
+            resultError: HealthSyncError.http(503, "unavailable", 1), foreground: true)
+        fixture.coordinator.setBackground()
+        // Longer than the five-second minimum retry delay.
+        try await Task.sleep(for: .milliseconds(6500))
+        XCTAssertEqual(fixture.client.results.count, 1)
+        XCTAssertEqual(fixture.uploader.uploads.count, 1)
+        fixture.reader.releaseQuery()
+    }
+
     /// Restores two queued payloads, acknowledges the first and lets its result
     /// delivery fail once with `resultError`.
     @MainActor
@@ -1618,8 +1838,10 @@ final class HealthFakeReader: HealthDataReading {
         continuation?.resume()
     }
     func authorize() async throws { authorizations += 1 }
+    var queryErrors: [Error] = []
     func query(days: Int, now: Date) async throws -> HealthQueryWindow {
         self.days.append(days)
+        if !queryErrors.isEmpty { throw queryErrors.removeFirst() }
         if holdQueries { await withCheckedContinuation { queryContinuation = $0 } }
         return HealthQueryWindow(
             computedAt: now, from: "2026-11-18", to: "2026-11-18",
@@ -1681,6 +1903,8 @@ final class HealthFakeClient: HealthDeviceRequesting {
     var pairedDeviceID = "device-1"
     var holdResults = false
     var resultErrors: [Error] = []
+    var manifestErrors: [Error] = []
+    var claimErrors: [Error] = []
     var resultContinuation: CheckedContinuation<[String: Any], Error>?
     var claims: [[[String: Any]]] = [[[
         "id": "request-1", "operation": "health.connect", "claim_token": "claim-1",
@@ -1703,8 +1927,16 @@ final class HealthFakeClient: HealthDeviceRequesting {
             return try await withCheckedThrowingContinuation { resultContinuation = $0 }
         }
         if path.hasSuffix("/manifest") {
+            if !manifestErrors.isEmpty { throw manifestErrors.removeFirst() }
             if let manifestError { throw manifestError }
-            if holdManifest { return try await withCheckedThrowingContinuation { manifestContinuation = $0 } }
+            if holdManifest {
+                // Like URLSession, a held request ends when its task is cancelled.
+                return try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { manifestContinuation = $0 }
+                } onCancel: {
+                    Task { @MainActor [weak self] in self?.cancelHeldManifest() }
+                }
+            }
         }
         if path.hasSuffix("/pair") {
             if holdPair {
@@ -1713,6 +1945,7 @@ final class HealthFakeClient: HealthDeviceRequesting {
             return pairResponse
         }
         if path.hasSuffix("/requests/claim") {
+            if !claimErrors.isEmpty { throw claimErrors.removeFirst() }
             if !claims.isEmpty { return ["requests": claims.removeFirst()] }
             return try await withCheckedThrowingContinuation { pendingClaims.append($0) }
         }
@@ -1727,6 +1960,11 @@ final class HealthFakeClient: HealthDeviceRequesting {
         let continuation = manifestContinuation
         manifestContinuation = nil
         continuation?.resume(returning: [:])
+    }
+    func cancelHeldManifest() {
+        let continuation = manifestContinuation
+        manifestContinuation = nil
+        continuation?.resume(throwing: CancellationError())
     }
     func releasePending() {
         releaseResult()
