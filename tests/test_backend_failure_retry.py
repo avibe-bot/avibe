@@ -1518,11 +1518,24 @@ def test_workspace_notice_names_its_session_and_retries_there(isolated_state, tm
     assert "failure_source" not in stored
 
 
-def test_workspace_notice_of_an_unwritten_input_offers_retry(isolated_state, tmp_path):
-    """The input that never reached the backend stays queued for the retry; it is not work in the way."""
-    session_id, notice, _turn, _inputs = _retry_notice(tmp_path, not_written=True)
+@pytest.mark.parametrize("run_status", [None, "queued", "failed"])
+def test_workspace_notice_of_an_unwritten_input_offers_retry(isolated_state, tmp_path, run_status):
+    """The input that never reached the backend stays queued for the retry; it is not work in the way.
+
+    Found on regression: an input bound to an Agent Run that already ended can never start (the start
+    claim retires it), so no Retry is offered for it.
+    """
+    from storage.models import agent_runs
+
+    session_id, notice, _turn, inputs = _retry_notice(tmp_path, not_written=True)
+    if run_status:
+        with create_sqlite_engine().begin() as conn:
+            conn.execute(agent_runs.insert().values(
+                id="run_bg", run_type="agent_run", status=run_status, session_id=session_id, metadata_json="{}",
+                delivery_id=inputs[0]["id"], created_at="2026-11-18T00:00:00Z", updated_at="2026-11-18T00:00:00Z",
+            ))
     workspace_notice = _workspace_notice_for(notice)
-    assert workspace_notice["content"]["failure_source"] == {"session_id": session_id, "retry": True}
+    assert workspace_notice["content"]["failure_source"] == {"session_id": session_id, "retry": run_status != "failed"}
 
 
 def test_workspace_thread_reads_when_an_unwritten_input_is_gone(isolated_state, tmp_path):
