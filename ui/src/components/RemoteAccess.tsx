@@ -1,5 +1,5 @@
 import type { TranslationKey } from '@/i18n/types';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -28,6 +28,8 @@ import {
 import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
+import { liveStreamVia, subscribeLiveStreamVia } from '../lib/liveStreamVia';
+import { remoteAccessDirectLines } from '../lib/remoteAccessDirect';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
@@ -538,6 +540,8 @@ export const RemoteAccess: React.FC = () => {
         </div>
       </div>
 
+      <RemoteAccessDirectLines direct={status?.direct} />
+
       {running && networkPath && (
         <div className="border-b border-border px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -952,5 +956,37 @@ export const RemoteAccess: React.FC = () => {
         </div>
       )}
     </section>
+  );
+};
+
+// The direct ingress, as current facts only: the instance's own state and certificate, and how this
+// page's live stream came in (that stream's own handshake; hidden until one has answered). No drop
+// count and no fallback reason: neither the instance nor the page can know them truthfully today.
+// Shown only while direct is turned on (ui/design: settings/remote-access/direct-*).
+const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }> = ({ direct }) => {
+  const { t, i18n } = useTranslation();
+  const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
+  const [now] = useState(() => Date.now());
+  const lines = remoteAccessDirectLines(direct, pageVia, now);
+  if (!lines) return null;
+  // Written like other Settings dates: the page's own locale.
+  const certificate = lines.certificateDate
+    ? t('remoteAccess.direct.certificate', {
+      date: new Intl.DateTimeFormat(i18n.language, { year: 'numeric', month: 'long', day: 'numeric' })
+        .format(lines.certificateDate),
+    })
+    : null;
+  const page = lines.pageKey ? t(lines.pageKey) : null;
+  const detail = certificate && page
+    ? t('remoteAccess.direct.detail', { certificate, page })
+    : certificate ?? page;
+  return (
+    <div className="border-b border-border px-5 py-3.5" data-testid="remote-access-direct">
+      <div className="text-[12px] text-muted">{t('remoteAccess.direct.label')}</div>
+      <div className="mt-1">
+        <Badge variant={lines.variant}>{t(lines.stateKey)}</Badge>
+      </div>
+      {detail && <div className="mt-1.5 text-[12px] text-muted">{detail}</div>}
+    </div>
   );
 };

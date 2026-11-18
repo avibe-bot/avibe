@@ -3299,6 +3299,43 @@ def test_workbench_events_heartbeat_proves_liveness_on_its_own_clock(monkeypatch
     assert "hidden-secret" not in busy
 
 
+def test_workbench_events_handshake_reports_the_streams_own_ingress(monkeypatch, tmp_path):
+    """Each stream says whether it came through the direct ingress, from its own scope.
+
+    A separate request may take another path, so only the stream can answer for
+    itself; a reconnect is a new stream that answers again.
+    """
+    from vibe.authorization import AuthorizationContext
+    from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    async def handshake(direct: bool) -> str:
+        with app.test_request_context("/api/events") as compat_request:
+            if direct:
+                compat_request._request.scope[DIRECT_INGRESS_SCOPE_KEY] = {"peer": "peer-a"}
+            g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                frames = [await iterator.__anext__() for _ in range(2)]
+            finally:
+                await iterator.aclose()
+        frame = frames[1]
+        return frame.decode("utf-8") if isinstance(frame, bytes) else frame
+
+    direct = asyncio.run(handshake(True))
+    assert "event: connected" in direct
+    assert '"via":"direct"' in direct
+    assert "peer-a" not in direct
+    # The main listener is not necessarily the tunnel: it is only "other".
+    assert '"via":"other"' in asyncio.run(handshake(False))
+    # A reconnect answers for itself again.
+    assert '"via":"direct"' in asyncio.run(handshake(True))
+
+
 def test_workbench_events_end_a_subscriber_whose_queue_overflowed(monkeypatch, tmp_path):
     """A subscriber that lost an event is not a subscriber any more.
 

@@ -3121,7 +3121,19 @@
     "diagnosticUnknown": "尚未观测",
     "diagnosticQuicInactive": "未验证 · 当前 {{protocol}}",
     "diagnosticQuicInactiveHelp": "Avibe 只会在当前 Connector 实际使用 QUIC 后确认该路径；当前 Connector 正在使用 {{protocol}}。",
-    "diagnosticVersion": "{{version}}"
+    "diagnosticVersion": "{{version}}",
+    "direct": {
+      "label": "直连",
+      "stateReady": "已就绪",
+      "stateAwaitingPermission": "等待授权",
+      "stateDenied": "未获准",
+      "stateAwaitingCertificate": "等待证书",
+      "stateNotRunning": "未运行",
+      "certificate": "证书有效期至 {{date}}",
+      "detail": "{{certificate}} · {{page}}",
+      "pageDirect": "本页当前连接：直连",
+      "pageOther": "本页当前连接：未走直连"
+    }
   },
   "models": {
     "eligibility": {
@@ -3621,7 +3633,8 @@
     "openMobileAccount": "账号与 Avibe",
     "signOut": "退出登录",
     "signingOut": "正在退出…",
-    "resizeSidebar": "调整侧栏宽度"
+    "resizeSidebar": "调整侧栏宽度",
+    "directTag": "直连"
   },
   "workbench": {
     "eyebrow": "Agent OS",

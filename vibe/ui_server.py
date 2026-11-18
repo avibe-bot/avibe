@@ -14659,7 +14659,7 @@ def _workbench_event_heartbeat_interval_ms() -> int:
     return int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
 
 
-def _workbench_event_connected_frame(sub_id: int) -> str:
+def _workbench_event_connected_frame(sub_id: int, *, via: str = "other") -> str:
     """The handshake: this subscription's id, and the cadence it is owed.
 
     Carrying the cadence here is what lets a client hold a brand-new stream to a
@@ -14671,9 +14671,14 @@ def _workbench_event_connected_frame(sub_id: int) -> str:
     A declaration, never proof: a server too old to send this field is simply
     never held to a cadence, and a client must still wait for a heartbeat before
     believing the stream is carrying events.
+
+    ``via`` says how this very stream reached the server: ``"direct"`` when it
+    entered through the direct ingress, ``"other"`` for any other listener
+    (the tunnel, the LAN, or loopback). Only the stream's own scope can answer
+    that; it holds for this stream alone and is reported again on reconnect.
     """
     interval_ms = _workbench_event_heartbeat_interval_ms()
-    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms}}}\n\n'
+    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms},"via":"{via}"}}\n\n'
 
 
 def _workbench_event_heartbeat_frame() -> str:
@@ -14933,6 +14938,7 @@ async def workbench_events():
     from vibe.inbox_bridge import is_bridge_connected
     from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT, broker
 
+    stream_via = "direct" if _is_direct_ingress_request() else "other"
     authorization_context = getattr(g, "authorization_context", None)
     remote_session_identity = getattr(g, "remote_session_identity", None)
     remote_session_payload = getattr(g, "remote_session_payload", None)
@@ -14976,7 +14982,7 @@ async def workbench_events():
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
-            yield _workbench_event_connected_frame(sub_id)
+            yield _workbench_event_connected_frame(sub_id, via=stream_via)
             payload = json.dumps(
                 {
                     "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,

@@ -33,6 +33,7 @@ import {
   WORKBENCH_EVENT_RETRY_INITIAL_MS,
   workbenchEventStaleAfterMs,
 } from '../lib/workbenchEventConnection';
+import { liveStreamVia, setLiveStreamVia } from '../lib/liveStreamVia';
 import { ApiProvider, useApi } from './ApiContext';
 
 const STALE_AFTER_MS = workbenchEventStaleAfterMs(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
@@ -398,6 +399,40 @@ describe('ApiProvider workbench stream liveness', () => {
     networkBack();
     expect(onConnected).toHaveBeenCalledTimes(2);
     expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('says how the live stream came in only while it lives, and asks each new stream again', () => {
+    setLiveStreamVia(null);
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    // Unknown, not "not direct", before any stream has answered for itself.
+    expect(liveStreamVia()).toBeNull();
+    const handshakeVia = (subId: number, via?: string) => FakeEventSource.latest().emit('connected', {
+      sub_id: subId,
+      interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+      ...(via ? { via } : {}),
+    });
+    handshakeVia(1, 'direct');
+    emitControllerLeg(true);
+    expect(liveStreamVia()).toBe('direct');
+
+    const first = FakeEventSource.latest();
+    awayAndBack({ awayMs: STALE_AFTER_MS });
+    expect(first.closed).toBe(true);
+    // Reconnecting: unknown again until the replacement answers.
+    expect(liveStreamVia()).toBeNull();
+
+    // The replacement came in another way: the main listener is only "other".
+    handshakeVia(2, 'other');
+    expect(liveStreamVia()).toBe('other');
+    // A later replacement answers for itself, direct again.
+    const second = FakeEventSource.latest();
+    awayAndBack({ awayMs: STALE_AFTER_MS });
+    expect(second.closed).toBe(true);
+    handshakeVia(3, 'direct');
+    expect(liveStreamVia()).toBe('direct');
+    // A server too old to say is unknown, never "not direct".
+    handshakeVia(4);
+    expect(liveStreamVia()).toBeNull();
   });
 
   it('does not let a replacement stream inherit the old one as proof of life', () => {
