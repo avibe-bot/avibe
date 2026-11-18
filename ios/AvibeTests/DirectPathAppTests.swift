@@ -4214,6 +4214,24 @@ final class DirectPathAppTests: XCTestCase {
         })
         try await Task.sleep(for: .seconds(2))
         captureWindow(mock, "1a-pill-connecting-over-cached-page-light")
+        try await page.loadChat()
+        try await Task.sleep(for: .seconds(2))
+        try await show(ZStack(alignment: .top) {
+            page.view
+            RuntimeOpenStatusPill(attempt: connecting, cancel: {})
+        })
+        try await Task.sleep(for: .seconds(1))
+        captureWindow(mock, "1a-pill-connecting-over-cached-chat-light")
+        print("[top bar overlap] chat: \(await page.topBarOverlaps(windowWidth: Double(mock.bounds.width)))")
+        // A regular session instead: TitleField's rename button, a long title.
+        _ = try? await page.webView.evaluateJavaScript(
+            "document.querySelector('.bot').outerHTML = '<button class=\"bot\" data-tap=\"标题（点按改名）\" style=\"flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis\"><b>冷启动方案评审与三张帧图的修改意见</b></button>'"
+        )
+        try await Task.sleep(for: .milliseconds(500))
+        captureWindow(mock, "1a-pill-connecting-over-cached-session-light")
+        print("[top bar overlap] session: \(await page.topBarOverlaps(windowWidth: Double(mock.bounds.width)))")
+        try await page.load()
+        try await Task.sleep(for: .seconds(2))
         try await show(ZStack(alignment: .bottom) {
             page.view
             CachedPageTimeoutBannerProposal(instanceName: "Studio")
@@ -7564,10 +7582,10 @@ private final class MockCachedPage {
             <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
             <style>
             body{margin:0;font-family:-apple-system,"PingFang SC";background:\(background);color:\(text)}
-            .topbar{position:fixed;top:0;left:0;right:0;padding:env(safe-area-inset-top) 16px 0;height:52px;display:flex;align-items:center;gap:10px;background:\(background);border-bottom:1px solid rgba(127,127,127,.15)}
+            .topbar{position:fixed;top:0;left:0;right:0;padding:env(safe-area-inset-top) 16px 0;height:44px;display:flex;align-items:center;gap:10px;background:\(background);border-bottom:1px solid rgba(127,127,127,.15)}
             .topbar .logo{width:28px;height:28px;border-radius:8px;background:#7c6cf2}
             .topbar b{flex:1;font-size:17px}.topbar .me{width:30px;height:30px;border-radius:15px;background:#10b981;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px}
-            main{padding-top:calc(env(safe-area-inset-top) + 60px);padding-bottom:calc(env(safe-area-inset-bottom) + 64px)}
+            main{padding-top:calc(env(safe-area-inset-top) + 52px);padding-bottom:calc(env(safe-area-inset-bottom) + 64px)}
             h1{margin:8px 20px 2px;font-size:26px}
             .status{margin:0 20px 8px;font-size:12px;color:\(muted)}
             .row{display:flex;gap:12px;padding:12px 20px}
@@ -7586,6 +7604,64 @@ private final class MockCachedPage {
         webView.isOpaque = false
         webView.loadHTMLString(html, baseURL: nil)
         try await Task.sleep(for: .milliseconds(800))
+    }
+
+    /// A Bot conversation, with the phone chat header's geometry from
+    /// ChatHeaderBar and BotConversationTitle: a 44 pt bar with a 28 pt back
+    /// button, the Bot switch (26 pt face, name, chevron), and on the right
+    /// the Show Page control and the session menu.
+    func loadChat() async throws {
+        let html = """
+            <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+            <style>
+            body{margin:0;font-family:-apple-system,"PingFang SC";background:#fff;color:#111}
+            .hdr{position:fixed;top:0;left:0;right:0;height:44px;padding:env(safe-area-inset-top) 16px 0;display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.92);border-bottom:1px solid #e5e5ea}
+            .back{width:28px;height:28px;border:1px solid #d9d9e0;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+            .bot{margin-left:-6px;display:flex;align-items:center;gap:8px;padding:2px 8px 2px 6px;border-radius:999px;min-width:0}
+            .face{width:26px;height:26px;border-radius:13px;background:#f5b041;flex-shrink:0}
+            .bot b{font-size:16px;white-space:nowrap}.chev{color:#888;font-size:12px}
+            .right{margin-left:auto;display:flex;gap:6px}.icon{width:28px;height:28px;border-radius:8px;border:1px solid #d9d9e0}
+            main{padding:calc(env(safe-area-inset-top) + 56px) 16px 120px}
+            .msg{max-width:78%;padding:10px 12px;border-radius:16px;margin:8px 0;font-size:15px;line-height:1.45}
+            .me{margin-left:auto;background:#10b981;color:#fff}.it{background:#f2f2f7}
+            .composer{position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom) + 8px);height:44px;border-radius:22px;border:1px solid #d9d9e0;background:#fff;color:#999;display:flex;align-items:center;padding:0 16px;font-size:15px}
+            </style></head><body>
+            <div class="hdr"><button class="back" data-tap="返回">←</button>
+            <button class="bot" data-tap="切换伙伴"><span class="face"></span><b>奶酪包</b><span class="chev">⌄</span></button>
+            <div class="right"><button class="icon" data-tap="Show Page"></button><button class="icon" data-tap="会话菜单"></button></div></div>
+            <main>
+            <div class="msg me">帮我看看下午的日程</div>
+            <div class="msg it">下午三点有一个评审，四点半和设计组同步。要我把评审材料先整理出来吗？</div>
+            <div class="msg me">好，顺便提醒我带上周报</div>
+            <div class="msg it">好的，三点前十分钟提醒你，周报我已经放进评审材料里了。</div>
+            </main>
+            <div class="composer">给奶酪包发消息</div>
+            </body></html>
+            """
+        webView.loadHTMLString(html, baseURL: nil)
+        try await Task.sleep(for: .milliseconds(800))
+    }
+
+    /// Each tappable element in the top bar, and whether it intersects the
+    /// band the status pill can occupy: horizontally centred, at most
+    /// `pillMaxWidth` wide, inside the top-bar row.
+    func topBarOverlaps(windowWidth: Double) async -> String {
+        let band = (windowWidth - Double(AvibeStyle.pillMaxWidth)) / 2
+        let script = """
+            JSON.stringify([...document.querySelectorAll('[data-tap]')].map(e => {
+              const r = e.getBoundingClientRect();
+              return {name: e.dataset.tap, left: r.left, right: r.right};
+            }))
+            """
+        let json = (try? await webView.evaluateJavaScript(script) as? String) ?? "[]"
+        let items = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]]) ?? []
+        return items.map { item in
+            let name = item["name"] as? String ?? "?"
+            let left = item["left"] as? Double ?? 0
+            let right = item["right"] as? Double ?? 0
+            let overlap = max(0, min(right, band + Double(AvibeStyle.pillMaxWidth)) - max(left, band))
+            return String(format: "%@ [%.0f–%.0f] overlap %.0f pt", name, left, right, overlap)
+        }.joined(separator: "; ") + String(format: " (pill band %.0f–%.0f)", band, band + Double(AvibeStyle.pillMaxWidth))
     }
 
     func markLive() async throws {
@@ -7621,7 +7697,7 @@ private struct CachedPageTimeoutBannerProposal: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("暂时连不上 \(instanceName)")
                     .font(.subheadline.weight(.semibold))
-                Text("显示的是上次的内容，连上后会自动更新。")
+                Text("显示的是上次的内容")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
