@@ -432,9 +432,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const applyUnreadMap = useCallback((map: Record<string, number>) => {
     wholeUnreadAppliedRef.current = true;
-    const applied = withPendingReads(map);
-    lowerRowCounts((sessionId) => applied[sessionId] ?? 0);
-    setUnreadBySession(applied);
+    // Rows go down only with counts the server reported, never with a clear a write still owes.
+    lowerRowCounts((sessionId) => map[sessionId] ?? 0);
+    setUnreadBySession(withPendingReads(map));
     setUnreadLoaded(true);
     wholeUnreadOwedRef.current = false;
   }, [lowerRowCounts, withPendingReads]);
@@ -450,8 +450,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     applyUnreadMap(map);
   }, [applyUnreadMap]);
 
-  const applySessionUnread = useCallback((sessionId: string, count: number) => {
-    lowerRowCounts((id) => (id === sessionId ? count : undefined));
+  /** ``reported`` is false for mark-read's instant clear: a write the server may still
+   *  refuse does not move the row's own count (``lowerRowCounts``). */
+  const applySessionUnread = useCallback((sessionId: string, count: number, reported = true) => {
+    if (reported) lowerRowCounts((id) => (id === sessionId ? count : undefined));
     setUnreadBySession((prev) => {
       if ((prev[sessionId] ?? 0) === count && (count > 0 || !(sessionId in prev))) return prev;
       const next = { ...prev };
@@ -644,7 +646,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
       const pending: PendingRead = { operation, restore };
       pendingReadsRef.current.set(sessionId, pending);
-      applySessionUnread(sessionId, 0);
+      applySessionUnread(sessionId, 0, false);
       // Clearing unread is best-effort, so a failure must not raise an error
       // toast. Reading a permitted session and mutating its unread state are
       // independent capabilities.

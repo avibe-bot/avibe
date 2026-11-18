@@ -37,14 +37,18 @@ const listInbox = vi.fn(async (params?: { onlySession?: string; limit?: number }
 }));
 
 const Probe = () => {
-  const { inboxSessions, unreadBySession } = useWorkbenchInbox();
-  return <ul>{inboxSessions.map((s) => <li key={s.session_id}>{`${s.preview_text}|${unreadBySession[s.session_id] ?? 0}`}</li>)}</ul>;
+  const { inboxSessions, unreadBySession, markRead } = useWorkbenchInbox();
+  return <>
+    <button type="button" onClick={() => void markRead('ses_a')}>Mark read</button>
+    <ul>{inboxSessions.map((s) => <li key={s.session_id}>{`${s.preview_text}|${unreadBySession[s.session_id] ?? 0}`}</li>)}</ul>
+  </>;
 };
 
 const settle = () => act(async () => {
   for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
+const markSessionRead = vi.fn(async (): Promise<unknown> => ({ updated: 0 }));
 const worker = new EventTarget();
 let handlers: WorkbenchEventHandlers | null = null;
 
@@ -53,7 +57,7 @@ beforeEach(() => {
   server.unread = {};
   apiRef.current = {
     listInbox,
-    markSessionRead: vi.fn(async () => ({ updated: 0 })),
+    markSessionRead,
     connectWorkbenchEvents: (next: WorkbenchEventHandlers) => {
       handlers = next;
       return () => undefined;
@@ -111,4 +115,18 @@ it('sees a newer reply after the last one was read on another device', async () 
   await settle();
 
   expect(screen.getByRole('listitem').textContent).toBe('New reply|1');
+});
+
+it('keeps a fresh row as it is when a Mark read fails', async () => {
+  server.row = row('Old reply', 1);
+  server.unread = { ses_a: 1 };
+  mount();
+  await settle();
+  markSessionRead.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+  const reads = listInbox.mock.calls.length;
+  await act(async () => { screen.getByRole('button', { name: 'Mark read' }).click(); });
+  await settle();
+  // The count is back, the row was never stale: no reread, no placeholder.
+  expect(screen.getByRole('listitem').textContent).toBe('Old reply|1');
+  expect(listInbox.mock.calls.slice(reads).some(([args]) => args?.onlySession)).toBe(false);
 });
