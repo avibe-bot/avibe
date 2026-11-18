@@ -3621,7 +3621,15 @@
     "openMobileAccount": "账号与 Avibe",
     "signOut": "退出登录",
     "signingOut": "正在退出…",
-    "resizeSidebar": "调整侧栏宽度"
+    "resizeSidebar": "调整侧栏宽度",
+    "directPath": {
+      "preferred": "新连接优先走：{{route}}",
+      "withClosures": "{{line}} · {{closures}}",
+      "direct": "直连",
+      "tunnel": "Cloudflare",
+      "closures_one": "路径中断 {{count}} 次",
+      "closures_other": "路径中断 {{count}} 次"
+    }
   },
   "workbench": {
     "eyebrow": "Agent OS",

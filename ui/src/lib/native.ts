@@ -502,7 +502,37 @@ type DirectTracker = {
   readForHidden: number;
   closureHandlers: Set<() => void>;
   stateListeners: Set<() => void>;
+  /** The latest observed path (`preferred` by `sequence`, the highest
+   *  `closure`), for display only; null before the first valid answer. */
+  path: NativeDirectPath | null;
+  pathListeners: Set<() => void>;
 };
+
+/** What the shell last said about this host's paths, for display only. */
+export type NativeDirectPath = {
+  /** What this document's new connections try first; never where an
+   *  existing connection runs. */
+  preferred: NativeDirectPreference;
+  /** Closures for this host since the App started (`direct.status()`). */
+  closure: number;
+  /** Orders `preferred`. */
+  sequence: number;
+};
+
+function observeDirectPath(tracker: DirectTracker, status: NativeDirectStatus): void {
+  const current = tracker.path;
+  const newer = !current || status.sequence > current.sequence;
+  const preferred = newer ? status.preferred : current.preferred;
+  const sequence = newer ? status.sequence : current.sequence;
+  const closure = Math.max(current?.closure ?? 0, status.closure);
+  if (current && current.preferred === preferred && current.sequence === sequence && current.closure === closure) {
+    return;
+  }
+  tracker.path = { preferred, sequence, closure };
+  for (const listener of Array.from(tracker.pathListeners)) {
+    if (tracker.pathListeners.has(listener)) listener();
+  }
+}
 
 // One per document: a WebView document and each child window load their own
 // copy of this module, so each takes its own baseline. Kept outside React so
@@ -517,14 +547,15 @@ function notifyDirectState(tracker: DirectTracker): void {
 
 // Every valid answer and event comes here, whichever attempt or read it
 // belongs to. Only `closure` drives anything: `preferred` (ordered by
-// `sequence`) is what new connections try first, and nothing in the Web UI
-// acts on it. Closure is compared only with closure, so order, duplicates,
+// `sequence`) is what new connections try first; the Web UI only shows it
+// (`nativeDirectPath`) and never acts on it. Closure is compared only with closure, so order, duplicates,
 // and late replies all converge on one action per higher value.
 function observeDirectStatus(
   tracker: DirectTracker,
   status: NativeDirectStatus,
   fromRead: boolean,
 ): void {
+  observeDirectPath(tracker, status);
   if (tracker.state !== 'ready') {
     // No stream of this document is open yet: a closure only raises the
     // baseline. A valid status answer is the baseline; an event is not.
@@ -596,6 +627,8 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
     readForHidden: 0,
     closureHandlers: new Set(),
     stateListeners: new Set(),
+    path: null,
+    pathListeners: new Set(),
   };
   directTracker = tracker;
 
@@ -672,6 +705,26 @@ export function retryNativeDirectBaseline(): void {
   if (!native) return;
   const tracker = directTrackerFor(native);
   if (tracker.state === 'unavailable') startBaselineAttempt(native, tracker);
+}
+
+/**
+ * The latest path the shell reported for this host, for display: null without
+ * the `direct` capability (nothing is started) or before a valid answer.
+ */
+export function nativeDirectPath(): NativeDirectPath | null {
+  const native = directBridge();
+  return native ? directTrackerFor(native).path : null;
+}
+
+/** Calls `listener` on every change of `nativeDirectPath()`. */
+export function subscribeNativeDirectPath(listener: () => void): () => void {
+  const native = directBridge();
+  if (!native) return () => undefined;
+  const tracker = directTrackerFor(native);
+  tracker.pathListeners.add(listener);
+  return () => {
+    tracker.pathListeners.delete(listener);
+  };
 }
 
 /**
