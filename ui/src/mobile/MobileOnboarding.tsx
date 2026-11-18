@@ -81,6 +81,7 @@ import {
 } from './InstanceList';
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
 import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
+import { SignInDivider, SignInProviderButtons, SignInProviderRow, type SignInProvider } from './SignInProviders';
 import { AboutSection, AccountDataContent, AccountLinkRow, LicensesContent } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
@@ -482,39 +483,54 @@ function RecoveryCard({
   );
 }
 
-function Welcome({
+/**
+ * Welcome. With `onProvider`, email stays the primary action and Google, GitHub and Apple follow
+ * below avibe.bot's 「或」 (proposal, ui/design: mobile-app/welcome/providers-*): `buttons` as
+ * secondary buttons with avibe.bot's wording, `row` as one row of marks.
+ */
+export function WelcomeScreen({
   locked,
   onContinue,
+  onProvider,
+  providerStyle = 'buttons',
 }: {
   locked: boolean;
   onContinue: () => void;
+  onProvider?: (provider: SignInProvider) => void;
+  providerStyle?: 'buttons' | 'row';
 }) {
   const { t } = useTranslation();
+  const providers = Boolean(onProvider);
+  const compactHero = providers && providerStyle === 'buttons';
   return (
     <CloudScreen>
       <Brand />
-      <div className="relative flex flex-1 flex-col items-center justify-center py-8">
-        <div className="relative mb-8 grid size-64 place-items-center">
+      <div className={cn('relative flex flex-1 flex-col items-center justify-center', compactHero ? 'py-4 [@media(max-height:700px)]:py-1' : 'py-8')}>
+        {/* Short phones (iPhone SE) keep every sign-in button on the first screen. */}
+        <div className={cn('relative grid place-items-center', compactHero ? 'mb-6 size-48 [@media(max-height:700px)]:mb-3 [@media(max-height:700px)]:size-28' : 'mb-8 size-64')}>
           <div className="absolute inset-0 rounded-full border border-edge bg-surface/30 shadow-elevation-0" />
-          <div className="absolute inset-6 rounded-full border border-surface/70 bg-surface/30" />
+          <div className={cn('absolute rounded-full border border-surface/70 bg-surface/30', compactHero ? 'inset-5' : 'inset-6')} />
           <img
             src={heroMascot}
             alt={t('mobileApp.welcome.mascotAlt')}
-            className="relative size-52 object-contain motion-safe:animate-[mobile-mascot-arrive_var(--motion-spring-smooth-duration)_var(--motion-spring-smooth)_both]"
+            className={cn(
+              'relative object-contain motion-safe:animate-[mobile-mascot-arrive_var(--motion-spring-smooth-duration)_var(--motion-spring-smooth)_both]',
+              compactHero ? 'size-40 [@media(max-height:700px)]:size-24' : 'size-52',
+            )}
           />
-          <span className="absolute -right-1 top-9 grid size-12 rotate-12 place-items-center rounded-2xl border border-edge bg-surface shadow-elevation-0">
+          <span className={cn('absolute -right-1 grid size-12 rotate-12 place-items-center rounded-2xl border border-edge bg-surface shadow-elevation-0', compactHero ? 'top-5 [@media(max-height:700px)]:hidden' : 'top-9')}>
             <Sparkles className="size-5 text-mint-ink" />
           </span>
-          <span className="absolute -left-1 bottom-5 rounded-full border border-edge bg-surface px-4 py-2 text-sm shadow-elevation-0">
+          <span className={cn('absolute -left-1 rounded-full border border-edge bg-surface px-4 py-2 text-sm shadow-elevation-0', compactHero ? 'bottom-2 [@media(max-height:700px)]:hidden' : 'bottom-5')}>
             {t('mobileApp.welcome.greeting')}
           </span>
         </div>
-        <h1 className="text-center text-4xl font-semibold leading-tight">
+        <h1 className={cn('text-center font-semibold leading-tight', compactHero ? 'text-3xl [@media(max-height:700px)]:text-2xl' : 'text-4xl')}>
           {t('mobileApp.welcome.titleLine1')}
           <br />
           {t('mobileApp.welcome.titleLine2')}
         </h1>
-        <p className="mt-5 max-w-xs text-center text-sm leading-7 text-muted">
+        <p className={cn('max-w-xs text-center text-sm leading-7 text-muted', compactHero ? 'mt-3' : 'mt-5')}>
           {t('mobileApp.welcome.bodyLine1')}
           <br />
           {t('mobileApp.welcome.bodyLine2')}
@@ -522,8 +538,16 @@ function Welcome({
       </div>
       <div className="flex flex-col gap-4 pb-3">
         <Primary disabled={locked} onClick={onContinue}>
-          {t('mobileApp.welcome.action')}
+          {providers ? t('mobileApp.welcome.continueWithEmail') : t('mobileApp.welcome.action')}
         </Primary>
+        {onProvider ? (
+          <>
+            <SignInDivider />
+            {providerStyle === 'row'
+              ? <SignInProviderRow disabled={locked} onProvider={onProvider} />
+              : <SignInProviderButtons disabled={locked} onProvider={onProvider} />}
+          </>
+        ) : null}
         <p className="text-center text-xs leading-relaxed text-muted">
           {t('mobileApp.welcome.footerLine1')}
           <br />
@@ -533,6 +557,8 @@ function Welcome({
     </CloudScreen>
   );
 }
+
+const Welcome = WelcomeScreen;
 
 type EmailMode = 'code' | 'password';
 

@@ -218,7 +218,12 @@
       "bodyLine2": "now in your pocket.",
       "action": "Sign in / Create account",
       "footerLine1": "Vibey, your built-in AI partner.",
-      "footerLine2": "Connect to your instances or those shared with you."
+      "footerLine2": "Connect to your instances or those shared with you.",
+      "continueWithEmail": "Continue with email",
+      "or": "or",
+      "continueWithGoogle": "Continue with Google",
+      "continueWithGitHub": "Continue with GitHub",
+      "continueWithApple": "Continue with Apple"
     },
     "email": {
       "title": "It starts with an email.",

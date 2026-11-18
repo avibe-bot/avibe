@@ -13,7 +13,9 @@ Welcome → email → six-digit email OTP → instance selection. Preserve the s
 account, instance ownership/sharing, availability and recovery semantics. A uses
 Avibe's high-resolution cloud mascot, subtle mint/cyan/violet background, raised
 rounded surfaces and pill actions. Every approved design exists in Chinese and English,
-and light and dark. No Apple/Google/GitHub choices or browser-login instructions.
+and light and dark. The original contract had no Apple/Google/GitHub choices or
+browser-login instructions; the owner reversed that on 2026-11-18 (see Sign-in
+providers below). There are still no browser-login instructions.
 
 Acceptance invariants:
 
@@ -33,6 +35,30 @@ Acceptance invariants:
 - Scope is `ui/design/` only. No new tokens, dependencies, production components,
   authentication/native/backend behavior, runtime/config changes or plans edits.
 
+## Sign-in providers (proposed, 2026-11-18)
+
+Owner decision 2026-11-18 10:34: the App signs in with Google, GitHub and Sign in
+with Apple as well as email. Google and GitHub run in the system sign-in window
+(`ASWebAuthenticationSession`), Apple in its native sheet; the bundled page only
+starts them. Contract for these frames:
+
+- Welcome keeps email as the one primary action, now 「使用邮箱继续」 /
+  "Continue with email". Below avibe.bot's divider 「或」 / "or" follow the other
+  accounts in avibe.bot's login-card order and wording (Google, then GitHub, then
+  Apple): 「使用 Google 继续」, 「使用 GitHub 继续」, and Apple's own
+  Simplified Chinese title 「通过 Apple 继续」 / "Continue with Apple".
+- Sign in with Apple keeps Apple's button style: black on light, white on dark
+  (the `foreground`/`background` pair), at the same size as the other two.
+- Two proposals: `welcome/providers` (A, recommended) draws them as secondary
+  buttons and shrinks the hero so the first screen holds every sign-in button at
+  390×844 and, with the hero's badges hidden, at 375×667 (`providers-small`);
+  `welcome/providers-row` (B) draws one row of round marks with the same wording
+  as accessible labels and keeps the original hero. The owner chooses one; the
+  other is deleted before merge.
+- Unlike the avibe.bot card, where the providers come first, email stays first
+  here because the App expects most people to use it (owner, 2026-11-18:
+  hierarchy by expected use).
+
 ## Frame inventory
 
 Prefix IDs with `mobile-app/`; append `-zh` or `-en` to approved states. Existing
@@ -41,7 +67,7 @@ flow, and `account/long-email` verifies the account wrapping policy.
 
 | File / surface | States |
 | --- | --- |
-| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small` |
+| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, proposed: `providers`, `providers-small`, `providers-row` |
 | `empty` | `default` (desktop + CLI choices), `cli` |
 | `account` | `default`, `no-instance`, `long-email` |
 | `native` | `instance-error`, `window-topbar` |

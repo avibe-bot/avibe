@@ -218,7 +218,12 @@
       "bodyLine2": "现在也在你的口袋里。",
       "action": "登录 / 注册",
       "footerLine1": "Vibey，你的内置 AI 伙伴。",
-      "footerLine2": "连接自己的实例，也可以加入别人共享的实例。"
+      "footerLine2": "连接自己的实例，也可以加入别人共享的实例。",
+      "continueWithEmail": "使用邮箱继续",
+      "or": "或",
+      "continueWithGoogle": "使用 Google 继续",
+      "continueWithGitHub": "使用 GitHub 继续",
+      "continueWithApple": "通过 Apple 继续"
     },
     "email": {
       "title": "从一封邮件开始。",
