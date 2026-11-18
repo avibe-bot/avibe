@@ -356,6 +356,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             }
             self.open_workbench();
             self.on_main_window(|_, workbench| trace::arm(workbench));
+            trace::watch_the_main_thread(self.app.clone());
             self.reserve_and_draw();
 
             // Pointed at the sandbox, the reserved window appears once that
@@ -375,9 +376,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             if self.focus {
                 // A passkey ceremony needs the keyboard in the sandbox document.
                 self.wait_children("the shown window to be key", |children| children[0].key);
-                self.eval("probe.windows.reserved.postMessage('focus', '*')");
-                let focus = self.report("child-focus");
-                assert_eq!(focus["focused"], true, "{focus}");
+                self.the_key_windows_document_has_the_keyboard("reserved");
             }
 
             // The opener can no longer read or replace what is on screen.
@@ -663,6 +662,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             assert!(self.on_main_window(|window, _| window.isVisible()));
             self.open_workbench();
             self.on_main_window(|_, workbench| trace::arm(workbench));
+            trace::watch_the_main_thread(self.app.clone());
             self.reserve_and_draw();
 
             self.eval(&format!("probe.windows.reserved.location.replace('{sandbox}/quiet')"));
@@ -1354,6 +1354,41 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             });
         }
 
+        /// A passkey ceremony needs the keyboard in the sandbox document. AppKit
+        /// says the window is key at once; WebKit tells the page's process a
+        /// moment later, so the page is asked until it says it has focus. A
+        /// displayed, key window whose document never gets it fails.
+        fn the_key_windows_document_has_the_keyboard(&mut self, name: &str) {
+            let started = Instant::now();
+            let mut asked = 0usize;
+            loop {
+                self.eval(&format!("probe.windows['{name}'].postMessage('focus', '*')"));
+                let focus = self.report("child-focus");
+                asked += 1;
+                if focus["focused"] == true {
+                    break;
+                }
+                let children = self.children();
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "a displayed window with the keyboard has a document without it, asked {asked} times in {:?}: \
+                     {focus}, {children:?}\n{}",
+                    started.elapsed(),
+                    trace::seen()
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let children = self.children();
+            assert!(children.len() == 1 && children[0].key, "{children:?}");
+            if asked > 1 {
+                println!(
+                    "vault window probe: the document of the shown window had the keyboard {:?} after its window \
+                     did, at the {asked}th asking",
+                    started.elapsed()
+                );
+            }
+        }
+
         /// A card asked for right after the user arrived (`arrived` is taken
         /// before the arrival) is displayed at once and takes input no sooner
         /// than two seconds after the arrival.
@@ -1366,10 +1401,31 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 children.len() == 1 && children[0].shown()
             });
             let displayed = now_ms();
+            // "At once" is about the shell: it must not hold a card back until
+            // the user has been there for the interval. On hosted runners
+            // WebKit has blocked the app's main thread for about five seconds
+            // while a web view or its process was being set up; time in which
+            // the main thread answered nothing is recorded, said, and not
+            // counted. A card held back with no such time recorded fails.
+            // The main thread answers in the order it was asked, and a
+            // question is put to it within 50 ms of the last answer, so one
+            // more turn of it here is behind the answer to any question that
+            // waited through a blocked stretch before the card was displayed.
+            self.on_main(|_| ());
+            let unanswered = trace::unanswered_between(arrived, displayed);
+            if unanswered > 0.0 {
+                println!(
+                    "vault window probe: {what}: the card was displayed {:.0} ms after the arrival; for {unanswered:.0} \
+                     ms of them the app's main thread did not answer, which is not counted as holding it back",
+                    displayed - arrived
+                );
+            }
             assert!(
-                displayed < arrived + 1500.0,
-                "{what}: the card was held back {} ms",
-                displayed - arrived
+                displayed - unanswered < arrived + 1500.0,
+                "{what}: the card was held back {:.0} ms ({unanswered:.0} ms of them the app's main thread did not \
+                 answer)\n{}",
+                displayed - arrived,
+                trace::seen()
             );
             std::thread::sleep(Duration::from_millis(3500));
             let log = self.card_log();
@@ -1965,6 +2021,63 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         }
         static LINES: Mutex<VecDeque<(f64, String, Option<Backtrace>)>> = Mutex::new(VecDeque::new());
         static ROUND: Mutex<Option<Counting>> = Mutex::new(None);
+        /// Stretches in which the app's main thread did not answer, as
+        /// (from, until) on the clock of `now_ms`.
+        static UNANSWERED: Mutex<Vec<(f64, f64)>> = Mutex::new(Vec::new());
+        /// Shorter than this is an ordinary busy moment and is not recorded.
+        const UNANSWERED_FROM: Duration = Duration::from_secs(1);
+
+        /// Asks the app's main thread for an answer, one question at a time,
+        /// for as long as the app runs, and records each stretch of a second
+        /// or more in which none came. The question is a closure posted to
+        /// the main thread; a thread that is blocked is not unblocked by it.
+        pub fn watch_the_main_thread(app: tauri::AppHandle) {
+            static WATCHING: AtomicBool = AtomicBool::new(false);
+            if WATCHING.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            std::thread::spawn(move || loop {
+                let (asked, asked_ms) = (Instant::now(), super::now_ms());
+                let (tx, rx) = std::sync::mpsc::channel();
+                // The stretch is recorded by the answer itself, on the main
+                // thread: whatever is posted to the main thread after this
+                // question finds it recorded.
+                let posted = app.run_on_main_thread(move || {
+                    let waited = asked.elapsed();
+                    if waited >= UNANSWERED_FROM {
+                        UNANSWERED
+                            .lock()
+                            .expect("the stretches")
+                            .push((asked_ms, asked_ms + waited.as_secs_f64() * 1000.0));
+                        note(
+                            format!(
+                                "the app's main thread did not answer for {} ms, until now",
+                                waited.as_millis()
+                            ),
+                            None,
+                        );
+                    }
+                    let _ = tx.send(());
+                });
+                if posted.is_err() || rx.recv().is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            });
+        }
+
+        /// How much of the time between two moments (on the clock of
+        /// `now_ms`) the app's main thread did not answer, in milliseconds.
+        /// A stretch is recorded when its question is answered; the caller
+        /// first lets the main thread answer what was posted before.
+        pub fn unanswered_between(from: f64, until: f64) -> f64 {
+            UNANSWERED
+                .lock()
+                .expect("the stretches")
+                .iter()
+                .map(|(began, ended)| (ended.min(until) - began.max(from)).max(0.0))
+                .sum()
+        }
 
         struct Counting {
             began: Instant,
@@ -2069,9 +2182,13 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 .iter()
                 .map(|(at, line, stack)| {
                     let since = before.replace(*at).map_or(0.0, |before: f64| at - before);
-                    let from = stack
-                        .as_ref()
-                        .map_or(String::new(), |stack| format!(", from {}", origin(stack)));
+                    // No frame of the module: AppKit is closing the window
+                    // itself, as when the user closes it; the module is told
+                    // by its delegate after this.
+                    let from = stack.as_ref().map_or(String::new(), |stack| match origin(stack) {
+                        from if from.is_empty() => ", from AppKit (the window's own close, as by the user)".to_owned(),
+                        from => format!(", from {from}"),
+                    });
                     format!("  [{at:.0}, +{since:.0} ms] {line}{from}")
                 })
                 .collect::<Vec<_>>()
