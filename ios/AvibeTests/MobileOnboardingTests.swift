@@ -1160,6 +1160,8 @@ final class MobileOnboardingTests: XCTestCase {
                 "push.subscribe",
                 "push.unsubscribe",
                 "push.openedAck",
+                "share.capabilities",
+                "share.present",
                 "systemSchedule.cancel",
                 "systemSchedule.capabilities",
                 "systemSchedule.request",
