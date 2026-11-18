@@ -1262,6 +1262,9 @@ until a new explicit connection. Retry-After applies to device requests.
 Both HealthKit entitlements and the localized read-purpose description belong
 only to the main app. The archive checker requires boolean grants and rejects
 HealthKit entitlements on extensions and any Health write-purpose description.
+For this Health sync feature, the main app's privacy manifest declares Health data
+as linked, not used for tracking, and for app functionality, and the archive
+checker requires exactly that declaration.
 Changing Apple App ID capabilities or provisioning profiles, signing an archive,
 physical-device validation and TestFlight distribution require separate owner
 approval. Unsigned simulator builds and synthetic-data tests do not establish

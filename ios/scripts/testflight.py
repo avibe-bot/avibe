@@ -565,6 +565,35 @@ def check_privacy_manifest(bundle: Path) -> None:
         raise TestFlightError(f"{bundle.name}'s PrivacyInfo.xcprivacy is incomplete")
 
 
+HEALTH_COLLECTED_DATA_TYPE = {
+    "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeHealth",
+    "NSPrivacyCollectedDataTypeLinked": True,
+    "NSPrivacyCollectedDataTypeTracking": False,
+    "NSPrivacyCollectedDataTypePurposes": ["NSPrivacyCollectedDataTypePurposeAppFunctionality"],
+}
+
+
+def check_health_privacy_declaration(bundle: Path) -> None:
+    """The main app declares Health data for its HealthKit sync, exactly once."""
+    privacy = plistlib.loads((bundle / "PrivacyInfo.xcprivacy").read_bytes())
+    collected = privacy.get("NSPrivacyCollectedDataTypes")
+    health = [
+        entry
+        for entry in (collected if isinstance(collected, list) else [])
+        if isinstance(entry, dict)
+        and entry.get("NSPrivacyCollectedDataType") == "NSPrivacyCollectedDataTypeHealth"
+    ]
+    # Compare types too: a plist integer 1 must not pass as the boolean true.
+    if len(health) != 1 or health[0] != HEALTH_COLLECTED_DATA_TYPE or any(
+        type(health[0][key]) is not bool
+        for key in ("NSPrivacyCollectedDataTypeLinked", "NSPrivacyCollectedDataTypeTracking")
+    ):
+        raise TestFlightError(
+            f"{bundle.name}'s PrivacyInfo.xcprivacy must declare HealthKit data once as "
+            "linked, not tracking, for app functionality"
+        )
+
+
 def verify_archive(archive: Path, *, build: str) -> dict:
     app = archived_app(archive)
     extensions = archived_extensions(app)
@@ -577,6 +606,7 @@ def verify_archive(archive: Path, *, build: str) -> dict:
         )
     for bundle in (app, *extensions.values()):
         check_privacy_manifest(bundle)
+    check_health_privacy_declaration(app)
     bundles = [
         (
             app,

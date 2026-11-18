@@ -511,6 +511,52 @@ def test_each_shipped_bundle_needs_its_own_privacy_manifest(tmp_path: Path):
         testflight.check_privacy_manifest(missing)
 
 
+def test_the_app_manifest_declares_uploaded_health_data_exactly(tmp_path: Path):
+    repo = Path(__file__).resolve().parents[1]
+    source = plistlib.loads((repo / "ios/Avibe/Resources/PrivacyInfo.xcprivacy").read_bytes())
+    app = tmp_path / "Avibe.app"
+    app.mkdir()
+
+    def write(manifest: dict) -> None:
+        (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps(manifest))
+
+    write(source)
+    testflight.check_health_privacy_declaration(app)
+
+    def without_health() -> list:
+        return [
+            entry
+            for entry in source["NSPrivacyCollectedDataTypes"]
+            if entry["NSPrivacyCollectedDataType"] != "NSPrivacyCollectedDataTypeHealth"
+        ]
+
+    health = dict(testflight.HEALTH_COLLECTED_DATA_TYPE)
+    invalid = [
+        without_health(),
+        [*without_health(), {**health, "NSPrivacyCollectedDataTypeTracking": True}],
+        [*without_health(), {**health, "NSPrivacyCollectedDataTypeLinked": False}],
+        [*without_health(), {**health, "NSPrivacyCollectedDataTypeLinked": 1}],
+        [*without_health(), {**health, "NSPrivacyCollectedDataTypePurposes": []}],
+        [
+            *without_health(),
+            {
+                **health,
+                "NSPrivacyCollectedDataTypePurposes": [
+                    "NSPrivacyCollectedDataTypePurposeAnalytics"
+                ],
+            },
+        ],
+        [*without_health(), health, health],
+    ]
+    for collected in invalid:
+        write({**source, "NSPrivacyCollectedDataTypes": collected})
+        with pytest.raises(testflight.TestFlightError, match="HealthKit data"):
+            testflight.check_health_privacy_declaration(app)
+    write({key: value for key, value in source.items() if key != "NSPrivacyCollectedDataTypes"})
+    with pytest.raises(testflight.TestFlightError, match="HealthKit data"):
+        testflight.check_health_privacy_declaration(app)
+
+
 @pytest.mark.parametrize(
     ("info", "entitlements", "message"),
     [
