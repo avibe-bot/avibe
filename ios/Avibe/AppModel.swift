@@ -1245,20 +1245,22 @@ final class AppModel: ObservableObject {
         // the session behind it. The check's answer decides as a refresh
         // does (another account, a signed-out session, or the instance gone
         // closes the runtime; a failed check keeps it).
+        // A launch from a notification tap or a shortcut opens what it
+        // names, against a session checked first, as before.
         if
+            pendingInstanceOpen == nil,
             let restored = sessionCoordinator.restoreLastGoodSession(),
             let runtime = sessionCoordinator.restorableRuntime(from: restored)
         {
             Self.coldStartSignposter.emitEvent("opened before the session check")
-            // A notification tap that launched the App opens its own instance
-            // instead (completeBootstrap below).
-            if pendingInstanceOpen == nil {
-                openRuntime(runtime)
-            }
-            completeBootstrap()
+            openRuntime(runtime)
             let check = Self.coldStartSignposter.beginInterval("session check")
-            defer { Self.coldStartSignposter.endInterval("session check", check) }
-            _ = try? await sessionCoordinator.refresh()
+            let checked = try? await sessionCoordinator.refresh()
+            Self.coldStartSignposter.endInterval("session check", check)
+            settleOpenFirst(runtime, checked: checked)
+            // A tap or shortcut that arrived meanwhile waited for the
+            // check, so it opens against the answered session.
+            completeBootstrap()
             return
         }
         sessionCoordinator.activateAccountSurface()
@@ -1282,6 +1284,31 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         completeBootstrap()
+    }
+
+    /// After an open-first's session check: push work the open started was
+    /// held off by the check (the account was busy), so it resumes now; and
+    /// a confirmed list that shows the instance unavailable ends an open
+    /// that has not loaded, as a check-first launch would not have opened it.
+    private func settleOpenFirst(
+        _ runtime: MobileRuntimeContext,
+        checked: MobileSessionState?
+    ) {
+        guard sessionCoordinator.isCurrentRuntime(runtime) else {
+            return
+        }
+        nativePushCoordinator.resumeAfterAccountActivation()
+        guard
+            case .signedIn(let snapshot, _) = checked,
+            let listed = snapshot.instances.first(where: { $0.id == runtime.instance.id }),
+            !listed.available,
+            let attempt = runtimeOpenAttempt,
+            attempt.runtime == runtime,
+            attempt.phase != .documentLoaded
+        else {
+            return
+        }
+        cancelRuntimeOpen(attemptID: attempt.id)
     }
 
     private func completeBootstrap() {

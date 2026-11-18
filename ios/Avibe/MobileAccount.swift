@@ -611,12 +611,15 @@ final class MobileSessionCoordinator {
         didSet {
             // Restoring reads the stored session; it writes nothing back.
             guard !restoringLastGoodSession else { return }
-            snapshotIsUnconfirmed = false
+            if snapshot == nil {
+                snapshotIsUnconfirmed = false
+            }
             persistLastGoodSession()
         }
     }
     /// `snapshot` came from the device, not yet from avibe.bot in this
-    /// process (a cold start that opened first).
+    /// process (a cold start that opened first). Only an answer from
+    /// avibe.bot clears it; a local re-read or a failed check does not.
     private var snapshotIsUnconfirmed = false
     private var restoringLastGoodSession = false
     /// The email typed for the sign-in that now owes a second factor, shown
@@ -1175,6 +1178,8 @@ final class MobileSessionCoordinator {
                 self.scheduleInstancePushReconcile(for: fresh)
                 self.healthAuthorizationAvailable = true
                 self.onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
+                // avibe.bot answered for this account.
+                self.snapshotIsUnconfirmed = false
                 return self.state(for: fresh)
             case .secondFactorRequired:
                 // Owing the second factor neither ends the session nor names
@@ -1677,6 +1682,7 @@ final class MobileSessionCoordinator {
             onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
             secondFactorEmail = nil
             snapshot = fresh
+            snapshotIsUnconfirmed = false
             pushAccountID = fresh.account.id
             scheduleInstancePushReconcile(for: fresh)
             return state(for: fresh)
@@ -1779,6 +1785,12 @@ final class MobileSessionCoordinator {
         else {
             return nil
         }
+        // The account's local records must be readable, as a check-first
+        // launch requires before it opens (otherwise that launch's check
+        // reports it).
+        guard onAuthenticatedAccount(stored.account.id) else {
+            return nil
+        }
         restoringLastGoodSession = true
         defer { restoringLastGoodSession = false }
         snapshot = stored
@@ -1795,9 +1807,20 @@ final class MobileSessionCoordinator {
     }
 
     private func persistLastGoodSession() {
+        // Only what opening needs: no other person's email (a shared
+        // instance's owner).
         guard
             let snapshot,
-            let data = try? JSONEncoder().encode(snapshot)
+            let data = try? JSONEncoder().encode(MobileSessionSnapshot(
+                account: snapshot.account,
+                instances: snapshot.instances.map {
+                    MobileInstance(
+                        id: $0.id, name: $0.name, host: $0.host, url: $0.url,
+                        relationship: $0.relationship, ownerEmail: nil,
+                        available: $0.available
+                    )
+                }
+            ))
         else {
             defaults.removeObject(forKey: Self.lastGoodSessionKey)
             return

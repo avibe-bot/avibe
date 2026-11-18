@@ -4676,6 +4676,31 @@ final class MobileOnboardingTests: XCTestCase {
         let runtime = try XCTUnwrap(relaunched.restorableRuntime(from: try XCTUnwrap(restored)))
         XCTAssertEqual(runtime.instance.id, instance.id)
 
+        // Another account's selection, or a selected instance the stored
+        // list shows unavailable: nothing opens first, and the stored
+        // session stays for the check to replace.
+        let stored = try XCTUnwrap(defaults.data(forKey: "avibe.mobile.lastGoodSession"))
+        let selection = try XCTUnwrap(defaults.data(forKey: "avibe.mobile.selection"))
+        defaults.set(
+            Data(#"{"accountID":"account-2","instanceID":"instance-1","url":"https://alex-app.avibe.bot"}"#.utf8),
+            forKey: "avibe.mobile.selection"
+        )
+        XCTAssertNil(makeCoordinator(defaults: defaults, transports: []).restoreLastGoodSession())
+        defaults.set(selection, forKey: "avibe.mobile.selection")
+        let offline = MobileSessionSnapshot(
+            account: snapshot(accountID: "account-1").account,
+            instances: [MobileInstance(
+                id: instance.id, name: instance.name, host: instance.host, url: instance.url,
+                relationship: "owner", ownerEmail: nil, available: false
+            )]
+        )
+        defaults.set(try JSONEncoder().encode(offline), forKey: "avibe.mobile.lastGoodSession")
+        let unavailable = makeCoordinator(defaults: defaults, transports: [])
+        XCTAssertNil(unavailable.restoreLastGoodSession())
+        XCTAssertNil(unavailable.currentAccount)
+        XCTAssertNotNil(defaults.data(forKey: "avibe.mobile.lastGoodSession"))
+        defaults.set(stored, forKey: "avibe.mobile.lastGoodSession")
+
         // Without a selection there is nothing to open first.
         let noSelection = makeDefaults()
         let other = FakeMobileAuthTransport()
