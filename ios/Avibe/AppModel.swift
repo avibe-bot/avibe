@@ -346,11 +346,12 @@ final class AppModel: ObservableObject {
             self?.nativeBadge.clear()
             await self?.nativePushCoordinator.prepareForLogout()
         },
-        onRevokeInstancePush: { [weak self] origin in
-            // The instance left the account's list: only its registration
-            // goes; the account's other instances keep theirs.
-            _ = try? await self?.nativePushCoordinator.unsubscribe(
-                instanceOrigin: origin
+        onReconcileInstancePush: { [weak self] liveOrigins, accountID in
+            // Instances that left the account's list lose only their own
+            // registrations; the account keeps the rest.
+            await self?.nativePushCoordinator.revokeRegistrations(
+                outside: liveOrigins,
+                accountID: accountID
             )
         }
     )

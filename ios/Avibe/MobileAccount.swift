@@ -518,8 +518,6 @@ final class MobileSessionCoordinator {
     /// The account this device's push may still be bound to: the last one
     /// signed in, until its push cleanup runs. It survives a relaunch.
     private static let pushAccountKey = "avibe.mobile.pushAccount"
-    /// The instances (id and origin) `pushAccountID` listed when last seen.
-    private static let pushInstancesKey = "avibe.mobile.pushInstances"
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -534,9 +532,10 @@ final class MobileSessionCoordinator {
     private let onDetachActiveOwnerForAuthenticatedAccount: @MainActor (String) -> Bool
     private let onAuthenticatedAccount: @MainActor (String) -> Bool
     private let onPreparePushLogout: @MainActor () async -> Void
-    /// Revokes this device's notification registration for one instance
-    /// origin, leaving the account's others bound.
-    private let onRevokeInstancePush: @MainActor (String) async -> Void
+    /// Revokes this device's registrations for the account's instance
+    /// origins outside the given set (the instances it now lists), leaving
+    /// the others bound. Called with the account that lists them.
+    private let onReconcileInstancePush: @MainActor (Set<String>, String) async -> Void
 
     private var transport: MobileAuthTransporting?
     private var snapshot: MobileSessionSnapshot?
@@ -627,7 +626,7 @@ final class MobileSessionCoordinator {
         onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {},
-        onRevokeInstancePush: @escaping @MainActor (String) async -> Void = { _ in }
+        onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in }
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
@@ -641,7 +640,7 @@ final class MobileSessionCoordinator {
         self.onDetachActiveOwnerForAuthenticatedAccount = onDetachActiveOwnerForAuthenticatedAccount
         self.onAuthenticatedAccount = onAuthenticatedAccount
         self.onPreparePushLogout = onPreparePushLogout
-        self.onRevokeInstancePush = onRevokeInstancePush
+        self.onReconcileInstancePush = onReconcileInstancePush
         transport = nil
         // A build from before `pushAccountID` was recorded: the saved
         // selection's account is the one its push may be bound to. Record it
@@ -924,33 +923,15 @@ final class MobileSessionCoordinator {
                     for: discovery, generation: requestGeneration
                 )
                 // The account stays. Only instances that left the account's
-                // list lose this device's notifications; one still listed at
-                // another address keeps them.
-                let missingSelection = self.selectionMissing(from: fresh)
-                let removedOrigins = self.originsRemoved(
-                    from: fresh,
-                    selection: missingSelection
-                )
-                if missingSelection != nil {
-                    // The runtime goes anyway: revoke within this operation.
-                    if !removedOrigins.isEmpty {
-                        try await self.revokeInstancePush(
-                            origins: removedOrigins,
-                            publishing: .signedIn(
-                                snapshot: self.orderedByUse(fresh, current: nil),
-                                selectedInstanceID: nil
-                            ),
-                            generation: requestGeneration
-                        )
-                    }
+                // list lose this device's notifications (reconciled once this
+                // operation has ended); the runtime goes only when its own
+                // instance is gone from the list at its address.
+                if self.selectionMissing(from: fresh) != nil {
                     self.beginRuntimeInvalidation(with: fresh)
-                } else {
-                    self.scheduleInstancePushRevokes(
-                        removedOrigins, accountID: fresh.account.id
-                    )
                 }
                 self.signedOutStoreIsFresh = false
-                self.recordPushAccount(fresh)
+                self.pushAccountID = fresh.account.id
+                self.scheduleInstancePushReconcile(for: fresh)
                 return self.state(for: fresh)
             case .secondFactorRequired:
                 // Owing the second factor neither ends the session nor names
@@ -1323,45 +1304,10 @@ final class MobileSessionCoordinator {
         await body()
     }
 
-    /// Revokes this device's registrations for instance origins that left
-    /// the account, the account and its other instances staying as they are.
-    private func revokeInstancePush(
-        origins: [String],
-        publishing state: MobileSessionState,
-        generation requestGeneration: Int
-    ) async throws {
-        try requireCurrentGeneration(requestGeneration)
-        let publicationID = UUID()
-        authoritativeTransition = (publicationID, state)
-        defer {
-            if authoritativeTransition?.id == publicationID {
-                authoritativeTransition = nil
-            }
-        }
-        await runPushCleanup {
-            for origin in origins {
-                await self.onRevokeInstancePush(origin)
-            }
-        }
-        try requireCurrentGeneration(requestGeneration)
-    }
-
     /// The `.pushLogout` phase of the account push cleanup running now. A
     /// sign-out borrows only that phase, never an instance revoke's, even
     /// while an older, superseded cleanup is still finishing.
     private var accountPushCleanup: Phase?
-
-    private var pushInstances: [(id: String, origin: String)] {
-        get {
-            (defaults.stringArray(forKey: Self.pushInstancesKey) ?? []).compactMap { entry in
-                let parts = entry.split(separator: "\n", maxSplits: 1).map(String.init)
-                return parts.count == 2 ? (parts[0], parts[1]) : nil
-            }
-        }
-        set {
-            defaults.set(newValue.map { "\($0.id)\n\($0.origin)" }, forKey: Self.pushInstancesKey)
-        }
-    }
 
     /// The account this device's push may still be bound to ("" once its
     /// cleanup has run; `init` records it on a first launch of this build).
@@ -1424,69 +1370,24 @@ final class MobileSessionCoordinator {
         ensureTransport()
     }
 
-    /// The origins of instances the previous list had and the refreshed one
-    /// no longer has at all (by id), plus the missing selection's own.
-    private func originsRemoved(
-        from fresh: MobileSessionSnapshot,
-        selection: StoredMobileSelection?
-    ) -> [String] {
-        // What the account listed before: this process's snapshot, or, when
-        // there is none (a cold launch, a second factor in between), the
-        // list recorded with `pushAccountID`.
-        let before: [(id: String, origin: String)]
-        if let previous = snapshot, previous.account.id == fresh.account.id {
-            before = previous.instances.compactMap { instance in
-                WebOrigin(url: instance.url).map { (instance.id, $0.serialized) }
-            }
-        } else if snapshot == nil, pushAccountID == fresh.account.id {
-            before = pushInstances
-        } else {
-            return []
-        }
-        let listed = Set(fresh.instances.map(\.id))
-        let liveOrigins = Set(fresh.instances.compactMap { WebOrigin(url: $0.url)?.serialized })
-        var candidates = before.filter { !listed.contains($0.id) }.map(\.origin)
-        if
-            let selection,
-            !listed.contains(selection.instanceID),
-            let origin = WebOrigin(url: selection.url)?.serialized
-        {
-            candidates.append(origin)
-        }
-        var origins: [String] = []
-        for origin in candidates where !liveOrigins.contains(origin) && !origins.contains(origin) {
-            origins.append(origin)
-        }
-        return origins
-    }
-
-    /// Revokes the given origins' registrations once the current operation
-    /// has ended, as ordinary push requests that keep the selection. One
-    /// refused as busy stays pending for push recovery. Only while this
-    /// account is still the one signed in: a later account's registration for
-    /// the same origin is not this one's to revoke.
-    private func scheduleInstancePushRevokes(_ origins: [String], accountID: String) {
-        guard !origins.isEmpty else { return }
+    /// Once the current operation has ended, revokes this device's
+    /// registrations for the account's instance origins it no longer lists,
+    /// as ordinary push requests that keep the selection. The push side
+    /// works from its own records and stages each revoke durably, so a pass
+    /// that cannot run is repeated by the next one. Only while this account
+    /// is still the one signed in.
+    private func scheduleInstancePushReconcile(for fresh: MobileSessionSnapshot) {
+        let accountID = fresh.account.id
+        let live = Set(fresh.instances.compactMap { WebOrigin(url: $0.url)?.serialized })
         Task { @MainActor [weak self] in
-            for origin in origins {
-                guard
-                    let self,
-                    self.currentAccount?.id == accountID,
-                    self.pushAccountID == accountID
-                else {
-                    return
-                }
-                await self.onRevokeInstancePush(origin)
+            guard
+                let self,
+                self.currentAccount?.id == accountID,
+                self.pushAccountID == accountID
+            else {
+                return
             }
-        }
-    }
-
-    /// The account now signed in, and the instances it lists, as this
-    /// device's push may be bound to them.
-    private func recordPushAccount(_ fresh: MobileSessionSnapshot) {
-        pushAccountID = fresh.account.id
-        pushInstances = fresh.instances.compactMap { instance in
-            WebOrigin(url: instance.url).map { (instance.id, $0.serialized) }
+            await self.onReconcileInstancePush(live, accountID)
         }
     }
 
@@ -1521,15 +1422,9 @@ final class MobileSessionCoordinator {
                 )
             }
             secondFactorEmail = nil
-            // Instances that left the list while this account had no
-            // snapshot here (closed App, second factor) lose their own
-            // registrations; the account keeps the rest.
-            scheduleInstancePushRevokes(
-                originsRemoved(from: fresh, selection: nil),
-                accountID: fresh.account.id
-            )
             snapshot = fresh
-            recordPushAccount(fresh)
+            pushAccountID = fresh.account.id
+            scheduleInstancePushReconcile(for: fresh)
             return state(for: fresh)
         case .secondFactorRequired(let requirement):
             snapshot = nil
