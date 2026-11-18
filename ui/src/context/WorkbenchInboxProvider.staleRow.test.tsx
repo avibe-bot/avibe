@@ -46,6 +46,7 @@ const settle = () => act(async () => {
 });
 
 const worker = new EventTarget();
+let handlers: WorkbenchEventHandlers | null = null;
 
 beforeEach(() => {
   server.row = row('Old reply', 0);
@@ -53,7 +54,10 @@ beforeEach(() => {
   apiRef.current = {
     listInbox,
     markSessionRead: vi.fn(async () => ({ updated: 0 })),
-    connectWorkbenchEvents: (_handlers: WorkbenchEventHandlers) => () => undefined,
+    connectWorkbenchEvents: (next: WorkbenchEventHandlers) => {
+      handlers = next;
+      return () => undefined;
+    },
   };
   Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: worker });
   Object.defineProperty(navigator, 'setAppBadge', { configurable: true, value: vi.fn(async () => undefined) });
@@ -65,25 +69,46 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it('reads a row again when the counts move past it, so its preview is the unread reply', async () => {
-  render(
+const mount = () => render(
     <BotRosterContext.Provider value={{ roster: { sessionIds: new Set(), known: true }, publish: () => {} }}>
       <NotificationPreferencesContext.Provider value={{ preferences, loaded: true, update: async () => true }}>
         <WorkbenchInboxProvider><Probe /></WorkbenchInboxProvider>
       </NotificationPreferencesContext.Provider>
     </BotRosterContext.Provider>,
-  );
+);
+const pushRefresh = () => act(async () => {
+  worker.dispatchEvent(new MessageEvent('message', { data: { type: 'vibe.push-badge-refresh' } }));
+});
+
+it('reads a row again when the counts move past it, so its preview is the unread reply', async () => {
+  mount();
   await settle();
   expect(screen.getByRole('listitem').textContent).toBe('Old reply|0');
 
   // A new reply lands while the stream is down; the push makes the page read the counts.
   server.row = row('New reply', 1);
   server.unread = { ses_a: 1 };
-  await act(async () => {
-    worker.dispatchEvent(new MessageEvent('message', { data: { type: 'vibe.push-badge-refresh' } }));
-  });
+  await pushRefresh();
   await settle();
 
   expect(screen.getByRole('listitem').textContent).toBe('New reply|1');
   expect(listInbox).toHaveBeenCalledWith(expect.objectContaining({ onlySession: 'ses_a' }));
+});
+
+it('sees a newer reply after the last one was read on another device', async () => {
+  server.row = row('Old reply', 1);
+  server.unread = { ses_a: 1 };
+  mount();
+  await settle();
+  expect(screen.getByRole('listitem').textContent).toBe('Old reply|1');
+
+  // Read on the Mac: the map drops to 0 here, the row keeps its old preview.
+  await act(async () => { handlers?.onInboxUnreadChanged?.({ unread_by_session: {} }); });
+  // Away, a new reply; the push reads the counts back to 1, the same number as before.
+  server.row = row('New reply', 1);
+  server.unread = { ses_a: 1 };
+  await pushRefresh();
+  await settle();
+
+  expect(screen.getByRole('listitem').textContent).toBe('New reply|1');
 });

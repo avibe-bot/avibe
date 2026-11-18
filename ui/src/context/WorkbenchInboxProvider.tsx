@@ -406,12 +406,38 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // stable identity, so it never churns the memoized context value. Paying the
   // ``wholeUnreadOwedRef`` debt belongs here for the same reason: this is the only
   // place a whole map is adopted, so no producer has to remember to clear it.
+  // A row's own count is the count as of the read that brought its preview. When
+  // the map lowers a session (read here, in another tab or on another device), the
+  // row's count goes down with it, so a later reply that only a counts read reports
+  // shows as newer than the row (``inboxRowStale``). A copy kept for a later merge
+  // (``targetedSnapshotsRef``) goes down with it too.
+  const lowerRowCounts = useCallback((countOf: (sessionId: string) => number | undefined) => {
+    const lower = (row: InboxSession): InboxSession => {
+      const count = countOf(row.session_id);
+      return count !== undefined && row.unread_count > count ? { ...row, unread_count: count, unread: count > 0 } : row;
+    };
+    for (const [sessionId, snapshot] of targetedSnapshotsRef.current) {
+      if (snapshot.row) targetedSnapshotsRef.current.set(sessionId, { row: lower(snapshot.row) });
+    }
+    setInboxSessions((prev) => {
+      let changed = false;
+      const next = prev.map((row) => {
+        const lowered = lower(row);
+        if (lowered !== row) changed = true;
+        return lowered;
+      });
+      return changed ? next : prev;
+    });
+  }, []);
+
   const applyUnreadMap = useCallback((map: Record<string, number>) => {
     wholeUnreadAppliedRef.current = true;
-    setUnreadBySession(withPendingReads(map));
+    const applied = withPendingReads(map);
+    lowerRowCounts((sessionId) => applied[sessionId] ?? 0);
+    setUnreadBySession(applied);
     setUnreadLoaded(true);
     wholeUnreadOwedRef.current = false;
-  }, [withPendingReads]);
+  }, [lowerRowCounts, withPendingReads]);
 
   const applyWholeUnreadRead = useCallback((
     read: WorkbenchSessionReadStamp,
@@ -425,6 +451,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   }, [applyUnreadMap]);
 
   const applySessionUnread = useCallback((sessionId: string, count: number) => {
+    lowerRowCounts((id) => (id === sessionId ? count : undefined));
     setUnreadBySession((prev) => {
       if ((prev[sessionId] ?? 0) === count && (count > 0 || !(sessionId in prev))) return prev;
       const next = { ...prev };
@@ -432,7 +459,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       else delete next[sessionId];
       return next;
     });
-  }, []);
+  }, [lowerRowCounts]);
 
   const mergeTargetedSnapshots = useCallback((rows: InboxSession[]): InboxSession[] => {
     let next = rows;
@@ -646,11 +673,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         return false;
       }
       if (!owned || !result) return true;
-      // The row's own count follows the read, so a later reply that only a counts
-      // read reports (see ``inboxRowStale``) shows as newer than the row.
-      setInboxSessions((prev) => (prev.some((row) => row.session_id === sessionId && row.unread_count > 0)
-        ? prev.map((row) => (row.session_id === sessionId ? { ...row, unread_count: 0, unread: false } : row))
-        : prev));
       // The response carries the whole account map, but it describes the other
       // sessions only as of this write. It is adopted whole only if nothing has
       // changed or committed the whole map since this write began; otherwise
@@ -893,12 +915,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // whole-account unread map, but this read owns only this session's count.
   // Never touches the cursor or replaces unrelated unread state.
   const reconcileSession = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string): Promise<boolean> => {
       if (targetedReadInFlightRef.current.has(sessionId)) {
         targetedReadPendingRef.current.add(sessionId);
-        return;
+        return true;
       }
       targetedReadInFlightRef.current.add(sessionId);
+      // Whether the last read answered (the row is current, or gone); false after a failure.
+      let landed = true;
       try {
         while (true) {
           targetedReadPendingRef.current.delete(sessionId);
@@ -919,7 +943,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           // runs later — after the navigation that removed the card it upserts.
           if (!isFeedActive()) {
             oweWholeUnread();
-            return;
+            return landed;
           }
           const sessionResource = `inbox-session:${sessionId}`;
           const unreadResource = `inbox-unread-session:${sessionId}`;
@@ -957,10 +981,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
             ) {
               applySessionUnread(sessionId, result.unread_by_session?.[sessionId] ?? 0);
             }
+            landed = true;
           } catch (err) {
+            landed = false;
             console.error('[inbox] reconcileSession failed', err);
           }
-          if (!targetedReadPendingRef.current.has(sessionId)) return;
+          if (!targetedReadPendingRef.current.has(sessionId)) return landed;
         }
       } finally {
         targetedReadInFlightRef.current.delete(sessionId);
@@ -1020,7 +1046,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       }
       if (staleRereadRef.current.get(row.session_id) === count) continue;
       staleRereadRef.current.set(row.session_id, count);
-      void reconcileSession(row.session_id);
+      // A failed read may be tried again by the next change; the reconnect's
+      // reconcile replaces the row in any case.
+      void reconcileSession(row.session_id).then((landed) => {
+        if (!landed && staleRereadRef.current.get(row.session_id) === count) staleRereadRef.current.delete(row.session_id);
+      });
     }
   }, [feedActive, inboxSessions, unreadBySession, reconcileSession]);
 

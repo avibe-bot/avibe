@@ -8,6 +8,7 @@ import type { InboxSession } from '../../context/ApiContext';
 import { INBOX_REVERT_AFTER_MS, writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { APP_SHELL_SCROLL_ID } from '../../lib/mobileProjectsListMemory';
 import { InboxPage } from './InboxPage';
+import { writeChatViewMode } from '../../lib/chatViewMemory';
 
 const feed = vi.hoisted(() => ({
   inboxSessions: [] as InboxSession[],
@@ -292,5 +293,16 @@ describe('Opening an unread conversation', () => {
     mount();
     open(3);
     expect(feed.markRead).toHaveBeenCalledExactlyOnceWith('session-3');
+  });
+});
+
+describe('Opening a conversation that is not read on opening', () => {
+  it('leaves one that reopens on its Show Page unread', () => {
+    feed.markRead.mockClear();
+    writeChatViewMode('session-4', 'show-page');
+    mount();
+    open(4);
+    expect(feed.markRead).not.toHaveBeenCalled();
+    writeChatViewMode('session-4', 'chat');
   });
 });
