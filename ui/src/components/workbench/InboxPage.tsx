@@ -16,6 +16,7 @@ import { usePendingVaultRequestsList } from '../../context/PendingVaultRequestsC
 import { liveVaultRequests } from '../../lib/vaultPendingRequests';
 import { VaultPendingRequests } from '../ui/vault-pending-requests';
 import { useMinute } from '../../lib/useMinute';
+import { useLatestRef } from '../../lib/useLatestRef';
 import { Button } from '../ui/button';
 import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
@@ -150,10 +151,16 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
 
   const capturePosition = useInboxScrollRestoration(listRef, location.key, filter, visible);
 
+  const unreadRef = useLatestRef(unreadBySession);
   const openSession = useCallback((s: InboxSession) => {
     capturePosition();
+    // Opening a row reads it: it leaves the Unread list now, and the read is synced
+    // behind it (a failed write puts the count, and the row, back).
+    // Read from a ref: a card is drawn again only when what it shows changes, and
+    // a new ``onOpen`` on every count change would draw them all.
+    if (capabilities.can_chat && (unreadRef.current[s.session_id] ?? 0) > 0) void markRead(s.session_id);
     navigate(`/chat/${encodeURIComponent(s.session_id)}`);
-  }, [capturePosition, navigate]);
+  }, [capabilities.can_chat, capturePosition, markRead, navigate, unreadRef]);
 
   const onMarkAllRead = async () => {
     const ids = Object.entries(unreadBySession)

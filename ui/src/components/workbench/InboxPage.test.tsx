@@ -283,3 +283,14 @@ describe('Inbox return position', () => {
     expect(shell.scrollTop).toBe(0);
   });
 });
+
+// Opening a row reads it at once: it leaves the Unread list before the Chat page
+// marks anything, and the write is synced behind it (owner report, 11-17).
+describe('Opening an unread conversation', () => {
+  it('marks it read as it opens', () => {
+    feed.markRead.mockClear();
+    mount();
+    open(3);
+    expect(feed.markRead).toHaveBeenCalledExactlyOnceWith('session-3');
+  });
+});

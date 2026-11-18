@@ -21,6 +21,7 @@ import {
   createWorkbenchSessionReadOwnership,
   type WorkbenchSessionReadStamp,
 } from '../lib/workbenchSessionReadOwnership';
+import { inboxRowStale } from '../lib/inboxPreview';
 import {
   getLocalSnapshotPrincipal,
   readLocalSnapshot,
@@ -645,6 +646,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         return false;
       }
       if (!owned || !result) return true;
+      // The row's own count follows the read, so a later reply that only a counts
+      // read reports (see ``inboxRowStale``) shows as newer than the row.
+      setInboxSessions((prev) => (prev.some((row) => row.session_id === sessionId && row.unread_count > 0)
+        ? prev.map((row) => (row.session_id === sessionId ? { ...row, unread_count: 0, unread: false } : row))
+        : prev));
       // The response carries the whole account map, but it describes the other
       // sessions only as of this write. It is adopted whole only if nothing has
       // changed or committed the whole map since this write began; otherwise
@@ -999,6 +1005,24 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     if (!feedActive) return;
     readFeedForActiveConsumer();
   }, [feedActive, readFeedForActiveConsumer]);
+
+  // A shown row whose unread count moved past its own (``inboxRowStale``) carries
+  // an older message's preview: read that row again. Once per row and count, so a
+  // row the server answers the same way is not read in a loop.
+  const staleRereadRef = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (!feedActive) return;
+    for (const row of inboxSessions) {
+      const count = unreadBySession[row.session_id] ?? 0;
+      if (!inboxRowStale(row, count)) {
+        staleRereadRef.current.delete(row.session_id);
+        continue;
+      }
+      if (staleRereadRef.current.get(row.session_id) === count) continue;
+      staleRereadRef.current.set(row.session_id, count);
+      void reconcileSession(row.session_id);
+    }
+  }, [feedActive, inboxSessions, unreadBySession, reconcileSession]);
 
   // The badges are shell-wide, so the unread map is loaded on every route — but on
   // a route with no feed consumer, only the map. The decision itself belongs to

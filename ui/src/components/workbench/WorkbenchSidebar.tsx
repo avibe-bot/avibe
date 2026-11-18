@@ -742,6 +742,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
 
   const onItemClick = (session: InboxSession) => {
     setPopoverOpen(false);
+    // Opening a row reads it, as on the Inbox page.
+    if (canChat && (unreadBySession[session.session_id] ?? 0) > 0) void markRead(session.session_id);
     navigate(`/chat/${encodeURIComponent(session.session_id)}`);
   };
 
