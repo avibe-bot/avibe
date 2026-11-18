@@ -7,6 +7,8 @@ enum ThirdPartySignIn: Equatable {
     /// Google also rejects sign-in inside embedded browsers.
     case google
     case github
+    /// Sign in with Apple on avibe.bot's web login card (owner, 2026-11-18).
+    case apple
 }
 
 /// Voice input's consent marker. An instance page that asks each account before
@@ -110,6 +112,9 @@ struct NavigationPolicy {
     /// an instance's Copilot sign-in opens.
     private static let githubOrigin = WebOrigin.parseConfigured("https://github.com")
     private static let githubAuthorizationPathPrefix = "/login/oauth/"
+    /// Sign in with Apple's web authorization, intercepted only for avibe.bot's own sign-in.
+    private static let appleOrigin = WebOrigin.parseConfigured("https://appleid.apple.com")
+    private static let appleAuthorizationPath = "/auth/authorize"
 
     let instanceOrigins: Set<WebOrigin>
     let authenticationOrigins: Set<WebOrigin>
@@ -140,6 +145,14 @@ struct NavigationPolicy {
         }
         if origin == Self.githubOrigin, isAvibeGitHubAuthorization(url) {
             return .thirdPartySignIn(.github)
+        }
+        if
+            origin == Self.appleOrigin,
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath.lowercased()
+                == Self.appleAuthorizationPath,
+            returnsToAuthenticationOrigin(url)
+        {
+            return .thirdPartySignIn(.apple)
         }
         return origin.scheme == "http" || origin.scheme == "https"
             ? .external
@@ -225,6 +238,15 @@ struct NavigationPolicy {
         }
         let path = components.percentEncodedPath.lowercased()
         guard path == "/login/oauth" || path.hasPrefix(Self.githubAuthorizationPathPrefix) else {
+            return false
+        }
+        return returnsToAuthenticationOrigin(url)
+    }
+
+    /// Whether an authorization request's `redirect_uri` is one of avibe.bot's own sign-in
+    /// origins (Supabase's `/auth/v1/callback`).
+    private func returnsToAuthenticationOrigin(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return false
         }
         return components.queryItems?.contains { item in

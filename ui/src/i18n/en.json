@@ -209,6 +209,14 @@
     "boot": {
       "loading": "Restoring your account…"
     },
+    "provider": {
+      "unavailable": "This way of signing in isn’t available right now. Use an email code instead.",
+      "googleEmailUnverified": "Verify this email with Google first, or use an email code instead.",
+      "githubEmailUnverified": "Verify this email with GitHub first, or use an email code instead.",
+      "googleFailed": "Couldn’t sign in with Google. Try again.",
+      "githubFailed": "Couldn’t sign in with GitHub. Try again.",
+      "appleFailed": "Couldn’t sign in with Apple. Try again."
+    },
     "welcome": {
       "mascotAlt": "Vibey cloud mascot",
       "greeting": "Hi, I’m Vibey",
@@ -216,7 +224,6 @@
       "titleLine2": "by your side.",
       "bodyLine1": "Avibe on your computer,",
       "bodyLine2": "now in your pocket.",
-      "action": "Sign in / Create account",
       "footerLine1": "Vibey, your built-in AI partner.",
       "footerLine2": "Connect to your instances or those shared with you.",
       "continueWithEmail": "Continue with email",
@@ -300,6 +307,8 @@
       "offlineBody": "Start Avibe on that computer and connect it to the internet. Then refresh the list or choose another online instance."
     },
     "empty": {
+      "newAccount": "This account was just created and has no instances yet. If you already have an Avibe account, sign out and sign in the way you did before.",
+      "newAccountSignOut": "Sign out",
       "title": "Bring your work along.",
       "subtitle": "Run on your computer. Connect from your phone.",
       "body": "No instances yet. Install Avibe on your computer and pair this account.",

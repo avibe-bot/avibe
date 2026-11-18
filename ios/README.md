@@ -37,7 +37,7 @@ and Web resizing cannot both run.
   Each child shows its current host plus Done and Open in Safari controls; the
   latter opens the current HTTP(S) URL in the Safari app.
 - Ordinary child-main-frame navigation stays in that child regardless of
-  origin. Google and GitHub authorization remain intercepted, and external
+  origin. Google, GitHub and Apple authorization remain intercepted, and external
   application schemes use the system.
 - Microphone capture is granted only to the configured instance main frame.
   Authentication, external, and arbitrary subframes receive neither microphone
@@ -49,12 +49,17 @@ and Web resizing cannot both run.
   older than that question) is refused with a native alert saying to update the
   instance. Any other page, such as a Show Page opened on its own under
   `/show/` or `/p/`, is refused without that alert.
-- Google and GitHub authorization are intercepted with an email-code
-  explanation. GitHub's are the `/login/oauth/` pages on `github.com` whose
-  `redirect_uri` returns to an authentication origin, that is avibe.bot's own
-  sign-in. GitHub sign-in for anything else (an MCP server an instance
-  connects to) and the rest of `github.com`, including the device-code page an
-  instance's Copilot sign-in opens, are an ordinary external site.
+- Google, GitHub and Apple authorization are intercepted with an alert whose
+  「去登录」 / "Go to sign-in" reads the session: the instance page asked
+  avibe.bot to sign in, so the App's avibe.bot session has lapsed, and the
+  read's `401` lands on the App's own sign-in screen, which offers the same
+  provider natively (a session that still reads signed in shows the instance
+  list). GitHub's are the `/login/oauth/` pages on `github.com` and Apple's
+  `appleid.apple.com/auth/authorize`, each only when its `redirect_uri`
+  returns to an authentication origin, that is avibe.bot's own sign-in.
+  Sign-in for anything else (an MCP server an instance connects to) and the
+  rest of those sites, including the device-code page an instance's Copilot
+  sign-in opens, are an ordinary external site.
 - Instance WebViews (primary and child) show no form accessory bar
   (previous / next / Done) above the keyboard: `FormAccessoryBar` gives
   WebKit's content view a runtime subclass whose `inputAccessoryView` is nil.
@@ -168,9 +173,10 @@ The closed deviation list is:
 
 1. Primary-main-frame HTTP(S) navigation outside the configured instance and
    authentication origins opens in `SFSafariViewController`.
-2. Google and GitHub authorization endpoints are intercepted. The App signs
-   in only with avibe.bot's own accounts (App Review guideline 4.8), and
-   Google also rejects embedded browsers.
+2. Google, GitHub and Apple authorization endpoints for avibe.bot's sign-in
+   are intercepted in instance WebViews. The App signs in with them natively
+   (the system sign-in window, Apple's sheet), and Google also rejects
+   embedded browsers.
 3. Top-level external application schemes use `UIApplication`; subframes
    cancel them.
 4. Microphone capture is automatically granted only to an instance-origin
@@ -859,16 +865,17 @@ the shared viewport scroll, as the shipped code and two-step screens do; the
 password form scrolls its Sign in action above the keyboard while the field
 has focus.
 
-### Google and GitHub sign-in
+### Google, GitHub and Sign in with Apple
 
-Owner decision 2026-11-18: the App also signs in with Google and GitHub, in
-the system sign-in window. The backend wire is avibe-bot-backend's mobile
-provider exchange (provisional until its independent security agreement);
-the App's side is below. Sign in with Apple is on hold and absent: no case,
-no entitlement.
+Owner decisions 2026-11-18: the App also signs in with Google and GitHub, in
+the system sign-in window, and with Apple, in its native sheet. Welcome keeps
+email as the one primary action and shows the three as one row of marks
+(layout B). The backend wire is avibe-bot-backend's mobile provider exchange
+(provisional until its independent security agreement); the App's side is
+below.
 
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
-  `provider` exactly `google` or `github`; any other value or an extra key
+  `provider` exactly `google`, `github` or `apple`; any other value or an extra key
   is `invalid_argument`, and the sheet forbids it like every auth method. It
   answers like `auth.verifyOtp`. Errors: `provider_cancelled` (the page shows
   nothing), `provider_unavailable`, `provider_email_unverified`,
@@ -903,12 +910,25 @@ no entitlement.
   exchange created the account; native keeps it for the account generation
   and adds `new_account: true` to that signed-in session's answers, a hint
   for the empty state only. Any account transition retires it.
-- Any account transition, sign-out included, closes an open sign-in window,
-  and its attempt can no longer exchange.
+- Apple: `/api/mobile/auth/start` answers the server's raw nonce. The App
+  asks Apple for the email scope only (the name is never sent), with
+  `nonce` = lowercase hex SHA256 of that nonce and `state` = the attempt's
+  state, requires the returned `state` to be equal (constant time), and posts
+  the identity token and the authorization code (UTF-8) with the verifier to
+  `/api/mobile/auth/apple`, which answers like the exchange.
+- Any account transition, sign-out included, closes an open sign-in window
+  or Apple sheet, and its attempt can no longer exchange.
+- `Avibe.entitlements` carries `com.apple.developer.applesignin =
+  ["Default"]`, the app's alone. `testflight.py` requires exactly that in the
+  signed app and the App Store profile and forbids it in both extensions.
+  Enabling the capability on `bot.avibe.ios` invalidates the App Store
+  profile, so this change merges only after the profile is regenerated and the
+  signing secret updated; simulator CI builds unsigned and is unaffected.
 
 What only a device proves: the `https` callback on a signed build, Safari's
-shared sign-in and the system consent alert, and the real providers on
-production with designated accounts after the backend's go.
+shared sign-in and the system consent alert, the Apple sheet with Face ID
+(first time and repeat), and the real providers on production with
+designated accounts after the backend's go.
 
 Coordinator tests inject an in-memory named-store registry. Integration tests
 that require real named stores use suite-scoped `UserDefaults`, track every UUID
@@ -933,7 +953,7 @@ pinned to Xcode 26.6.
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google and GitHub authorization and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
+| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google, GitHub and Apple authorization and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
 | `decidePolicyFor navigationAction:preferences:` | Intentionally not implemented because WebKit calls this overload instead of the implemented action-policy method. `defaultWebpagePreferences` remains the single preference owner. | Simulator build verifies the selected overload. |
 | `decidePolicyFor navigationResponse` | Implemented. Attachment and non-displayable responses use the same download admission rule; displayable responses use WebKit. | Simulator XCTest and build cover response conversion to `WKDownload`. |
 | `didStartProvisionalNavigation` | Implemented. Cancels stale JavaScript dialogs and starts primary loading state. | Simulator build; exactly-once dialog cleanup is a manual interaction check. |
@@ -954,7 +974,7 @@ pinned to Xcode 26.6.
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google and GitHub authorization are intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, GitHub, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
+| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google, GitHub and Apple authorization are intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, GitHub, Apple, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
 | `webViewDidClose` | Implemented and closes the matching child subtree. | Simulator build; `window.close()` is an interactive check. |
 | `runJavaScriptAlertPanelWithMessage` | Implemented with an initiating-WebView `UIAlertController` and exactly-once completion. | Simulator build; interaction and removal cleanup are manual checks. |
 | `runJavaScriptConfirmPanelWithMessage` | Implemented with OK/Cancel and exactly-once completion. | Simulator build; existing Web UI `confirm()` callers are manual checks. |

@@ -35,30 +35,34 @@ Acceptance invariants:
 - Scope is `ui/design/` only. No new tokens, dependencies, production components,
   authentication/native/backend behavior, runtime/config changes or plans edits.
 
-## Sign-in providers (proposed, 2026-11-18)
+## Sign-in providers (approved, 2026-11-18)
 
-Owner decision 2026-11-18 10:34: the App signs in with Google, GitHub and Sign in
-with Apple as well as email. Google and GitHub run in the system sign-in window
-(`ASWebAuthenticationSession`), Apple in its native sheet; the bundled page only
-starts them. Contract for these frames:
+Owner decisions 2026-11-18: the App signs in with Google, GitHub and Sign in
+with Apple as well as email. Google and GitHub run in the system sign-in
+window (`ASWebAuthenticationSession`), Apple in its native sheet; the bundled
+page only starts them. The owner picked layout B at 13:12:
 
-- Welcome keeps email as the one primary action, now 「使用邮箱继续」 /
-  "Continue with email". Below avibe.bot's divider 「或」 / "or" follow the other
-  accounts in avibe.bot's login-card order and wording (Google, then GitHub, then
-  Apple): 「使用 Google 继续」, 「使用 GitHub 继续」, and Apple's own
-  Simplified Chinese title 「通过 Apple 继续」 / "Continue with Apple".
-- Sign in with Apple keeps Apple's button styles: white with a black outline on
-  light and white on dark (the `apple-sign-in` tokens), at the same size and
-  weight as the other two (Product, 2026-11-18: black read as a second primary).
-- Two proposals: `welcome/providers` (A) draws them as secondary
-  buttons and shrinks the hero so the first screen holds every sign-in button at
-  390×844 and, with the hero's badges hidden, at 375×667 (`providers-small`);
-  `welcome/providers-row` (B, Product's suggestion) draws one row of round marks with the same wording
-  as accessible labels and keeps the original hero. The owner chooses one; the
-  other is deleted before merge.
-- Unlike the avibe.bot card, where the providers come first, email stays first
-  here because the App expects most people to use it (owner, 2026-11-18:
-  hierarchy by expected use).
+- Welcome keeps email as the one primary action, 「使用邮箱继续」 /
+  "Continue with email", and the large Vibey illustration. Below avibe.bot's
+  divider 「或」 / "or" one row holds three round marks in avibe.bot's login
+  card order, then Apple: Google, GitHub, Apple. Each mark is 48 pt and is
+  labelled for VoiceOver with the full wording: 「使用 Google 继续」,
+  「使用 GitHub 继续」, and Apple's own Simplified Chinese title
+  「通过 Apple 继续」 / "Continue with Apple".
+- Google and GitHub use Google's sign-in button colours, as on avibe.bot's
+  login card (`provider-button` tokens): light `#FFFFFF` fill, `#747775`
+  outline, `#1F1F1F` mark; dark `#131314`, `#8E918F`, `#E3E3E3`. Apple keeps
+  its HIG styles (`apple-sign-in` tokens): white with a black outline on
+  light, white on dark.
+- Unlike the avibe.bot card, where the providers come first, email stays
+  first here because the App expects most people to use it (owner: hierarchy
+  by expected use).
+- A provider sign-in that did not finish says so in one line above the email
+  button (`welcome/providers-row-error`, proposed); closing the window or
+  sheet says nothing.
+- An account a provider sign-in in the App just created, with no instances,
+  shows one line and an outline 「退出登录」 above the usual ways to add an
+  instance (`empty/new-account`, proposed; Product's copy, 2026-11-18).
 
 ## Frame inventory
 
@@ -68,8 +72,8 @@ flow, and `account/long-email` verifies the account wrapping policy.
 
 | File / surface | States |
 | --- | --- |
-| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, proposed: `providers`, `providers-small`, `providers-row` |
-| `empty` | `default` (desktop + CLI choices), `cli` |
+| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, `providers-row`, proposed: `providers-row-error` |
+| `empty` | `default` (desktop + CLI choices), `cli`, proposed: `new-account` |
 | `account` | `default`, `no-instance`, `long-email` |
 | `native` | `instance-error`, `window-topbar` |
 | `alignment` — shipped references, no locale suffix | `account-reference`, `error-reference` |

@@ -34,6 +34,38 @@
         }
       }
     },
+    "apple.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use Continue with Apple on the App’s sign-in screen."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在 App 的登录页选择「通过 Apple 继续」。"
+          }
+        }
+      }
+    },
+    "apple.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in with Apple isn’t available here"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此处无法使用 Apple 登录"
+          }
+        }
+      }
+    },
     "browser.account" : {
       "localizations" : {
         "en" : {
@@ -573,13 +605,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sign in with an email code sent to your GitHub account's primary email address. It opens the same account."
+            "value" : "Use Continue with GitHub on the App’s sign-in screen."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请用 GitHub 账号的主邮箱接收验证码登录，进入的是同一个账号。"
+            "value" : "请在 App 的登录页选择「使用 GitHub 继续」。"
           }
         }
       }
@@ -605,13 +637,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Use the email code for the same account. Google blocks sign-in inside embedded browsers."
+            "value" : "Use Continue with Google on the App’s sign-in screen."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请改用同一账号的邮箱验证码。Google 不允许在内嵌浏览器中登录。"
+            "value" : "请在 App 的登录页选择「使用 Google 继续」。"
           }
         }
       }
@@ -964,6 +996,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在创建…"
+          }
+        }
+      }
+    },
+    "signin.go" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Go to sign-in"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "去登录"
           }
         }
       }

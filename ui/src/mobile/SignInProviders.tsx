@@ -51,48 +51,11 @@ const LABEL_KEYS = {
 } as const;
 
 /**
- * Google, GitHub and Apple below the email action, as secondary buttons that use avibe.bot's
- * wording. Sign in with Apple keeps Apple's own style: white with a black outline on light, white
- * on dark (the `apple-sign-in` tokens), the same size and weight as the others.
- * Design: mobile-app/welcome/providers-*.
- */
-export function SignInProviderButtons({
-  disabled,
-  onProvider,
-}: {
-  disabled?: boolean;
-  onProvider: (provider: SignInProvider) => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="flex flex-col gap-3">
-      {SIGN_IN_PROVIDERS.map((provider) => {
-        const Mark = MARKS[provider];
-        const apple = provider === 'apple';
-        return (
-          <Button
-            key={provider}
-            type="button"
-            variant={apple ? undefined : 'outline'}
-            disabled={disabled}
-            className={cn(
-              'h-11 w-full gap-2 rounded-full text-sm font-medium',
-              apple && 'border border-apple-sign-in-border bg-apple-sign-in text-apple-sign-in-foreground hover:bg-apple-sign-in/90 active:bg-apple-sign-in/90',
-            )}
-            onClick={() => onProvider(provider)}
-          >
-            <Mark className="size-4" />
-            {t(LABEL_KEYS[provider])}
-          </Button>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * The compact alternative: one row of three round marks, each labelled for assistive technology
- * with the same wording. Design: mobile-app/welcome/providers-row-*.
+ * Google, GitHub and Apple below the email action (owner, 2026-11-18: layout B): one row of three
+ * round marks, 48 pt each, labelled for VoiceOver with avibe.bot's wording and Apple's own title.
+ * Google and GitHub use Google's sign-in button colours (the `provider-button` tokens, as on
+ * avibe.bot's login card); Sign in with Apple keeps Apple's styles: white with a black outline on
+ * light, white on dark (the `apple-sign-in` tokens). Design: mobile-app/welcome/providers-row-*.
  */
 export function SignInProviderRow({
   disabled,
@@ -111,12 +74,13 @@ export function SignInProviderRow({
           <Button
             key={provider}
             type="button"
-            variant={apple ? undefined : 'outline'}
             disabled={disabled}
             aria-label={t(LABEL_KEYS[provider])}
             className={cn(
-              'size-12 rounded-full p-0',
-              apple && 'border border-apple-sign-in-border bg-apple-sign-in text-apple-sign-in-foreground hover:bg-apple-sign-in/90 active:bg-apple-sign-in/90',
+              'size-12 rounded-full border p-0',
+              apple
+                ? 'border-apple-sign-in-border bg-apple-sign-in text-apple-sign-in-foreground hover:bg-apple-sign-in/90 active:bg-apple-sign-in/90'
+                : 'border-provider-button-border bg-provider-button text-provider-button-foreground hover:bg-provider-button/90 active:bg-provider-button/90',
             )}
             onClick={() => onProvider(provider)}
           >

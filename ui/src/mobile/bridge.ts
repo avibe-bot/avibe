@@ -25,7 +25,7 @@ export type MobileSessionState =
       instances: MobileInstance[];
       selected_instance_id: string | null;
       /**
-       * This account was just created by a Google or GitHub sign-in in the App, as the backend
+       * This account was just created by a Google, GitHub or Apple sign-in in the App, as the backend
        * attested; native keeps it for this account generation only. A hint for the empty state.
        */
       new_account?: true;
@@ -131,13 +131,14 @@ export const signInMobileWithPassword = (
   call('auth.signInWithPassword', { email, password });
 
 /**
- * Google or GitHub in the system sign-in window, then the backend's one-time exchange, natively.
+ * Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then the backend's
+ * one-time exchange, natively.
  * Resolves like `verifyMobileOtp`. Errors: `provider_cancelled` (show nothing),
  * `provider_unavailable`, `provider_email_unverified`, `invalid_or_expired`, `rate_limited`
  * (with `retry_after_seconds`), and `network`.
  */
 export const signInMobileWithProvider = (
-  provider: 'google' | 'github',
+  provider: 'google' | 'github' | 'apple',
 ): Promise<MobileSessionState> =>
   call('auth.signInWithProvider', { provider });
 

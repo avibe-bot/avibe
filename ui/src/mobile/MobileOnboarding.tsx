@@ -56,6 +56,7 @@ import {
   returnToMobileInstance,
   selectMobileInstance,
   signInMobileWithPassword,
+  signInMobileWithProvider,
   type MobileBridgeError,
   type MobileInstance,
   type MobileSessionState,
@@ -81,7 +82,7 @@ import {
 } from './InstanceList';
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
 import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
-import { SignInDivider, SignInProviderButtons, SignInProviderRow, type SignInProvider } from './SignInProviders';
+import { SignInDivider, SignInProviderRow, type SignInProvider } from './SignInProviders';
 import { AboutSection, AccountDataContent, AccountLinkRow, LicensesContent } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
@@ -108,6 +109,7 @@ type BusyAction =
   | 'verify'
   | 'resend'
   | 'signIn'
+  | 'provider'
   | 'passkey'
   | 'refresh'
   | 'select'
@@ -139,7 +141,16 @@ type MobileErrorKey =
   | 'mobileApp.twoFactor.recoveryInvalid'
   | 'mobileApp.twoFactor.rateLimited'
   | 'mobileApp.errors.network'
-  | 'mobileApp.errors.localRecords';
+  | 'mobileApp.errors.localRecords'
+  | ProviderErrorKey;
+/** What a Google, GitHub or Apple sign-in that did not finish says on Welcome. */
+type ProviderErrorKey =
+  | 'mobileApp.provider.unavailable'
+  | 'mobileApp.provider.googleEmailUnverified'
+  | 'mobileApp.provider.githubEmailUnverified'
+  | 'mobileApp.provider.googleFailed'
+  | 'mobileApp.provider.githubFailed'
+  | 'mobileApp.provider.appleFailed';
 type SecondFactorSession = Extract<MobileSessionState, { status: 'twoFactorRequired' }>;
 type SecondFactorStep = 'passkey' | 'totp' | 'recovery' | 'setup';
 
@@ -278,6 +289,36 @@ const pageErrorKey = (
     return 'mobileApp.code.rateLimited';
   }
   return 'mobileApp.errors.network';
+};
+
+/**
+ * A provider sign-in's failure on Welcome, or `null` when the person closed it (nothing to say).
+ * Copy approved by Product 2026-11-18; the email check names the provider.
+ */
+const providerErrorKey = (
+  error: MobileBridgeError,
+  provider: SignInProvider,
+): MobileErrorKey | null => {
+  switch (error.code) {
+    case 'provider_cancelled':
+      return null;
+    case 'provider_unavailable':
+      return 'mobileApp.provider.unavailable';
+    case 'provider_email_unverified':
+      if (provider === 'google') return 'mobileApp.provider.googleEmailUnverified';
+      if (provider === 'github') return 'mobileApp.provider.githubEmailUnverified';
+      return 'mobileApp.provider.appleFailed';
+    case 'rate_limited':
+      return 'mobileApp.code.rateLimited';
+    case 'invalid_or_expired':
+      return provider === 'google'
+        ? 'mobileApp.provider.googleFailed'
+        : provider === 'github'
+          ? 'mobileApp.provider.githubFailed'
+          : 'mobileApp.provider.appleFailed';
+    default:
+      return provider === 'apple' ? 'mobileApp.provider.appleFailed' : 'mobileApp.errors.network';
+  }
 };
 
 /** In the instance sheet (`#sheet`) the page scrolls its document, which native hands to the sheet. */
@@ -484,68 +525,65 @@ function RecoveryCard({
 }
 
 /**
- * Welcome. With `onProvider`, email stays the primary action and Google, GitHub and Apple follow
- * below avibe.bot's 「或」 (proposal, ui/design: mobile-app/welcome/providers-*): `buttons` as
- * secondary buttons with avibe.bot's wording, `row` as one row of marks.
+ * Welcome: email is the one primary action; Google, GitHub and Apple follow below avibe.bot's
+ * 「或」 as one row of marks (ui/design: mobile-app/welcome/providers-row). A provider sign-in
+ * that failed says so above them.
  */
 export function WelcomeScreen({
   locked,
+  errorKey = null,
   onContinue,
   onProvider,
-  providerStyle = 'buttons',
 }: {
   locked: boolean;
+  errorKey?: MobileErrorKey | ProviderErrorKey | null;
   onContinue: () => void;
   onProvider?: (provider: SignInProvider) => void;
-  providerStyle?: 'buttons' | 'row';
 }) {
   const { t } = useTranslation();
-  const providers = Boolean(onProvider);
-  const compactHero = providers && providerStyle === 'buttons';
   return (
     <CloudScreen>
       <Brand />
-      <div className={cn('relative flex flex-1 flex-col items-center justify-center', compactHero ? 'pt-4 pb-10 [@media(max-height:700px)]:pt-0' : 'py-8')}>
-        {/* Short phones (iPhone SE) keep every sign-in button on the first screen. */}
-        <div className={cn('relative grid place-items-center', compactHero ? 'mb-6 size-48 [@media(max-height:700px)]:mb-3 [@media(max-height:700px)]:size-20' : 'mb-8 size-64')}>
+      <div className="relative flex flex-1 flex-col items-center justify-center py-8">
+        <div className="relative mb-8 grid size-64 place-items-center">
           <div className="absolute inset-0 rounded-full border border-edge bg-surface/30 shadow-elevation-0" />
-          <div className={cn('absolute rounded-full border border-surface/70 bg-surface/30', compactHero ? 'inset-5' : 'inset-6')} />
+          <div className="absolute inset-6 rounded-full border border-surface/70 bg-surface/30" />
           <img
             src={heroMascot}
             alt={t('mobileApp.welcome.mascotAlt')}
-            className={cn(
-              'relative object-contain motion-safe:animate-[mobile-mascot-arrive_var(--motion-spring-smooth-duration)_var(--motion-spring-smooth)_both]',
-              compactHero ? 'size-40 [@media(max-height:700px)]:size-16' : 'size-52',
-            )}
+            className="relative size-52 object-contain motion-safe:animate-[mobile-mascot-arrive_var(--motion-spring-smooth-duration)_var(--motion-spring-smooth)_both]"
           />
-          <span className={cn('absolute -right-1 grid size-12 rotate-12 place-items-center rounded-2xl border border-edge bg-surface shadow-elevation-0', compactHero ? 'top-5 [@media(max-height:700px)]:hidden' : 'top-9')}>
+          <span className="absolute -right-1 top-9 grid size-12 rotate-12 place-items-center rounded-2xl border border-edge bg-surface shadow-elevation-0">
             <Sparkles className="size-5 text-mint-ink" />
           </span>
-          <span className={cn('absolute -left-1 rounded-full border border-edge bg-surface px-4 py-2 text-sm shadow-elevation-0', compactHero ? 'bottom-2 [@media(max-height:700px)]:hidden' : 'bottom-5')}>
+          <span className="absolute -left-1 bottom-5 rounded-full border border-edge bg-surface px-4 py-2 text-sm shadow-elevation-0">
             {t('mobileApp.welcome.greeting')}
           </span>
         </div>
-        <h1 className={cn('text-center font-semibold leading-tight', compactHero ? 'text-3xl [@media(max-height:700px)]:text-2xl' : 'text-4xl')}>
+        <h1 className="text-center text-4xl font-semibold leading-tight">
           {t('mobileApp.welcome.titleLine1')}
           <br />
           {t('mobileApp.welcome.titleLine2')}
         </h1>
-        <p className={cn('max-w-xs text-center text-sm leading-7 text-muted', compactHero ? 'mt-3' : 'mt-5')}>
+        <p className="mt-5 max-w-xs text-center text-sm leading-7 text-muted">
           {t('mobileApp.welcome.bodyLine1')}
           <br />
           {t('mobileApp.welcome.bodyLine2')}
         </p>
       </div>
       <div className="flex flex-col gap-4 pb-3">
+        {errorKey ? (
+          <p role="alert" className="text-center text-xs leading-6 text-destructive-ink">
+            {t(errorKey)}
+          </p>
+        ) : null}
         <Primary disabled={locked} onClick={onContinue}>
-          {providers ? t('mobileApp.welcome.continueWithEmail') : t('mobileApp.welcome.action')}
+          {t('mobileApp.welcome.continueWithEmail')}
         </Primary>
         {onProvider ? (
           <>
             <SignInDivider />
-            {providerStyle === 'row'
-              ? <SignInProviderRow disabled={locked} onProvider={onProvider} />
-              : <SignInProviderButtons disabled={locked} onProvider={onProvider} />}
+            <SignInProviderRow disabled={locked} onProvider={onProvider} />
           </>
         ) : null}
         <p className="text-center text-xs leading-relaxed text-muted">
@@ -559,6 +597,11 @@ export function WelcomeScreen({
 }
 
 const Welcome = WelcomeScreen;
+
+/** The empty-instances page as a view (props only); design frames draw it. */
+export function EmptyInstancesScreen(props: Parameters<typeof EmptyInstances>[0]) {
+  return <EmptyInstances {...props} />;
+}
 
 type EmailMode = 'code' | 'password';
 
@@ -1741,6 +1784,9 @@ function EmptyInstances({
   onOpenGuide,
   onOpenDownload,
   onExit,
+  newAccount = false,
+  signingOut = false,
+  onLogout,
 }: {
   /** In the sheet: Back returns to the instance list there. */
   onExit?: () => void;
@@ -1748,6 +1794,14 @@ function EmptyInstances({
   busy: boolean;
   locked: boolean;
   errorKey: MobileErrorKey | null;
+  /**
+   * A Google, GitHub or Apple sign-in in the App just created this account and it has no
+   * instances (Product, 2026-11-18): someone who already had an account may have reached a new
+   * one, so the page says so and offers sign-out. A hint only; it decides nothing.
+   */
+  newAccount?: boolean;
+  signingOut?: boolean;
+  onLogout?: () => void;
   onBack: () => void;
   onAccount: () => void;
   onRefresh: () => void;
@@ -1777,6 +1831,20 @@ function EmptyInstances({
       {errorKey ? (
         <div className="mb-6">
           <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRefresh} />
+        </div>
+      ) : null}
+      {newAccount && !cli && onLogout ? (
+        <div className={cn(raised, 'mb-6 flex flex-col gap-4')}>
+          <p className="text-sm leading-6 text-muted">{t('mobileApp.empty.newAccount')}</p>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={locked}
+            className="w-full rounded-full"
+            onClick={onLogout}
+          >
+            {signingOut ? t('mobileApp.account.signingOut') : t('mobileApp.empty.newAccountSignOut')}
+          </Button>
         </div>
       ) : null}
       {cli ? (
@@ -2437,6 +2505,27 @@ function MobileOnboardingScreens() {
     }
   };
 
+  /** Google, GitHub or Apple, natively; closing their window or sheet says nothing. */
+  const signInWithProvider = async (provider: SignInProvider) => {
+    const token = beginOperation('provider');
+    if (token === null) return;
+    setErrorKey(null);
+    pendingWeakPassword.current = null;
+    launchSecondFactor.current = null;
+    try {
+      const next = await signInMobileWithProvider(provider);
+      if (!ownsOperation(token)) return;
+      // A new sign-in owes its own second factor.
+      if (next.status !== 'signedOut') secondFactorRetryAt.current = 0;
+      applySession(token, next, false);
+    } catch (rawError) {
+      if (!ownsOperation(token)) return;
+      setErrorKey(providerErrorKey(normalizeMobileBridgeError(rawError), provider));
+    } finally {
+      finishOperation(token);
+    }
+  };
+
   const refresh = async () => {
     const token = beginOperation('refresh');
     if (token === null) return;
@@ -2755,7 +2844,16 @@ function MobileOnboardingScreens() {
       />
     );
   }
-  if (screen === 'welcome') return <Welcome locked={locked} onContinue={showEmail} />;
+  if (screen === 'welcome') {
+    return (
+      <Welcome
+        locked={locked}
+        errorKey={errorKey}
+        onContinue={showEmail}
+        onProvider={(provider) => void signInWithProvider(provider)}
+      />
+    );
+  }
   if (screen === 'email') {
     return (
       <EmailEntry
@@ -2946,6 +3044,9 @@ function MobileOnboardingScreens() {
         busy={busy === 'refresh'}
         locked={locked}
         errorKey={errorKey}
+        newAccount={signedIn?.new_account === true && signedIn.instances.length === 0}
+        signingOut={busy === 'logout'}
+        onLogout={() => void logout()}
         onBack={() => {
           if (!isOperationLocked()) {
             setErrorKey(null);
