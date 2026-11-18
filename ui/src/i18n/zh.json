@@ -358,7 +358,8 @@
       "rateLimited_one": "尝试次数过多，请 {{count}} 分钟后再试。"
     },
     "errors": {
-      "network": "暂时连不上 avibe.bot。检查网络后重试。"
+      "network": "暂时连不上 avibe.bot。检查网络后重试。",
+      "localRecords": "无法读取或保存此 iPhone 上的闹钟和提醒记录。请重试。"
     },
     "licenses": {
       "about": "关于",

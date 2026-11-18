@@ -2421,6 +2421,34 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testAppInfoWithholdsIdentityUntilTheEnvelopeCommits() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("I3AppInfo.\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var failing = true
+        let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
+            fileIO: FaultingSystemScheduleFileIO(checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } }))
+        let webView = WKWebView(frame: .zero, configuration: NativeBridgeConfiguration.make(
+            instanceOrigin: instance, setOuterScrollLocked: { _, _ in false },
+            deviceID: { store.installationID }))
+        let loader = WebViewLoadProbe()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML("<!doctype html><title>Identity</title>", baseURL: instance.url, in: webView)
+        func readID() async throws -> String? {
+            try await webView.callAsyncJavaScript(
+                "return (await window.avibeNative.call('app.info')).device?.id ?? null;",
+                arguments: [:], in: nil, contentWorld: .page) as? String
+        }
+        let uncommitted = try await readID()
+        XCTAssertNil(uncommitted)
+        failing = false
+        XCTAssertTrue(store.retryCommit())
+        let committed = try await readID()
+        XCTAssertEqual(committed, store.installationID)
+        XCTAssertNotNil(committed)
+    }
+
+    @MainActor
     func testNativeBridgeIsDiscoverableOnlyInTheInstanceMainFrame() async throws {
         let metadata = NativeShellMetadata(
             shellVersion: "1.2.3 (45)",
@@ -2468,7 +2496,9 @@ final class NavigationPolicyTests: XCTestCase {
                 showInstances: {
                     instancesShown.fulfill()
                 },
-                instanceName: { nativeName }
+                instanceName: { nativeName },
+                instanceID: { "instance-1" },
+                deviceID: { "device-1" }
             )
         )
         primaryWebView = webView
@@ -2542,6 +2572,7 @@ final class NavigationPolicyTests: XCTestCase {
               accountPresentationCapability: info.capabilities.accountPresentation,
               instancePresentationCapability: info.capabilities.instancePresentation,
               instanceInfo: info.instance,
+              deviceInfo: info.device,
               legacyAccountResult,
               accountRootResult,
               invalidAccountArguments,
@@ -2571,7 +2602,14 @@ final class NavigationPolicyTests: XCTestCase {
             2
         )
         XCTAssertEqual(instancePayload["instancePresentationCapability"] as? Int, 1)
-        XCTAssertEqual(instancePayload["instanceInfo"] as? [String: String], ["name": "Studio"])
+        XCTAssertEqual(
+            instancePayload["instanceInfo"] as? [String: String],
+            ["id": "instance-1", "name": "Studio"]
+        )
+        XCTAssertEqual(
+            instancePayload["deviceInfo"] as? [String: String],
+            ["id": "device-1"]
+        )
         XCTAssertTrue(instancePayload["legacyAccountResult"] is NSNull)
         XCTAssertTrue(instancePayload["accountRootResult"] is NSNull)
         XCTAssertEqual(instancePayload["invalidAccountArguments"] as? [String],
@@ -2600,7 +2638,10 @@ final class NavigationPolicyTests: XCTestCase {
                 "return JSON.stringify((await window.avibeNative.call('app.info')).instance);",
                 arguments: [:], in: nil, contentWorld: .page
             )
-            XCTAssertEqual(try jsonObject(from: info) as? [String: String], ["name": expected])
+            XCTAssertEqual(
+                try jsonObject(from: info) as? [String: String],
+                ["id": "instance-1", "name": expected]
+            )
         }
 
         try await probe.loadHTML(
@@ -3665,7 +3706,13 @@ final class NavigationPolicyTests: XCTestCase {
         controlPlane: MobileControlPlaneConfiguration,
         pushOpenedNow: @escaping () -> Date = Date.init
     ) -> AppModel {
-        AppModel(
+        let scheduleDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("I3Fixture.\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scheduleDirectory) }
+        let scheduleStore = FileSystemSystemScheduleStore(
+            fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
+        )
+        return AppModel(
             defaults: defaults,
             controlPlane: controlPlane,
             pushKeychain: InMemoryPushKeychainStore(),
@@ -3674,6 +3721,7 @@ final class NavigationPolicyTests: XCTestCase {
             pushNotificationCenter: NavigationTestPushNotificationCenter(),
             pushOpenedNow: pushOpenedNow,
             // Never the test host's own badge.
+            systemScheduleStore: scheduleStore,
             badgeCenter: NavigationTestBadgeCenter()
         )
     }

@@ -35,6 +35,7 @@ from core.control_requests import (
     ControlRequest,
     result,
 )
+from core.caller_context import AVIBE_SESSION_ID_ENV
 from core.handlers.cli_requests import _command_arguments, handle_control_request
 from vibe import cli, internal_client
 
@@ -54,6 +55,16 @@ _ARGV = {
     "session.send-now": ["session", "send-now", "--session-id", "s1"],
     "session.queue.remove": ["session", "queue", "remove", "m1", "--session-id", "s1"],
     "runs.cancel": ["runs", "cancel", "r1"],
+    "schedule.create": [
+        "schedule", "create",
+        "--kind", "alarm",
+        "--title", "Wake up",
+        "--at", "2026-11-18T09:00:00+08:00",
+        "--time-zone", "Asia/Shanghai",
+        "--operation-id", "alarm-1",
+    ],
+    "schedule.status": ["schedule", "status", "alarm-1"],
+    "schedule.cancel": ["schedule", "cancel", "alarm-1"],
 }
 
 
@@ -85,6 +96,70 @@ def _request(operation: str, argv: list[str], *, env=None, cwd: str | None = Non
 
 def test_every_named_mutation_is_covered():
     assert set(_ARGV) == set(OPERATIONS) - {"agent.run"}
+
+
+@pytest.mark.asyncio
+async def test_schedule_control_binds_the_caller_session_and_controller_instance(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "storage.system_schedule_service.create_operation",
+        lambda **kwargs: calls.append(kwargs) or {"operation_id": kwargs["operation_id"], "state": "pending"},
+    )
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            remote_access=SimpleNamespace(
+                vibe_cloud=SimpleNamespace(instance_id="instance-a"),
+            )
+        )
+    )
+    request = _request(
+        "schedule.create",
+        _ARGV["schedule.create"],
+        env={AVIBE_SESSION_ID_ENV: "session-a"},
+    )
+
+    response = await handle_control_request(controller, request.to_payload())
+
+    assert response["exit_code"] == 0
+    assert response["payload"] == {
+        "ok": True,
+        "kind": "system_schedule_operation",
+        "operation": {"operation_id": "alarm-1", "state": "pending"},
+    }
+    assert calls == [{
+        "session_id": "session-a",
+        "instance_id": "instance-a",
+        "operation_id": "alarm-1",
+        "kind": "alarm",
+        "title": "Wake up",
+        "fire_at": "2026-11-18T09:00:00+08:00",
+        "time_zone": "Asia/Shanghai",
+        "expires_in": 300,
+    }]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env", "instance_id", "code"),
+    [
+        ({}, "instance-a", "session_required"),
+        ({AVIBE_SESSION_ID_ENV: "session-a"}, "", "instance_not_paired"),
+    ],
+)
+async def test_schedule_control_refuses_missing_session_or_instance(env, instance_id, code):
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            remote_access=SimpleNamespace(
+                vibe_cloud=SimpleNamespace(instance_id=instance_id),
+            )
+        )
+    )
+    request = _request("schedule.status", _ARGV["schedule.status"], env=env)
+
+    response = await handle_control_request(controller, request.to_payload())
+
+    assert response["exit_code"] == 1
+    assert response["payload"]["code"] == code
 
 
 @pytest.mark.parametrize("operation", sorted(_ARGV))
@@ -166,6 +241,11 @@ def test_absent_service_executes_nothing(monkeypatch, tmp_path, capsys, operatio
         ("session.update", ["session", "update", "--title", "x", "--hidden", "--scope-id", "none"]),
         ("session.queue.remove", ["session", "queue", "remove", "m1"]),
         ("runs.cancel", ["runs", "cancel", "r1"]),
+        ("schedule.create", ["schedule", "create", "--kind", "reminder", "--title", "Take medicine",
+                              "--at", "2026-11-18T09:00:00+08:00", "--time-zone", "Asia/Shanghai",
+                              "--operation-id", "medicine-1", "--expires-in", "60"]),
+        ("schedule.status", ["schedule", "status", "medicine-1"]),
+        ("schedule.cancel", ["schedule", "cancel", "medicine-1", "--expires-in", "60"]),
     ],
 )
 def test_the_service_decodes_exactly_what_the_parser_produced(operation, argv):
@@ -207,6 +287,8 @@ async def test_arguments_the_parser_could_not_produce_are_refused_unexecuted(cha
         ("task.remove", "task_id"), ("task.run", "task_id"), ("watch.update", "watch_id"),
         ("watch.pause", "watch_id"), ("watch.resume", "watch_id"), ("watch.remove", "watch_id"),
         ("session.queue.remove", "message_id"), ("runs.cancel", "run_id"),
+        ("schedule.create", "operation_id"), ("schedule.status", "operation_id"),
+        ("schedule.cancel", "operation_id"),
     ],
 )
 @pytest.mark.asyncio
