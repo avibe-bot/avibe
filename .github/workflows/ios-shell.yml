@@ -165,6 +165,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Build and install Avibe on the Simulator (draft only)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme Avibe \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath "$RUNNER_TEMP/AvibeDerivedData" \
+            ENABLE_DEBUG_DYLIB=NO IROH_DEBUG_DYLIB_PATH= IROH_DEBUG_DYLIB_INPUT= \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          app="$(find "$RUNNER_TEMP/AvibeDerivedData/Build/Products" -maxdepth 2 -name Avibe.app -type d | head -1)"
+          echo "installing $app"
+          xcrun simctl install "$SIMULATOR_ID" "$app"
+
       - name: Start the voice capture probe's stand-in instance (draft only)
         run: |
           set -euo pipefail
