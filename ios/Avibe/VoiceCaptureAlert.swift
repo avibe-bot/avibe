@@ -5,19 +5,38 @@ import UIKit
 /// listening, in the words the island would have used.
 @MainActor
 enum VoiceCaptureAlert {
-    static func present(_ reason: VoiceCaptureAttributes.Reason, attempt: Int = 0) {
+    /// The alert's text: for a Live Activity that would not start, the
+    /// failure line with its step and code (the notification's line, which
+    /// may not show if notifications are off).
+    static func message(
+        _ reason: VoiceCaptureAttributes.Reason,
+        failure: VoiceCaptureAttributes.ContentState?
+    ) -> String {
+        if reason == .activityFailed, let failure, failure.failedStep != nil {
+            return String(localized: VoiceCaptureCopy.reasonLine(
+                .recordingFailed, errorCode: failure.errorCode, step: failure.failedStep, errorText: failure.errorText
+            ))
+        }
+        return String(localized: VoiceCaptureCopy.reason(reason))
+    }
+
+    static func present(
+        _ reason: VoiceCaptureAttributes.Reason,
+        failure: VoiceCaptureAttributes.ContentState? = nil,
+        attempt: Int = 0
+    ) {
         guard let presenter = topViewController() else {
             // The scene is still coming up after `continueInForeground`.
             guard attempt < 20 else { return }
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(250))
-                present(reason, attempt: attempt + 1)
+                present(reason, failure: failure, attempt: attempt + 1)
             }
             return
         }
         let alert = UIAlertController(
             title: String(localized: VoiceCaptureCopy.text("voiceCapture.phase.needsApp")),
-            message: String(localized: VoiceCaptureCopy.reason(reason)),
+            message: message(reason, failure: failure),
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(

@@ -1,9 +1,13 @@
 import AVFoundation
 import Foundation
 
-/// The audio session a take records in.
+/// The audio session a take records in, in the two steps a failure is
+/// reported by.
 protocol VoiceCaptureAudioSession {
-    func activateForRecording() throws
+    /// Category, mode and options (设置音频会话).
+    func configureForRecording() throws
+    /// `setActive(true)` (激活音频会话).
+    func activate() throws
     func deactivate()
 }
 
@@ -18,10 +22,12 @@ protocol VoiceCaptureRecordingEngine: AnyObject {
 extension AVAudioRecorder: VoiceCaptureRecordingEngine {}
 
 struct SystemAudioSession: VoiceCaptureAudioSession {
-    func activateForRecording() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default, options: [])
-        try session.setActive(true)
+    func configureForRecording() throws {
+        try AVAudioSession.sharedInstance().setCategory(.record, mode: .default, options: [])
+    }
+
+    func activate() throws {
+        try AVAudioSession.sharedInstance().setActive(true)
     }
 
     func deactivate() {
@@ -35,6 +41,12 @@ final class VoiceCaptureRecorder {
     enum Failure: Error {
         case permission
         case start
+    }
+
+    /// Where starting stopped, and what the system answered there.
+    struct StartFailure: Error {
+        let step: VoiceCaptureAttributes.Step
+        let underlying: Error
     }
 
     let url: URL
@@ -103,15 +115,19 @@ final class VoiceCaptureRecorder {
         guard permission() else {
             throw Failure.permission
         }
+        var step = VoiceCaptureAttributes.Step.sessionCategory
         do {
-            try session.activateForRecording()
+            try session.configureForRecording()
+            step = .sessionActivate
+            try session.activate()
             sessionActive = true
+            step = .recorder
             let recorder = try makeEngine(url)
             guard recorder.record() else { throw Failure.start }
             self.recorder = recorder
         } catch {
             deactivateSession()
-            throw error
+            throw StartFailure(step: step, underlying: error)
         }
     }
 

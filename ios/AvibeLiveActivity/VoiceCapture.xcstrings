@@ -305,6 +305,38 @@
         }
       }
     },
+    "voiceCapture.reason.recordingFailedAt %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recording couldn't start (%@)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "录音没能开始（%@）。"
+          }
+        }
+      }
+    },
+    "voiceCapture.reason.recordingFailedAt %@ %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recording couldn't start (%1$@, error %2$@)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "录音没能开始（%1$@，错误 %2$@）。"
+          }
+        }
+      }
+    },
     "voiceCapture.reason.recordingFailedCode %lld" : {
       "localizations" : {
         "en" : {
@@ -413,6 +445,86 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "这个 Avibe 暂时不能用语音输入。"
+          }
+        }
+      }
+    },
+    "voiceCapture.step.liveActivity" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "starting the Live Activity"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动实时活动"
+          }
+        }
+      }
+    },
+    "voiceCapture.step.recorder" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "starting the recorder"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动录音器"
+          }
+        }
+      }
+    },
+    "voiceCapture.step.sessionActivate" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "activating the audio session"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "激活音频会话"
+          }
+        }
+      }
+    },
+    "voiceCapture.step.sessionCategory" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "setting up the audio session"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设置音频会话"
+          }
+        }
+      }
+    },
+    "voiceCapture.step.takeFile" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "preparing the recording file"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "准备录音文件"
           }
         }
       }

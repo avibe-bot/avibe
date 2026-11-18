@@ -94,8 +94,27 @@ enum VoiceCaptureCopy {
         }
     }
 
-    /// The reason, with the system's error code where one is known.
-    static func reasonLine(_ reason: VoiceCaptureAttributes.Reason, errorCode: Int?) -> LocalizedStringResource {
+    /// The reason, with where it stopped and the system's error code where
+    /// they are known: 录音没能开始（激活音频会话，错误 561145187）。
+    static func reasonLine(
+        _ reason: VoiceCaptureAttributes.Reason,
+        errorCode: Int?,
+        step: VoiceCaptureAttributes.Step? = nil,
+        errorText: String? = nil
+    ) -> LocalizedStringResource {
+        if reason == .recordingFailed, let step {
+            let stepName = String(localized: text("voiceCapture.step.\(step.rawValue)"))
+            if let shown = errorText ?? errorCode.map(String.init) {
+                return LocalizedStringResource(
+                    String.LocalizationValue("voiceCapture.reason.recordingFailedAt \(stepName) \(shown)"),
+                    table: "VoiceCapture"
+                )
+            }
+            return LocalizedStringResource(
+                String.LocalizationValue("voiceCapture.reason.recordingFailedAt \(stepName)"),
+                table: "VoiceCapture"
+            )
+        }
         if reason == .recordingFailed, let errorCode {
             return LocalizedStringResource(
                 String.LocalizationValue("voiceCapture.reason.recordingFailedCode \(errorCode)"),
@@ -233,7 +252,7 @@ struct VoiceCaptureDetail: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else if let reason = state.reason {
-                Text(VoiceCaptureCopy.reasonLine(reason, errorCode: state.errorCode))
+                Text(VoiceCaptureCopy.reasonLine(reason, errorCode: state.errorCode, step: state.failedStep, errorText: state.errorText))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)

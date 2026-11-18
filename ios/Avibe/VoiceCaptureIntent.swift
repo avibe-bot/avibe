@@ -49,7 +49,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
                 try await continueInForeground(alwaysConfirm: false)
                 controller.openMainBotChat()
                 // Never in front without a word: say why it came forward.
-                VoiceCaptureAlert.present(reason)
+                VoiceCaptureAlert.present(reason, failure: controller.lastFailure)
                 return .result()
             } catch {
                 // The system declined; the island says to open Avibe.
