@@ -173,7 +173,7 @@ from core.agent_core.messages import (
     usage_to_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult
-from core.agent_core.tools.paths import to_thread_joined
+from core.agent_core.tools.paths import read_in_worker, to_thread_joined
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -1752,7 +1752,7 @@ class Agent:
 
     async def _prepare_conversation(self, system: str, selected: ModelSelection) -> _PreparedConversation:
         """Compose and budget before any context transition; also used by dry_tick."""
-        view, history, anchor = await self._scope.call(lambda: to_thread_joined(
+        view, history, anchor = await self._scope.call(lambda: read_in_worker(
             conversation_history, tuple(self._rows), self.context is not None,
         ))
         request, tools = await self._request(
@@ -2449,7 +2449,7 @@ class Agent:
             if not plan.can_fit:
                 raise _SideTurnTooLarge()
             measured[:] = [plan]
-            messages = await self._scope.call(lambda: to_thread_joined(deepcopy, request.messages))
+            messages = await self._scope.call(lambda: read_in_worker(deepcopy, request.messages))
             return replace(request, messages=messages), tools
 
         finished: dict[str, Any] = {"outcome": "failed", "error": None, "folded_event_id": None}

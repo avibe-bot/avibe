@@ -300,6 +300,39 @@ async def test_settled_attempt_does_not_keep_its_request_history_alive():
     assert len(requests) == 2 and all(item() is None for item in requests)
 
 
+async def test_stop_skips_queued_request_preparation(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from tests.agent_core.fakes import SELECTION
+
+    # Occupy the only worker. Stop must finish without the unrelated work finishing first.
+    loop = asyncio.get_running_loop()
+    submit = loop.run_in_executor
+    queued = asyncio.Event()
+    release = Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        busy = submit(pool, release.wait)
+
+        def enqueue(executor, fn, *args):
+            assert executor is None
+            future = submit(pool, fn, *args)
+            queued.set()
+            return future
+
+        monkeypatch.setattr(loop, "run_in_executor", enqueue)
+        agent = make_agent(ScriptedProvider([]))
+        preparing = asyncio.create_task(agent._prepare_conversation("system", SELECTION))
+        try:
+            await asyncio.wait_for(queued.wait(), 2)
+            preparing.cancel()
+            done, _ = await asyncio.wait({preparing}, timeout=1)
+            assert preparing in done and preparing.cancelled()
+        finally:
+            release.set()
+            await busy
+            await asyncio.gather(preparing, return_exceptions=True)
+
+
 async def test_conversation_history_copy_does_not_run_on_the_loop_or_leak_hook_mutations():
     import threading
     from core.agent_core.harness.store import ContextEntry
