@@ -193,6 +193,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
           ref={setIframe}
           onLoad={handleIframeLoad}
           title={t('chat.showPage.title')}
+          data-avibe-show-session={sessionId}
           src={src ?? undefined}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"
