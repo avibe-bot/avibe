@@ -7,8 +7,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SystemScheduleForwarder } from './SystemScheduleForwarder';
 
-const { apiFetch, native, activity } = vi.hoisted(() => ({
+const { apiFetch, native, activity, events } = vi.hoisted(() => ({
   apiFetch: vi.fn(),
+  events: {
+    handlers: new Set<{ onTurnEnd?: (data: { session_id: string }) => void; onConnected?: () => void }>(),
+    turnEnd(sessionId = 'session-1') {
+      for (const handlers of this.handlers) handlers.onTurnEnd?.({ session_id: sessionId });
+    },
+    connected() {
+      for (const handlers of this.handlers) handlers.onConnected?.();
+    },
+  },
   native: {
     hasNativeCapability: vi.fn(),
     nativeAppInfo: vi.fn(),
@@ -20,6 +29,16 @@ const { apiFetch, native, activity } = vi.hoisted(() => ({
 
 const state = vi.hoisted(() => ({ canChat: true }));
 
+vi.mock('@/context/ApiContext', () => {
+  // As in the App, the API context's functions keep their identity.
+  const api = {
+    connectWorkbenchEvents: (handlers: { onTurnEnd?: (data: { session_id: string }) => void; onConnected?: () => void }) => {
+      events.handlers.add(handlers);
+      return () => { events.handlers.delete(handlers); };
+    },
+  };
+  return { useApi: () => api };
+});
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({
     capabilities: { can_chat: state.canChat },
@@ -93,6 +112,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  events.handlers.clear();
   vi.useRealTimers();
   vi.clearAllMocks();
 });
@@ -181,6 +201,9 @@ describe('SystemScheduleForwarder', () => {
       expect(uploadedReceipts).toEqual([]);
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(abortedClaims).toBe(1);
+      // The create finished while the claim stalled: the reconcile it asked
+      // for runs once the stalled one ends, so the cancel and the receipts
+      // complete without waiting for the page to come back.
       await act(async () => { await vi.advanceTimersByTimeAsync(10_005); });
 
       expect(acceptedLeases).toEqual(new Set([createClaim.leaseToken, 'lease-cancel']));
@@ -191,8 +214,122 @@ describe('SystemScheduleForwarder', () => {
       expect(maxActiveClaims).toBe(1);
       expect(activeClaims).toBe(0);
       expect(uploadedReceipts).toEqual([receipt, receipt, cancelReceipt]);
+
+      // And then it settles: nothing more on a timer.
+      const settled = claimCalls;
+      await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+      expect(claimCalls).toBe(settled);
     },
   );
+
+  it('claims when the page opens and when it comes back, never on a timer', async () => {
+    vi.useFakeTimers();
+    let reactivate: (() => void) | undefined;
+    activity.onPageReactivated.mockImplementation((callback: () => void) => {
+      reactivate = callback;
+      return () => undefined;
+    });
+    apiFetch.mockImplementation(async () => Response.json({ ok: true, claim: null }));
+
+    render(<SystemScheduleForwarder />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(1);
+
+    // An hour with the page open and nothing happening: no request at all.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(1);
+
+    await act(async () => {
+      reactivate?.();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
+  });
+
+  it('sends a finished call\'s receipt even while another claim is still running', async () => {
+    vi.useFakeTimers();
+    let releaseSecondClaim: ((response: Response) => void) | undefined;
+    let claimCalls = 0;
+    apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/system-schedule/receipt') return Response.json({ ok: true });
+      claimCalls += 1;
+      if (claimCalls === 1) return Response.json({ ok: true, claim: createClaim });
+      if (claimCalls === 2) {
+        return new Promise<Response>((resolve) => { releaseSecondClaim = resolve; });
+      }
+      return Response.json({ ok: true, claim: null });
+    });
+
+    render(<SystemScheduleForwarder />);
+    // The create's Native call has finished while the second claim is held.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce();
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(0);
+
+    await act(async () => {
+      releaseSecondClaim?.(Response.json({ ok: true, claim: null }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1);
+  });
+
+  it('claims an alarm the Agent queued when its turn ends, without leaving the App', async () => {
+    vi.useFakeTimers();
+    let queued = false;
+    let delivered = false;
+    apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
+      if (path === '/api/system-schedule/receipt') {
+        delivered = true;
+        return Response.json({ ok: true });
+      }
+      const body = JSON.parse(init.body as string);
+      const claim = queued && !delivered
+        && !body.exclude_lease_tokens.includes(createClaim.leaseToken)
+        ? createClaim
+        : null;
+      return Response.json({ ok: true, claim });
+    });
+
+    render(<SystemScheduleForwarder />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(native.nativeSystemScheduleRequest).not.toHaveBeenCalled();
+
+    // The user asks for an alarm in chat and stays on the reply: the Agent
+    // queues it and its turn ends.
+    queued = true;
+    await act(async () => {
+      events.turnEnd();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce();
+    expect(native.nativeSystemScheduleRequest).toHaveBeenCalledWith(request);
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1);
+
+    // The reconcile after the receipt settles; then nothing more without
+    // another turn end or a return to the page.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const claims = callsFor('/api/system-schedule/claim').length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(claims);
+  });
+
+  it('catches up when the event stream reconnects, since it replays no missed turn end', async () => {
+    vi.useFakeTimers();
+    apiFetch.mockImplementation(async () => Response.json({ ok: true, claim: null }));
+
+    render(<SystemScheduleForwarder />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const claims = callsFor('/api/system-schedule/claim').length;
+    await act(async () => {
+      events.connected();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(claims + 1);
+  });
 
   it('shares the closed create, cancel, and terminal receipt vectors across layers', () => {
     expect(contractVectors.contract).toBe(1);
@@ -310,12 +447,10 @@ describe('SystemScheduleForwarder', () => {
   });
 
   it.each([
-    { action: 'create', resume: 'poll' },
-    { action: 'create', resume: 'reactivation' },
-    { action: 'cancel', resume: 'poll' },
-    { action: 'cancel', resume: 'reactivation' },
-  ] as const)('backs off a rejected $action until $resume permits replay', async ({
-    action, resume,
+    { action: 'create' },
+    { action: 'cancel' },
+  ] as const)('backs off a rejected $action until the page comes back', async ({
+    action,
   }) => {
     vi.useFakeTimers();
     let reactivate: (() => void) | undefined;
@@ -364,9 +499,8 @@ describe('SystemScheduleForwarder', () => {
     expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
 
     await act(async () => { rejectNative?.(new Error('forbidden')); });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(resume === 'poll' ? 4_999 : 4_000);
-    });
+    // However long it waits, nothing replays it on a timer.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     expect(nativeCall).toHaveBeenCalledOnce();
     expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
@@ -374,8 +508,8 @@ describe('SystemScheduleForwarder', () => {
 
     admitted = true;
     await act(async () => {
-      if (resume === 'reactivation') reactivate?.();
-      await vi.advanceTimersByTimeAsync(resume === 'poll' ? 5 : 0);
+      reactivate?.();
+      await vi.advanceTimersByTimeAsync(0);
     });
     await act(async () => { await vi.advanceTimersByTimeAsync(5); });
 
