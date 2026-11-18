@@ -8475,7 +8475,9 @@ def direct_rendezvous():
             reason="hostname_not_direct",
         )
     else:
+        auth = getattr(g, "authorization_context", None)
         result = rendezvous_state.rendezvous.offer(
+            is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
             subject=subject,

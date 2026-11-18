@@ -1236,6 +1236,12 @@ def save_config(
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        # Only the local shell writer may grant or withdraw consent to public relays.
+        # Compare against the locked base, not a prior read or the request's role.
+        if config.remote_access.vibe_cloud.public_relay_trial != bool(
+            base_config and base_config.remote_access.vibe_cloud.public_relay_trial
+        ):
+            raise ValueError("Public relay trial consent must be changed from the instance host shell")
         if base_config is not None:
             # A recovered base section must reach the file as stored, never as
             # the defaults merged in above. Refuse before any side effect below.
