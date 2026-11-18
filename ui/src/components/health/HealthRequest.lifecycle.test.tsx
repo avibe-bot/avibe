@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -430,5 +430,253 @@ describe('Document-owned connection attempts across consumers', () => {
     fireEvent.click(button); await tick();
     expect(call).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(2);
+  });
+});
+
+
+// Original reviewer scenarios with the desired invariant replacing defect assertions.
+describe('Reviewer receipt-retention counterexamples', () => {
+  it.each(['connected', 'declined'] as const)('retains completed A %s after B fails with both cards retained', async (outcome) => {
+    vi.useFakeTimers(); const call = installBridge();
+    const a = { ...request };
+    const b = { ...request, id: `mreq_f${request.id.slice(6)}` };
+    call.mockResolvedValueOnce({ state: outcome }).mockResolvedValueOnce({ state: 'failed' });
+    fetchMock.mockImplementation(async (url: string) => url === '/api/mobile/pairings'
+      ? Response.json({ pairing_code: 'local-only' }) : Response.json(url.endsWith(b.id) ? b : a));
+    mount(<><HealthRequestCard request={a} /><HealthRequestCard request={b} /></>); await tick();
+    fireEvent.click(screen.getAllByRole('button', { name: en.health.authorize })[0]); await tick();
+    expect(screen.getByText(en.health.note[outcome])).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: en.health.authorize })); await tick();
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(en.health.note[outcome])).toBeTruthy();
+    expect(screen.getByText(en.health.note.failed)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.health.authorize })).toBeNull();
+  });
+
+  it('retains completed A after B pairing is canceled and A is truly remounted', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    const a = { ...request };
+    const b = { ...request, id: `mreq_f${request.id.slice(6)}` };
+    let pairs = 0;
+    let resolveAbandoned!: (value: Response) => void;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url !== '/api/mobile/pairings') return Response.json(url.endsWith(b.id) ? b : a);
+      if (++pairs === 1) return Response.json({ pairing_code: 'a-code' });
+      return new Promise<Response>(resolve => { resolveAbandoned = resolve; });
+    });
+    const first = mount(<HealthRequestCard request={a} />); await tick();
+    fireEvent.click(screen.getByRole('button', { name: en.health.authorize })); await tick();
+    expect(screen.getByText(en.health.note.connected)).toBeTruthy(); first.unmount();
+    const second = mount(<HealthRequestCard request={b} />); await tick();
+    fireEvent.click(screen.getByRole('button', { name: en.health.authorize })); await tick(); second.unmount();
+    await act(async () => { resolveAbandoned(Response.json({ pairing_code: 'canceled-b' })); });
+    mount(<HealthRequestCard request={a} />); await tick();
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(en.health.note.connected)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.health.authorize })).toBeNull();
+  });
+
+  it('shares confirmed terminal knowledge despite an older same-request queued GET', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    const a = { ...request };
+    let gets = 0;
+    let resolveStale!: (value: Response) => void;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/mobile/pairings') return Response.json({ pairing_code: 'a-code' });
+      if (++gets === 1) return new Promise<Response>(resolve => { resolveStale = resolve; });
+      return Response.json({ ...a, state: 'succeeded' });
+    });
+    mount(<><HealthRequestCard request={a} /><HealthRequestCard request={a} /></>); await tick();
+    expect(screen.getAllByText(en.health.note.succeeded)).toHaveLength(2);
+    await act(async () => { resolveStale(Response.json(a)); });
+    expect(screen.queryByRole('button', { name: en.health.authorize })).toBeNull();
+    expect(call).not.toHaveBeenCalled();
+  });
+});
+
+
+const relatedRequest = (prefix: string): HealthRequest => ({ ...request, id: `mreq_${prefix}${request.id.slice(6)}` });
+const pairingIds = () => fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')
+  .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { request_id: string }).request_id);
+const authorizeIn = (view: ReturnType<typeof mount>) => fireEvent.click(within(view.container).getByRole('button', { name: en.health.authorize }));
+const assertReceipt = (view: ReturnType<typeof mount>, outcome: 'connected' | 'declined' | 'failed') => {
+  expect(within(view.container).getByText(en.health.note[outcome])).toBeTruthy();
+  expect(within(view.container).queryByRole('button', { name: en.health.authorize })).toBeNull();
+};
+
+describe('Per-request knowledge independently of the single active attempt', () => {
+  for (const outcome of ['connected', 'declined', 'failed'] as const) {
+    for (const next of ['failed', 'canceled', 'pending'] as const) {
+      it.each(['retained', 'remounted'] as const)(`preserves A ${outcome} when B is ${next}, with A %s`, async (surface) => {
+        vi.useFakeTimers(); const call = installBridge();
+        const a = { ...request }; const b = relatedRequest('b'); const c = relatedRequest('c');
+        let resolveNative!: (value: { state: string }) => void;
+        let resolvePairing!: (value: Response) => void;
+        call.mockImplementation((_method: string, params: { requestId: string }) => {
+          if (params.requestId === a.id) return Promise.resolve({ state: outcome });
+          if (params.requestId === b.id && next === 'pending') return new Promise(resolve => { resolveNative = resolve; });
+          return Promise.resolve({ state: params.requestId === b.id ? 'failed' : 'connected' });
+        });
+        fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+          if (url !== '/api/mobile/pairings') return Response.json(url.endsWith(b.id) ? b : url.endsWith(c.id) ? c : a);
+          if (JSON.parse(init?.body as string).request_id === b.id && next === 'canceled') {
+            return new Promise<Response>(resolve => { resolvePairing = resolve; });
+          }
+          return Response.json({ pairing_code: 'synthetic-code' });
+        });
+        let first = mount(<HealthRequestCard request={a} />); await tick();
+        authorizeIn(first); await tick(); assertReceipt(first, outcome);
+        if (surface === 'remounted') first.unmount();
+        const readsA = fetchMock.mock.calls.filter(([url]) => url.endsWith(a.id)).length;
+        const second = mount(<HealthRequestCard request={b} />); await tick();
+        authorizeIn(second); await tick();
+        // B's publications must not be interpreted as new A outcomes that restart A's GET.
+        expect(fetchMock.mock.calls.filter(([url]) => url.endsWith(a.id))).toHaveLength(readsA);
+        if (next === 'canceled') {
+          second.unmount();
+          await act(async () => { resolvePairing(Response.json({ pairing_code: 'abandoned-b-code' })); });
+        }
+        if (surface === 'remounted') { first = mount(<HealthRequestCard request={a} />); await tick(); }
+        assertReceipt(first, outcome);
+        const third = mount(<HealthRequestCard request={c} />); await tick();
+        const button = within(third.container).getByRole('button', { name: en.health.authorize }) as HTMLButtonElement;
+        expect(button.disabled).toBe(next === 'pending');
+        if (next === 'pending') {
+          fireEvent.click(button); await tick(); expect(pairingIds()).toEqual([a.id, b.id]);
+          await act(async () => { resolveNative({ state: 'connected' }); });
+          expect(button.disabled).toBe(false); assertReceipt(first, outcome);
+        }
+        fireEvent.click(button); await tick();
+        assertReceipt(first, outcome);
+        expect(pairingIds()).toEqual([a.id, b.id, c.id]);
+        expect(call.mock.calls.filter(([, params]) => params.requestId === a.id)).toHaveLength(1);
+        expect(call.mock.calls.filter(([, params]) => params.requestId === b.id)).toHaveLength(next === 'canceled' ? 0 : 1);
+      });
+    }
+  }
+
+  it('reserves exactly one POST when different request consumers act in the same tick', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    const a = { ...request }; const b = relatedRequest('b');
+    let resolvePairing!: (value: Response) => void;
+    fetchMock.mockImplementation(async (url: string) => url === '/api/mobile/pairings'
+      ? new Promise<Response>(resolve => { resolvePairing = resolve; }) : Response.json(url.endsWith(b.id) ? b : a));
+    const first = mount(<HealthRequestCard request={a} />);
+    const second = mount(<HealthRequestCard request={b} />); await tick();
+    act(() => { authorizeIn(first); authorizeIn(second); }); await tick();
+    expect(pairingIds()).toEqual([a.id]);
+    await act(async () => { resolvePairing(Response.json({ pairing_code: 'a-code' })); });
+    assertReceipt(first, 'connected');
+    expect(within(second.container).queryByText(en.health.note.connected)).toBeNull();
+    expect((within(second.container).getByRole('button') as HTMLButtonElement).disabled).toBe(false);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  for (const target of ['a', 'b'] as const) {
+    for (const timing of ['before', 'after'] as const) {
+      it.each(['succeeded', 'failed', 'expired', 'canceled'] as const)(`retains only ${target}'s terminal %s ${timing} B Native completion`, async (state) => {
+        vi.useFakeTimers(); const call = installBridge();
+        const a = { ...request }; const b = relatedRequest('b'); const c = relatedRequest('c');
+        let serverA = a; let serverB = b;
+        let resolveNative!: (value: { state: string }) => void;
+        call.mockResolvedValueOnce({ state: 'declined' }).mockImplementationOnce(() => new Promise(resolve => { resolveNative = resolve; }));
+        fetchMock.mockImplementation(async (url: string) => url === '/api/mobile/pairings'
+          ? Response.json({ pairing_code: 'synthetic-code' }) : Response.json(url.endsWith(b.id) ? serverB : url.endsWith(c.id) ? c : serverA));
+        const first = mount(<HealthRequestCard request={a} />); await tick();
+        authorizeIn(first); await tick();
+        const second = mount(<HealthRequestCard request={b} />); await tick();
+        authorizeIn(second); await tick();
+        const third = mount(<HealthRequestCard request={c} />); await tick();
+        const button = within(third.container).getByRole('button') as HTMLButtonElement;
+        if (timing === 'after') await act(async () => { resolveNative({ state: 'connected' }); });
+        if (target === 'a') serverA = { ...a, state }; else serverB = { ...b, state };
+        await tick(3000);
+        const terminalView = target === 'a' ? first : second;
+        expect(within(terminalView.container).getByText(en.health.note[state])).toBeTruthy();
+        if (target === 'b') assertReceipt(first, 'declined');
+        if (timing === 'before') {
+          expect(button.disabled).toBe(true); fireEvent.click(button); await tick();
+          expect(pairingIds()).toEqual([a.id, b.id]);
+          await act(async () => { resolveNative({ state: 'connected' }); });
+        }
+        expect(button.disabled).toBe(false);
+        expect(within(terminalView.container).getByText(en.health.note[state])).toBeTruthy();
+        if (target === 'a') assertReceipt(second, 'connected'); else assertReceipt(first, 'declined');
+        terminalView.unmount();
+        const again = mount(<HealthRequestCard request={target === 'a' ? a : b} />); await tick();
+        expect(within(again.container).getByText(en.health.note[state])).toBeTruthy();
+        expect(within(again.container).queryByRole('button')).toBeNull();
+        authorizeIn(third); await tick();
+        expect(pairingIds()).toEqual([a.id, b.id, c.id]);
+      });
+    }
+  }
+
+  for (const late of ['queued', 'unknown', 'error'] as const) {
+    it.each(['succeeded', 'failed', 'expired', 'canceled'] as const)(`shares terminal %s against a peer's late ${late}, then survives remount`, async (state) => {
+      vi.useFakeTimers(); const call = installBridge();
+      const a = { ...request };
+      let gets = 0;
+      let resolveOld!: (value: Response) => void;
+      fetchMock.mockImplementation(() => ++gets === 1
+        ? new Promise<Response>(resolve => { resolveOld = resolve; }) : Promise.resolve(Response.json({ ...a, state })));
+      const first = mount(<HealthRequestCard request={a} />);
+      const second = mount(<HealthRequestCard request={a} />); await tick();
+      expect(screen.getAllByText(en.health.note[state])).toHaveLength(2);
+      await act(async () => { resolveOld(late === 'queued' ? Response.json(a)
+        : late === 'unknown' ? Response.json({ ...a, state: 'unrecognized' }) : Response.json({}, { status: 503 })); });
+      await tick(30000);
+      expect(screen.getAllByText(en.health.note[state])).toHaveLength(2);
+      expect(screen.queryByRole('button')).toBeNull(); expect(gets).toBe(2);
+      first.unmount(); second.unmount();
+      fetchMock.mockResolvedValue(Response.json({}, { status: 503 }));
+      mount(<HealthRequestCard request={a} />); await tick(30000);
+      expect(screen.getByText(en.health.note[state])).toBeTruthy();
+      expect(screen.queryByRole('button')).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(2); // terminal knowledge needs no fresh polling window
+      expect(call).not.toHaveBeenCalled();
+    });
+  }
+
+  it.each(['connected', 'declined', 'failed'] as const)('keeps a remounted %s receipt through unknown live status until the server terminal arrives', async (outcome) => {
+    vi.useFakeTimers(); const call = installBridge(); call.mockResolvedValue({ state: outcome });
+    const a = { ...request };
+    const first = mount(<HealthRequestCard request={a} />); await tick(); authorizeIn(first); await tick(); first.unmount();
+    let resolveLive!: (value: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { resolveLive = resolve; }));
+    const second = mount(<HealthRequestCard request={a} />); await tick(); assertReceipt(second, outcome);
+    await act(async () => { resolveLive(Response.json({}, { status: 503 })); });
+    assertReceipt(second, outcome);
+    expect(screen.getByText(en.health.loadError)).toBeTruthy();
+    current = { ...a, state: 'succeeded' }; await tick(3000);
+    expect(screen.getByText(en.health.note.succeeded)).toBeTruthy();
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(pairingIds()).toEqual([a.id]); expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it('terminalizes a pairing without losing A or allowing its late body to clear C Native', async () => {
+    vi.useFakeTimers(); const call = installBridge();
+    const a = { ...request }; const b = relatedRequest('b'); const c = relatedRequest('c');
+    let serverB = b;
+    let resolveBody!: (value: unknown) => void;
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockResolvedValueOnce({ state: 'connected' }).mockImplementationOnce(() => new Promise(resolve => { resolveNative = resolve; }));
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url !== '/api/mobile/pairings') return Response.json(url.endsWith(b.id) ? serverB : url.endsWith(c.id) ? c : a);
+      if (JSON.parse(init?.body as string).request_id !== b.id) return Response.json({ pairing_code: 'synthetic-code' });
+      const response = Response.json({}); response.json = () => new Promise(resolve => { resolveBody = resolve; }); return response;
+    });
+    const first = mount(<HealthRequestCard request={a} />); await tick(); authorizeIn(first); await tick();
+    const second = mount(<HealthRequestCard request={b} />); await tick(); authorizeIn(second); await tick();
+    serverB = { ...b, state: 'canceled' }; await tick(3000);
+    assertReceipt(first, 'connected'); expect(within(second.container).getByText(en.health.note.canceled)).toBeTruthy();
+    const third = mount(<HealthRequestCard request={c} />); await tick(); authorizeIn(third); await tick();
+    await act(async () => { resolveBody({ pairing_code: 'retired-b-code' }); });
+    const button = within(third.container).getByRole('button', { name: en.health.opening }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true); fireEvent.click(button); await tick();
+    expect(pairingIds()).toEqual([a.id, b.id, c.id]); expect(call).toHaveBeenCalledTimes(2);
+    await act(async () => { resolveNative({ state: 'connected' }); });
+    assertReceipt(first, 'connected'); assertReceipt(third, 'connected');
+    expect(within(second.container).getByText(en.health.note.canceled)).toBeTruthy();
   });
 });

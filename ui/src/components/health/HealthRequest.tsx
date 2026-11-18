@@ -30,12 +30,12 @@ export function HealthRequestCardView({ state, operation = 'health.connect', met
       <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-pink/15 text-pink-ink">
         <HeartPulse className="size-4" />
       </div>
-      <div className="flex min-w-0 flex-1 basis-[180px] flex-col gap-0.5" aria-live="polite">
+      <div className="flex min-w-0 flex-1 basis-(--health-card-copy-basis) flex-col gap-0.5" aria-live="polite">
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-xs text-muted">{t(operation === 'health.connect' ? 'health.title.connect' : 'health.title.refresh')}</span>
           {state !== 'authorize' && <Badge variant={variants[state]}>{t(`health.status.${state}`)}</Badge>}
         </div>
-        <span className="text-[13px] font-semibold text-foreground">{metrics.map(metric => t(`health.metric.${metric}`, { defaultValue: metric })).join(t('health.metricSeparator'))}</span>
+        <span className="text-health-metric font-semibold text-foreground">{metrics.map(metric => t(`health.metric.${metric}`, { defaultValue: metric })).join(t('health.metricSeparator'))}</span>
         <span className="text-xs leading-5 text-muted">{t(state === 'waiting' && operation === 'health.refresh' ? 'health.waitingRefresh' : `health.note.${state}`)}</span>
         {loadError && <span role="status" className="text-xs leading-5 text-muted">{t('health.loadError')}</span>}
       </div>
@@ -58,7 +58,7 @@ export function HealthLandingView({ state, operation = 'health.connect', busy, r
   const connected = state === 'connected' || state === 'succeeded';
   const authorize = state === 'authorize';
   return (
-    <div className="mx-auto flex min-h-[76dvh] w-full max-w-[420px] flex-col items-center justify-center px-5 py-10 text-center">
+    <div className="mx-auto flex min-h-(--health-landing-min-h) w-full max-w-(--health-landing-max-w) flex-col items-center justify-center px-5 py-10 text-center">
       <div className={cn('flex size-14 items-center justify-center rounded-2xl', connected ? 'bg-mint-soft text-mint-ink' : state === 'waiting' ? 'bg-cyan-soft text-cyan-ink' : 'bg-pink/15 text-pink-ink')}>
         {connected ? <Check className="size-7" /> : state === 'waiting' ? <Smartphone className="size-7" /> : <HeartPulse className="size-7" />}
       </div>
@@ -77,7 +77,7 @@ export function HealthLandingView({ state, operation = 'health.connect', busy, r
 function HealthLandingRequest({ id }: { id: string }) {
   const live = useHealthRequest(id);
   const { t } = useTranslation();
-  if (!live.request || !live.state) return <div className="mx-auto flex min-h-[76dvh] max-w-[420px] flex-col justify-center gap-5 px-5 text-center">
+  if (!live.request || !live.state) return <div className="mx-auto flex min-h-(--health-landing-min-h) max-w-(--health-landing-max-w) flex-col justify-center gap-5 px-5 text-center">
     <p role="status">{t(live.loadError ? 'health.loadError' : 'health.loading')}</p>
     <Button asChild variant="outline"><Link to="/inbox">{t('health.landing.openConversations')}</Link></Button>
   </div>;

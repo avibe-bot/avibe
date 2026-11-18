@@ -55,51 +55,69 @@ export async function getHealthRequest(id: string, signal?: AbortSignal): Promis
 }
 
 type ConnectionResult = 'connected' | 'declined' | 'failed';
+type RequestKnowledge =
+  | { readonly kind: 'receipt'; readonly result: ConnectionResult }
+  | { readonly kind: 'terminal'; readonly request: HealthRequest };
 type ConnectionAttempt = {
-  requestId: string;
-  phase: 'pairing' | 'native' | 'settled';
-  result: ConnectionResult | null;
+  readonly requestId: string;
+  readonly phase: 'pairing' | 'native';
+  readonly cancelPairing: () => void;
 };
-// S3 admits one connect at a time. This document owns that attempt, not a visible route.
-let connection: ConnectionAttempt | null = null;
-let connectionOwner: { cancelPairing: () => void; terminal: boolean } | null = null;
+type HealthConnections = {
+  readonly active: ConnectionAttempt | null;
+  readonly entries: ReadonlyMap<string, RequestKnowledge>;
+};
+// S3 admits one connect at a time. Completed request knowledge outlives that execution slot.
+// Entries contain metadata only and live until this document ends; none confer authorization.
+let connections: HealthConnections = { active: null, entries: new Map() };
 const connectionListeners = new Set<() => void>();
-export const getHealthConnection = () => connection;
+export const getHealthConnection = () => connections;
 export function subscribeHealthConnection(listener: () => void) {
   connectionListeners.add(listener);
   return () => { connectionListeners.delete(listener); };
 }
-function publishConnection(next: ConnectionAttempt | null) {
-  connection = next;
+function publishConnection(next: HealthConnections) {
+  connections = next;
   connectionListeners.forEach(listener => listener());
 }
 
-export function observeHealthTerminal(id: string) {
-  if (connection?.requestId !== id || !connectionOwner) return;
-  connectionOwner.terminal = true;
-  if (connection.phase === 'pairing') connectionOwner.cancelPairing();
-  // A terminal request supersedes the receipt, but cannot end an executing Native call.
-  else if (connection.result) publishConnection({ ...connection, result: null });
+export function observeHealthTerminal(request: HealthRequest) {
+  if (['queued', 'claimed'].includes(request.state)
+    || connections.entries.get(request.id)?.kind === 'terminal') return;
+  // Copy only the value-free contract fields. A terminal entry is absorbing, even across remounts.
+  const { id, operation, state, created_at, expires_at, requires_user, metrics, error } = request;
+  const metadata: HealthRequest = { id, operation, state, created_at, expires_at, requires_user,
+    metrics: [...metrics], error: error ? { code: error.code } : null };
+  const entries = new Map(connections.entries);
+  entries.set(id, { kind: 'terminal', request: metadata });
+  publishConnection({ ...connections, entries });
+  if (connections.active?.requestId === id) connections.active.cancelPairing();
+  // cancelPairing cannot release Native: its exact attempt must still settle.
 }
 
 export async function connectHealthRequest(request: HealthRequest, signal: AbortSignal) {
   if (signal.aborted || healthRequestView(request) !== 'authorize'
-    || (connection && connection.phase !== 'settled')
-    || (connection?.requestId === request.id && connection.result)) return;
+    || connections.active || connections.entries.has(request.id)) return;
   const pairing = new AbortController();
-  const owner = {
-    terminal: false,
+  let attempt: ConnectionAttempt = {
+    requestId: request.id,
+    phase: 'pairing',
     cancelPairing: () => {
-      if (connectionOwner !== owner || connection?.phase !== 'pairing') return;
+      if (connections.active !== attempt || attempt.phase !== 'pairing') return;
       pairing.abort();
-      connectionOwner = null;
-      publishConnection(null);
+      publishConnection({ ...connections, active: null });
     },
   };
+  const settle = (result: ConnectionResult) => {
+    if (getHealthConnection().active !== attempt) return;
+    const entries = new Map(connections.entries);
+    if (entries.get(request.id)?.kind !== 'terminal') entries.set(request.id, { kind: 'receipt', result });
+    // Record the outcome and release only this reservation in one synchronous publication.
+    publishConnection({ active: null, entries });
+  };
   // Reserve synchronously, before POST, including when two consumers act in the same tick.
-  connectionOwner = owner;
-  publishConnection({ requestId: request.id, phase: 'pairing', result: null });
-  signal.addEventListener('abort', owner.cancelPairing, { once: true });
+  publishConnection({ ...connections, active: attempt });
+  signal.addEventListener('abort', attempt.cancelPairing, { once: true });
   try {
     const pairingCode = await withApiDeadline(HEALTH_HTTP_DEADLINE_MS, pairing.signal, async (requestSignal) => {
       const response = await apiFetch('/api/mobile/pairings', {
@@ -114,18 +132,17 @@ export async function connectHealthRequest(request: HealthRequest, signal: Abort
     });
     pairing.signal.throwIfAborted();
     signal.throwIfAborted();
-    if (connectionOwner !== owner) return;
+    if (getHealthConnection().active !== attempt) return;
     // The code stays invocation-local. Once dispatched, aborting a route cannot cancel Native.
-    publishConnection({ requestId: request.id, phase: 'native', result: null });
-    signal.removeEventListener('abort', owner.cancelPairing);
+    attempt = { ...attempt, phase: 'native' };
+    publishConnection({ ...connections, active: attempt });
+    signal.removeEventListener('abort', attempt.cancelPairing);
     const result = await nativeHealthConnect({ requestId: request.id, pairingCode });
     if (!result || !['connected', 'declined', 'failed'].includes(result.state)) throw new Error('health_connect_failed');
-    publishConnection({ requestId: request.id, phase: 'settled', result: owner.terminal ? null : result.state });
+    settle(result.state);
   } catch {
-    if (connectionOwner === owner) {
-      publishConnection({ requestId: request.id, phase: 'settled', result: owner.terminal ? null : 'failed' });
-    }
+    settle('failed');
   } finally {
-    signal.removeEventListener('abort', owner.cancelPairing);
+    signal.removeEventListener('abort', attempt.cancelPairing);
   }
 }

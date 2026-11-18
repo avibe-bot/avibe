@@ -21,9 +21,11 @@ const installBridge = (capabilities: Record<string, number> = { health: 1 }) => 
   Object.defineProperty(window, 'avibeNative', { configurable: true, value: { contract: 1, platform: 'ios', shellVersion: '1', capabilities, call, on: vi.fn() } });
   return call;
 };
+let requestNumber = 0;
 let current = request;
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
+  request.id = `mreq_${(++requestNumber).toString(16).padStart(32, '0')}`;
   current = { ...request };
   document.cookie = 'vibe_csrf_token=synthetic-csrf; path=/';
   fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
