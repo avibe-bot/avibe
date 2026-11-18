@@ -142,8 +142,8 @@ export const signInMobileWithPassword = (
   call('auth.signInWithPassword', { email, password });
 
 /**
- * Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then Supabase's
- * PKCE or id_token grant and avibe.bot's session, natively.
+ * Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then the backend's
+ * one-time exchange, natively.
  * Resolves like `verifyMobileOtp`. Errors: `provider_cancelled` (show nothing),
  * `provider_unavailable`, `provider_email_unverified`, `invalid_or_expired`, `rate_limited`
  * (with `retry_after_seconds`), and `network`.
