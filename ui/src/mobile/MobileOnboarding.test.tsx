@@ -2494,6 +2494,15 @@ describe('mobile instance sheet', () => {
       expect(document.querySelector('[data-mobile-back]')).toBeNull();
     });
 
+    it('switches instance from the sheet\'s Account to its list, whose account row leads back', async () => {
+      await openAccountRoot();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
+      await screen.findByText('mobileApp.sheet.youreIn');
+      expect(screen.getByText('Personal Avibe')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long\.address@example\.com/ }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+    });
+
     it('is the sheet\'s root: Account with Close, and no Back for the edge swipe to press', async () => {
       await openAccountRoot();
       expect(screen.getByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeTruthy();

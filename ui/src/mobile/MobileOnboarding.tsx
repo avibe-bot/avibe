@@ -18,6 +18,7 @@ import {
   UserRound,
   Loader2,
   Database,
+  ArrowLeftRight,
 } from 'lucide-react';
 import {
   createContext,
@@ -1954,6 +1955,7 @@ function Account({
   onLogout,
   onLicenses,
   onAccountData,
+  onSwitchInstance,
   inSheet = false,
   showCurrent = !inSheet,
   onClose,
@@ -1981,6 +1983,11 @@ function Account({
   onLicenses: () => void;
   /** Account and data: the privacy policy and, at its bottom, deleting the account. */
   onAccountData: () => void;
+  /**
+   * The sheet the avatar opens on Account: a row to its instance list, for people who don't know
+   * the instance name in the header opens it (owner, 2026-11-18).
+   */
+  onSwitchInstance?: () => void;
 }) {
   const { t } = useTranslation();
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id);
@@ -2056,7 +2063,12 @@ function Account({
           <ChevronRight className="size-4" />
         </Button>
       </section> : null}
-      <div className="mt-8">
+      {onSwitchInstance ? (
+        <div className="mt-8">
+          <AccountLinkRow icon={ArrowLeftRight} label={t('mobileApp.account.switch')} disabled={locked} onClick={onSwitchInstance} />
+        </div>
+      ) : null}
+      <div className={onSwitchInstance ? 'mt-4' : 'mt-8'}>
         <AccountLinkRow icon={Database} label={t('mobileApp.accountData.title')} disabled={locked} onClick={onAccountData} />
       </div>
       <AboutSection disabled={locked} licenses={licenses} onLicenses={onLicenses} />
@@ -3033,6 +3045,13 @@ function MobileOnboardingScreens() {
             setScreen('accountData');
           }
         }}
+        // The avatar's sheet opens on Account; its instance list is one tap away.
+        onSwitchInstance={inSheet && accountRoot ? () => {
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('sheet');
+          }
+        } : undefined}
       />
     );
   }

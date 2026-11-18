@@ -596,9 +596,50 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// A sheet over an instance takes that page's scheme; `nil` follows the
+    /// system. WebKit gives the page the matching `prefers-color-scheme`.
+    var pageColorScheme: PageColorScheme? {
+        didSet {
+            guard pageColorScheme != oldValue else { return }
+            applyColorScheme()
+        }
+    }
+
+    /// The bundled pages' own `--background` (ui/src/index.css), so the
+    /// view shows the page's colour before its first paint instead of
+    /// WebKit's white.
+    static let pageBackground = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 8 / 255, green: 8 / 255, blue: 18 / 255, alpha: 1)
+            : UIColor(red: 244 / 255, green: 246 / 255, blue: 251 / 255, alpha: 1)
+    }
+
+    private func applyColorScheme() {
+        let style: UIUserInterfaceStyle
+        switch pageColorScheme {
+        case .light: style = .light
+        case .dark: style = .dark
+        case nil: style = .unspecified
+        }
+        overrideUserInterfaceStyle = style
+        // In a sheet the grabber and corners belong to the presented
+        // controller, so it takes the same appearance.
+        if startScreen.isSheet, let presented = presentationController?.presentedViewController
+            ?? parent?.presentationController?.presentedViewController
+        {
+            presented.overrideUserInterfaceStyle = style
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = Self.pageBackground
+        // Transparent until the page paints, so the sheet slides in with the
+        // page's colour rather than WebKit's white.
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        applyColorScheme()
         view.addSubview(webView)
         // The pages change screens in place, not in the WebView's history,
         // so WebKit's own back swipe has nothing to go back to. A swipe in
@@ -639,6 +680,13 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         super.viewSafeAreaInsetsDidChange()
         keyboardViewportLayoutController?
             .refreshForContainerGeometryChange()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // The presentation exists now; the sheet's chrome takes the scheme
+        // before it slides in.
+        applyColorScheme()
     }
 
     override func viewDidAppear(_ animated: Bool) {
