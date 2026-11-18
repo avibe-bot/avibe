@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, type FC } from 'react';
 
+import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { apiFetch, withApiDeadline } from '@/lib/apiFetch';
 import {
@@ -107,6 +108,7 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
 
 /** Forwards durable Runtime requests through independent trusted iOS bridge leases. */
 export const SystemScheduleForwarder: FC = () => {
+  const { connectWorkbenchEvents } = useApi();
   const { capabilities } = useInstanceAuthorization();
   const active = capabilities.can_chat && hasNativeCapability('systemSchedule');
   const enabledRef = useRef(false);
@@ -247,8 +249,10 @@ export const SystemScheduleForwarder: FC = () => {
   useEffect(() => {
     reconcileRef.current = reconcile;
     enabledRef.current = active;
-    // Claims run when the page opens and each time it comes back to the
-    // foreground, never on a timer (#3967 replaces this with a push).
+    // Claims run when the page opens, each time it comes back to the
+    // foreground, and when an Agent turn ends (the turn that asked for an
+    // alarm has queued it by then). Never on a timer. Interim: #3967 replaces
+    // these triggers with a push of the request itself.
     void reconcile();
     const stopReactivation = onPageReactivated(() => void reconcile());
     return () => {
@@ -256,6 +260,13 @@ export const SystemScheduleForwarder: FC = () => {
       stopReactivation();
     };
   }, [active, reconcile]);
+
+  useEffect(() => {
+    if (!active) return undefined;
+    return connectWorkbenchEvents({
+      onTurnEnd: () => void reconcileRef.current(),
+    });
+  }, [active, connectWorkbenchEvents]);
 
   return null;
 };

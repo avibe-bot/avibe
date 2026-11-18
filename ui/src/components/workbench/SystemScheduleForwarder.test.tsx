@@ -7,8 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SystemScheduleForwarder } from './SystemScheduleForwarder';
 
-const { apiFetch, native, activity } = vi.hoisted(() => ({
+const { apiFetch, native, activity, events } = vi.hoisted(() => ({
   apiFetch: vi.fn(),
+  events: {
+    handlers: new Set<{ onTurnEnd?: (data: { session_id: string }) => void }>(),
+    turnEnd(sessionId = 'session-1') {
+      for (const handlers of this.handlers) handlers.onTurnEnd?.({ session_id: sessionId });
+    },
+  },
   native: {
     hasNativeCapability: vi.fn(),
     nativeAppInfo: vi.fn(),
@@ -20,6 +26,16 @@ const { apiFetch, native, activity } = vi.hoisted(() => ({
 
 const state = vi.hoisted(() => ({ canChat: true }));
 
+vi.mock('@/context/ApiContext', () => {
+  // As in the App, the API context's functions keep their identity.
+  const api = {
+    connectWorkbenchEvents: (handlers: { onTurnEnd?: (data: { session_id: string }) => void }) => {
+      events.handlers.add(handlers);
+      return () => { events.handlers.delete(handlers); };
+    },
+  };
+  return { useApi: () => api };
+});
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({
     capabilities: { can_chat: state.canChat },
@@ -93,6 +109,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  events.handlers.clear();
   vi.useRealTimers();
   vi.clearAllMocks();
 });
@@ -254,6 +271,47 @@ describe('SystemScheduleForwarder', () => {
     });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1);
+  });
+
+  it('claims an alarm the Agent queued when its turn ends, without leaving the App', async () => {
+    vi.useFakeTimers();
+    let queued = false;
+    let delivered = false;
+    apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
+      if (path === '/api/system-schedule/receipt') {
+        delivered = true;
+        return Response.json({ ok: true });
+      }
+      const body = JSON.parse(init.body as string);
+      const claim = queued && !delivered
+        && !body.exclude_lease_tokens.includes(createClaim.leaseToken)
+        ? createClaim
+        : null;
+      return Response.json({ ok: true, claim });
+    });
+
+    render(<SystemScheduleForwarder />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(native.nativeSystemScheduleRequest).not.toHaveBeenCalled();
+
+    // The user asks for an alarm in chat and stays on the reply: the Agent
+    // queues it and its turn ends.
+    queued = true;
+    await act(async () => {
+      events.turnEnd();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(native.nativeSystemScheduleRequest).toHaveBeenCalledOnce();
+    expect(native.nativeSystemScheduleRequest).toHaveBeenCalledWith(request);
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1);
+
+    // The reconcile after the receipt settles; then nothing more without
+    // another turn end or a return to the page.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const claims = callsFor('/api/system-schedule/claim').length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(claims);
   });
 
   it('shares the closed create, cancel, and terminal receipt vectors across layers', () => {
