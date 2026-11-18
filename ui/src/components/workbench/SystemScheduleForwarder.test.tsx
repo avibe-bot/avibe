@@ -10,9 +10,12 @@ import { SystemScheduleForwarder } from './SystemScheduleForwarder';
 const { apiFetch, native, activity, events } = vi.hoisted(() => ({
   apiFetch: vi.fn(),
   events: {
-    handlers: new Set<{ onTurnEnd?: (data: { session_id: string }) => void }>(),
+    handlers: new Set<{ onTurnEnd?: (data: { session_id: string }) => void; onConnected?: () => void }>(),
     turnEnd(sessionId = 'session-1') {
       for (const handlers of this.handlers) handlers.onTurnEnd?.({ session_id: sessionId });
+    },
+    connected() {
+      for (const handlers of this.handlers) handlers.onConnected?.();
     },
   },
   native: {
@@ -29,7 +32,7 @@ const state = vi.hoisted(() => ({ canChat: true }));
 vi.mock('@/context/ApiContext', () => {
   // As in the App, the API context's functions keep their identity.
   const api = {
-    connectWorkbenchEvents: (handlers: { onTurnEnd?: (data: { session_id: string }) => void }) => {
+    connectWorkbenchEvents: (handlers: { onTurnEnd?: (data: { session_id: string }) => void; onConnected?: () => void }) => {
       events.handlers.add(handlers);
       return () => { events.handlers.delete(handlers); };
     },
@@ -312,6 +315,20 @@ describe('SystemScheduleForwarder', () => {
     const claims = callsFor('/api/system-schedule/claim').length;
     await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
     expect(callsFor('/api/system-schedule/claim')).toHaveLength(claims);
+  });
+
+  it('catches up when the event stream reconnects, since it replays no missed turn end', async () => {
+    vi.useFakeTimers();
+    apiFetch.mockImplementation(async () => Response.json({ ok: true, claim: null }));
+
+    render(<SystemScheduleForwarder />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    const claims = callsFor('/api/system-schedule/claim').length;
+    await act(async () => {
+      events.connected();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(claims + 1);
   });
 
   it('shares the closed create, cancel, and terminal receipt vectors across layers', () => {

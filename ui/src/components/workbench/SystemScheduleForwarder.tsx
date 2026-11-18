@@ -267,6 +267,9 @@ export const SystemScheduleForwarder: FC = () => {
     if (!active) return undefined;
     return connectWorkbenchEvents({
       onTurnEnd: () => void reconcileRef.current(),
+      // The stream replays nothing it missed: catch up on a turn end lost
+      // while it was down (the documented use of `onConnected`).
+      onConnected: () => void reconcileRef.current(),
     });
   }, [active, connectWorkbenchEvents]);
 
