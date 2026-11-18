@@ -518,6 +518,8 @@ final class MobileSessionCoordinator {
     /// The account this device's push may still be bound to: the last one
     /// signed in, until its push cleanup runs. It survives a relaunch.
     private static let pushAccountKey = "avibe.mobile.pushAccount"
+    /// The instances (id and origin) `pushAccountID` listed when last seen.
+    private static let pushInstancesKey = "avibe.mobile.pushInstances"
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -942,29 +944,13 @@ final class MobileSessionCoordinator {
                         )
                     }
                     self.beginRuntimeInvalidation(with: fresh)
-                } else if !removedOrigins.isEmpty {
-                    // The selection stays: revoke once this operation has
-                    // ended, as ordinary push requests that keep it. One
-                    // refused as busy stays pending for push recovery.
-                    // Only while this account is still the one signed in: a
-                    // later account's registration for the same origin is
-                    // not this one's to revoke.
-                    let accountID = fresh.account.id
-                    Task { @MainActor [weak self] in
-                        for origin in removedOrigins {
-                            guard
-                                let self,
-                                self.currentAccount?.id == accountID,
-                                self.pushAccountID == accountID
-                            else {
-                                return
-                            }
-                            await self.onRevokeInstancePush(origin)
-                        }
-                    }
+                } else {
+                    self.scheduleInstancePushRevokes(
+                        removedOrigins, accountID: fresh.account.id
+                    )
                 }
                 self.signedOutStoreIsFresh = false
-                self.pushAccountID = fresh.account.id
+                self.recordPushAccount(fresh)
                 return self.state(for: fresh)
             case .secondFactorRequired:
                 // Owing the second factor neither ends the session nor names
@@ -1365,6 +1351,18 @@ final class MobileSessionCoordinator {
     /// while an older, superseded cleanup is still finishing.
     private var accountPushCleanup: Phase?
 
+    private var pushInstances: [(id: String, origin: String)] {
+        get {
+            (defaults.stringArray(forKey: Self.pushInstancesKey) ?? []).compactMap { entry in
+                let parts = entry.split(separator: "\n", maxSplits: 1).map(String.init)
+                return parts.count == 2 ? (parts[0], parts[1]) : nil
+            }
+        }
+        set {
+            defaults.set(newValue.map { "\($0.id)\n\($0.origin)" }, forKey: Self.pushInstancesKey)
+        }
+    }
+
     /// The account this device's push may still be bound to ("" once its
     /// cleanup has run; `init` records it on a first launch of this build).
     private var pushAccountID: String? {
@@ -1432,27 +1430,64 @@ final class MobileSessionCoordinator {
         from fresh: MobileSessionSnapshot,
         selection: StoredMobileSelection?
     ) -> [String] {
-        guard let previous = snapshot, previous.account.id == fresh.account.id else {
+        // What the account listed before: this process's snapshot, or, when
+        // there is none (a cold launch, a second factor in between), the
+        // list recorded with `pushAccountID`.
+        let before: [(id: String, origin: String)]
+        if let previous = snapshot, previous.account.id == fresh.account.id {
+            before = previous.instances.compactMap { instance in
+                WebOrigin(url: instance.url).map { (instance.id, $0.serialized) }
+            }
+        } else if snapshot == nil, pushAccountID == fresh.account.id {
+            before = pushInstances
+        } else {
             return []
         }
         let listed = Set(fresh.instances.map(\.id))
         let liveOrigins = Set(fresh.instances.compactMap { WebOrigin(url: $0.url)?.serialized })
-        var urls = previous.instances.filter { !listed.contains($0.id) }.map(\.url)
-        if let selection, !listed.contains(selection.instanceID) {
-            urls.append(selection.url)
+        var candidates = before.filter { !listed.contains($0.id) }.map(\.origin)
+        if
+            let selection,
+            !listed.contains(selection.instanceID),
+            let origin = WebOrigin(url: selection.url)?.serialized
+        {
+            candidates.append(origin)
         }
         var origins: [String] = []
-        for url in urls {
-            guard
-                let origin = WebOrigin(url: url)?.serialized,
-                !liveOrigins.contains(origin),
-                !origins.contains(origin)
-            else {
-                continue
-            }
+        for origin in candidates where !liveOrigins.contains(origin) && !origins.contains(origin) {
             origins.append(origin)
         }
         return origins
+    }
+
+    /// Revokes the given origins' registrations once the current operation
+    /// has ended, as ordinary push requests that keep the selection. One
+    /// refused as busy stays pending for push recovery. Only while this
+    /// account is still the one signed in: a later account's registration for
+    /// the same origin is not this one's to revoke.
+    private func scheduleInstancePushRevokes(_ origins: [String], accountID: String) {
+        guard !origins.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            for origin in origins {
+                guard
+                    let self,
+                    self.currentAccount?.id == accountID,
+                    self.pushAccountID == accountID
+                else {
+                    return
+                }
+                await self.onRevokeInstancePush(origin)
+            }
+        }
+    }
+
+    /// The account now signed in, and the instances it lists, as this
+    /// device's push may be bound to them.
+    private func recordPushAccount(_ fresh: MobileSessionSnapshot) {
+        pushAccountID = fresh.account.id
+        pushInstances = fresh.instances.compactMap { instance in
+            WebOrigin(url: instance.url).map { (instance.id, $0.serialized) }
+        }
     }
 
     /// The stored selection when the refreshed list no longer has it at the
@@ -1486,8 +1521,15 @@ final class MobileSessionCoordinator {
                 )
             }
             secondFactorEmail = nil
+            // Instances that left the list while this account had no
+            // snapshot here (closed App, second factor) lose their own
+            // registrations; the account keeps the rest.
+            scheduleInstancePushRevokes(
+                originsRemoved(from: fresh, selection: nil),
+                accountID: fresh.account.id
+            )
             snapshot = fresh
-            pushAccountID = fresh.account.id
+            recordPushAccount(fresh)
             return state(for: fresh)
         case .secondFactorRequired(let requirement):
             snapshot = nil

@@ -1870,6 +1870,62 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    /// An instance that left the account's list while this process had no
+    /// snapshot of it, across a second factor or a relaunch, still loses
+    /// its own registration once the account is known again; the others stay.
+    func testInstancesRemovedWhileUnseenLoseOnlyTheirPush() async throws {
+        let team = MobileInstance(
+            id: "instance-2", name: "Team", host: "team-app.avibe.bot",
+            url: URL(string: "https://team-app.avibe.bot")!,
+            relationship: "owner", ownerEmail: nil, available: true
+        )
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        for path in ["second factor", "relaunch"] {
+            let defaults = makeDefaults()
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1", instances: [instance, team])
+            let owing = FakeMobileAuthTransport()
+            owing.secondFactor = requirement
+            owing.verifySecondFactorHandler = { _ in
+                .signedIn(self.snapshot(accountID: "account-1", instances: [self.instance]))
+            }
+            var revoked: [String] = []
+            var pushLogouts = 0
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                transports: [first, owing] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { pushLogouts += 1 },
+                onRevokeInstancePush: { revoked.append($0) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+
+            if path == "second factor" {
+                coordinator.activateAccountSurface()
+                XCTAssertEqual(try await coordinator.refresh(), .twoFactorRequired(requirement))
+                _ = try await coordinator.verifySecondFactor(method: .totp, code: "123456")
+            } else {
+                let relaunch = FakeMobileAuthTransport()
+                relaunch.session = snapshot(accountID: "account-1", instances: [instance])
+                let relaunched = makeCoordinator(
+                    defaults: defaults,
+                    transports: [relaunch] + (0..<2).map { _ in FakeMobileAuthTransport() },
+                    onPreparePushLogout: { pushLogouts += 1 },
+                    onRevokeInstancePush: { revoked.append($0) }
+                )
+                relaunched.activateAccountSurface()
+                _ = try await relaunched.bootstrap()
+            }
+            try await settlePush()
+
+            XCTAssertEqual(revoked, ["https://team-app.avibe.bot"], path)
+            XCTAssertEqual(pushLogouts, 0, path)
+        }
+    }
+
     /// The first launch of this build after one that never recorded
     /// `pushAccountID`: the saved selection names the account its push may
     /// be bound to, and that survives a sign-in clearing the selection.
