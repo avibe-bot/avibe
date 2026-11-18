@@ -182,6 +182,38 @@ jobs:
           # linkd runs App Intents only for a signed bundle ("Rejecting invalid
           # client due to requiresValidBundle" when unsigned).
           app="$(find "$RUNNER_TEMP/AvibeDerivedData/Build/Products" -maxdepth 2 -name Avibe.app -type d | head -1)"
+          # linkd needs a TeamIdentifier on the bundle; an ad hoc signature has
+          # none. Re-sign with a throwaway self-signed identity whose OU is
+          # the Team (draft probe only; no Apple signing material).
+          work="$RUNNER_TEMP/probe-sign"; mkdir -p "$work"; cd "$work"
+          openssl req -x509 -newkey rsa:2048 -keyout k.pem -out c.pem -days 2 -nodes \
+            -subj "/CN=Apple Development: Avibe Probe (68B2SQ6YK3)/OU=68B2SQ6YK3/O=Avibe Probe" \
+            -addext "extendedKeyUsage=critical,codeSigning" -addext "keyUsage=critical,digitalSignature" \
+            -addext "basicConstraints=critical,CA:false"
+          openssl pkcs12 -export -legacy -out p.p12 -inkey k.pem -in c.pem -passout pass:probe \
+            || openssl pkcs12 -export -out p.p12 -inkey k.pem -in c.pem -passout pass:probe
+          security create-keychain -p probe probe.keychain-db
+          security set-keychain-settings probe.keychain-db
+          security unlock-keychain -p probe probe.keychain-db
+          security import p.p12 -k probe.keychain-db -P probe -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k probe probe.keychain-db >/dev/null
+          security list-keychains -d user -s "$work/probe.keychain-db" $(security list-keychains -d user | tr -d '"')
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain c.pem || true
+          security find-identity -p codesigning "$work/probe.keychain-db"
+          identity="$(security find-identity -p codesigning "$work/probe.keychain-db" | awk '/\)/{print $2; exit}')"
+          resign() {
+            codesign -d --entitlements - --xml "$1" > "$work/ents.plist" 2>/dev/null || true
+            if [ -s "$work/ents.plist" ]; then
+              codesign --force --sign "$identity" --keychain "$work/probe.keychain-db" --entitlements "$work/ents.plist" --generate-entitlement-der "$1"
+            else
+              codesign --force --sign "$identity" --keychain "$work/probe.keychain-db" "$1"
+            fi
+          }
+          find "$app" -name "*.framework" -o -name "*.dylib" | while read -r f; do codesign --force --sign "$identity" --keychain "$work/probe.keychain-db" "$f"; done
+          for appex in "$app"/PlugIns/*.appex; do resign "$appex"; done
+          resign "$app"
+          codesign -dv "$app" 2>&1 | grep -E "Authority|TeamIdentifier|Signature" || true
+          cd "$GITHUB_WORKSPACE"
           echo "installing $app"
           xcrun simctl install "$SIMULATOR_ID" "$app"
           codesign -dv "$app" 2>&1 | head -8 || true
