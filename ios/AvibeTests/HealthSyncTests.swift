@@ -469,6 +469,74 @@ final class HealthSyncTests: XCTestCase {
     }
 
     @MainActor
+    func testUnknownAccountNeverRestoresAndLaterAccountWithoutSelectionRejectsOldCredentials() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var accountID: String?
+        fixture.coordinator.accountIDProvider = { accountID }
+        fixture.coordinator.targetProvider = { nil }
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertTrue(fixture.client.calls.isEmpty)
+        XCTAssertNil(fixture.reader.observer)
+        XCTAssertTrue(fixture.reader.days.isEmpty)
+        accountID = "account-2"
+        await fixture.coordinator.resume(foreground: true)
+        XCTAssertNil(try fixture.credentials.load())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.path))
+        XCTAssertTrue(fixture.reader.days.isEmpty)
+        XCTAssertFalse(fixture.client.calls.contains { $0.path.hasSuffix("manifest") || $0.path.hasSuffix("claim") })
+    }
+
+    @MainActor
+    func testBootstrapRevalidatesAlreadyLoadedIdentityWhileEarlierResumeIsSuspended() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var accountID = "account-1"
+        fixture.coordinator.accountIDProvider = { accountID }
+        fixture.coordinator.targetProvider = { nil }
+        fixture.client.holdManifest = true
+        let early = Task { await fixture.coordinator.resume(foreground: false) }
+        try await eventually { fixture.client.manifestContinuation != nil }
+        accountID = "account-2"
+        await fixture.coordinator.resume(foreground: true)
+        XCTAssertNil(try fixture.credentials.load())
+        XCTAssertNil(fixture.reader.observer)
+        XCTAssertTrue(fixture.reader.days.isEmpty)
+        fixture.client.releaseManifest()
+        await early.value
+        XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+        XCTAssertFalse(fixture.client.calls.contains { $0.path.hasSuffix("claim") })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.path))
+    }
+
+    @MainActor
+    func testFailedLogoutCleanupCannotRestoreEvenForTheSameAccountAfterRelaunch() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        await fixture.coordinator.resume(foreground: false)
+        let observer = try XCTUnwrap(fixture.reader.observer)
+        await observer()
+        let payload = try XCTUnwrap(fixture.uploader.uploads.first).file
+        fixture.credentials.clearError = HealthSyncError.code("credential_unavailable")
+        await fixture.coordinator.logout()
+        XCTAssertNotNil(try fixture.credentials.load())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: payload.path))
+        XCTAssertTrue(try HealthDeviceStore(directory: fixture.directory).state.cleanupPending)
+        let queries = fixture.reader.days.count
+        let calls = fixture.client.calls.count
+        let restarted = HealthSyncCoordinator(
+            credentials: fixture.credentials, reader: fixture.reader, client: fixture.client,
+            uploader: fixture.uploader, directory: fixture.directory
+        )
+        restarted.accountIDProvider = { "account-1" }
+        await restarted.resume(foreground: true)
+        XCTAssertEqual(fixture.reader.days.count, queries)
+        XCTAssertFalse(fixture.client.calls.dropFirst(calls).contains { $0.path.hasSuffix("manifest") || $0.path.hasSuffix("claim") })
+        XCTAssertTrue(try HealthDeviceStore(directory: fixture.directory).state.cleanupPending)
+        fixture.credentials.clearError = nil
+        await restarted.resume(foreground: false)
+        XCTAssertNil(try fixture.credentials.load())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.path))
+    }
+
+    @MainActor
     func testUnrecognized422And426StillSuspendInsteadOfRetrying() async throws {
         for status in [422, 426] {
             let fixture = try coordinatorFixture(savedIdentity: true)
@@ -649,9 +717,13 @@ private final class HealthHTTPRequestRecorder: @unchecked Sendable {
 private final class HealthMemoryCredentials: HealthCredentialStoring {
     var identity: HealthDeviceIdentity?
     private(set) var saves = 0
+    var clearError: Error?
     func load() throws -> HealthDeviceIdentity? { identity }
     func save(_ identity: HealthDeviceIdentity) throws { self.identity = identity; saves += 1 }
-    func clear() throws { identity = nil }
+    func clear() throws {
+        if let clearError { throw clearError }
+        identity = nil
+    }
     func installationID() throws -> String { "10000000-0000-0000-0000-000000000001" }
 }
 
@@ -766,6 +838,8 @@ private final class HealthFakeClient: HealthDeviceRequesting {
         "metrics": ["steps"], "requires_user": true,
     ]]]
     var holdPair = false
+    var holdManifest = false
+    private(set) var manifestContinuation: CheckedContinuation<[String: Any], Error>?
     var manifestError: Error?
     private(set) var pairContinuation: CheckedContinuation<[String: Any], Error>?
     private(set) var pendingClaims: [CheckedContinuation<[String: Any], Error>] = []
@@ -775,7 +849,10 @@ private final class HealthFakeClient: HealthDeviceRequesting {
     func request(origin: String, credential: String?, method: String,
                  path: String, body: [String: Any]?) async throws -> [String: Any] {
         calls.append(Call(method: method, path: path, body: body, credential: credential))
-        if path.hasSuffix("/manifest"), let manifestError { throw manifestError }
+        if path.hasSuffix("/manifest") {
+            if let manifestError { throw manifestError }
+            if holdManifest { return try await withCheckedThrowingContinuation { manifestContinuation = $0 } }
+        }
         if path.hasSuffix("/pair") {
             if holdPair {
                 return try await withCheckedThrowingContinuation { pairContinuation = $0 }
@@ -793,8 +870,14 @@ private final class HealthFakeClient: HealthDeviceRequesting {
         pairContinuation = nil
         continuation?.resume(returning: pairResponse)
     }
+    func releaseManifest() {
+        let continuation = manifestContinuation
+        manifestContinuation = nil
+        continuation?.resume(returning: [:])
+    }
     func releasePending() {
         releasePair()
+        releaseManifest()
         let continuations = pendingClaims
         pendingClaims = []
         for continuation in continuations { continuation.resume(returning: ["requests": []]) }

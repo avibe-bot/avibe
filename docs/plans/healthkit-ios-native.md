@@ -61,3 +61,18 @@ waits for a second durable payload. All 19 sync tests passed after this change.
 The exact entitlement-set CI test now includes both new boolean HealthKit grants
 without weakening its comparison. Its full 79-case pipeline test file and all
 113 archive-validator cases passed locally.
+
+The second review identified a restored identity that could outlive account
+bootstrap. Every resume now validates the current account independently of the
+selected instance, before restoration or connection early returns. Unknown
+accounts cannot start queries or device requests. A mismatched account
+invalidates pending work and clears the previous connection. Failed credential
+deletion leaves a durable cleanup marker and removes payloads, so relaunch can
+retry cleanup without reviving the connection. All 22 sync XCTest cases passed,
+including a suspended bootstrap request, an account without a selected instance,
+and failed logout cleanup followed by relaunch.
+
+The unrelated macOS desktop window probe failed its foreground timing assertion
+in CI run 44221510579, matching the existing master failure in run 44184871334.
+The orchestrator confirmed this check is not required and instructed this lane
+to document it without modifying or rerunning desktop code.

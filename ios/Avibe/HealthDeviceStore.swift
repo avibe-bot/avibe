@@ -118,6 +118,7 @@ struct HealthSyncState: Codable {
     var uploads: [String] = []
     var initialBackfillPending = true
     var suspended = false
+    var cleanupPending = false
 }
 
 /// Only health sync owns this directory; no payload is placed in app groups.
@@ -176,6 +177,18 @@ final class HealthDeviceStore {
         }
         if FileManager.default.fileExists(atPath: file(id).path) {
             try FileManager.default.removeItem(at: file(id))
+        }
+    }
+
+    func prepareForCleanup() throws {
+        try update {
+            $0.cleanupPending = true
+            $0.uploads.removeAll()
+            $0.completed.removeAll()
+        }
+        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            where file.lastPathComponent != "state.json" {
+            try FileManager.default.removeItem(at: file)
         }
     }
 

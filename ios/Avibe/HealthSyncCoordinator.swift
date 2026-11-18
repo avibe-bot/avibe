@@ -40,6 +40,19 @@ final class HealthSyncCoordinator: ObservableObject {
     private var uploadWaiters: [String: [CheckedContinuation<Void, Error>]] = [:]
     private var retryAfter: Date?
     var targetProvider: (() -> HealthConnectionTarget?)?
+    var accountIDProvider: (() -> String?)?
+    private var cleanupPending = false
+
+    private var currentAccountID: String? {
+        if let accountIDProvider { return accountIDProvider() }
+        return targetProvider?()?.accountID
+    }
+
+    private func requireAccount() throws {
+        guard let identity, currentAccountID == identity.accountID, !cleanupPending else {
+            throw HealthSyncError.code("connection_changed")
+        }
+    }
 
     init(credentials: HealthCredentialStoring = HealthCredentialStore(),
          reader: HealthDataReading? = nil,
@@ -70,7 +83,8 @@ final class HealthSyncCoordinator: ObservableObject {
     }
 
     func connect(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
-        guard !connecting, let target = targetProvider?(), target.origin == origin.serialized,
+        guard !connecting, let target = targetProvider?(), currentAccountID == target.accountID,
+              target.origin == origin.serialized,
               !requestID.isEmpty, !pairingCode.isEmpty else { return "failed" }
         connecting = true
         defer { connecting = false }
@@ -92,7 +106,9 @@ final class HealthSyncCoordinator: ObservableObject {
             let pairEpoch = await stopLocal(unregister: true)
             operationEpoch = pairEpoch
             try requireCurrent(pairEpoch)
-            guard targetProvider?() == target else { throw HealthSyncError.code("connection_changed") }
+            guard !cleanupPending, targetProvider?() == target, currentAccountID == target.accountID else {
+                throw HealthSyncError.code("connection_changed")
+            }
             foreground = wasForeground
             let response = try await client.request(origin: target.origin, credential: nil, method: "POST",
                 path: "/api/mobile/device/v1/pair", body: [
@@ -101,7 +117,7 @@ final class HealthSyncCoordinator: ObservableObject {
                     "app_version": Self.appVersion, "metrics": HealthQueryWindow.metrics,
                 ])
             try requireCurrent(pairEpoch)
-            guard targetProvider?() == target,
+            guard targetProvider?() == target, currentAccountID == target.accountID,
                   let deviceID = response["device_id"] as? String,
                   let credential = response["credential"] as? String, !credential.isEmpty,
                   let instance = response["instance"] as? [String: Any],
@@ -133,6 +149,22 @@ final class HealthSyncCoordinator: ObservableObject {
     /// observer delivery needs its persisted device even without a WebView.
     func resume(foreground: Bool) async {
         self.foreground = foreground
+        // Cleanup survives failed Keychain deletion and is retried even signed out.
+        if store == nil, FileManager.default.fileExists(atPath: directory.path) {
+            do { store = try HealthDeviceStore(directory: directory) }
+            catch { notice = "health.cleanup_failed"; return }
+        }
+        if cleanupPending || store?.state.cleanupPending == true {
+            await stopLocal(unregister: true)
+            return
+        }
+        guard let accountID = currentAccountID else { return }
+        // Revalidate before the restoration/connection early return: a previous
+        // launch-time resume may still be suspended in an asynchronous request.
+        if let identity, identity.accountID != accountID {
+            await stopLocal(unregister: true)
+            return
+        }
         guard !restoring, !connecting else { return }
         restoring = true
         let token = epoch
@@ -140,7 +172,7 @@ final class HealthSyncCoordinator: ObservableObject {
         do {
             if identity == nil {
                 guard let saved = try credentials.load() else { return }
-                if let target = targetProvider?(), target.accountID != saved.accountID {
+                if accountID != saved.accountID {
                     await stopLocal(unregister: true)
                     return
                 }
@@ -282,9 +314,11 @@ final class HealthSyncCoordinator: ObservableObject {
         }
         let taskID = UUID()
         let task = Task { @MainActor () throws -> [String: String] in
-            guard let store = self.store, !store.state.suspended, self.identity != nil else { throw HealthSyncError.code("not_connected") }
+            try self.requireAccount()
+            guard let store = self.store, !store.state.suspended else { throw HealthSyncError.code("not_connected") }
             let window = try await self.reader.query(days: store.state.initialBackfillPending ? 30 : 8, now: self.now())
             try self.requireCurrent(token)
+            try self.requireAccount()
             let seq = try store.nextSequence()
             let id = try store.enqueue(window.payload(sequence: seq)) { state, uploadID in
                 if let requestID, var result = state.completed[requestID] {
@@ -325,6 +359,7 @@ final class HealthSyncCoordinator: ObservableObject {
 
     private func drainUploads() async throws {
         guard let store, !store.state.suspended, let identity else { return }
+        try requireAccount()
         if let retryAfter, retryAfter > now() { throw HealthSyncError.http(503, "retry_later", retryAfter.timeIntervalSince(now())) }
         // Send one monotonic sequence at a time; background completion advances it.
         if let id = store.state.uploads.first, !uploadingIDs.contains(id) {
@@ -405,6 +440,7 @@ final class HealthSyncCoordinator: ObservableObject {
 
     private func request(_ method: String, _ path: String, _ body: [String: Any]? = nil) async throws -> [String: Any] {
         guard let identity else { throw HealthSyncError.code("not_connected") }
+        try requireAccount()
         if let retryAfter, retryAfter > now() {
             throw HealthSyncError.http(503, "retry_later", retryAfter.timeIntervalSince(now()))
         }
@@ -412,6 +448,7 @@ final class HealthSyncCoordinator: ObservableObject {
         let result = try await client.request(origin: identity.origin, credential: identity.credential,
             method: method, path: "/api/mobile/device/v1/" + path, body: body)
         try requireCurrent(token)
+        try requireAccount()
         return result
     }
 
@@ -461,12 +498,22 @@ final class HealthSyncCoordinator: ObservableObject {
         retryTask?.cancel()
         retryTask = nil
         for id in Array(uploadWaiters.keys) { finishWaiters(id, result: .failure(HealthSyncError.code("connection_changed"))) }
-        // Clear secrets and files before awaiting network or account transitions.
-        do { try credentials.clear() } catch { notice = "health.cleanup_failed" }
-        do {
-            if let store { try store.clear() }
-            else if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
-        } catch { notice = "health.cleanup_failed" }
+        // Retain a value-free cleanup marker until secrets and files are gone.
+        // A failed Keychain delete must not revive this connection next launch.
+        cleanupPending = true
+        let cleanupStore = store ?? (try? HealthDeviceStore(directory: directory))
+        do { try cleanupStore?.prepareForCleanup() }
+        catch { notice = "health.cleanup_failed" }
+        var credentialsCleared = false
+        do { try credentials.clear(); credentialsCleared = true }
+        catch { notice = "health.cleanup_failed" }
+        if credentialsCleared {
+            do {
+                if let cleanupStore { try cleanupStore.clear() }
+                else if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+                cleanupPending = false
+            } catch { notice = "health.cleanup_failed" }
+        }
         store = nil
         uploadingIDs.removeAll()
         retryAfter = nil

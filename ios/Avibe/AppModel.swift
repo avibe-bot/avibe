@@ -423,6 +423,9 @@ final class AppModel: ObservableObject {
             center: pushNotificationCenter ?? SystemPushNotificationCenter()
         )
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
+        healthSync?.accountIDProvider = { [weak self] in
+            self?.sessionCoordinator.currentAccount?.id
+        }
         healthSync?.targetProvider = { [weak self] in
             guard let self, let account = self.sessionCoordinator.currentAccount,
                   let instance = self.sessionCoordinator.selectedInstance,
