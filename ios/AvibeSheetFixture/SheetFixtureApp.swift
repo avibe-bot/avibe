@@ -725,9 +725,22 @@ private final class FixtureMobileAuthTransport: MobileAuthTransporting {
         return .signedIn(session)
     }
 
-    func advertisedProviders() async -> [MobileSignInProvider]? {
-        []
+    func signInMethods() async -> MobileSignInMethods? {
+        MobileSignInMethods(providers: [], passkey: false)
     }
+
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart {
+        throw MobileAccountError.providerUnavailable
+    }
+
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws {
+        throw MobileAccountError.network
+    }
+
+    func primaryPasskeyCancel(flow: String) async {}
 
     func providerStart(
         provider: MobileSignInProvider,

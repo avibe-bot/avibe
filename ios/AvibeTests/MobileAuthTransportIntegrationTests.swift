@@ -1043,7 +1043,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 case 5:
                     return LocalHTTPResponse(status: 503, headers: [("Content-Type", "application/json")], body: Data("{}".utf8))
                 default:
-                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":["apple","google","bogus","google",7]}"#)
+                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":["apple","google","bogus","google",7],"passkey_login_enabled":true}"#)
                 }
             case ("POST", "/api/mobile/auth/start"):
                 let body = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]) ?? [:]
@@ -1096,8 +1096,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let transport = MobileAuthTransport(controlPlaneURL: baseURL, websiteDataStore: dataStore)
 
         // Known names once each, in the App's order; anything else is dropped.
-        let advertised = await transport.advertisedProviders()
-        XCTAssertEqual(advertised, [.google, .apple])
+        let advertised = await transport.signInMethods()
+        XCTAssertEqual(advertised, MobileSignInMethods(providers: [.google, .apple], passkey: true))
 
         let google = try await transport.providerStart(provider: .google, challenge: "challenge-g", state: "state-g")
         XCTAssertEqual(
@@ -1136,12 +1136,13 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertEqual(googleCookies.first(where: { $0.name == "avibe_session" })?.value, "google")
 
         // With an account cookie in the store, the list is still read without it; a missing or
-        // malformed list is none, and an unreadable config is `nil` (the page keeps its list).
-        let withoutList = await transport.advertisedProviders()
-        XCTAssertEqual(withoutList, [])
-        let malformed = await transport.advertisedProviders()
-        XCTAssertEqual(malformed, [])
-        let unavailable = await transport.advertisedProviders()
+        // malformed list is none (and no passkey switch is off), and an unreadable config is
+        // `nil`, which leaves the answer without a list: email alone.
+        let withoutList = await transport.signInMethods()
+        XCTAssertEqual(withoutList, MobileSignInMethods(providers: [], passkey: false))
+        let malformed = await transport.signInMethods()
+        XCTAssertEqual(malformed, MobileSignInMethods(providers: [], passkey: false))
+        let unavailable = await transport.signInMethods()
         XCTAssertNil(unavailable)
         let listReads = configs.requests().dropFirst()
         XCTAssertEqual(listReads.count, 4)

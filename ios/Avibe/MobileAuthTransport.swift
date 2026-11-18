@@ -192,10 +192,10 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         return try decodeDiscovery(response)
     }
 
-    func advertisedProviders() async -> [MobileSignInProvider]? {
+    func signInMethods() async -> MobileSignInMethods? {
         guard
             let response = try? await evaluateJSON(
-                Self.advertisedProvidersScript,
+                Self.signInMethodsScript,
                 operation: .fetchSession,
                 arguments: [:]
             ),
@@ -207,7 +207,10 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         let names = response["providers"] as? [Any] ?? []
         // Known names, once each, in the App's own order.
         let advertised = Set(names.compactMap { ($0 as? String).flatMap(MobileSignInProvider.init(rawValue:)) })
-        return MobileSignInProvider.allCases.filter(advertised.contains)
+        return MobileSignInMethods(
+            providers: MobileSignInProvider.allCases.filter(advertised.contains),
+            passkey: response.boolean("passkey")
+        )
     }
 
     func providerStart(
@@ -1257,8 +1260,9 @@ extension MobileAuthTransport: WKNavigationDelegate {
     )
 
     // Reads which providers the mobile broker accepts now (`mobile_providers` in the auth
-    // config), fresh each time, so a provider appears as soon as avibe.bot enables it.
-    private static let advertisedProvidersScript = boundedScript(
+    // config) and passkey sign-in's switch, fresh each time, so a way in appears as soon as
+    // avibe.bot enables it.
+    private static let signInMethodsScript = boundedScript(
         initialStage: .session,
         body: """
           const response = await boundedFetch(new URL("/api/config/auth", window.location.origin), {
@@ -1269,7 +1273,8 @@ extension MobileAuthTransport: WKNavigationDelegate {
           const providers = Array.isArray(config?.mobile_providers)
             ? config.mobile_providers.filter((name) => typeof name === "string")
             : [];
-          return JSON.stringify({ok: response.ok, stage, status: response.status, providers});
+          const passkey = config?.passkey_login_enabled === true;
+          return JSON.stringify({ok: response.ok, stage, status: response.status, providers, passkey});
         """
     )
 

@@ -548,7 +548,7 @@ Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
-`auth.signInWithProvider`, `session.refresh`,
+`auth.signInWithProvider`, `auth.signInWithPasskey`, `session.refresh`,
 `session.selectInstance`, `session.logout`, `app.returnToInstance`,
 `app.openPage`, and the closed `app.openExternal` allowlist (the two install
 guides and avibe.bot's Account security page). Instance documents, child
@@ -874,13 +874,26 @@ email as the one primary action and shows the three as one row of marks
 (provisional until its independent security agreement); the App's side is
 below.
 
-- Welcome shows only the providers avibe.bot advertises for the App now:
-  `mobile_providers` in `GET /api/config/auth`, read fresh by the hidden
-  transport (without cookies) and added natively to a signed-out session
-  answer as `providers` when it answers within 2 s (known names once each,
-  in the App's order; a missing or malformed list means none). An answer
-  without it leaves the page's last list, which starts empty: email alone. So the App can ship before the broker
-  serves a provider, and each mark appears when avibe.bot enables it.
+- Welcome shows only the ways in avibe.bot offers the App now, from one read
+  of `GET /api/config/auth` by the hidden transport (without cookies): the
+  providers in `mobile_providers` (known names once each, in the App's
+  order; a missing or malformed list means none) and passkey sign-in
+  (`passkey_login_enabled` exactly `true`; every iOS the App runs on has the
+  passkey sheet). Native adds them to a signed-out session answer as
+  `providers` and `passkey` when the read answers within 2 s. An answer
+  without them offers email alone (#3946; #3945 kept the page's last list).
+  So the App can ship before the broker serves a provider, and each way in
+  appears when avibe.bot enables it.
+- Passkey sign-in with no email first is the closed `auth.signInWithPasskey`
+  (no arguments; the sheet forbids it), apart from the second-factor
+  `auth.verifyPasskey`. The coordinator runs avibe.bot's primary passkey
+  options, the system sheet with no allow-list and verify in one fresh
+  store, then reads the session as a request of its own. A closed sheet
+  cancels the flow and any attempt that does not sign in retires the store,
+  but a store that holds an accepted verify is kept until its session is
+  read (a `401` there retires it), so trying again reads it without a
+  second sheet or verify. `503` is passkey sign-in switched off
+  (`provider_unavailable`); a `403` is avibe.bot's HTTP boundary (`network`).
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
   `provider` exactly `google`, `github` or `apple`; any other value or an extra key
   is `invalid_argument`, and the sheet forbids it like every auth method. It

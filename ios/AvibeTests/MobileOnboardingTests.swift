@@ -1127,6 +1127,112 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(loginTransport.primaryPasskeyVerifications.count, 1)
     }
 
+    // AUTH-SETUP-185: avibe.bot accepted the passkey and the session read is still out when the
+    // person signs out. The read's late answer publishes nothing, and the store it ran in is not
+    // taken back: trying again starts over and never reads that store again.
+    func testALateSessionReadAfterAnAcceptedPasskeyAndASignOutIsDropped() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        var attemptStore: UUID?
+        transport.primaryPasskeyStartHandler = {
+            attemptStore = store.identifier
+            return MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        transport.primaryPasskeyVerifyHandler = { _, _ in }
+        let reading = expectation(description: "session read out")
+        var reads = 0
+        var answer: CheckedContinuation<MobileSessionDiscovery?, Error>?
+        transport.fetchSessionHandler = {
+            reads += 1
+            return try await withCheckedThrowingContinuation { continuation in
+                answer = continuation
+                reading.fulfill()
+            }
+        }
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [
+                FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(), FakeMobileAuthTransport(),
+            ],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithPasskey(presentationAnchor: UIWindow()) }
+        await fulfillment(of: [reading], timeout: 30)
+        let attempted = try XCTUnwrap(attemptStore)
+        XCTAssertEqual(transport.primaryPasskeyVerifications.count, 1, "verify was accepted")
+
+        let state = try await coordinator.logout()
+        XCTAssertEqual(state, .signedOut)
+        answer?.resume(returning: .signedIn(snapshot(accountID: "account-1", instances: [])))
+        switch await attempt.result {
+        case .success:
+            XCTFail("A late session read must not sign in")
+        case .failure(let error):
+            XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+        }
+        XCTAssertNil(coordinator.currentAccount)
+        XCTAssertNotEqual(store.identifier, attempted, "the accepted store is not taken back")
+
+        _ = try? await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+        XCTAssertEqual(reads, 1, "trying again does not read the old store")
+        XCTAssertNotEqual(store.identifier, attempted)
+        XCTAssertNil(coordinator.currentAccount)
+    }
+
+    // AUTH-SETUP-185: the system sheet answered, but avibe.bot did not accept the passkey (or its
+    // answer did not arrive). Nothing was accepted, so no session is read and the attempt's store
+    // is retired like any sign-in that did not finish.
+    func testAPasskeyVerifyThatIsNotAcceptedRetiresTheStore() async throws {
+        for ending in [MobileAccountError.passkeyRejected, .network] {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            var attemptStore: UUID?
+            transport.primaryPasskeyStartHandler = {
+                attemptStore = store.identifier
+                return MobilePrimaryPasskeyStart(
+                    flow: "flow-1",
+                    request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+                )
+            }
+            transport.primaryPasskeyVerifyHandler = { _, _ in throw ending }
+            var reads = 0
+            transport.fetchSessionHandler = {
+                reads += 1
+                return nil
+            }
+            let authenticator = FakePasskeyAuthenticator()
+            authenticator.result = .success(passkeyAssertion())
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+                passkeyAuthenticator: authenticator
+            )
+            coordinator.activateAccountSurface()
+            do {
+                _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+                XCTFail("Expected \(ending.code)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error, ending)
+            }
+            XCTAssertEqual(authenticator.requests.count, 1, ending.code)
+            XCTAssertEqual(transport.primaryPasskeyVerifications.count, 1, ending.code)
+            XCTAssertEqual(reads, 0, "no session read follows a verify that was not accepted")
+            XCTAssertNotEqual(store.identifier, try XCTUnwrap(attemptStore), ending.code)
+            XCTAssertNil(coordinator.currentAccount)
+        }
+    }
+
     // A late assertion after an account change is never verified.
     func testALatePasskeyAssertionAfterSigningOutIsDropped() async throws {
         let transport = FakeMobileAuthTransport()
@@ -1627,16 +1733,17 @@ final class MobileOnboardingTests: XCTestCase {
     func testTheAdvertisedListIsReadWithinItsBoundOrLeftOut() async throws {
         let transport = FakeMobileAuthTransport()
         transport.advertised = [.github, .apple]
+        transport.passkeyAdvertised = true
         let coordinator = makeCoordinator(defaults: makeDefaults(), transports: [transport])
         coordinator.activateAccountSurface()
 
-        let quick = await coordinator.advertisedProviders(within: 5)
-        XCTAssertEqual(quick, [.github, .apple])
+        let quick = await coordinator.signInMethods(within: 5)
+        XCTAssertEqual(quick, MobileSignInMethods(providers: [.github, .apple], passkey: true))
 
         transport.advertisedDelay = 5_000_000_000
         let clock = ContinuousClock()
         let started = clock.now
-        let slow = await coordinator.advertisedProviders(within: 0.05)
+        let slow = await coordinator.signInMethods(within: 0.05)
         XCTAssertNil(slow)
         XCTAssertLessThan(clock.now - started, .seconds(2))
     }
@@ -5634,13 +5741,14 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     }
 
     var advertised: [MobileSignInProvider]? = []
+    var passkeyAdvertised = false
     var advertisedDelay: UInt64 = 0
 
-    func advertisedProviders() async -> [MobileSignInProvider]? {
+    func signInMethods() async -> MobileSignInMethods? {
         if advertisedDelay > 0 {
             try? await Task.sleep(nanoseconds: advertisedDelay)
         }
-        return advertised
+        return advertised.map { MobileSignInMethods(providers: $0, passkey: passkeyAdvertised) }
     }
 
     func providerStart(
