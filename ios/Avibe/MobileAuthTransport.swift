@@ -10,6 +10,8 @@ enum MobileAuthTransportOperation: CaseIterable, Equatable {
     case verifySecondFactor
     case logout
     case pushManagement
+    case providerStart
+    case providerExchange
 }
 
 enum MobileAuthTransportStage: String, CaseIterable, Equatable {
@@ -22,6 +24,10 @@ enum MobileAuthTransportStage: String, CaseIterable, Equatable {
     case challenge
     case secondFactor = "second_factor"
     case logout
+    /// `POST /api/mobile/auth/start`.
+    case start
+    /// `POST /api/mobile/auth/exchange`.
+    case exchange
 }
 
 struct MobileAuthTransportDeadlines: Equatable {
@@ -178,6 +184,57 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             throw Self.mappedError(for: .verifySecondFactor, response: response)
         }
         return try decodeDiscovery(response)
+    }
+
+    func providerStart(
+        provider: MobileSignInProvider,
+        challenge: String,
+        state: String
+    ) async throws -> MobileProviderStart {
+        let response = try await evaluateJSON(
+            Self.providerStartScript,
+            operation: .providerStart,
+            arguments: [
+                "provider": provider.rawValue,
+                "codeChallenge": challenge,
+                "state": state,
+            ]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .providerStart, response: response)
+        }
+        guard
+            let transactionID = response.string("transactionID"),
+            !transactionID.isEmpty,
+            let rawBrowserURL = response.string("browserURL"),
+            let browserURL = URL(string: rawBrowserURL)
+        else {
+            throw MobileAccountError.network
+        }
+        return MobileProviderStart(transactionID: transactionID, browserURL: browserURL)
+    }
+
+    func providerExchange(
+        transactionID: String,
+        code: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        let response = try await evaluateJSON(
+            Self.providerExchangeScript,
+            operation: .providerExchange,
+            arguments: [
+                "transactionID": transactionID,
+                "code": code,
+                "verifier": verifier,
+            ]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .providerExchange, response: response)
+        }
+        return MobileProviderExchange(
+            discovery: try decodeDiscovery(response),
+            accountCreated: response.boolean("accountCreated")
+        )
     }
 
     func logout() async throws {
@@ -342,7 +399,9 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
              .signInWithPassword,
              .fetchSession,
              .passkeyChallenge,
-             .verifySecondFactor:
+             .verifySecondFactor,
+             .providerStart,
+             .providerExchange:
             return deadlines.requestMilliseconds
         case .pushManagement:
             return deadlines.requestMilliseconds
@@ -460,6 +519,10 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                     && stage == MobileAuthTransportStage.token.rawValue
                 || operation == .verifySecondFactor
                     && stage == MobileAuthTransportStage.secondFactor.rawValue
+                || operation == .providerStart
+                    && stage == MobileAuthTransportStage.start.rawValue
+                || operation == .providerExchange
+                    && stage == MobileAuthTransportStage.exchange.rawValue
         {
             return MobileAccountError(
                 code: "rate_limited",
@@ -539,6 +602,31 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                 return .network
             }
             return .secondFactorInvalid
+        case .providerStart:
+            // Only the agreed answers mean anything; the rest is `network`.
+            if
+                status == 404,
+                stage == MobileAuthTransportStage.start.rawValue,
+                response.string("code") == MobileAccountError.providerUnavailable.code
+            {
+                return .providerUnavailable
+            }
+            return .network
+        case .providerExchange:
+            if status == 401, stage == MobileAuthTransportStage.session.rawValue {
+                return .invalidOrExpired
+            }
+            guard stage == MobileAuthTransportStage.exchange.rawValue else {
+                return .network
+            }
+            switch (status, response.string("code")) {
+            case (400, MobileAccountError.invalidOrExpired.code):
+                return .invalidOrExpired
+            case (403, MobileAccountError.providerEmailUnverified.code):
+                return .providerEmailUnverified
+            default:
+                return .network
+            }
         case .fetchSession, .logout, .pushManagement:
             return .network
         }
@@ -1018,6 +1106,78 @@ extension MobileAuthTransport: WKNavigationDelegate {
             );
           }
         \(sessionDiscoveryBody)
+        """
+    )
+
+    // The provider sign-in's start (contract: `_tmp/ios-login/contract-backend.md`). The App
+    // checks the browser address natively; the script only relays what the backend answered.
+    private static let providerStartScript = boundedScript(
+        initialStage: .start,
+        body: """
+          const response = await boundedFetch(new URL("/api/mobile/auth/start", window.location.origin), {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({provider, code_challenge: codeChallenge, state})
+          });
+          const payload = await response.json().catch(() => null);
+          if (!response.ok) {
+            return JSON.stringify({
+              ok: false,
+              stage,
+              status: response.status,
+              code: typeof payload?.error === "string" ? payload.error : null,
+              retryAfter: Number(response.headers.get("retry-after")) || null
+            });
+          }
+          if (
+            response.status !== 200
+            || typeof payload?.transaction_id !== "string"
+            || typeof payload?.browser_url !== "string"
+          ) {
+            return failed("invalid_response", response.status, "Sign-in start returned an invalid response.");
+          }
+          return JSON.stringify({
+            ok: true,
+            stage,
+            status: response.status,
+            transactionID: payload.transaction_id,
+            browserURL: payload.browser_url
+          });
+        """
+    )
+
+    // Redeems the one-time code into this store's cookies (204), then reads the session as the
+    // other sign-ins do. `Avibe-Account-Created: 1` is the backend's attestation that this
+    // exchange created the account; it is relayed as one bit and decides nothing.
+    private static let providerExchangeScript = boundedScript(
+        initialStage: .exchange,
+        body: """
+          const exchangeResponse = await boundedFetch(new URL("/api/mobile/auth/exchange", window.location.origin), {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({transaction_id: transactionID, code, code_verifier: verifier})
+          });
+          if (exchangeResponse.status !== 204) {
+            const payload = await exchangeResponse.json().catch(() => null);
+            return JSON.stringify({
+              ok: false,
+              stage,
+              status: exchangeResponse.status,
+              code: typeof payload?.error === "string" ? payload.error : null,
+              retryAfter: Number(exchangeResponse.headers.get("retry-after")) || null
+            });
+          }
+          const accountCreated = exchangeResponse.headers.get("avibe-account-created") === "1";
+          const discover = async () => {
+        \(sessionDiscoveryBody)
+          };
+          const discovered = JSON.parse(await discover());
+          if (discovered.ok) discovered.accountCreated = accountCreated;
+          return JSON.stringify(discovered);
         """
     )
 

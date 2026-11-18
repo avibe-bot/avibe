@@ -1298,6 +1298,22 @@ private final class StandInAccountTransport: MobileAuthTransporting {
         session.map(MobileSessionDiscovery.signedIn)
     }
 
+    func providerStart(
+        provider: MobileSignInProvider,
+        challenge: String,
+        state: String
+    ) async throws -> MobileProviderStart {
+        throw MobileAccountError.network
+    }
+
+    func providerExchange(
+        transactionID: String,
+        code: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        throw MobileAccountError.network
+    }
+
     func passkeyChallenge() async throws -> MobilePasskeyChallenge {
         throw MobileAccountError.passkeyUnavailable
     }

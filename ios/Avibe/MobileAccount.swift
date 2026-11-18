@@ -239,6 +239,23 @@ struct MobileAccountError: Error, Equatable {
         code: "passkey_unavailable",
         message: "No passkey for this account is available on this device."
     )
+    /// The person closed the system sign-in window: the page shows nothing.
+    static let providerCancelled = MobileAccountError(
+        code: "provider_cancelled",
+        message: "The sign-in was cancelled."
+    )
+    static let providerUnavailable = MobileAccountError(
+        code: "provider_unavailable",
+        message: "This sign-in method is not available right now."
+    )
+    static let providerEmailUnverified = MobileAccountError(
+        code: "provider_email_unverified",
+        message: "The provider has not verified this email address."
+    )
+    static let invalidOrExpired = MobileAccountError(
+        code: "invalid_or_expired",
+        message: "The sign-in could not be completed. Try again."
+    )
     static let runtimeUnavailable = MobileAccountError(
         code: "runtime_unavailable",
         message: "No instance is open behind the account page."
@@ -490,6 +507,21 @@ protocol MobileAuthTransporting: AnyObject {
     func verifySecondFactor(
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
+    /// `POST /api/mobile/auth/start` for Google or GitHub. Throws
+    /// `providerUnavailable`, `rate_limited`, or `network`.
+    func providerStart(
+        provider: MobileSignInProvider,
+        challenge: String,
+        state: String
+    ) async throws -> MobileProviderStart
+    /// `POST /api/mobile/auth/exchange`, then the session read. Throws
+    /// `invalidOrExpired` (also for the session's `401`),
+    /// `providerEmailUnverified`, `rate_limited`, or `network`.
+    func providerExchange(
+        transactionID: String,
+        code: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange
     func logout() async throws
     func pushManagementRequest(
         _ request: PushManagementRequest
@@ -521,6 +553,10 @@ final class MobileSessionCoordinator {
     private let websiteDataStore: AccountWebsiteDataStore
     private let transportFactory: TransportFactory
     private let passkeyAuthenticator: MobilePasskeyAuthenticating
+    private let webAuthenticator: MobileWebAuthenticating
+    /// The account generation whose provider sign-in the backend attested created the account.
+    /// Memory only: any account transition moves the generation on, which retires it.
+    private var providerCreatedGeneration: Int?
     private let onOpenRuntime: (MobileRuntimeContext) -> Void
     private let onPrepareAccountTransition: () -> [
         WebsiteDataStoreReleaseBarrier
@@ -611,6 +647,7 @@ final class MobileSessionCoordinator {
             MobileAuthTransport(controlPlaneURL: $0, websiteDataStore: $1)
         },
         passkeyAuthenticator: MobilePasskeyAuthenticating? = nil,
+        webAuthenticator: MobileWebAuthenticating? = nil,
         onOpenRuntime: @escaping (MobileRuntimeContext) -> Void,
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
@@ -626,6 +663,7 @@ final class MobileSessionCoordinator {
         self.transportFactory = transportFactory
         self.passkeyAuthenticator = passkeyAuthenticator
             ?? MobilePasskeyAuthenticator()
+        self.webAuthenticator = webAuthenticator ?? MobileWebAuthenticator()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
         self.onDetachActiveOwner = onDetachActiveOwner
@@ -799,6 +837,85 @@ final class MobileSessionCoordinator {
                 self.signedOutStoreIsFresh = false
                 self.secondFactorEmail = normalizedEmail
                 return try self.state(for: discovery)
+            } catch {
+                if self.generation == loginGeneration {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Whether the signed-in account was created by this generation's provider sign-in, as the
+    /// backend attested. A hint for the empty state only: it decides nothing.
+    var accountWasJustCreated: Bool {
+        providerCreatedGeneration == generation && snapshot != nil
+    }
+
+    /// Google or GitHub in the system sign-in window, then the backend's one-time exchange into
+    /// this store (contract: `_tmp/ios-login/contract-backend.md`). A login transition like the
+    /// email code's: it starts from a fresh signed-out store, and every attempt that does not
+    /// sign in, a cancel included, rotates to a fresh one. The verifier, state, code and
+    /// transaction never leave native memory and the transport's fixed scripts.
+    func signInWithProvider(
+        _ provider: MobileSignInProvider,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileSessionState {
+        try await runExclusive {
+            let loginGeneration = self.beginAccountTransition(clearSelection: true)
+            do {
+                if !self.signedOutStoreIsFresh {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                let secrets = try MobileProviderSecrets.generate()
+                let start = try await self.requireTransport().providerStart(
+                    provider: provider,
+                    challenge: secrets.challenge,
+                    state: secrets.state
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                let controlPlane = self.controlPlane.baseURL
+                guard
+                    MobileProviderRoute.isAllowedBrowserURL(start.browserURL, controlPlane: controlPlane),
+                    let callbackHost = controlPlane.host
+                else {
+                    throw MobileAccountError.network
+                }
+                // The store is in use from here: a cancel below still retires it.
+                self.signedOutStoreIsFresh = false
+                let returned = try await self.webAuthenticator.authenticate(
+                    url: start.browserURL,
+                    callbackHost: callbackHost,
+                    callbackPath: MobileProviderRoute.callbackPath,
+                    presentationAnchor: presentationAnchor
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                let code: String
+                switch MobileProviderRoute.callback(returned, controlPlane: controlPlane, state: secrets.state) {
+                case .code(let value):
+                    code = value
+                case .cancelled:
+                    throw MobileAccountError.providerCancelled
+                case .emailUnverified:
+                    throw MobileAccountError.providerEmailUnverified
+                case .unavailable:
+                    throw MobileAccountError.providerUnavailable
+                case .invalid:
+                    throw MobileAccountError.invalidOrExpired
+                }
+                let exchange = try await self.requireTransport().providerExchange(
+                    transactionID: start.transactionID,
+                    code: code,
+                    verifier: secrets.verifier
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                self.clearStoredSelection()
+                self.secondFactorEmail = nil
+                if exchange.accountCreated {
+                    self.providerCreatedGeneration = loginGeneration
+                }
+                return try self.state(for: exchange.discovery)
             } catch {
                 if self.generation == loginGeneration {
                     try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
@@ -1275,6 +1392,8 @@ final class MobileSessionCoordinator {
         with snapshot: MobileSessionSnapshot
     ) {
         generation += 1
+        // A sign-in window still open belongs to the generation that just ended.
+        webAuthenticator.cancel()
         authoritativeTransition = nil
         clearStoredSelection()
         self.snapshot = snapshot
@@ -1522,6 +1641,8 @@ final class MobileSessionCoordinator {
         clearSelection: Bool
     ) -> Int {
         generation += 1
+        // A sign-in window still open belongs to the generation that just ended.
+        webAuthenticator.cancel()
         authoritativeTransition = nil
         invalidateAccount(clearSelection: clearSelection)
         return generation
@@ -1556,6 +1677,8 @@ final class MobileSessionCoordinator {
         let token = UUID()
         phase = .resetting(token)
         generation += 1
+        // A sign-in window still open belongs to the generation that just ended.
+        webAuthenticator.cancel()
         authoritativeTransition = nil
         pendingStoreReleaseBarriers.append(
             contentsOf: onPrepareAccountTransition()

@@ -542,7 +542,7 @@ Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
-`session.refresh`,
+`auth.signInWithProvider`, `session.refresh`,
 `session.selectInstance`, `session.logout`, `app.returnToInstance`,
 `app.openPage`, and the closed `app.openExternal` allowlist (the two install
 guides and avibe.bot's Account security page). Instance documents, child
@@ -858,6 +858,57 @@ The page follows the approved default composition on every height and lets
 the shared viewport scroll, as the shipped code and two-step screens do; the
 password form scrolls its Sign in action above the keyboard while the field
 has focus.
+
+### Google and GitHub sign-in
+
+Owner decision 2026-11-18: the App also signs in with Google and GitHub, in
+the system sign-in window. The backend wire is avibe-bot-backend's mobile
+provider exchange (provisional until its independent security agreement);
+the App's side is below. Sign in with Apple is on hold and absent: no case,
+no entitlement.
+
+- The bundled Welcome calls `auth.signInWithProvider({provider})`, with
+  `provider` exactly `google` or `github`; any other value or an extra key
+  is `invalid_argument`, and the sheet forbids it like every auth method. It
+  answers like `auth.verifyOtp`. Errors: `provider_cancelled` (the page shows
+  nothing), `provider_unavailable`, `provider_email_unverified`,
+  `invalid_or_expired`, `rate_limited`, `network`.
+- `MobileSessionCoordinator.signInWithProvider` is a login transition like
+  the email code: generation bump, selection cleared, runtime released, a
+  fresh signed-out store first (the backend refuses an active account
+  cookie), and a fresh store again after every attempt that does not sign
+  in, a cancel included. Each attempt draws a 32-byte verifier and a 32-byte
+  state (unpadded base64url) and sends the S256 challenge; they, the
+  transaction and the one-time code live only in native memory and the
+  transport's fixed-script arguments, never in the bundled page, logs or
+  storage.
+- The hidden account transport posts `/api/mobile/auth/start` and
+  `/api/mobile/auth/exchange` with fixed scripts, same origin, no
+  redirects. Native opens only the answered browser address that is exactly
+  the control plane's `/api/mobile/auth/browser` with one `launch`
+  parameter, in `ASWebAuthenticationSession` with the `https` callback
+  `<control plane host>/mobile/auth/complete` (iOS 17.4, the deployment
+  target; `webcredentials:avibe.bot` and avibe.bot's
+  `apple-app-site-association` authorise it) and
+  `prefersEphemeralWebBrowserSession` off, so Safari's Google or GitHub
+  sign-in is reused. The callback is read only in its exact shape:
+  `https`, that host and path, no port, userinfo or fragment, `state`
+  equal in constant time, and exactly one of `code` (opaque, at most 4 KiB)
+  or an `error` the App knows; anything else is `invalid_or_expired` and is
+  never exchanged.
+- The exchange's `204` sets the account cookies in this store; the
+  existing `/api/mobile/session` read then decides: signed in, the existing
+  two-step gate, or `invalid_or_expired` for `401`. An optional
+  `Avibe-Account-Created: 1` is the backend's attestation that this
+  exchange created the account; native keeps it for the account generation
+  and adds `new_account: true` to that signed-in session's answers, a hint
+  for the empty state only. Any account transition retires it.
+- Any account transition, sign-out included, closes an open sign-in window,
+  and its attempt can no longer exchange.
+
+What only a device proves: the `https` callback on a signed build, Safari's
+shared sign-in and the system consent alert, and the real providers on
+production with designated accounts after the backend's go.
 
 Coordinator tests inject an in-memory named-store registry. Integration tests
 that require real named stores use suite-scoped `UserDefaults`, track every UUID

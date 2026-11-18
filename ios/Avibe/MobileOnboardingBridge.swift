@@ -121,6 +121,7 @@ enum MobileBridgeMethod: String, CaseIterable {
     case authSignInWithPassword = "auth.signInWithPassword"
     case authVerifySecondFactor = "auth.verifySecondFactor"
     case authVerifyPasskey = "auth.verifyPasskey"
+    case authSignInWithProvider = "auth.signInWithProvider"
     case sessionRefresh = "session.refresh"
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
@@ -320,7 +321,8 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                          .authVerifyOTP,
                          .authSignInWithPassword,
                          .authVerifySecondFactor,
-                         .authVerifyPasskey:
+                         .authVerifyPasskey,
+                         .authSignInWithProvider:
                         throw MobileAccountError.forbidden
                     default:
                         break
@@ -329,7 +331,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 switch request.method {
                 case .sessionBootstrap:
                     let state = try await coordinator.bootstrap()
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: self.sessionResult(state))
                 case .authRequestOTP:
                     guard let email = request.params["email"] as? String else {
                         throw MobileAccountError.invalidRequest
@@ -350,7 +352,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         email: email,
                         code: code
                     )
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: self.sessionResult(state))
                 case .authSignInWithPassword:
                     guard
                         let email = request.params["email"] as? String,
@@ -375,7 +377,26 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         method: method,
                         code: code
                     )
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: self.sessionResult(state))
+                case .authSignInWithProvider:
+                    guard
+                        request.params.count == 1,
+                        let rawProvider = request.params["provider"] as? String,
+                        let provider = MobileSignInProvider(rawValue: rawProvider)
+                    else {
+                        throw MobileAccountError(
+                            code: "invalid_argument",
+                            message: "The sign-in provider is not one the App offers."
+                        )
+                    }
+                    guard let window = trustedWebView?.window else {
+                        throw MobileAccountError.network
+                    }
+                    let state = try await coordinator.signInWithProvider(
+                        provider,
+                        presentationAnchor: window
+                    )
+                    reply(replyHandler, result: self.sessionResult(state))
                 case .authVerifyPasskey:
                     guard let window = trustedWebView?.window else {
                         throw MobileAccountError.passkeyUnavailable
@@ -383,10 +404,10 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     let state = try await coordinator.verifyPasskey(
                         presentationAnchor: window
                     )
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: self.sessionResult(state))
                 case .sessionRefresh:
                     let state = try await coordinator.refresh()
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: self.sessionResult(state))
                 case .sessionSelectInstance:
                     guard let id = request.params["id"] as? String else {
                         throw MobileAccountError.invalidRequest
@@ -399,7 +420,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     )
                 case .sessionLogout:
                     let state = try await coordinator.logout()
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: self.sessionResult(state))
                 case .appOpenExternal:
                     guard
                         let rawURL = request.params["url"] as? String,
@@ -452,6 +473,16 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 reply(replyHandler, error: .network)
             }
         }
+    }
+
+    /// A session answer for the page. A signed-in account that this generation's provider
+    /// sign-in created carries `new_account: true`, a hint for the empty state only.
+    private func sessionResult(_ state: MobileSessionState) -> Any {
+        var object = state.jsonObject
+        if case .signedIn = state, coordinator.accountWasJustCreated {
+            object["new_account"] = true
+        }
+        return object
     }
 
     private func reply(
