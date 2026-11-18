@@ -1860,8 +1860,14 @@ final class MobileOnboardingTests: XCTestCase {
         for row in rows {
             let first = FakeMobileAuthTransport()
             first.session = snapshot(accountID: "account-1", instances: row.before)
-            let refreshTransport = FakeMobileAuthTransport()
-            refreshTransport.session = snapshot(accountID: "account-1", instances: row.after)
+            // How many transports the push requests borrow depends on when
+            // each pass runs against the account surface; every one after
+            // the first reaches avibe.bot listing the refreshed instances.
+            let later = (0..<8).map { _ in
+                let transport = FakeMobileAuthTransport()
+                transport.session = self.snapshot(accountID: "account-1", instances: row.after)
+                return transport
+            }
             var pushLogouts = 0
             var reconciles: [(Set<String>, String)] = []
             var runtime: MobileRuntimeContext?
@@ -1869,7 +1875,7 @@ final class MobileOnboardingTests: XCTestCase {
             weak var weakCoordinator: MobileSessionCoordinator?
             let coordinator = makeCoordinator(
                 defaults: makeDefaults(),
-                transports: [first, refreshTransport, FakeMobileAuthTransport()],
+                transports: [first] + later,
                 onOpen: { runtime = $0 },
                 onPreparePushLogout: { pushLogouts += 1 },
                 onReconcileInstancePush: { live, accountID in
@@ -1936,16 +1942,21 @@ final class MobileOnboardingTests: XCTestCase {
             let defaults = makeDefaults()
             let first = FakeMobileAuthTransport()
             first.session = snapshot(accountID: "account-1", instances: [instance, team])
-            let owing = FakeMobileAuthTransport()
-            owing.secondFactor = requirement
-            owing.verifySecondFactorHandler = { _ in
-                .signedIn(self.snapshot(accountID: "account-1", instances: [self.instance]))
+            // Whichever transport a push request borrows, avibe.bot owes the
+            // factor and then lets the same account in with one instance.
+            let owing = (0..<8).map { _ in
+                let transport = FakeMobileAuthTransport()
+                transport.secondFactor = requirement
+                transport.verifySecondFactorHandler = { _ in
+                    .signedIn(self.snapshot(accountID: "account-1", instances: [self.instance]))
+                }
+                return transport
             }
             var reconciles: [Set<String>] = []
             var pushLogouts = 0
             let coordinator = makeCoordinator(
                 defaults: defaults,
-                transports: [first, owing] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                transports: [first] + owing,
                 onPreparePushLogout: { pushLogouts += 1 },
                 onReconcileInstancePush: { live, _ in reconciles.append(live) }
             )
@@ -1961,11 +1972,14 @@ final class MobileOnboardingTests: XCTestCase {
                 XCTAssertEqual(owed, .twoFactorRequired(requirement))
                 _ = try await coordinator.verifySecondFactor(method: .totp, code: "123456")
             } else {
-                let relaunch = FakeMobileAuthTransport()
-                relaunch.session = snapshot(accountID: "account-1", instances: [instance])
+                let relaunch = (0..<8).map { _ in
+                    let transport = FakeMobileAuthTransport()
+                    transport.session = self.snapshot(accountID: "account-1", instances: [self.instance])
+                    return transport
+                }
                 let relaunched = makeCoordinator(
                     defaults: defaults,
-                    transports: [relaunch] + (0..<2).map { _ in FakeMobileAuthTransport() },
+                    transports: relaunch,
                     onPreparePushLogout: { pushLogouts += 1 },
                     onReconcileInstancePush: { live, _ in reconciles.append(live) }
                 )
