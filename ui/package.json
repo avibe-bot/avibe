@@ -115,7 +115,7 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
-    "@playwright/test": "1.65.1",
+    "@playwright/test": "1.64.1",
     "@tailwindcss/postcss": "^4.3.5",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.10",

@@ -164,15 +164,15 @@ def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
 
 
 def test_ui_playwright_hold_keeps_the_test_runner_and_browser_driver_coherent() -> None:
-    # 1.65.0 regresses the unchanged activity-expiry consumer. Exclude only that
-    # tested candidate and retain one matching runner/driver set for npm ci.
+    # Retain a matching runner/driver set for npm ci and keep the tested
+    # activity-expiry failures out of automatic groups, not future versions.
     ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
     assert [item for item in ui["ignore"] if item["dependency-name"] == "@playwright/test"] == [
-        {"dependency-name": "@playwright/test", "versions": ["1.65.0"]}
+        {"dependency-name": "@playwright/test", "versions": ["1.65.0", "1.65.1"]}
     ]
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
-    expected = "1.65.1"
+    expected = "1.64.1"
     assert package["devDependencies"]["@playwright/test"] == expected
     assert lock["packages"][""]["devDependencies"]["@playwright/test"] == expected
     for name in ("@playwright/test", "playwright", "playwright-core"):
