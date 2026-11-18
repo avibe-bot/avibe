@@ -56,18 +56,6 @@ its frame, with neither usable visual content nor useful controls, is not ready
 yet: observe again while the state keeps changing, and report what you observed
 once it stops changing or the timeout ends.
 
-Readiness describes observable content. The driver must still prove where an
-input would go. An observation with `observation_only: true` has no action
-tokens or screenshot capture binding. A visible dialog with
-`app_dialog_unresolved` needs manual handling: tell the user that Computer Use
-cannot confirm input would reach only this window, ask them to handle it, and
-observe again afterward. Do not substitute Return/Escape, a pixel click,
-foreground delivery, or a PID-only key for a refused exact-window action.
-
-An explicit Dock target returns `dock_unsupported`. Computer Use cannot control
-the Dock; ask the user to remove an icon by dragging it out manually. Do not
-edit Dock preferences or use another input route to bypass this boundary.
-
 ## No-effect recovery and viewport content
 
 - Default to background input. If a second observation shows no effect, do not
@@ -87,6 +75,20 @@ edit Dock preferences or use another input route to bypass this boundary.
 - For virtualized content, the tree and screenshot describe the current viewport,
   not the full document. Scrolling replaces that content: observe and capture
   what you need as you scroll; do not assume earlier rows remain in the tree.
+
+## Unresolved dialogs and Dock targets
+
+Readiness describes observable content. The driver must still prove where an
+input would go. An observation with `observation_only: true` has no action
+tokens or screenshot capture binding. A visible dialog with
+`app_dialog_unresolved` needs manual handling: tell the user that Computer Use
+cannot confirm input would reach only this window, ask them to handle it, and
+observe again afterward. Do not substitute Return/Escape, a pixel click,
+foreground delivery, or a PID-only key for a refused exact-window action.
+
+An explicit Dock target returns `dock_unsupported`. Computer Use cannot control
+the Dock; ask the user to remove an icon by dragging it out manually. Do not
+edit Dock preferences or use another input route to bypass this boundary.
 
 ## SDK cheat-sheet
 
