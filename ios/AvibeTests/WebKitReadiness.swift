@@ -37,6 +37,31 @@ enum WebKitReadiness {
             + TimeInterval(components.attoseconds) / 1e18
     }
 
+    /// The account transport's deadlines for an App whose tests are not
+    /// about the control-plane page's readiness: that page may take as long
+    /// as a web content launch, so a slow launch on CI is not mistaken for
+    /// the App's own readiness timeout. Requests keep the App's deadlines.
+    static let afterWebContentLaunch = MobileAuthTransportDeadlines(
+        readinessMilliseconds: Int(webContentLaunch.components.seconds) * 1_000,
+        requestMilliseconds: MobileAuthTransportDeadlines.standard.requestMilliseconds,
+        logoutMilliseconds: MobileAuthTransportDeadlines.standard.logoutMilliseconds
+    )
+
+    /// `standardTransportOperation` for an App built with
+    /// `afterWebContentLaunch`: what one account operation, the App's launch
+    /// among them, may take before it ends either way.
+    static let launchedTransportOperation: Duration = .milliseconds(
+        afterWebContentLaunch.readinessMilliseconds
+            + afterWebContentLaunch.requestMilliseconds
+    ) + .seconds(5)
+
+    /// `launchedTransportOperation` for `XCTestCase.fulfillment(of:timeout:)`.
+    static var launchedTransportOperationSeconds: TimeInterval {
+        let components = launchedTransportOperation.components
+        return TimeInterval(components.seconds)
+            + TimeInterval(components.attoseconds) / 1e18
+    }
+
     /// `webContentLaunch` for `XCTestCase.fulfillment(of:timeout:)`.
     static var webContentLaunchSeconds: TimeInterval {
         TimeInterval(webContentLaunch.components.seconds)
@@ -81,11 +106,12 @@ enum WebKitReadiness {
         _ app: AppModel,
         accountID: String,
         instanceIDs: Set<String>,
-        requests: FixtureRequestLog
+        requests: FixtureRequestLog,
+        budget: Duration = standardTransportOperation
     ) async throws {
         let clock = ContinuousClock()
         let started = clock.now
-        let deadline = started.advanced(by: standardTransportOperation)
+        let deadline = started.advanced(by: budget)
         while case .loading = app.route {
             guard clock.now < deadline else {
                 throw FixtureReadinessError(description: fixtureEvidence(
