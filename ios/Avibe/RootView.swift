@@ -66,6 +66,9 @@ struct RootView: View {
                     RuntimeOpenProgress(attempt: attempt) {
                         appModel.cancelRuntimeOpen(attemptID: attempt.id)
                     }
+                } else {
+                    // The session is being restored: the line, with no stage.
+                    RuntimeProgressLine(label: Text("runtime.loading"))
                 }
             }
             if appModel.route == .onboarding(.instances),
@@ -558,14 +561,37 @@ enum AvibeStyle {
 /// touches; VoiceOver hears the stage once.
 struct RuntimeOpenProgressLine: View {
     let attempt: RuntimeOpenAttempt
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var sweeping = false
 
     var body: some View {
         let label = runtimeOpenPhaseText(
             attempt.phase,
             instanceName: attempt.runtime.instance.name
         )
+        RuntimeProgressLine(label: Text(label))
+            .onAppear {
+                // Once per attempt, however many screens show its line.
+                if RuntimeOpenAnnouncements.lastAnnounced != attempt.id {
+                    RuntimeOpenAnnouncements.lastAnnounced = attempt.id
+                    AccessibilityNotification.Announcement(label).post()
+                }
+            }
+            .accessibilityIdentifier("runtime-open-progress")
+    }
+}
+
+@MainActor
+enum RuntimeOpenAnnouncements {
+    static var lastAnnounced: Int?
+}
+
+/// The thin progress line itself: Avibe green at the top edge, below the
+/// status bar. It takes no touches.
+struct RuntimeProgressLine: View {
+    let label: Text
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweeping = false
+
+    var body: some View {
         GeometryReader { geometry in
             let segment = geometry.size.width * 0.3
             ZStack(alignment: .leading) {
@@ -588,11 +614,9 @@ struct RuntimeOpenProgressLine: View {
             withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
                 sweeping = true
             }
-            AccessibilityNotification.Announcement(label).post()
         }
         .accessibilityElement()
-        .accessibilityLabel(Text(label))
-        .accessibilityIdentifier("runtime-open-progress")
+        .accessibilityLabel(label)
     }
 }
 
@@ -605,7 +629,7 @@ struct RuntimeOpenProgress: View {
     var body: some View {
         ZStack {
             RuntimeOpenProgressLine(attempt: attempt)
-            if attempt.isTakingLong {
+            if attempt.offersCancel {
                 RuntimeOpenSlowBanner(
                     showsLastContent: false,
                     cancel: cancel
@@ -613,7 +637,15 @@ struct RuntimeOpenProgress: View {
                 .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.2), value: attempt.isTakingLong)
+        .animation(.easeOut(duration: 0.2), value: attempt.offersCancel)
+        .onChange(of: attempt.offersCancel) { _, offers in
+            // Cancel is the way out now: say so.
+            if offers {
+                AccessibilityNotification.Announcement(
+                    String(localized: "runtime.open.slow")
+                ).post()
+            }
+        }
     }
 }
 
@@ -625,6 +657,7 @@ struct RuntimeOpenSlowBanner: View {
     let showsLastContent: Bool
     var cancel: (() -> Void)?
     var dismiss: (() -> Void)?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         // No spinner: the progress line at the top already shows the open is
@@ -636,7 +669,7 @@ struct RuntimeOpenSlowBanner: View {
                     : "runtime.open.slow"
             )
             .font(.subheadline.weight(.semibold))
-            .lineLimit(1)
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
             .frame(maxWidth: .infinity, alignment: .leading)
             if let cancel {
                 Button("common.cancel", action: cancel)
@@ -669,7 +702,7 @@ struct RuntimeOpenSlowBanner: View {
 }
 
 /// The page's shape before its first paint, with no data: a header, a few
-/// list rows, and the tab bar. It takes no touches.
+/// list rows, and the tab bar. Touches stop at it.
 struct RuntimeSkeleton: View {
     var body: some View {
         VStack(spacing: 0) {
@@ -711,7 +744,10 @@ struct RuntimeSkeleton: View {
         .foregroundStyle(Color(uiColor: .tertiarySystemFill))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(uiColor: .systemBackground).ignoresSafeArea())
-        .allowsHitTesting(false)
+        // It covers a page that may already be painting underneath (a
+        // sign-in redirect, a reload): taps stop here, as the old overlay's.
+        .contentShape(Rectangle())
+        .onTapGesture {}
         .accessibilityHidden(true)
         .accessibilityIdentifier("runtime-skeleton")
     }

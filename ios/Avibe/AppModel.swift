@@ -109,6 +109,13 @@ struct RuntimeOpenAttempt: Equatable {
     var canResumeAutomaticBudget: Bool
     var isTakingLong: Bool
 
+    /// Whether the open's loading layer offers Cancel: past the long-wait
+    /// mark, or once automatic timing has ended for good (a handoff) while
+    /// the layer stays, since no timeout will end it then.
+    var offersCancel: Bool {
+        isTakingLong || (automaticStartedAt == nil && !canResumeAutomaticBudget)
+    }
+
     /// Native-only v1 has no product-ready signal. `documentLoaded` therefore
     /// remains explicitly readiness-unknown.
     var isVerifiedReady: Bool { false }
@@ -1197,8 +1204,11 @@ final class AppModel: ObservableObject {
         sessionCoordinator.activateAccountSurface()
         do {
             let restore = Self.coldStartSignposter.beginInterval("session restore")
-            let state = try await sessionCoordinator.bootstrap()
-            Self.coldStartSignposter.endInterval("session restore", restore)
+            let state: MobileSessionState
+            do {
+                defer { Self.coldStartSignposter.endInterval("session restore", restore) }
+                state = try await sessionCoordinator.bootstrap()
+            }
             if let runtime = sessionCoordinator.restorableRuntime(from: state) {
                 sessionCoordinator.deactivateAccountSurface()
                 openRuntime(runtime)
