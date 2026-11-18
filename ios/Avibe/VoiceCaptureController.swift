@@ -416,6 +416,7 @@ final class VoiceCaptureController {
         do {
             audio = try environment.makeAudio(id)
         } catch {
+            record("start: take file failed \(error)")
             instance.close()
             state = .idle
             showNotice(phase: .failed, reason: .microphone)
@@ -669,5 +670,8 @@ final class VoiceCaptureController {
 
     private func record(_ event: String) {
         Self.logger.info("\(event, privacy: .public)")
+        #if DEBUG
+        VoiceCaptureProbeLog.record(event)
+        #endif
     }
 }

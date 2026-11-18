@@ -104,12 +104,30 @@ final class VoiceCaptureRecorder {
             throw Failure.permission
         }
         do {
+            #if DEBUG
+            VoiceCaptureProbeLog.record("recorder: activating session")
+            #endif
             try session.activateForRecording()
             sessionActive = true
+            #if DEBUG
+            VoiceCaptureProbeLog.record("recorder: session active; making engine")
+            #endif
             let recorder = try makeEngine(url)
-            guard recorder.record() else { throw Failure.start }
+            guard recorder.record() else {
+                #if DEBUG
+                VoiceCaptureProbeLog.record("recorder: record() returned false")
+                #endif
+                throw Failure.start
+            }
+            #if DEBUG
+            VoiceCaptureProbeLog.record("recorder: recording")
+            #endif
             self.recorder = recorder
         } catch {
+            #if DEBUG
+            let ns = error as NSError
+            VoiceCaptureProbeLog.record("recorder: failed \(ns.domain) \(ns.code) \(error)")
+            #endif
             deactivateSession()
             throw error
         }

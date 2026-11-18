@@ -1,5 +1,6 @@
 import AppIntents
 import Foundation
+import UIKit
 
 /// 「和主伙伴说话」: the Action Button (or Shortcuts, Siri, Spotlight) records
 /// what the user says without bringing Avibe to the front, and sends it to
@@ -38,7 +39,13 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         let controller = VoiceCaptureController.shared
+        #if DEBUG
+        VoiceCaptureProbeLog.record("intent: perform, app state \(UIApplication.shared.applicationState.rawValue)")
+        #endif
         let outcome = await controller.toggle()
+        #if DEBUG
+        VoiceCaptureProbeLog.record("intent: outcome \(outcome)")
+        #endif
         guard case .needsApp(let reason) = outcome else {
             return .result()
         }

@@ -25,6 +25,9 @@ struct VoiceCaptureTarget: Equatable {
     static let storeIdentifierKey = "avibe.mobile.websiteDataStoreIdentifier"
 
     static func current(defaults: UserDefaults = .standard) -> VoiceCaptureTarget? {
+        #if DEBUG
+        if let probe = VoiceCaptureProbeSetup.target() { return probe }
+        #endif
         guard
             let data = defaults.data(forKey: selectionKey),
             let selection = try? JSONDecoder().decode(StoredSelection.self, from: data),

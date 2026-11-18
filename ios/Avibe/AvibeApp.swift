@@ -51,6 +51,10 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         ]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        #if DEBUG
+        VoiceCaptureProbeSetup.runIfRequested()
+        VoiceCaptureProbeLog.record("launch: state=\(application.applicationState.rawValue)")
+        #endif
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
