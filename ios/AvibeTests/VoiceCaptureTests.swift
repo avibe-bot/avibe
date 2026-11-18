@@ -284,6 +284,50 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.phase, .listening)
     }
 
+    /// The owner's 11-18 report: permission granted, yet the island said to
+    /// allow the microphone. A recorder that will not start is not a
+    /// permission problem; say what happened, with the system's code.
+    func testARecorderThatWillNotStartSaysSoWithItsCodeNotThePermissionLine() async {
+        let world = World()
+        // AVAudioSession.ErrorCode.cannotStartRecording ('!rec').
+        world.recorderStartError = NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+        let outcome = await world.controller().toggle()
+        XCTAssertEqual(outcome, .stopped)
+        let shown = world.activities.first?.ended
+        XCTAssertEqual(shown?.phase, .failed)
+        XCTAssertEqual(shown?.reason, .recordingFailed)
+        XCTAssertEqual(shown?.errorCode, 561145187)
+    }
+
+    func testATakeFileThatCannotBeMadeIsNotAPermissionProblemEither() async {
+        let world = World()
+        world.takeFileFails = true
+        let outcome = await world.controller().toggle()
+        XCTAssertEqual(outcome, .stopped)
+        XCTAssertEqual(world.activities.first?.states.first?.reason, .recordingFailed)
+        XCTAssertNotNil(world.activities.first?.states.first?.errorCode)
+    }
+
+    /// Two runs for one press (11-18: two identical notices): a run within a
+    /// second of a start that failed does nothing, so one notice shows.
+    func testASecondRunRightAfterAFailedStartPostsNoSecondNotice() async {
+        let world = World()
+        world.recorderStartError = NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.toggle()
+        clock = clock.addingTimeInterval(0.4)
+        let second = await controller.toggle()
+        XCTAssertEqual(second, .stopped)
+        XCTAssertEqual(world.activities.count, 1, "one notice")
+
+        // A press a moment later is a new try.
+        clock = clock.addingTimeInterval(2)
+        _ = await controller.toggle()
+        XCTAssertEqual(world.activities.count, 2)
+    }
+
     func testAnIslandThatCannotStartRecordsNothingAndSaysWhy() async {
         let world = World()
         world.activityRequestFails = true
@@ -432,6 +476,9 @@ private final class World {
     /// Live Activities a gone process left behind.
     var leftovers: [FakeActivity] = []
     var activityRequestFails = false
+    /// What the recorder throws when it starts (the background refusal).
+    var recorderStartError: Error?
+    var takeFileFails = false
     var leftoverAudioDiscarded = 0
     var now: () -> Date = Date.init
 
@@ -440,7 +487,9 @@ private final class World {
             target: { self.target },
             makeInstance: { _ in self.instance },
             makeAudio: { _ in
+                if self.takeFileFails { throw CocoaError(.fileWriteNoPermission) }
                 let audio = FakeAudio()
+                audio.startError = self.recorderStartError
                 self.audio = audio
                 return audio
             },
@@ -528,7 +577,11 @@ private final class FakeAudio: VoiceCaptureAudio {
         try? Data([0, 1, 2]).write(to: url)
     }
 
-    func start() throws { started = true }
+    var startError: Error?
+    func start() throws {
+        if let startError { throw startError }
+        started = true
+    }
     func stop() -> TimeInterval { stops += 1; return duration }
     func discard() { discarded = true }
 }
