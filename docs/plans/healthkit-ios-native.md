@@ -166,3 +166,54 @@ error, and exited 65. The generated bundle inventories matched
 This establishes a reproducible baseline failure; it does not make the complete
 candidate run green. No product code, assertion or timeout was changed for this
 comparison, and neither run was retried.
+
+## Cold restoration follow-up (2026-11-18)
+
+Review found two gaps after the final integration: a background upload completion
+delivered after iOS relaunched the app, before the account or Keychain identity was
+restored, was dropped; and an authenticated event could leave a connection with no
+operational identity paused. This replaces the captured connection epoch described
+above. No persistent field, store, account anchor, device protocol or polling loop
+is added.
+
+Upload completion is local accounting. The delegate's serial processing chain waits
+only for synchronous checks and one state write: the protected state file must exist
+and be readable, contain a committed device ID and no cleanup marker, and have the
+completed task's upload UUID at the queue head. A 2xx response must carry a positive
+integer `accepted_seq` (not a boolean) equal to that payload's `device_seq`. This
+needs no operational identity, Keychain, account or connection epoch. `enqueue` mints
+a fresh UUID for every immutable payload, `taskDescription` carries it unchanged,
+pairing replaces the queue and cleanup removes it, so an old task cannot consume a
+new connection's head even when the sequences match. Any non-2xx response, including
+409 `stale_seq` with a matching sequence in its body, is a failure; no ACK or
+successful result is synthesized from it.
+
+The accepted upload is removed from the queue, its dependent result is released and
+the backfill flag updated in one state write; the payload file is deleted afterwards.
+This publishes no identity and grants no request, query or observer authority. Result
+submission and the next upload run in a separate task gated by the current epoch,
+account, binding and cleanup state, so `urlSessionDidFinishEvents` completes without
+waiting for login, manifest, result HTTP or another transfer. Irrelevant or retired
+completions return immediately. Failures, including unreadable or unwritable protected
+storage, keep the outbox and report no success; only an authorized continuation applies
+the existing terminal/retry policy.
+
+Finite storage failure domains remain explicit. Termination before the state write
+loses that ACK; the retransmission then receives `stale_seq` and the request is
+reported failed although the instance accepted the payload. A state write that
+commits before payload deletion can leave an orphan file. No orphan scan or
+power-loss guarantee is added.
+
+An authenticated event queues one restoration only when there is no operational
+identity or authorization is paused; a normal identity triggers no extra sync. The
+pending pass runs after the account publishes its fresh snapshot, waits behind an
+active connect, restore or cleanup, and is consumed only when an account is
+available. Duplicate events coalesce into one pass. Logout, pause or a new epoch
+retires it; a committed or restored identity clears it.
+
+`MobileSessionCoordinator.refresh` now publishes Health authorization and the
+authenticated event after push cleanup and runtime invalidation, immediately before
+returning the signed-in state. The existing generation check prevents a refresh
+superseded by logout or an account change during that cleanup from authenticating
+Health. Paths without an await keep their meaning; no account transaction or rotation
+changes.

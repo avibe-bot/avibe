@@ -968,6 +968,7 @@ final class HealthSyncTests: XCTestCase {
         try await eventually { fixture.uploader.uploads.count == 1 }
         let old = fixture.uploader.uploads[0]
         await fixture.coordinator.logout()
+        fixture.client.pairedDeviceID = "device-2"
         fixture.client.claims = [[claim(token: "new-lease")]]
         let replacement = fixture.connect()
         try await eventually { fixture.coordinator.consent != nil }
@@ -975,6 +976,7 @@ final class HealthSyncTests: XCTestCase {
         _ = await replacement.value
         try await eventually { fixture.uploader.uploads.count == 2 }
         let current = fixture.uploader.uploads[1]
+        XCTAssertEqual(fixture.credentials.identity?.deviceID, "device-2")
         XCTAssertEqual(old.sequence, current.sequence)
         XCTAssertNotEqual(old.id, current.id)
         await fixture.uploader.acknowledge(old)
@@ -1028,6 +1030,254 @@ final class HealthSyncTests: XCTestCase {
         let after = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
         XCTAssertEqual((after as? [String: String])?["state"], "failed")
         XCTAssertEqual(calls, 1)
+    }
+
+    @MainActor
+    func testColdCompletionAccountsForTheDurableHeadWithoutAccountOrKeychain() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        fixture.coordinator.accountIDProvider = { nil }
+        fixture.credentials.loadError = HealthCredentialReadError.status(errSecInteractionNotAllowed)
+        let upload = try pendingUpload(in: fixture.directory)
+        await fixture.uploader.acknowledge(upload)
+        let reopened = try HealthDeviceStore(directory: fixture.directory)
+        XCTAssertTrue(reopened.state.uploads.isEmpty)
+        XCTAssertNil(reopened.state.completed["request-1"]?.uploadID)
+        XCTAssertFalse(reopened.state.completed["request-1"]?.acknowledged ?? true)
+        XCTAssertFalse(reopened.state.initialBackfillPending)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: upload.file.path))
+        XCTAssertTrue(fixture.client.calls.isEmpty)
+        XCTAssertTrue(fixture.reader.days.isEmpty)
+        XCTAssertEqual(fixture.reader.starts, 0)
+        XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+        fixture.credentials.loadError = nil
+        fixture.coordinator.accountIDProvider = { "account-1" }
+        await fixture.coordinator.resume(foreground: false)
+        try await eventually { fixture.client.results.count == 1 }
+        XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+        XCTAssertEqual(fixture.client.results[0]["outcome"] as? String, "succeeded")
+    }
+
+    @MainActor
+    func testColdCompletionBeforeHeldManifestDoesNotRetransmitAfterRestoration() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        let upload = try pendingUpload(in: fixture.directory)
+        fixture.client.holdManifest = true
+        let restoring = Task { await fixture.coordinator.resume(foreground: false) }
+        try await eventually { fixture.client.manifestContinuation != nil }
+        await fixture.uploader.acknowledge(upload)
+        XCTAssertTrue(try HealthDeviceStore(directory: fixture.directory).state.uploads.isEmpty)
+        fixture.client.releaseManifest()
+        await restoring.value
+        try await eventually { fixture.client.results.count == 1 }
+        XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+        XCTAssertTrue(fixture.reader.days.isEmpty)
+    }
+
+    @MainActor
+    func testColdCompletionRejectsUncommittedNonHeadWrongSequenceAnd409() async throws {
+        for invalid in ["uncommitted", "cleanup", "nonHead", "sequence", "boolean", "stale"] {
+            let fixture = try coordinatorFixture(savedIdentity: true)
+            fixture.coordinator.accountIDProvider = { nil }
+            let upload = try pendingUpload(in: fixture.directory)
+            let persisted = try HealthDeviceStore(directory: fixture.directory)
+            if invalid == "uncommitted" { try persisted.update { $0.committedDeviceID = nil } }
+            if invalid == "cleanup" { try persisted.update { $0.cleanupPending = true } }
+            let id = invalid == "nonHead" ? UUID().uuidString : upload.id
+            let result: Result<[String: Any], Error>
+            if invalid == "stale" { result = .failure(HealthSyncError.http(409, "stale_seq", nil)) }
+            else {
+                let accepted: NSNumber = invalid == "boolean" ? NSNumber(value: true)
+                    : NSNumber(value: invalid == "sequence" ? 2 : 1)
+                result = .success(["accepted_seq": accepted])
+            }
+            await fixture.uploader.onComplete?(id, result)
+            let state = try HealthDeviceStore(directory: fixture.directory).state
+            XCTAssertEqual(state.uploads, [upload.id], invalid)
+            XCTAssertEqual(state.completed["request-1"]?.uploadID, upload.id, invalid)
+            XCTAssertTrue(fixture.client.results.isEmpty, invalid)
+            XCTAssertTrue(fixture.reader.days.isEmpty, invalid)
+        }
+    }
+
+    @MainActor
+    func testColdCompletionWithUnavailableStorageKeepsTheOutbox() async throws {
+        for blockRead in [true, false] {
+            let fixture = try coordinatorFixture(savedIdentity: true)
+            fixture.coordinator.accountIDProvider = { nil }
+            let upload = try pendingUpload(in: fixture.directory)
+            let blocked = blockRead ? upload.file : fixture.directory
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: blocked.path)
+            await fixture.uploader.acknowledge(upload)
+            try FileManager.default.setAttributes([.posixPermissions: blockRead ? 0o600 : 0o700], ofItemAtPath: blocked.path)
+            let state = try HealthDeviceStore(directory: fixture.directory).state
+            XCTAssertEqual(state.uploads, [upload.id])
+            XCTAssertEqual(state.completed["request-1"]?.uploadID, upload.id)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: upload.file.path))
+            XCTAssertTrue(fixture.client.calls.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testRealUploadDelegateFinishesSystemEventsAfterLocalAckWithoutWaitingForNetwork() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        let upload = try pendingUpload(in: fixture.directory)
+        let uploader = HealthBackgroundUploader()
+        let coordinator = HealthSyncCoordinator(credentials: fixture.credentials, reader: fixture.reader,
+            client: fixture.client, uploader: uploader, directory: fixture.directory)
+        coordinator.accountIDProvider = { "account-1" }
+        coordinator.websiteDataStoreIDProvider = fixture.coordinator.websiteDataStoreIDProvider
+        fixture.client.holdManifest = true
+        fixture.client.holdResults = true
+        let restoring = Task { await coordinator.resume(foreground: false) }
+        try await eventually { fixture.client.manifestContinuation != nil }
+        let server = try LocalHTTPServer { _ in .json(#"{"accepted_seq":1}"#) }
+        let url = try await server.start()
+        addTeardownBlock { server.stop() }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        var task: URLSessionDataTask!
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            task = session.dataTask(with: url) { data, _, error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume(returning: data ?? Data()) }
+            }
+            task.taskDescription = upload.id
+            task.resume()
+        }
+        var systemFinished = false
+        uploader.systemCompletion = {
+            XCTAssertTrue((try? HealthDeviceStore(directory: fixture.directory).state.uploads.isEmpty) == true)
+            systemFinished = true
+        }
+        uploader.urlSession(session, dataTask: task, didReceive: data)
+        uploader.urlSession(session, task: task, didCompleteWithError: nil)
+        uploader.urlSessionDidFinishEvents(forBackgroundURLSession: session)
+        try await eventually { systemFinished && fixture.client.resultContinuation != nil }
+        XCTAssertNotNil(fixture.client.manifestContinuation)
+        XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+        fixture.client.releaseResult()
+        fixture.client.releaseManifest()
+        await restoring.value
+        try await eventually { fixture.client.results.count == 1 }
+        await coordinator.logout()
+    }
+
+    @MainActor
+    func testColdAuthenticationRestoresOnceAndCoalescesEventsDuringRestore() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var accountID: String?
+        fixture.coordinator.accountIDProvider = { accountID }
+        _ = try pendingUpload(in: fixture.directory)
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertEqual(fixture.reader.starts, 0)
+        fixture.client.holdManifest = true
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        // The synchronous event consumer runs before snapshot publication.
+        accountID = "account-1"
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await eventually { fixture.client.manifestContinuation != nil }
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        fixture.client.holdManifest = false
+        fixture.client.releaseManifest()
+        try await eventually { fixture.uploader.uploads.count == 1 }
+        XCTAssertEqual(fixture.reader.starts, 1)
+        XCTAssertEqual(fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+    }
+
+    @MainActor
+    func testColdAuthenticationRetainsOnePassBehindActiveRestoreAndLogoutRetiresIt() async throws {
+        for signOut in [false, true] {
+            let fixture = try coordinatorFixture(savedIdentity: true)
+            var accountID: String? = "account-1"
+            fixture.coordinator.accountIDProvider = { accountID }
+            fixture.client.holdManifest = true
+            let restoring = Task { await fixture.coordinator.resume(foreground: false) }
+            try await eventually { fixture.client.manifestContinuation != nil }
+            accountID = nil
+            fixture.coordinator.accountEvent(.authorizationUnavailable)
+            accountID = "account-1"
+            fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+            if signOut {
+                accountID = nil
+                await fixture.coordinator.logout()
+            }
+            fixture.client.holdManifest = false
+            fixture.client.releaseManifest()
+            await restoring.value
+            if signOut {
+                XCTAssertNil(try fixture.credentials.load())
+                XCTAssertNil(fixture.reader.observer)
+            } else {
+                try await eventually { fixture.reader.starts == 2 }
+                XCTAssertNotNil(fixture.reader.observer)
+            }
+        }
+    }
+
+    @MainActor
+    func testAuthenticationWaitsForActiveConsentAndCannotReviveCleanup() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        let connecting = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        await Task.yield()
+        XCTAssertNotNil(fixture.coordinator.consent)
+        XCTAssertEqual(fixture.reader.starts, 0)
+        fixture.coordinator.answerConsent(false)
+        let declined = await connecting.value
+        XCTAssertEqual(declined, "declined")
+        try await eventually { fixture.reader.starts == 1 }
+        fixture.reader.disableSucceeds = false
+        await fixture.coordinator.logout()
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        await Task.yield()
+        XCTAssertTrue(try HealthDeviceStore(directory: fixture.directory).state.cleanupPending)
+        XCTAssertEqual(fixture.reader.starts, 1)
+        XCTAssertNil(fixture.credentials.identity)
+        fixture.reader.disableSucceeds = true
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertNil(fixture.reader.observer)
+        XCTAssertEqual(fixture.reader.starts, 1)
+    }
+
+    @MainActor
+    func testStaleHTTPResponseNeverSynthesizesAnAckOrSuccessfulResult() async throws {
+        let fixture = try coordinatorFixture()
+        let connecting = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        _ = await connecting.value
+        try await eventually { fixture.uploader.uploads.count == 1 }
+        let upload = fixture.uploader.uploads[0]
+        let response = try XCTUnwrap(HTTPURLResponse(url: URL(string: fixture.origin.serialized)!,
+            statusCode: 409, httpVersion: nil, headerFields: nil))
+        do {
+            _ = try HealthDeviceClient.response(data: Data(#"{"accepted_seq":1,"error":{"code":"stale_seq"}}"#.utf8),
+                response: response)
+            XCTFail("409 cannot be an ACK even if its body contains a matching sequence")
+        } catch {
+            await fixture.uploader.onComplete?(upload.id, .failure(error))
+        }
+        try await eventually { (try? HealthDeviceStore(directory: fixture.directory).state.uploads.isEmpty) == true }
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertEqual(fixture.client.results.count, 1)
+        XCTAssertEqual(fixture.client.results[0]["outcome"] as? String, "failed")
+        XCTAssertFalse(fixture.client.results.contains { $0["outcome"] as? String == "succeeded" })
+    }
+
+    private func pendingUpload(in directory: URL) throws -> HealthFakeUploader.Upload {
+        let store = try HealthDeviceStore(directory: directory)
+        _ = try store.nextSequence()
+        let id = try store.enqueue(["device_seq": 1, "items": [], "failures": []]) { state, id in
+            var result = self.pendingResult()
+            result.ready = true
+            result.outcome = "succeeded"
+            result.error = nil
+            result.states = ["steps": "empty"]
+            result.uploadID = id
+            state.completed[result.id] = result
+        }
+        return HealthFakeUploader.Upload(id: id, file: store.file(id), sequence: 1)
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -1093,7 +1343,7 @@ private final class HealthHTTPRequestRecorder: @unchecked Sendable {
     func snapshot() -> [LocalHTTPRequest] { lock.withLock { requests } }
 }
 
-private final class HealthMemoryCredentials: HealthCredentialStoring {
+final class HealthMemoryCredentials: HealthCredentialStoring {
     var identity: HealthDeviceIdentity?
     private(set) var saves = 0
     var clearError: Error?
@@ -1152,7 +1402,7 @@ private final class HealthMemoryKeychainAccess: PushKeychainItemAccessing {
 }
 
 @MainActor
-private final class HealthFakeReader: HealthDataReading {
+final class HealthFakeReader: HealthDataReading {
     private(set) var authorizations = 0
     private(set) var days: [Int] = []
     private(set) var observer: (() async -> Void)?
@@ -1185,7 +1435,7 @@ private final class HealthFakeReader: HealthDataReading {
     func stopObserving() { observer = nil }
 }
 
-private final class HealthFakeUploader: HealthUploading {
+final class HealthFakeUploader: HealthUploading {
     struct Upload {
         let id: String
         let file: URL
@@ -1216,7 +1466,7 @@ private final class HealthFakeUploader: HealthUploading {
 }
 
 @MainActor
-private final class HealthFakeClient: HealthDeviceRequesting {
+final class HealthFakeClient: HealthDeviceRequesting {
     struct Call {
         let method: String
         let path: String
@@ -1224,6 +1474,9 @@ private final class HealthFakeClient: HealthDeviceRequesting {
         let credential: String?
     }
     private(set) var calls: [Call] = []
+    var pairedDeviceID = "device-1"
+    var holdResults = false
+    var resultContinuation: CheckedContinuation<[String: Any], Error>?
     var claims: [[[String: Any]]] = [[[
         "id": "request-1", "operation": "health.connect", "claim_token": "claim-1",
         "metrics": ["steps"], "requires_user": true,
@@ -1240,6 +1493,9 @@ private final class HealthFakeClient: HealthDeviceRequesting {
     func request(origin: String, credential: String?, method: String,
                  path: String, body: [String: Any]?) async throws -> [String: Any] {
         calls.append(Call(method: method, path: path, body: body, credential: credential))
+        if path.hasSuffix("/result"), holdResults {
+            return try await withCheckedThrowingContinuation { resultContinuation = $0 }
+        }
         if path.hasSuffix("/manifest") {
             if let manifestError { throw manifestError }
             if holdManifest { return try await withCheckedThrowingContinuation { manifestContinuation = $0 } }
@@ -1267,19 +1523,26 @@ private final class HealthFakeClient: HealthDeviceRequesting {
         continuation?.resume(returning: [:])
     }
     func releasePending() {
+        releaseResult()
         releasePair()
         releaseManifest()
         let continuations = pendingClaims
         pendingClaims = []
         for continuation in continuations { continuation.resume(returning: ["requests": []]) }
     }
+    func releaseResult() {
+        holdResults = false
+        let continuation = resultContinuation
+        resultContinuation = nil
+        continuation?.resume(returning: [:])
+    }
     private var pairResponse: [String: Any] {
-        ["device_id": "device-1", "credential": "memory-only", "instance": ["id": "instance-1"]]
+        ["device_id": pairedDeviceID, "credential": "memory-only", "instance": ["id": "instance-1"]]
     }
 }
 
 @MainActor
-private final class HealthCoordinatorFixture {
+final class HealthCoordinatorFixture {
     let directory: URL
     let credentials = HealthMemoryCredentials()
     let reader = HealthFakeReader()

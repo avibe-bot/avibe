@@ -27,10 +27,9 @@ final class HealthSyncCoordinator: ObservableObject {
     private let now: () -> Date
     private var store: HealthDeviceStore?
     private var identity: HealthDeviceIdentity?
-    // A committed identity owns ACKs across temporary account authorization pauses.
-    private var committedEpoch: UUID?
-    private var uploadEpochs: [String: UUID] = [:]
     private var authorizationPaused = false
+    private var authorizationResumePending = false
+    private var authorizationResumeID: UUID?
     private var epoch = UUID()
     private var consentContinuation: CheckedContinuation<Bool, Never>?
     private var connecting: UUID?
@@ -78,7 +77,7 @@ final class HealthSyncCoordinator: ObservableObject {
         self.directory = directory
         self.now = now
         uploader.onComplete = { [weak self] id, result in
-            await self?.uploadCompleted(id: id, result: result)
+            self?.uploadCompleted(id: id, result: result)
         }
     }
 
@@ -127,23 +126,40 @@ final class HealthSyncCoordinator: ObservableObject {
             if let identity, identity.accountID != accountID || !bindingMatches(identity)
                 || (!instances.isEmpty && !instances.contains(identity.instanceID)) {
                 _ = beginCleanup(unregister: true)
-            } else if identity != nil, authorizationPaused {
-                let token = epoch
-                Task { @MainActor [weak self] in
-                    guard let self, self.epoch == token else { return }
-                    self.resumeAuthorizedConnection()
-                }
+            } else if identity == nil || authorizationPaused {
+                authorizationResumePending = true
+                resumeAuthorizedConnection()
             }
         }
     }
 
     private func resumeAuthorizedConnection() {
-        guard authorizationPaused, !restoring, connecting == nil, !cleanupPending,
-              (try? requireAccount()) != nil else { return }
-        authorizationPaused = false
+        if identity != nil, !authorizationPaused, !restoring {
+            authorizationResumePending = false
+        }
+        guard authorizationResumePending, authorizationResumeID == nil else { return }
+        let attempt = UUID()
+        authorizationResumeID = attempt
         let token = epoch
         Task { @MainActor [weak self] in
-            guard let self, self.epoch == token, self.connecting == nil else { return }
+            guard let self else { return }
+            defer {
+                if self.authorizationResumeID == attempt {
+                    self.authorizationResumeID = nil
+                    if self.identity != nil, !self.authorizationPaused {
+                        self.authorizationResumePending = false
+                    } else if !self.restoring, self.connecting == nil, !self.cleanupPending,
+                              self.currentAccountID != nil {
+                        self.resumeAuthorizedConnection()
+                    }
+                }
+            }
+            // The account callback publishes its snapshot before this task
+            // runs. Blocked owners retain one pass for their completion.
+            guard self.epoch == token, self.authorizationResumeID == attempt,
+                  !self.restoring, self.connecting == nil, !self.cleanupPending,
+                  self.currentAccountID != nil else { return }
+            self.authorizationResumePending = false
             await self.resume(foreground: self.foreground)
         }
     }
@@ -151,6 +167,8 @@ final class HealthSyncCoordinator: ObservableObject {
     private func pauseAuthority() {
         authorizationPaused = true
         epoch = UUID()
+        authorizationResumeID = nil
+        authorizationResumePending = false
         reader.stopObserving()
         uploader.invalidate()
         uploadingIDs.removeAll()
@@ -180,7 +198,10 @@ final class HealthSyncCoordinator: ObservableObject {
               !requestID.isEmpty, !pairingCode.isEmpty else { return "failed" }
         let connection = UUID()
         connecting = connection
-        defer { if connecting == connection { connecting = nil } }
+        defer {
+            if connecting == connection { connecting = nil }
+            resumeAuthorizedConnection()
+        }
         let token = epoch
         let approved = await withCheckedContinuation { continuation in
             consentContinuation = continuation
@@ -256,8 +277,8 @@ final class HealthSyncCoordinator: ObservableObject {
                 $0.committedDeviceID = candidate.deviceID
             }
             identity = candidate
-            committedEpoch = operationEpoch
             authorizationPaused = false
+            authorizationResumePending = false
             committed = true
             uploader.reconnect()
             let workEpoch = operationEpoch
@@ -344,8 +365,8 @@ final class HealthSyncCoordinator: ObservableObject {
                 return
             }
             guard store?.state.suspended != true else { return }
-            if identity == nil { committedEpoch = token }
             identity = saved
+            authorizationPaused = false
             uploader.reconnect()
             await registerObservers()
             try requireCurrent(token)
@@ -537,50 +558,72 @@ final class HealthSyncCoordinator: ObservableObject {
         // Send one monotonic sequence at a time; background completion advances it.
         if let id = store.state.uploads.first, !uploadingIDs.contains(id) {
             uploadingIDs.insert(id)
-            uploadEpochs[id] = committedEpoch
             do { try await uploader.upload(id: id, file: store.file(id), identity: identity) }
             catch { uploadingIDs.remove(id); throw error }
         }
     }
 
-    private func uploadCompleted(id: String, result: Result<[String: Any], Error>) async {
-        guard let store, store.state.uploads.first == id, let identity,
-              !cleanupPending, store.state.committedDeviceID == identity.deviceID,
-              let committedEpoch, uploadEpochs[id] == committedEpoch else { return }
-        uploadingIDs.remove(id)
+    private func uploadCompleted(id: String, result: Result<[String: Any], Error>) {
+        guard !cleanupPending else { return }
         let token = epoch
+        let completedStore: HealthDeviceStore
         do {
+            // Each upload UUID is minted by enqueue for one immutable payload.
+            // Pair/cleanup replace the queue; IDs are never reused across
+            // devices. Thus a task's exact current head identifies its durable
+            // committed owner even before Keychain/account restoration.
+            guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("state.json").path) else { return }
+            completedStore = try store ?? HealthDeviceStore(directory: directory)
+            guard !completedStore.state.cleanupPending,
+                  completedStore.state.committedDeviceID != nil,
+                  completedStore.state.uploads.first == id else { return }
+            uploadingIDs.remove(id)
             let response = try result.get()
             guard let accepted = response["accepted_seq"] as? NSNumber,
-                  let data = try JSONSerialization.jsonObject(with: Data(contentsOf: store.file(id))) as? [String: Any],
+                  CFGetTypeID(accepted) != CFBooleanGetTypeID(),
+                  accepted.int64Value > 0,
+                  accepted.compare(NSNumber(value: accepted.int64Value)) == .orderedSame,
+                  let data = try JSONSerialization.jsonObject(with: Data(contentsOf: completedStore.file(id))) as? [String: Any],
                   data["device_seq"] as? NSNumber == accepted else { throw HealthSyncError.code("invalid_ack") }
-            try store.removeUpload(id) {
+            try completedStore.removeUpload(id) {
                 if (data["failures"] as? [[String: Any]])?.isEmpty == true { $0.initialBackfillPending = false }
                 for key in $0.completed.keys where $0.completed[key]?.uploadID == id { $0.completed[key]?.uploadID = nil }
             }
-            uploadEpochs.removeValue(forKey: id)
+            if store == nil { store = completedStore }
             finishWaiters(id, result: .success(()))
-            try await sendResults()
-            try await drainUploads()
         } catch {
-            guard epoch == token else { return }
-            let stale = (error as? HealthSyncError)?.code == "stale_seq"
-            let terminal = Self.isTerminal(error) || stale
-            if terminal {
-                try? store.removeUpload(id) {
-                    for key in $0.completed.keys where $0.completed[key]?.uploadID == id {
-                        $0.completed[key]?.uploadID = nil
-                        $0.completed[key]?.outcome = "failed"
-                        $0.completed[key]?.error = "internal"
-                        if let states = $0.completed[key]?.states {
-                            $0.completed[key]?.states = states.mapValues { _ in "internal" }
+            // Only the locally gated continuation may act on device errors.
+            // Inaccessible storage retains its outbox and cannot prove ACK.
+            Task { @MainActor [weak self] in
+                guard let self, self.epoch == token, (try? self.requireAccount()) != nil else { return }
+                self.uploadingIDs.remove(id)
+                let terminal = Self.isTerminal(error) || (error as? HealthSyncError)?.code == "stale_seq"
+                if terminal, let store = self.store, store.state.uploads.first == id {
+                    try? store.removeUpload(id) {
+                        for key in $0.completed.keys where $0.completed[key]?.uploadID == id {
+                            $0.completed[key]?.uploadID = nil
+                            $0.completed[key]?.outcome = "failed"
+                            $0.completed[key]?.error = "internal"
+                            if let states = $0.completed[key]?.states {
+                                $0.completed[key]?.states = states.mapValues { _ in "internal" }
+                            }
                         }
                     }
                 }
+                self.finishWaiters(id, result: .failure(error))
+                await self.handle(error, expectedEpoch: token)
+                if !terminal { self.scheduleRetry() }
             }
-            finishWaiters(id, result: .failure(error))
-            await handle(error, expectedEpoch: token)
-            if !terminal { scheduleRetry() }
+            return
+        }
+        // URLSession's completion barrier waits only for local accounting.
+        // Network work remains separately owned by this epoch and account.
+        Task { @MainActor [weak self] in
+            guard let self, self.epoch == token, (try? self.requireAccount()) != nil else { return }
+            do {
+                try await self.sendResults()
+                try await self.drainUploads()
+            } catch { await self.handle(error, expectedEpoch: token) }
         }
     }
 
@@ -678,9 +721,9 @@ final class HealthSyncCoordinator: ObservableObject {
         connecting = nil
         answerConsent(false)
         identity = nil
-        committedEpoch = nil
-        uploadEpochs.removeAll()
         authorizationPaused = false
+        authorizationResumePending = false
+        authorizationResumeID = nil
         reader.stopObserving()
         uploader.invalidate()
         setBackground()
@@ -713,6 +756,7 @@ final class HealthSyncCoordinator: ObservableObject {
                     self.cleanupPending = false
                 } catch { self.notice = "health.cleanup_failed" }
             } else { self.notice = "health.cleanup_failed" }
+            self.resumeAuthorizedConnection()
             if unregister, let old { await self.revoke(old) }
         }
         return stoppedEpoch

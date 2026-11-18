@@ -918,8 +918,6 @@ final class MobileSessionCoordinator {
                     )
                     return .signedOut
                 }
-                self.healthAuthorizationAvailable = true
-                self.onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
                 if self.selectedRuntimeOriginIsMissing(in: fresh) {
                     try await self.preparePushLogout(
                         publishing: .signedIn(
@@ -931,6 +929,8 @@ final class MobileSessionCoordinator {
                     self.beginRuntimeInvalidation(with: fresh)
                 }
                 self.signedOutStoreIsFresh = false
+                self.healthAuthorizationAvailable = true
+                self.onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
                 return self.state(for: fresh)
             case .secondFactorRequired(let requirement):
                 self.healthAuthorizationAvailable = false
