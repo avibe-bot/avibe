@@ -127,6 +127,7 @@ final class DirectIrohTransportTests: XCTestCase {
                 .init(
                     endpointID: DirectIrohFixtures.instanceEndpoint,
                     addresses: ["192.168.1.20:51234", "[fd12:0:0:0:0:0:0:1]:51234"],
+                    relayURL: nil,
                     alpn: Data("avibe-direct/1".utf8)
                 ),
             ]
@@ -489,6 +490,145 @@ final class DirectIrohTransportTests: XCTestCase {
         }
         XCTAssertEqual(harness.log.count(of: "connection.close"), 2)
         XCTAssertEqual(harness.scheduler.pending, [60])
+    }
+
+    // MARK: The public-relay owner trial
+
+    private static let relayA = ["policy": "public-trial-v1", "url": "https://aps1-1.relay.n0.iroh.link./"]
+    private static let relayB = ["policy": "public-trial-v1", "url": "https://use1-1.relay.n0.iroh.link./"]
+
+    func testARelayOnlyAnswerIsDialledThroughThePinnedMapAndNothingElse() async throws {
+        let harness = Harness()
+        let endpoint = harness.engine.prepare()
+        endpoint.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(
+                generation: "boot:1", client: harness.engine.key.endpointID, addresses: [], relay: Self.relayA
+            )
+        )
+        harness.select()
+        try await eventually("the relayed path is reported") {
+            harness.reports == [.usable(generation: "boot:1")]
+        }
+        // The endpoint is bound with the pinned map, and the instance's
+        // address is the answer's relay and nothing else.
+        XCTAssertEqual(harness.engine.relayMaps, [DirectTrialRelay.publicTrialRelayURLs])
+        XCTAssertEqual(
+            endpoint.dials,
+            [.init(
+                endpointID: DirectIrohFixtures.instanceEndpoint,
+                addresses: [],
+                relayURL: "https://aps1-1.relay.n0.iroh.link./",
+                alpn: Data("avibe-direct/1".utf8)
+            )]
+        )
+    }
+
+    func testAnAnswerWithoutAKnownRelayBindsNoRelayAtAll() async throws {
+        let harness = Harness()
+        _ = try await harness.bringUp(
+            generation: "boot:1",
+            relay: ["policy": "public-trial-v2", "url": "https://aps1-1.relay.n0.iroh.link./"]
+        )
+        XCTAssertEqual(harness.engine.relayMaps, [[]])
+        XCTAssertNil(harness.engine.bound[0].dials[0].relayURL)
+    }
+
+    func testAChangedRelayRetiresThePathAndALateDialForTheOldOneInstallsNothing() async throws {
+        let harness = Harness()
+        // Relay A and addresses, under boot:1.
+        _ = try await harness.bringUp(generation: "boot:1", relay: Self.relayA)
+        let old = try await harness.transport.openStream(for: harness.tag("boot:1"))
+
+        // Relay B, same key and addresses, under the next generation: the
+        // path is retired, then dialled again through B.
+        let second = harness.engine.prepare()
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:2", client: harness.engine.key.endpointID, relay: Self.relayB)
+        )
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("relay B is dialled") { second.dials.count == 1 }
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .lost])
+        XCTAssertEqual(second.dials[0].relayURL, "https://use1-1.relay.n0.iroh.link./")
+        await assertCancelled { try await old.write(Data("x".utf8)) }
+
+        // The relay is withdrawn (B to null) while B's dial is still under
+        // way: B's dial is given up, and what it produces late is closed.
+        let third = harness.engine.prepare()
+        third.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:3", client: harness.engine.key.endpointID)
+        )
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("the path without a relay comes up") {
+            harness.reports == [.usable(generation: "boot:1"), .lost, .usable(generation: "boot:3")]
+        }
+        second.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
+        try await eventually("B's late connection is closed") {
+            harness.log.count(of: "connection.close") == 2
+        }
+        XCTAssertEqual(
+            harness.engine.relayMaps,
+            [DirectTrialRelay.publicTrialRelayURLs, DirectTrialRelay.publicTrialRelayURLs, []]
+        )
+        XCTAssertNil(third.dials[0].relayURL)
+        await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:2", path: 9)) }
+        _ = try await harness.transport.openStream(for: harness.tag("boot:3", path: 9))
+    }
+
+    func testARelayDialHasItsOwnLongerBoundAndADirectDialKeepsItsOwn() async throws {
+        XCTAssertEqual(DirectIrohTiming().dialSeconds, 1.5)
+        XCTAssertEqual(DirectIrohTiming().relayDialSeconds, 5)
+
+        var timing = Harness.patientTiming
+        timing.dialSeconds = 0.05
+        let harness = Harness(timing: timing)
+        let endpoint = harness.engine.prepare()
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(
+                generation: "boot:1", client: harness.engine.key.endpointID, addresses: [], relay: Self.relayA
+            )
+        )
+        harness.select()
+        try await eventually("the instance is dialled through the relay") { endpoint.dials.count == 1 }
+        // Well past the direct bound: the relay dial is still waiting.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(harness.log.count(of: "endpoint.close"), 0)
+        endpoint.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
+        try await eventually("the relayed path is reported") {
+            harness.reports == [.usable(generation: "boot:1")]
+        }
+    }
+
+    func testARelayChangeUnderTheSameGenerationIsNotARenewal() async throws {
+        let harness = Harness()
+        _ = try await harness.bringUp(generation: "boot:1", relay: Self.relayA)
+        // A policy-only or URL-only change the instance should have given a
+        // new generation: the App still treats it as a new offer.
+        let next = harness.engine.prepare()
+        next.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.established]))
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID, relay: Self.relayB)
+        )
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("the path is retired and dialled again") {
+            harness.reports == [.usable(generation: "boot:1"), .lost, .usable(generation: "boot:1")]
+        }
+        XCTAssertEqual(harness.log.count(of: "bind"), 2)
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 1)
+    }
+
+    func testARelayOnlyAnswerThatIsWithdrawnEndsThePathAndThePublicOriginStays() async throws {
+        let harness = Harness()
+        _ = try await harness.bringUp(generation: "boot:1", addresses: [], relay: Self.relayA)
+        // The instance has neither a relay nor an address any more.
+        harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 60))
+        XCTAssertTrue(harness.scheduler.fire(240))
+        try await eventually("the withdrawal is reported") {
+            harness.reports == [.usable(generation: "boot:1"), .lost]
+        }
+        XCTAssertEqual(harness.scheduler.pending, [60])
+        await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 9)) }
     }
 
     func testAnAnswerForAnotherInstanceNeitherBringsAPathUpNorTakesOneDown() async throws {
@@ -1637,6 +1777,7 @@ final class DirectIrohTransportTests: XCTestCase {
             timing.fetchSeconds = 120
             timing.bindSeconds = 120
             timing.dialSeconds = 120
+            timing.relayDialSeconds = 120
             timing.probeSeconds = 120
             return timing
         }()
@@ -1710,6 +1851,8 @@ final class DirectIrohTransportTests: XCTestCase {
         func bringUp(
             generation: String,
             answers: [Data] = [DirectIrohFakeConnection.established],
+            addresses: [[String: String]]? = nil,
+            relay: [String: String]? = nil,
             firing: TimeInterval? = nil,
             file: StaticString = #filePath,
             line: UInt = #line
@@ -1718,7 +1861,11 @@ final class DirectIrohTransportTests: XCTestCase {
             let connection = makeConnection(answers: answers)
             endpoint.connection.resolve(connection)
             rendezvous.answer(
-                DirectIrohFixtures.ready(generation: generation, client: engine.key.endpointID)
+                addresses.map {
+                    DirectIrohFixtures.ready(
+                        generation: generation, client: engine.key.endpointID, addresses: $0, relay: relay
+                    )
+                } ?? DirectIrohFixtures.ready(generation: generation, client: engine.key.endpointID, relay: relay)
             )
             let reported = reports.count
             if let firing {
