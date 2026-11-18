@@ -102,6 +102,11 @@ describe('SystemScheduleForwarder', () => {
     'releases a stalled claim %s without overlapping owners or losing cancel and receipt progress',
     async (phase) => {
       vi.useFakeTimers();
+      let reactivate: (() => void) | undefined;
+      activity.onPageReactivated.mockImplementation((callback: () => void) => {
+        reactivate = callback;
+        return () => undefined;
+      });
       const cancelRequest = {
         requestId: 'cancel-after-stall',
         operationId: request.operationId,
@@ -181,7 +186,13 @@ describe('SystemScheduleForwarder', () => {
       expect(uploadedReceipts).toEqual([]);
       await act(async () => { await vi.advanceTimersByTimeAsync(1); });
       expect(abortedClaims).toBe(1);
-      await act(async () => { await vi.advanceTimersByTimeAsync(10_005); });
+      // Nothing resumes on a timer; returning to the page does.
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(claimCalls).toBe(2);
+      await act(async () => {
+        reactivate?.();
+        await vi.advanceTimersByTimeAsync(10_005);
+      });
 
       expect(acceptedLeases).toEqual(new Set([createClaim.leaseToken, 'lease-cancel']));
       expect(createReceiptAttempts).toBe(2);
@@ -193,6 +204,32 @@ describe('SystemScheduleForwarder', () => {
       expect(uploadedReceipts).toEqual([receipt, receipt, cancelReceipt]);
     },
   );
+
+  it('claims when the page opens and when it comes back, never on a timer', async () => {
+    vi.useFakeTimers();
+    let reactivate: (() => void) | undefined;
+    activity.onPageReactivated.mockImplementation((callback: () => void) => {
+      reactivate = callback;
+      return () => undefined;
+    });
+    apiFetch.mockImplementation(async () => Response.json({ ok: true, claim: null }));
+
+    render(<SystemScheduleForwarder />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(1);
+
+    // An hour with the page open and nothing happening: no request at all.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(1);
+
+    await act(async () => {
+      reactivate?.();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 60 * 1_000); });
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
+  });
 
   it('shares the closed create, cancel, and terminal receipt vectors across layers', () => {
     expect(contractVectors.contract).toBe(1);
@@ -310,12 +347,10 @@ describe('SystemScheduleForwarder', () => {
   });
 
   it.each([
-    { action: 'create', resume: 'poll' },
-    { action: 'create', resume: 'reactivation' },
-    { action: 'cancel', resume: 'poll' },
-    { action: 'cancel', resume: 'reactivation' },
-  ] as const)('backs off a rejected $action until $resume permits replay', async ({
-    action, resume,
+    { action: 'create' },
+    { action: 'cancel' },
+  ] as const)('backs off a rejected $action until the page comes back', async ({
+    action,
   }) => {
     vi.useFakeTimers();
     let reactivate: (() => void) | undefined;
@@ -364,9 +399,8 @@ describe('SystemScheduleForwarder', () => {
     expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
 
     await act(async () => { rejectNative?.(new Error('forbidden')); });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(resume === 'poll' ? 4_999 : 4_000);
-    });
+    // However long it waits, nothing replays it on a timer.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     expect(nativeCall).toHaveBeenCalledOnce();
     expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
@@ -374,8 +408,8 @@ describe('SystemScheduleForwarder', () => {
 
     admitted = true;
     await act(async () => {
-      if (resume === 'reactivation') reactivate?.();
-      await vi.advanceTimersByTimeAsync(resume === 'poll' ? 5 : 0);
+      reactivate?.();
+      await vi.advanceTimersByTimeAsync(0);
     });
     await act(async () => { await vi.advanceTimersByTimeAsync(5); });
 

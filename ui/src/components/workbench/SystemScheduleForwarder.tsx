@@ -13,7 +13,6 @@ import {
 } from '@/lib/native';
 import { onPageReactivated } from '@/lib/pageActivity';
 
-const POLL_INTERVAL_MS = 5_000;
 const MAX_CLAIMS_PER_RECONCILE = 16;
 const CLAIM_TIMEOUT_MS = 15_000;
 const RECEIPT_TIMEOUT_MS = 15_000;
@@ -99,7 +98,7 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
       if (PERMANENT_RECEIPT_ERRORS.has(payload?.error)) return 'discard';
     }
   } catch {
-    // The lease and receipt remain in memory for the next poll/reactivation.
+    // The lease and receipt remain in memory for the next reactivation.
   } finally {
     window.clearTimeout(timeout);
   }
@@ -148,7 +147,7 @@ export const SystemScheduleForwarder: FC = () => {
           : await nativeSystemScheduleCancel(claim.request as NativeSystemScheduleCancel);
         if (receipt?.error && RETRY_NATIVE_RECEIPT_ERRORS.has(receipt.error.code)) {
           // Native cannot yet read or commit the item's management record.
-          // Keep the Runtime lease sticky so the next poll re-enters Native
+          // Keep the Runtime lease sticky so the next reactivation re-enters Native
           // recovery instead of treating an uncertain effect as terminal.
           reconcileImmediately = false;
           return;
@@ -163,7 +162,7 @@ export const SystemScheduleForwarder: FC = () => {
         }
       } catch {
         // Admission may stay unavailable while an account sheet covers Runtime.
-        // Retry the sticky lease on the next poll/reactivation, without spinning.
+        // Retry the sticky lease on the next reactivation, without spinning.
         reconcileImmediately = false;
       } finally {
         inFlightLeasesRef.current.delete(key);
@@ -240,12 +239,12 @@ export const SystemScheduleForwarder: FC = () => {
   useEffect(() => {
     reconcileRef.current = reconcile;
     enabledRef.current = active;
+    // Claims run when the page opens and each time it comes back to the
+    // foreground, never on a timer (#3967 replaces this with a push).
     void reconcile();
-    const interval = window.setInterval(() => void reconcile(), POLL_INTERVAL_MS);
     const stopReactivation = onPageReactivated(() => void reconcile());
     return () => {
       enabledRef.current = false;
-      window.clearInterval(interval);
       stopReactivation();
     };
   }, [active, reconcile]);
