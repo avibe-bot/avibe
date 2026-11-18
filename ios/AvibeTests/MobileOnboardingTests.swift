@@ -5276,8 +5276,9 @@ final class MobileOnboardingTests: XCTestCase {
             let refreshTransport = FakeMobileAuthTransport()
             refreshTransport.session = removedInstance
                 ? snapshot(accountID: "account-1", instances: []) : snapshot(accountID: "account-1")
-            let started = expectation(description: "push cleanup")
-            let release = expectation(description: "release push cleanup")
+            // Not registered with the test: the removed-instance scenario never waits on them.
+            let started = XCTestExpectation(description: "push cleanup")
+            let release = XCTestExpectation(description: "release push cleanup")
             var cleanups = 0
             var forward = false
             var authentications = 0
