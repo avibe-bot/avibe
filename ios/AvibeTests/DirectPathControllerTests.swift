@@ -1344,7 +1344,7 @@ private final class StandInAccountTransport: MobileAuthTransporting {
     func primaryPasskeyVerify(
         flow: String,
         response: [String: Any]
-    ) async throws -> MobileSessionDiscovery {
+    ) async throws {
         throw MobileAccountError.network
     }
 

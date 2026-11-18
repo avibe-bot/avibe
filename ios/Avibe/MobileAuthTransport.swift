@@ -337,7 +337,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
     func primaryPasskeyVerify(
         flow: String,
         response assertion: [String: Any]
-    ) async throws -> MobileSessionDiscovery {
+    ) async throws {
         let response = try await evaluateJSON(
             Self.primaryPasskeyVerifyScript,
             operation: .primaryPasskey,
@@ -349,7 +349,6 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         guard response.boolean("ok") else {
             throw Self.mappedError(for: .primaryPasskey, response: response)
         }
-        return try decodeDiscovery(response)
     }
 
     func primaryPasskeyCancel(flow: String) async {
@@ -764,8 +763,9 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                 return .network
             }
             switch (status, response.string("code")) {
-            case (503, _), (403, "forbidden"):
-                // Off, or not open to this account yet.
+            case (503, _):
+                // Off. A 403 is the HTTP boundary refusing the request, not an audience answer
+                // (that one is verify's `verification_failed`): it stays `network`.
                 return .providerUnavailable
             case (400, "verification_failed"):
                 return .passkeyRejected
@@ -1376,7 +1376,8 @@ extension MobileAuthTransport: WKNavigationDelegate {
         """
     )
 
-    // Passkey sign-in's finish: the assertion for this flow, then the session read.
+    // Passkey sign-in's verify: the assertion for this flow. A 200 sets the session cookies in
+    // this store; the session is read separately, with its own deadline.
     private static let primaryPasskeyVerifyScript = boundedScript(
         initialStage: .passkeyVerify,
         body: """
@@ -1397,10 +1398,7 @@ extension MobileAuthTransport: WKNavigationDelegate {
               retryAfter: Number(response.headers.get("retry-after")) || null
             });
           }
-          const discover = async () => {
-        \(sessionDiscoveryBody)
-          };
-          return await discover();
+          return JSON.stringify({ok: true, stage, status: response.status});
         """
     )
 

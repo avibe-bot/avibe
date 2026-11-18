@@ -541,16 +541,18 @@ protocol MobileAuthTransporting: AnyObject {
         verifier: String
     ) async throws -> MobileProviderExchange
     /// `POST /api/passkey-primary/options`: a flow and a discoverable request. Throws
-    /// `providerUnavailable` when passkey sign-in is off or not open to every account,
-    /// `rate_limited`, or `network`.
+    /// `providerUnavailable` when passkey sign-in is off (503), `rate_limited`, or `network`
+    /// (a 403 is avibe.bot's HTTP boundary, not an answer about this account).
     func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart
-    /// `POST /api/passkey-primary/verify` in the same store, then the session read. Throws
-    /// `passkeyRejected` when avibe.bot does not accept the passkey, `passkeyCancelled` for an
-    /// ended or expired flow, `rate_limited`, or `network`.
+    /// `POST /api/passkey-primary/verify` in the same store. Success sets the session cookies
+    /// there; the session is read separately (`fetchSession`). Throws `passkeyRejected` when
+    /// avibe.bot does not accept the passkey (`verification_failed`, which is also its answer for
+    /// an account outside the audience), `passkeyCancelled` for an ended or expired flow,
+    /// `rate_limited`, or `network`.
     func primaryPasskeyVerify(
         flow: String,
         response: [String: Any]
-    ) async throws -> MobileSessionDiscovery
+    ) async throws
     /// `POST /api/passkey-primary/cancel`, best effort: an abandoned flow also expires.
     func primaryPasskeyCancel(flow: String) async
     func logout() async throws
@@ -621,6 +623,10 @@ final class MobileSessionCoordinator {
     /// selection and transport ownership have different invariants.
     private var transportOperationToken: UUID?
     private var signedOutStoreIsFresh = false
+    /// The generation whose store holds a passkey sign-in avibe.bot accepted but whose session
+    /// has not been read yet. Memory only: any account transition retires it, and a relaunch
+    /// reads that store's session anyway.
+    private var verifiedPasskeyGeneration: Int?
     /// A replacement page must read the known result even while push/store
     /// cleanup suspends. The publication ID prevents an older continuation
     /// from clearing a newer transition's result.
@@ -1184,6 +1190,18 @@ final class MobileSessionCoordinator {
         presentationAnchor: ASPresentationAnchor
     ) async throws -> MobileSessionState {
         try await runExclusive {
+            // avibe.bot already accepted this store's passkey sign-in and only its session read
+            // failed: read it again in the same store, with no second sheet and no second verify.
+            if let verified = self.verifiedPasskeyGeneration, verified == self.generation {
+                do {
+                    return try await self.readVerifiedPasskeySession(generation: verified)
+                } catch {
+                    if self.generation == verified, self.verifiedPasskeyGeneration != verified {
+                        try await self.replaceWithFreshSignedOutStore(generation: verified)
+                    }
+                    throw error
+                }
+            }
             let loginGeneration = self.beginAccountTransition(clearSelection: true)
             do {
                 if !self.signedOutStoreIsFresh {
@@ -1207,21 +1225,49 @@ final class MobileSessionCoordinator {
                     throw error
                 }
                 try self.requireCurrentGeneration(loginGeneration)
-                let discovery = try await self.requireTransport().primaryPasskeyVerify(
+                try await self.requireTransport().primaryPasskeyVerify(
                     flow: start.flow,
                     response: assertion.authenticationResponseJSON
                 )
                 try self.requireCurrentGeneration(loginGeneration)
-                self.clearStoredSelection()
-                self.secondFactorEmail = nil
-                return try self.state(for: discovery)
+                // The store now holds the session avibe.bot issued (backend §6: never discard it
+                // before it is read). A passing failure to read it keeps the store.
+                self.verifiedPasskeyGeneration = loginGeneration
+                return try await self.readVerifiedPasskeySession(generation: loginGeneration)
             } catch {
-                if self.generation == loginGeneration {
+                if self.generation == loginGeneration, self.verifiedPasskeyGeneration != loginGeneration {
                     try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
                 }
                 throw error
             }
         }
+    }
+
+    /// Reads the session an accepted passkey sign-in left in this generation's store: one read,
+    /// and one more after a passing failure, each with the session read's own deadline. Nothing
+    /// is published until a read answers. `401` means the session did not hold: the store is
+    /// no longer kept (the caller retires it). Any other failure keeps it for the next try.
+    private func readVerifiedPasskeySession(generation: Int) async throws -> MobileSessionState {
+        var failure = MobileAccountError.network
+        for _ in 0..<2 {
+            let discovery: MobileSessionDiscovery?
+            do {
+                discovery = try await self.requireTransport().fetchSession()
+            } catch let error as MobileAccountError {
+                try self.requireCurrentGeneration(generation)
+                failure = error
+                continue
+            }
+            try self.requireCurrentGeneration(generation)
+            self.verifiedPasskeyGeneration = nil
+            guard let discovery else {
+                throw MobileAccountError.invalidOrExpired
+            }
+            self.clearStoredSelection()
+            self.secondFactorEmail = nil
+            return try self.state(for: discovery)
+        }
+        throw failure
     }
 
     /// Confirms with one of the account's passkeys: options from avibe.bot,
@@ -1793,6 +1839,7 @@ final class MobileSessionCoordinator {
         clearSelection: Bool
     ) -> Int {
         generation += 1
+        verifiedPasskeyGeneration = nil
         // A sign-in window or sheet still open belongs to the generation that just ended.
         webAuthenticator.cancel()
         appleAuthorizer.cancel()

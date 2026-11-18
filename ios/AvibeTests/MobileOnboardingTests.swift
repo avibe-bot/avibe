@@ -902,7 +902,8 @@ final class MobileOnboardingTests: XCTestCase {
             MobilePrimaryPasskeyStart(flow: "flow-1", request: request)
         }
         let fresh = snapshot(accountID: "account-1", instances: [])
-        transport.primaryPasskeyVerifyHandler = { _, _ in .signedIn(fresh) }
+        transport.primaryPasskeyVerifyHandler = { _, _ in }
+        transport.session = fresh
         let authenticator = FakePasskeyAuthenticator()
         authenticator.result = .success(
             MobilePasskeyAssertion(
@@ -1036,6 +1037,94 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(store.identifier, attempted)
         XCTAssertEqual(authenticator.requests.count, 1, "no second passkey sheet")
         XCTAssertEqual(transport.primaryPasskeyVerifications.count, 1, "no second verify")
+    }
+
+    // A 401 after an accepted verify means the session did not hold: the store is not kept.
+    func testAnAcceptedPasskeySignInWhoseSessionIsGoneRetiresTheStore() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        var attemptStore: UUID?
+        transport.primaryPasskeyStartHandler = {
+            attemptStore = store.identifier
+            return MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        transport.primaryPasskeyVerifyHandler = { _, _ in }
+        // `nil`: the session read answered 401.
+        transport.fetchSessionHandler = { nil }
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        do {
+            _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+            XCTFail("Expected invalid_or_expired")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .invalidOrExpired)
+        }
+        XCTAssertNotEqual(store.identifier, try XCTUnwrap(attemptStore))
+        XCTAssertNil(coordinator.currentAccount)
+    }
+
+    func testTheBundledPageReachesPasskeySignInOnlyWithNoArgumentsAndNeverFromTheSheet() async throws {
+        let signedOutTransport = FakeMobileAuthTransport()
+        let loginTransport = FakeMobileAuthTransport()
+        loginTransport.primaryPasskeyStartHandler = {
+            MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        loginTransport.primaryPasskeyVerifyHandler = { _, _ in }
+        loginTransport.session = snapshot(accountID: "account-1")
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [signedOutTransport, loginTransport, FakeMobileAuthTransport()],
+                passkeyAuthenticator: authenticator
+            ),
+            startScreen: .instances
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+        try await WebKitReadiness.waitForDocument(in: webView)
+        let refused = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.signInWithPasskey', {email: 'alex@example.com'});
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(refused, "invalid_argument")
+        XCTAssertTrue(authenticator.requests.isEmpty)
+        let status = try await webView.callAsyncJavaScript(
+            """
+            const state = await window.avibeMobile.call('auth.signInWithPasskey');
+            return state.status;
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(status, "signedIn")
+        XCTAssertEqual(authenticator.requests.count, 1)
+        XCTAssertEqual(loginTransport.primaryPasskeyVerifications.count, 1)
     }
 
     // A late assertion after an account change is never verified.
@@ -1648,6 +1737,21 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? String
         XCTAssertEqual(provider, MobileAccountError.forbidden.code)
         XCTAssertTrue(transport.providerStarts.isEmpty)
+        let passkey = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.signInWithPasskey');
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(passkey, MobileAccountError.forbidden.code)
+        XCTAssertTrue(transport.primaryPasskeyVerifications.isEmpty)
         XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
     }
 
@@ -5474,7 +5578,7 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     }
     var primaryPasskeyVerifyHandler: (
         String, [String: Any]
-    ) async throws -> MobileSessionDiscovery = { _, _ in
+    ) async throws -> Void = { _, _ in
         throw MobileAccountError.passkeyRejected
     }
     private(set) var primaryPasskeyVerifications: [(flow: String, response: [String: Any])] = []
@@ -5574,9 +5678,9 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     func primaryPasskeyVerify(
         flow: String,
         response: [String: Any]
-    ) async throws -> MobileSessionDiscovery {
+    ) async throws {
         primaryPasskeyVerifications.append((flow, response))
-        return try await primaryPasskeyVerifyHandler(flow, response)
+        try await primaryPasskeyVerifyHandler(flow, response)
     }
 
     func primaryPasskeyCancel(flow: String) async {
@@ -5639,16 +5743,17 @@ private func passkeyAssertion() -> MobilePasskeyAssertion {
 }
 
 /// avibe.bot accepted the passkey (its cookies are in the store) but the session read after it
-/// failed. Before the fix the transport answered both in one call that failed as `network`.
+/// failed (both reads the attempt makes).
 @MainActor
 private func acceptPasskeyButFailTheSessionRead(_ transport: FakeMobileAuthTransport) {
-    transport.primaryPasskeyVerifyHandler = { _, _ in throw MobileAccountError.network }
+    transport.primaryPasskeyVerifyHandler = { _, _ in }
+    transport.fetchSessionError = MobileAccountError.network
 }
 
 @MainActor
 private func letTheSessionReadSucceed(_ transport: FakeMobileAuthTransport, _ session: MobileSessionSnapshot) {
+    transport.fetchSessionError = nil
     transport.session = session
-    transport.primaryPasskeyVerifyHandler = { _, _ in .signedIn(session) }
 }
 
 private extension MobileSecondFactorProof {

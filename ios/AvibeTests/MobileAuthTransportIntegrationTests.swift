@@ -1181,6 +1181,78 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         ])
     }
 
+    // AUTH-SETUP-185: the fixed passkey sign-in scripts, run by WebKit against avibe.bot's wire
+    // (backend 884a13c): exact Accept, same-origin, the binding cookie kept in this store for
+    // verify, verify's session cookie in the same store for the separate session read, and
+    // cancel's exact body.
+    func testPasskeySignInScriptsKeepTheBindingAndTheSessionInThisStore() async throws {
+        let state = HTTPFixtureState()
+        let sessionJSON = Self.sessionJSON
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            let cookies = request.headers["cookie"] ?? ""
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon"}"#)
+            case ("POST", "/api/passkey-primary/options"):
+                return .json(
+                    #"{"ok":true,"flow":"flow-1","expiresAt":"2026-11-18T10:00:00Z","options":{"challenge":"Y2hhbGxlbmdl","rpId":"avibe.bot","timeout":120000,"userVerification":"required","allowCredentials":[{"type":"public-key","id":"c29tZQ"}]}}"#,
+                    headers: [("Set-Cookie", "avibe_passkey_primary=binding; Path=/; HttpOnly; SameSite=Lax")]
+                )
+            case ("POST", "/api/passkey-primary/verify"):
+                guard cookies.contains("avibe_passkey_primary=binding") else {
+                    return LocalHTTPResponse(status: 403, headers: [("Content-Type", "application/json")], body: Data(#"{"ok":false,"error":"forbidden"}"#.utf8))
+                }
+                return .json(#"{"ok":true,"next":"/app"}"#, headers: [("Set-Cookie", "avibe_session=passkey; Path=/; HttpOnly")])
+            case ("POST", "/api/passkey-primary/cancel"):
+                return .json(#"{"ok":true}"#)
+            case ("GET", "/api/mobile/session"):
+                guard cookies.contains("avibe_session=passkey") else {
+                    return .status(401)
+                }
+                return .json(sessionJSON)
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+        }
+        let transport = MobileAuthTransport(controlPlaneURL: baseURL, websiteDataStore: .nonPersistent())
+
+        let start = try await transport.primaryPasskeyStart()
+        XCTAssertEqual(start.flow, "flow-1")
+        XCTAssertTrue(start.request.allowedCredentialIDs.isEmpty, "discoverable: the allow-list is dropped")
+        try await transport.primaryPasskeyVerify(flow: "flow-1", response: ["id": "cred", "type": "public-key"])
+        let discovery = try await transport.fetchSession()
+        guard case .signedIn(let snapshot)? = discovery else {
+            return XCTFail("Expected the session the verify set, got \(String(describing: discovery))")
+        }
+        XCTAssertEqual(snapshot.account.email, "alex@example.com")
+        await transport.primaryPasskeyCancel(flow: "flow-1")
+
+        let origin = WebOrigin(url: baseURL, requiresHTTPS: false)?.serialized
+        let posts = state.requests().filter { $0.method == "POST" }
+        XCTAssertEqual(posts.map(\.path), [
+            "/api/passkey-primary/options", "/api/passkey-primary/verify", "/api/passkey-primary/cancel",
+        ])
+        for post in posts {
+            XCTAssertEqual(post.headers["accept"], "application/json", post.path)
+            XCTAssertEqual(post.headers["content-type"], "application/json", post.path)
+            XCTAssertEqual(post.headers["origin"], origin, post.path)
+            XCTAssertNil(post.headers["authorization"], post.path)
+        }
+        let bodies = try posts.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any]) as NSDictionary
+        }
+        let context: NSDictionary = ["continuation": NSNull(), "next": NSNull(), "lang": NSNull()]
+        XCTAssertEqual(bodies[0], ["context": context])
+        XCTAssertEqual(bodies[1], ["flow": "flow-1", "response": ["id": "cred", "type": "public-key"], "context": context])
+        XCTAssertEqual(bodies[2], ["flow": "flow-1"])
+    }
+
     func testControlPlaneCookiesDoNotFollowACrossOriginRedirect() async throws {
         let state = HTTPFixtureState()
         let captureState = HTTPFixtureState()
