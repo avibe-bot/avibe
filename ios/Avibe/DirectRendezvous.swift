@@ -3,8 +3,8 @@ import Foundation
 
 // The rendezvous answer and what the App accepts from it
 // (docs/plans/remote-direct-rendezvous.md section 5). Everything here is
-// pure: no socket, no endpoint, no permission. Nothing in the App calls it
-// until a direct transport is registered, and `AvibeApp` registers none.
+// pure: no socket, endpoint or permission until the registered transport
+// asks for it.
 // Design: docs/plans/remote-direct-ios-transport.md.
 
 /// An iroh endpoint ID in its wire form: an Ed25519 public key, written as
