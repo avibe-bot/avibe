@@ -101,7 +101,7 @@ On both Linux targets, a disposable network namespace captures every interface w
 
 ### Advisory NAT-disabled experiment
 
-The separate, non-gating/non-shipping Linux job first builds a stock-client test executable. It then vendors pinned dependencies in disposable runner storage, applies [`iroh-1.4.1-allow-nat-zero.patch`](experiments/iroh-1.4.1-allow-nat-zero.patch), updates that vendored file's checksum, and builds only a separate experimental server with NAT cap zero. The prebuilt stock client (hash checked unchanged) runs the same admission/stream tests and dead/live address-family candidate tests against it in an isolated network namespace. The job uploads evidence only, never a binary.
+It runs on manual dispatch and on pushes to master, not on pull requests. The separate, non-gating/non-shipping Linux job first builds a stock-client test executable. It then vendors pinned dependencies in disposable runner storage, applies [`iroh-1.4.1-allow-nat-zero.patch`](experiments/iroh-1.4.1-allow-nat-zero.patch), updates that vendored file's checksum, and builds only a separate experimental server with NAT cap zero. The prebuilt stock client (hash checked unchanged) runs the same admission/stream tests and dead/live address-family candidate tests against it in an isolated network namespace. The job uploads evidence only, never a binary.
 
 The patch only allows zero through iroh's wrapper; noq already interprets zero as extension disabled. It is **not used by any packaged binary**. Owner approval is required before any proposal to carry it in a shipping dependency.
 
