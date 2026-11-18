@@ -28,22 +28,52 @@ class RetryUnavailable(ValueError):
         super().__init__(code)
 
 
-def _notice(conn: Connection, session_id: str, notice_id: str) -> dict[str, Any]:
-    notice = messages_service.get_message(conn, notice_id, session_id=session_id)
+def _workspace_notice(conn: Connection, session_id: str, notice_id: str) -> dict[str, Any] | None:
+    """A workspace-addressed notice of a failed Turn of ``session_id``, as that Session's notice.
+
+    The notice row stays in the workspace Session (``row_session_id``); its Turn and
+    Session are the ones its ``failure_id`` names, never ones a caller supplies.
+    """
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    notice = messages_service.get_message(conn, notice_id, session_id=WORKSPACE_NOTICE_SESSION_ID)
+    if notice is None:
+        return None
+    source_session_id, turn_id = deliveries.workspace_notice_source(conn, notice.get("metadata") or {})
+    if source_session_id != session_id or not turn_id:
+        return None
+    return {
+        **notice,
+        "session_id": session_id,
+        "row_session_id": WORKSPACE_NOTICE_SESSION_ID,
+        "metadata": {**(notice.get("metadata") or {}), "turn_id": turn_id},
+    }
+
+
+def notice_retryable(notice: dict[str, Any] | None) -> bool:
+    """Whether a notice can carry a retry at all; the read and the press share this."""
     metadata = (notice or {}).get("metadata") or {}
-    if (
+    return not (
         notice is None
-        or notice["type"] != "notify"
-        or notice["author"] != "agent"
-        or notice["source"] != "agent"
+        or notice.get("type") != "notify"
+        or notice.get("author") != "agent"
+        or notice.get("source") != "agent"
         or metadata.get("event") != "backend_failure"
         or not metadata.get("failure_id")
         or not metadata.get("turn_id")
         or metadata.get("detached")
         # The Turn's running commands continue as Watches: a retry would run them twice.
         or metadata.get("watch_ids")
-    ):
+    )
+
+
+def _notice(conn: Connection, session_id: str, notice_id: str) -> dict[str, Any]:
+    notice = messages_service.get_message(conn, notice_id, session_id=session_id)
+    if notice is None:
+        notice = _workspace_notice(conn, session_id, notice_id)
+    if not notice_retryable(notice):
         raise RetryUnavailable("retry_not_available")
+    assert notice is not None
     return notice
 
 
@@ -235,10 +265,12 @@ def reserve_retry(
             )
         admit_input(conn, retry_input, delivery_id=delivery_id, history=binding)
     content = dict(notice["content"])
+    # ``failure_source`` is read, never stored (``messages_service._row_to_payload``).
+    content.pop("failure_source", None)
     content["failure_retry"] = {"delivery_id": delivery_id}
     conn.execute(
         update(messages)
-        .where(messages.c.id == notice_id, messages.c.session_id == session_id)
+        .where(messages.c.id == notice_id, messages.c.session_id == notice.get("row_session_id", session_id))
         .values(content_json=json.dumps(content, ensure_ascii=False))
     )
     saved = deliveries.get_delivery(conn, delivery_id)
@@ -261,3 +293,49 @@ def admission_denial(conn: Connection, delivery: dict[str, Any]) -> str | None:
     except RetryUnavailable as error:
         return error.code
     return None
+
+
+def workspace_notice_retry_available(
+    conn: Connection, notice: dict[str, Any], session_id: str, turn_id: str
+) -> bool:
+    """Whether a retry of this failed Turn would be accepted now (read-only).
+
+    The same boundary ``reserve_retry`` checks, so the workspace thread offers
+    Retry only where pressing it can start one.
+    """
+    if not notice_retryable({**notice, "metadata": {**(notice.get("metadata") or {}), "turn_id": turn_id}}):
+        return False
+    # An input that never reached the backend stays queued; the retry takes it
+    # over (``reserve_retry``), so it is not pending work in the way of one.
+    # A read must never fail on a retry it cannot offer: any refusal is "no Retry".
+    try:
+        turn = deliveries.get_turn(conn, turn_id)
+        retained = (
+            _retained_inputs(conn, turn)
+            if turn is not None
+            and turn["session_id"] == session_id
+            and turn["state"] == "terminal"
+            and turn["terminal_outcome"] == "not_written"
+            else []
+        )
+        _validate_boundary(
+            conn,
+            {"session_id": session_id, "metadata": {"turn_id": turn_id}},
+            exclude_ids={row["id"] for row in retained},
+        )
+    except RetryUnavailable:
+        return False
+    # A retained input bound to an Agent Run that has already ended can never
+    # start: the start claim retires it (``SessionTurnManager._delivery_agent_runs_can_start``),
+    # so a Retry that takes it over would only be retired. Offer none. Read-only
+    # here, unlike the claim path's inspection, which may write.
+    from storage.background import normalize_run_status
+    from storage.models import agent_runs
+
+    for row in retained:
+        for run in conn.execute(
+            select(agent_runs.c.status, agent_runs.c.cancel_requested).where(agent_runs.c.delivery_id == row["id"])
+        ).mappings():
+            if run["cancel_requested"] or normalize_run_status(run["status"]) not in {"queued", "running"}:
+                return False
+    return True
