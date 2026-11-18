@@ -260,3 +260,49 @@ started. Foreground entry still passes `true` explicitly, because the
 application state can still read as background during that notification. The
 coordinator behavior is covered by tests; actual system event ordering is not
 reproduced in XCTest and remains unverified.
+
+## Foreground liveness follow-up (2026-11-18)
+
+Review of the recovery head found that foreground polling only started when a
+one-shot sequence (restore, connect or authenticated restoration) finished, so a
+single transient failure could leave a foreground session without polling, and
+that launch navigation waited for Health restoration. This replaces the network
+continuation described above with one in-memory convergence owner. No protocol,
+persistent field, account transaction or background wake is added.
+
+One convergence pass runs at a time per epoch; requests made during a pass
+coalesce into at most one more pass, and a pass from a retired epoch is cancelled
+and never reused. The pass checks authority, starts foreground polling, sends the
+manifest when it is due, completes unready reservations, sends results and drains
+the outbox. Lost authority (epoch change, pause, account, binding, cleanup or
+suspension) stops the pass. A transient failure is recorded, later steps still
+run, and one retry is scheduled at the end through the single foreground retry
+slot (at least five seconds, Retry-After when set, otherwise 30 seconds). The
+manifest is due again for every epoch and every resume entry, and is cleared only
+when it succeeds in the same epoch; the pairing setup manifest does not clear it.
+
+Entries: resume restores the identity, marks the manifest due, joins the pass and
+then performs one activation refresh only when foreground; a pass never queries
+for freshness, so an upload ACK cannot trigger another query. ACK success, a
+retired terminal payload, a successful HealthKit delivery and a committed
+connection (whatever its first sync did) request a pass. Transient upload,
+delivery, polling and pass failures only schedule the retry. An authenticated
+event for a present identity requests a pass only while the manifest is due or
+foreground polling is missing, so a converged identity makes no request.
+
+`foreground` is written only by the lifecycle: resume entries and entering the
+background. Cleanup, revocation and suspension cancel polling and the retry
+without rewriting it, so reconnecting in the same foreground session polls again.
+In the background there is no polling, retry timer, refresh or new wake; a pass
+started by a system event or already running when the app leaves the foreground
+may finish its idempotent steps. HealthKit and URLSession completion timing is
+unchanged, and upload completion still waits only for local accounting. Results
+may wait behind a held manifest within the same pass.
+
+Bootstrap now delivers navigation requested before it completed (notification
+taps and selected-instance links) before awaiting Health restoration.
+
+Existing limits remain: `sendResults` stops at its first failing result, and a
+request the instance purged (404 `request_not_found`) keeps failing on later
+passes. Real system event ordering, background session redelivery timing and
+HealthKit observer timing are reviewed in code only.

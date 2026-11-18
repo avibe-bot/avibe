@@ -1178,7 +1178,8 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         hasCompletedBootstrap = true
-        await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
+        // Navigation requested before bootstrap is delivered before Health
+        // restoration, which may wait on the network and HealthKit.
         if let pendingInstanceOpen {
             self.pendingInstanceOpen = nil
             switch pendingInstanceOpen {
@@ -1188,6 +1189,7 @@ final class AppModel: ObservableObject {
                 openSelectedInstance(path: path)
             }
         }
+        await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
     }
 
     private func stopRuntime() {

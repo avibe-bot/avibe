@@ -45,6 +45,12 @@ final class HealthSyncCoordinator: ObservableObject {
     private var syncTask: Task<[String: String], Error>?
     private var syncID: UUID?
     private var retryTask: Task<Void, Never>?
+    // One convergence pass at a time per epoch; requests during a pass coalesce.
+    private var convergeTask: Task<Void, Never>?
+    private var convergeEpoch: UUID?
+    private var convergeAgain = false
+    // In memory: each epoch and each resume entry make the manifest due again.
+    private var manifestDue = true
     private var uploadWaiters: [String: [CheckedContinuation<Void, Error>]] = [:]
     private var retryAfter: Date?
     var targetProvider: (() -> HealthConnectionTarget?)?
@@ -129,6 +135,9 @@ final class HealthSyncCoordinator: ObservableObject {
             } else if identity == nil || authorizationPaused {
                 authorizationResumePending = true
                 resumeAuthorizedConnection()
+            } else if manifestDue || (foreground && pollTask == nil) {
+                // A converged identity triggers no network; an unconverged one finishes setup.
+                requestConvergence()
             }
         }
     }
@@ -167,6 +176,7 @@ final class HealthSyncCoordinator: ObservableObject {
     private func pauseAuthority() {
         authorizationPaused = true
         epoch = UUID()
+        retireConvergence()
         authorizationResumeID = nil
         authorizationResumePending = false
         reader.stopObserving()
@@ -216,7 +226,6 @@ final class HealthSyncCoordinator: ObservableObject {
             try await reader.authorize()
             try requireCurrent(token)
             let installationID = try credentials.installationID()
-            let wasForeground = foreground
             operationEpoch = beginCleanup(unregister: true)
             connecting = connection
             await cleanupTask?.value
@@ -226,7 +235,6 @@ final class HealthSyncCoordinator: ObservableObject {
             try requireCurrent(operationEpoch)
             guard !cleanupPending, targetProvider?() == target, currentAccountID == target.accountID,
                   websiteDataStoreIDProvider?() == binding else { throw HealthSyncError.code("connection_changed") }
-            foreground = wasForeground
             let response = try await client.request(origin: target.origin, credential: nil, method: "POST",
                 path: "/api/mobile/device/v1/pair", body: [
                     "pairing_code": pairingCode, "installation_id": installationID,
@@ -286,11 +294,10 @@ final class HealthSyncCoordinator: ObservableObject {
                 guard let self, self.epoch == workEpoch else { return }
                 await self.registerObservers()
                 guard self.epoch == workEpoch else { return }
-                do {
-                    _ = try await self.synchronize(requestID: requestID, waitForUpload: false)
-                    try await self.sendResults()
-                    if self.foreground { self.beginPolling() }
-                } catch { await self.handle(error, expectedEpoch: workEpoch) }
+                do { _ = try await self.synchronize(requestID: requestID, waitForUpload: false) }
+                catch { await self.handle(error, expectedEpoch: workEpoch) }
+                // Polling, the manifest and any unready reservation converge whatever the first sync did.
+                if self.epoch == workEpoch { self.requestConvergence() }
             }
             return "connected"
         } catch {
@@ -331,6 +338,7 @@ final class HealthSyncCoordinator: ObservableObject {
         }
         guard connecting == nil, !restoring else { return }
         restoring = true
+        manifestDue = true
         let token = epoch
         defer {
             restoring = false
@@ -370,27 +378,27 @@ final class HealthSyncCoordinator: ObservableObject {
             uploader.reconnect()
             await registerObservers()
             try requireCurrent(token)
-            try await manifest()
-            if let store {
-                for reservation in Array(store.state.completed.values) where !reservation.ready {
-                    _ = try await synchronize(requestID: reservation.id, waitForUpload: false)
-                }
-            }
-            try await drainUploads()
-            try await sendResults()
-            if self.foreground {
-                beginPolling()
-                _ = try await synchronize()
-            }
+            await requestConvergence().value
+            try requireCurrent(token)
+            // The activation refresh belongs to this entry only; convergence never
+            // queries for freshness.
+            if self.foreground { _ = try await synchronize() }
         } catch is DecodingError {
             await stopLocal(unregister: true, expectedEpoch: token)
         } catch { await handle(error, expectedEpoch: token) }
     }
 
+    /// Lifecycle only. Internal stops cancel work without rewriting `foreground`.
     func setBackground() {
         foreground = false
+        stopForegroundWork()
+    }
+
+    private func stopForegroundWork() {
         pollTask?.cancel()
         pollTask = nil
+        retryTask?.cancel()
+        retryTask = nil
     }
 
     func logout() async { await stopLocal(unregister: true) }
@@ -402,7 +410,12 @@ final class HealthSyncCoordinator: ObservableObject {
             do {
                 // Return after durable enqueue, leaving transfers to URLSession.
                 _ = try await self.synchronize(waitForUpload: false)
-            } catch { if self.epoch == token { await self.handle(error, expectedEpoch: token) } }
+                if self.epoch == token { self.requestConvergence() }
+            } catch {
+                guard self.epoch == token else { return }
+                await self.handle(error, expectedEpoch: token)
+                if !Self.isTerminal(error) { self.scheduleRetry(token) }
+            }
         }
         if epoch == token { backgroundDelivery = enabled }
     }
@@ -432,6 +445,7 @@ final class HealthSyncCoordinator: ObservableObject {
                     guard self.epoch == token else { break }
                     await self.handle(error, expectedEpoch: token)
                     if self.identity == nil { break }
+                    if !Self.isTerminal(error) { self.scheduleRetry(token) }
                     let delay = max(5, self.retryAfter?.timeIntervalSince(self.now()) ?? 5)
                     try? await Task.sleep(for: .seconds(delay))
                 }
@@ -612,38 +626,86 @@ final class HealthSyncCoordinator: ObservableObject {
                 }
                 self.finishWaiters(id, result: .failure(error))
                 await self.handle(error, expectedEpoch: token)
-                // A retired payload lets its failed result and the next payload
-                // proceed now; a transient failure retries the same continuation.
-                if terminal { await self.continueNetwork(token) } else { self.scheduleRetry(token) }
+                // A retired payload is progress; a transient failure only retries.
+                if terminal { if self.epoch == token { self.requestConvergence() } } else { self.scheduleRetry(token) }
             }
             return
         }
         // URLSession's completion barrier waits only for local accounting.
-        // Network work remains separately owned by this epoch and account.
-        Task { @MainActor [weak self] in await self?.continueNetwork(token) }
+        // Network work belongs to the convergence owner of this epoch.
+        if epoch == token { requestConvergence() }
     }
 
-    /// The single network continuation after local upload accounting. Result
-    /// delivery and the outbox recover independently: a transient failure in
-    /// one does not skip the other, and one foreground retry resumes both.
-    private func continueNetwork(_ token: UUID) async {
+    /// Starts, or coalesces into, the single convergence pass of the current
+    /// epoch. A task from a retired epoch is never reused.
+    @discardableResult
+    private func requestConvergence() -> Task<Void, Never> {
+        let token = epoch
+        if let convergeTask, convergeEpoch == token {
+            convergeAgain = true
+            return convergeTask
+        }
+        convergeAgain = false
+        convergeEpoch = token
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            repeat {
+                self.convergeAgain = false
+                await self.convergencePass(token)
+            } while self.convergeAgain && self.epoch == token && !Task.isCancelled
+            if self.convergeEpoch == token {
+                self.convergeTask = nil
+                self.convergeEpoch = nil
+            }
+        }
+        convergeTask = task
+        return task
+    }
+
+    private func retireConvergence() {
+        convergeTask?.cancel()
+        convergeTask = nil
+        convergeEpoch = nil
+        convergeAgain = false
+        manifestDue = true
+    }
+
+    /// Foreground polling first, then the due manifest, unready reservations,
+    /// results and the outbox. Lost authority stops the pass; transient failures
+    /// are recorded, later steps still run, and one retry is scheduled at the end.
+    private func convergencePass(_ token: UUID) async {
         guard networkAuthorized(token) else { return }
         var transient = false
-        do { try await sendResults() } catch {
-            await handle(error, expectedEpoch: token)
-            transient = !Self.isTerminal(error)
+        if foreground { beginPolling() }
+        if manifestDue {
+            // The setup manifest from pairing does not clear this.
+            do {
+                try await manifest()
+                if epoch == token { manifestDue = false }
+            } catch { transient = await recordFailure(error, token) || transient }
+            guard networkAuthorized(token) else { return }
         }
-        // A revoked, suspended, paused or replaced connection takes no second action.
+        if let store {
+            for reservation in Array(store.state.completed.values) where !reservation.ready {
+                do { _ = try await synchronize(requestID: reservation.id, waitForUpload: false) }
+                catch { transient = await recordFailure(error, token) || transient }
+                guard networkAuthorized(token) else { return }
+            }
+        }
+        do { try await sendResults() } catch { transient = await recordFailure(error, token) || transient }
         guard networkAuthorized(token) else { return }
-        do { try await drainUploads() } catch {
-            await handle(error, expectedEpoch: token)
-            transient = transient || !Self.isTerminal(error)
-        }
-        if transient { scheduleRetry(token) }
+        do { try await drainUploads() } catch { transient = await recordFailure(error, token) || transient }
+        if transient, networkAuthorized(token) { scheduleRetry(token) }
+    }
+
+    /// Applies the existing error policy and reports whether the failure is transient.
+    private func recordFailure(_ error: Error, _ token: UUID) async -> Bool {
+        await handle(error, expectedEpoch: token)
+        return !Self.isTerminal(error)
     }
 
     private func networkAuthorized(_ token: UUID) -> Bool {
-        epoch == token && (try? requireAccount()) != nil && store?.state.suspended != true
+        epoch == token && !authorizationPaused && (try? requireAccount()) != nil && store?.state.suspended != true
     }
 
     private func finishWaiters(_ id: String, result: Result<Void, Error>) {
@@ -703,15 +765,13 @@ final class HealthSyncCoordinator: ObservableObject {
             notice = status == 426 || error.code == "contract_unsupported" ? "health.update_required" : "health.connection_failed"
             try? store?.update { $0.suspended = true }
             reader.stopObserving()
-            setBackground()
-            retryTask?.cancel()
-            retryTask = nil
+            stopForegroundWork()
         } else if case .http(let status, _, let delay) = error, [429, 503].contains(status) {
             retryAfter = now().addingTimeInterval(max(1, delay ?? 30))
         }
     }
 
-    /// One coalesced foreground retry of the network continuation, never before
+    /// The single foreground retry slot for every transient failure, never before
     /// Retry-After. Background recovery waits for existing system events.
     private func scheduleRetry(_ token: UUID) {
         guard retryTask == nil, foreground, networkAuthorized(token) else { return }
@@ -720,7 +780,7 @@ final class HealthSyncCoordinator: ObservableObject {
             try? await Task.sleep(for: .seconds(max(5, self.retryAfter?.timeIntervalSince(self.now()) ?? 30)))
             guard !Task.isCancelled, self.epoch == token else { return }
             self.retryTask = nil
-            await self.continueNetwork(token)
+            self.requestConvergence()
         }
     }
 
@@ -744,14 +804,13 @@ final class HealthSyncCoordinator: ObservableObject {
         authorizationPaused = false
         authorizationResumePending = false
         authorizationResumeID = nil
+        retireConvergence()
         reader.stopObserving()
         uploader.invalidate()
-        setBackground()
+        stopForegroundWork()
         syncTask?.cancel()
         syncTask = nil
         syncID = nil
-        retryTask?.cancel()
-        retryTask = nil
         for id in Array(uploadWaiters.keys) { finishWaiters(id, result: .failure(HealthSyncError.code("connection_changed"))) }
         cleanupPending = true
         let cleanupStore = store ?? (try? HealthDeviceStore(directory: directory))
