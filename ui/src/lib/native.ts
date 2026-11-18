@@ -19,15 +19,19 @@ export type NativePushSubscription = {
   keys: { p256dh: string; auth: string };
 };
 export type NativePushRevokeState = 'active' | 'absent' | 'pending';
+/** iOS's notification permission for the App. Older shells don't say. */
+export type NativePushPermission = 'granted' | 'notDetermined' | 'denied';
 export type NativePushStatus =
   | {
       state: 'unavailable' | 'off';
       revokeState?: NativePushRevokeState;
       endpoint?: string;
+      permission?: NativePushPermission;
     }
   | ({
       state: 'on';
       revokeState?: NativePushRevokeState;
+      permission?: NativePushPermission;
     } & NativePushSubscription);
 
 export type NativeDirectPreference = 'tunnel' | 'direct';
