@@ -181,7 +181,8 @@ def test_a_bot_message_has_no_callback_and_tells_the_bot_where_to_report(home, c
     lines = prepared.render("Review the login flow.", SimpleNamespace(include_time_info=False)).splitlines()
     assert lines == [
         f"[Harness: agent run {stored['id']} from @<bot:main>]",
-        "[When the work is done or you need a decision, you can report to @<bot:main> with "
+        "[Write back when the work is done, when you need a decision, or when a problem changes the plan; "
+        "not for progress. Open with which of the three it is. Report to @<bot:main> with "
         "`vibe agent run --bot main --message ...`.]",
         "Review the login flow.",
     ]

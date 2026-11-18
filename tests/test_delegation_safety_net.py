@@ -236,7 +236,7 @@ def test_no_reply_delivery_provenance_survives_queued_merge_and_acceptance(harne
         for run in runs
     ]
     assert harness_hint(sources[0], receiver="sesB") == "No reply needed."
-    assert "report to #sesD" in harness_hint(sources[1], receiver="sesB")
+    assert "Report to #sesD" in harness_hint(sources[1], receiver="sesB")
     assert _pair(h) is None and _pair(h, sender="sesD") is not None
 
 

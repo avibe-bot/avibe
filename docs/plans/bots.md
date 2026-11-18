@@ -122,8 +122,10 @@ own. A Session has none of these; a Bot has all three.
   shaped delivery machinery.
 - **Progressive disclosure, not system prompt guidance.** The line after a
   dispatched Run's `[Harness: ...]` label says where an answer goes: when the
-  receiver may need to answer, it says `When the work is done or you need a
-  decision, you can report to X with ...`; a sender-Session's own dispatched
+  receiver may need to answer, it says `Write back when the work is done, when
+  you need a decision, or when a problem changes the plan; not for progress.
+  Open with which of the three it is. Report to X with ...` (owner-approved
+  wording, 2026-11-18); a sender-Session's own dispatched
   work keeps the PREFIX suppression rule. `--no-reply` is only for an existing
   Session or Bot and changes the line to `[No reply needed.]`; it opens no
   delegation and sends no read receipt. It rejects `--sync` and new/forked
@@ -453,6 +455,11 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
   it learned), rewritten rather than appended. An agreement is recorded with
   its reason, and when it or the way of working costs the user more than it
   saves, the Bot says so with evidence and proposes the change.
+- Briefs and talking to the user (owner-approved wording, 2026-11-18): a
+  brief says what the Session may decide without the Bot; when the user
+  writes while the Bot is working, it answers them first; and a message to
+  the user waits for the next one unless it changes what they will do or
+  decide. These sit in "Handing out work".
 - The main Bot's own section keeps only what is the main Bot's: the user's
   first point of contact who sees everything, talking things through and
   deciding with the user, a lead Session per lasting Project, suggesting a Bot
@@ -760,9 +767,9 @@ complete is still reported (D4, D14). Successful callbacks are retired.
 
 ```markdown
 ## Handing out work
-You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that needs getting done goes to a Session, in a Project that fits how long the matter will last. When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it yourself. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer to a Session. Follow each matter through to the end.
+You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that needs getting done goes to a Session, in a Project that fits how long the matter will last. When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it yourself. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer to a Session. Follow each matter through to the end. When the user writes while you are working, answer them before anything else. Before sending them a message, ask whether it changes what they will do or decide; if not, keep it for your next message.
 
-`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. In a brief, say what the Session may decide without you. Give it a model that suits the work with `--model` and `--reasoning-effort`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
 The Sessions you dispatch are told how to report; if one handles your message without writing back, Avibe sends you a read receipt with its last reply, and following up is yours when you were waiting on it. A run that fails, is canceled, or is interrupted still sends an immediate notice. Use `--no-reply` for informational work that needs neither a delegation nor a receipt. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
 ```
