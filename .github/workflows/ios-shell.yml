@@ -198,7 +198,11 @@ jobs:
           security import p.p12 -k probe.keychain-db -P probe -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k probe probe.keychain-db >/dev/null
           security list-keychains -d user -s "$work/probe.keychain-db" $(security list-keychains -d user | tr -d '"')
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain c.pem || true
+          # codesign uses only a trusted identity: trust the throwaway root
+          # for code signing system-wide on this ephemeral runner.
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -p basic -k /Library/Keychains/System.keychain c.pem
+          security verify-cert -c c.pem -p codeSign || true
+          security find-identity -v -p codesigning || true
           security find-identity -p codesigning "$work/probe.keychain-db"
           security find-identity "$work/probe.keychain-db" || true
           # The self-signed identity is not "valid" for find-identity's
