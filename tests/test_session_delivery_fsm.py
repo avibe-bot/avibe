@@ -9032,6 +9032,24 @@ def test_startup_recovery_reads_growing_tables_only_through_index_seeks(tmp_path
 
 
 @pytest.mark.anyio
+async def test_unlinked_turn_end_never_enters_successor_write_transaction(managers, monkeypatch):
+    manager, *_ = managers
+    turn_id, _ = await _activate(manager)
+    monkeypatch.setattr(manager, "_runtime_start_owner", Mock(side_effect=AssertionError("looked for a replacement")))
+    assert await manager._resume_linked_control_successor("ses_fsm", turn_id) is None
+
+
+def test_control_predecessor_lookup_seeks_both_link_ids(managers):
+    _, _, engine, *_ = managers
+    with engine.connect() as conn:
+        plan = conn.exec_driver_sql(
+            "EXPLAIN QUERY PLAN SELECT id FROM session_turns WHERE control_successor_turn_id=? "
+            "AND control_successor_delivery_id=? LIMIT 2", ("turn", "delivery"),
+        ).all()
+    assert any("SEARCH" in row[-1] and "control_successor_turn_id=? AND control_successor_delivery_id=?" in row[-1] for row in plan)
+
+
+@pytest.mark.anyio
 async def test_resultless_terminal_run_settlement_lands_off_loop_before_completion(
     managers, monkeypatch,
 ):

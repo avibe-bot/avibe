@@ -591,6 +591,38 @@ async def test_a_command_whose_record_would_be_unreadable_never_starts(tmp_path,
     assert host.meta(job_id)["command"] == command
 
 
+@pytest.mark.parametrize("stop", [False, True])
+async def test_blocked_spawn_allows_heartbeat_and_stop(tmp_path, monkeypatch, stop):
+    import threading
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    spawn = host._spawn
+
+    def slow_spawn(*args):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(2), "loop could not run a heartbeat during job setup"
+        return spawn(*args)
+
+    monkeypatch.setattr(host, "_spawn", slow_spawn)
+    ran = tmp_path / "ran"
+    task = asyncio.create_task(_start(host, tmp_path, f'echo ran > "{ran}"'))
+    await entered.wait()
+    if stop:
+        task.cancel()
+    release.set()
+    if stop:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        job = host.find_job(instance())
+        assert job and not host.started(job) and not ran.exists()
+        assert _wait_until(lambda: _wrapper_gone(host.job_dir(job)))
+    else:
+        job = await task
+        assert (await host.wait(job, deadline_s=5)).state == "exited" and ran.exists()
+
+
 async def test_a_start_cancelled_before_its_decision_abandons_the_wrapper_at_once(tmp_path, monkeypatch):
     """The only await in ``start`` is the wait for the pid: a cancel there abandons the wrapper, so it
     exits now instead of waiting 30 s for a decision, and the command never runs."""

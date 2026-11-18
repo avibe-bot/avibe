@@ -173,6 +173,7 @@ from core.agent_core.messages import (
     usage_to_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult
+from core.loop_watchdog import model_stream_closed, model_stream_opened
 from core.agent_core.tools.paths import read_in_worker, to_thread_joined
 
 T = TypeVar("T")
@@ -1075,6 +1076,7 @@ class Agent:
                 streamed = False
                 terminal = None
                 relieve = False
+                model_stream_opened()
                 try:
                     while True:
                         try:
@@ -1157,9 +1159,12 @@ class Agent:
                         yield terminal, tools
                         return
                 finally:
-                    close = getattr(stream, "aclose", None)
-                    if close is not None:
-                        await self._cleanup(close, stream=True)
+                    try:
+                        close = getattr(stream, "aclose", None)
+                        if close is not None:
+                            await self._cleanup(close, stream=True)
+                    finally:
+                        model_stream_closed()
                 # The attempt is not the run's answer and is never context (invariant 4): it stays in the ledger and
                 # the audit. A retried request goes out again unchanged; one refused as overflow is rebuilt after a
                 # ladder step (section 8).
