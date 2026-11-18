@@ -80,7 +80,7 @@ export function useHealthRequest(id: string, initial?: HealthRequest) {
         // A peer's confirmed terminal supersedes this consumer's queued/error/in-flight read.
         read?.abort();
         clearTimeout(timer);
-        snapshot = { ...snapshot, request: next.request };
+        snapshot = { ...snapshot, request: next.request, known: true, loadError: false };
         publish();
       } else if (active && next?.kind === 'receipt') void refresh();
     });

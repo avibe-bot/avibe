@@ -6,7 +6,7 @@ import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import en from '@/i18n/en.json';
 import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
-import { type HealthRequest } from '@/lib/healthRequests';
+import { connectHealthRequest, observeHealthTerminal, type HealthRequest } from '@/lib/healthRequests';
 import HealthLandingPage, { HealthRequestCard } from './HealthRequest';
 
 const request: HealthRequest = {
@@ -678,5 +678,79 @@ describe('Per-request knowledge independently of the single active attempt', () 
     await act(async () => { resolveNative({ state: 'connected' }); });
     assertReceipt(first, 'connected'); assertReceipt(third, 'connected');
     expect(within(second.container).getByText(en.health.note.canceled)).toBeTruthy();
+  });
+});
+
+describe('Peer terminal adoption after this consumer failed a read', () => {
+  for (const late of ['queued', 'error'] as const) {
+    it.each(['succeeded', 'failed', 'expired', 'canceled'] as const)(`shows only the peer's %s terminal and ignores this consumer's late ${late} read`, async (state) => {
+      vi.useFakeTimers(); const call = installBridge();
+      const a = { ...request };
+      let gets = 0;
+      let resolveOld!: (value: Response) => void;
+      fetchMock.mockImplementation(() => {
+        gets++;
+        if (gets === 1) return Promise.resolve(Response.json({}, { status: 503 }));
+        // This consumer's retry ignores abort, so it can return after the peer's terminal.
+        if (gets === 2) return new Promise<Response>(resolve => { resolveOld = resolve; });
+        return Promise.resolve(Response.json({ ...a, state }));
+      });
+      const failing = mount(<HealthRequestCard request={a} />); await tick();
+      expect(within(failing.container).getByText(en.health.loadError)).toBeTruthy();
+      await tick(3000); expect(gets).toBe(2);
+      const peer = mount(<HealthRequestCard request={a} />); await tick();
+      for (const view of [failing, peer]) {
+        expect(within(view.container).getByText(en.health.note[state])).toBeTruthy();
+        expect(within(view.container).queryByText(en.health.loadError)).toBeNull();
+        expect(within(view.container).queryByRole('button')).toBeNull();
+      }
+      await act(async () => { resolveOld(late === 'queued' ? Response.json(a) : Response.json({}, { status: 503 })); });
+      await tick(30000);
+      expect(within(failing.container).getByText(en.health.note[state])).toBeTruthy();
+      expect(within(failing.container).queryByText(en.health.loadError)).toBeNull();
+      expect(within(failing.container).queryByRole('button')).toBeNull();
+      expect(gets).toBe(3); expect(call).not.toHaveBeenCalled();
+    });
+  }
+});
+
+describe('Visible state across own read, peer knowledge and route activity', () => {
+  type OwnRead = 'unread' | 'live' | 'failed';
+  type PeerKnowledge = 'none' | 'receipt' | 'terminal';
+  const cells: Array<[OwnRead, PeerKnowledge, boolean]> = [];
+  for (const own of ['unread', 'live', 'failed'] as const) {
+    for (const peer of ['none', 'receipt', 'terminal'] as const) {
+      for (const active of [true, false]) cells.push([own, peer, active]);
+    }
+  }
+  it.each(cells)('own %s, peer %s, active %s', async (own, peer, active) => {
+    vi.useFakeTimers(); const call = installBridge();
+    const a = { ...request };
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/mobile/pairings') return Promise.resolve(Response.json({ pairing_code: 'synthetic-code' }));
+      if (own === 'unread') return stalled(init?.signal);
+      return Promise.resolve(own === 'live' ? Response.json(a) : Response.json({}, { status: 503 }));
+    });
+    // The surface reads while visible; an inactive cell is the same consumer after it is hidden.
+    const view = render(activeCard(true, a)); await tick();
+    if (!active) { view.rerender(activeCard(false, a)); await tick(); }
+    if (peer === 'receipt') {
+      // Another consumer's settled Native result, through the document owner it would use.
+      await act(async () => { await connectHealthRequest(a, new AbortController().signal); });
+      expect(call).toHaveBeenCalledTimes(1);
+    }
+    if (peer === 'terminal') await act(async () => { observeHealthTerminal({ ...a, state: 'succeeded' }); });
+    await tick();
+
+    const shown = within(view.container);
+    const expected = peer === 'terminal' ? 'succeeded' : peer === 'receipt' ? 'connected' : 'authorize';
+    expect(shown.getByText(en.health.note[expected])).toBeTruthy();
+    // A confirmed terminal never appears together with an unavailable status.
+    const loadErrorShown = active && own === 'failed' && peer !== 'terminal';
+    expect(shown.queryByText(en.health.loadError) !== null).toBe(loadErrorShown);
+    // Shared receipt or terminal knowledge never opens authorization; only this surface's live read does.
+    const button = shown.queryByRole('button', { name: en.health.authorize }) as HTMLButtonElement | null;
+    expect(button !== null).toBe(peer === 'none');
+    if (button) expect(button.disabled).toBe(!(active && own === 'live'));
   });
 });
