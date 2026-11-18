@@ -109,7 +109,7 @@ class DirectTransportRuntimeManager(ManagedRuntimeManager):
         if manifest is None:
             return None
         if require_public_trial and (manifest.payload.get("provenance") or {}).get("source_sha") != (
-            "855c6daf7f57c55ebb8d1558a0a5e714b6d5bb5e"
+            "578659184dfa38bc87261a6fa832f9b4c65a1c90"
         ):
             # Only the reviewed implementation supports this control protocol.
             return None
