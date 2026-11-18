@@ -530,7 +530,7 @@ final class AppModel: ObservableObject {
             runtimeOpenAttempt?.id == attemptID,
             runtimeOpenAttempt?.runtime == runtime,
             route == .browser(runtime),
-            sessionCoordinator.keepsSelectedRuntime(runtime)
+            sessionCoordinator.isCurrentRuntime(runtime)
         else {
             recordRuntimeReleaseBarrier(
                 controller.invalidateForAccountTransition()
@@ -1611,7 +1611,7 @@ final class AppModel: ObservableObject {
         // itself starts (or any selection-keeping request) does not end it;
         // a reset, a sign-out, an account change, or any other operation
         // does. Direct authorization keeps asking `isCurrentRuntime`.
-        guard sessionCoordinator.keepsSelectedRuntime(runtime) else {
+        guard sessionCoordinator.isCurrentRuntime(runtime) else {
             return false
         }
         if let pendingPushOpened,
@@ -1651,7 +1651,7 @@ final class AppModel: ObservableObject {
             return self.runtimeIdentity == identity
                 && self.runtimeOpenAttempt?.id == identity
                 && self.route == .loading
-                && self.sessionCoordinator.keepsSelectedRuntime(runtime)
+                && self.sessionCoordinator.isCurrentRuntime(runtime)
         }
         Task { [weak self] in
             await directPathController.prepareRoute(
@@ -1667,7 +1667,7 @@ final class AppModel: ObservableObject {
                 // Something newer took the route, or the total budget ended.
                 return
             }
-            guard self.sessionCoordinator.keepsSelectedRuntime(runtime) else {
+            guard self.sessionCoordinator.isCurrentRuntime(runtime) else {
                 self.terminateRuntimeOpen(
                     attemptID: identity,
                     reason: .accountTransition,
@@ -1731,7 +1731,7 @@ final class AppModel: ObservableObject {
                 attemptID: deferred.identity
             ) {
                 deferredOpen = nil
-            } else if !sessionCoordinator.keepsSelectedRuntime(deferred.runtime) {
+            } else if !sessionCoordinator.isCurrentRuntime(deferred.runtime) {
                 // The selection ended underneath; do not leave the spinner
                 // or its attempt alive. A push update in flight (one the open
                 // or the return to the foreground started) keeps it.
