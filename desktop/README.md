@@ -354,7 +354,11 @@ For the same reason it must not use anything of the library: that would put a
 second copy of the module and of its Objective-C classes into the process.
 CI fails if the probe's binary contains any symbol of the library.
 When it fails it prints the last requests for a window and every sandbox
-window that closed, with the rule that closed it. Its reserve deadline is 15
+window that closed, with the rule that closed it, and each stretch of a second
+or more in which the app's main thread did not answer. Hosted runners have
+blocked that thread for about five seconds inside WebKit while a web view or
+its process was being set up; such a stretch is said and is not counted as the
+shell holding a card back, and a card held back without one still fails. Its reserve deadline is 15
 seconds (the shell's is 60), so that a slow moment on a runner does not close
 a window a case is still waiting for; the cases that test the deadline wait
 that long.
