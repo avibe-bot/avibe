@@ -239,7 +239,11 @@ final class AppModel: ObservableObject {
     @Published var runtimePageColorScheme: PageColorScheme?
     /// Advances each time a runtime opens, so the root builds a new runtime
     /// controller even when the same instance is selected again.
-    @Published private(set) var runtimeIdentity = 0
+    @Published private(set) var runtimeIdentity = 0 {
+        // A new or retired runtime has reported no scheme yet: its sheets
+        // follow the system until it does.
+        didSet { runtimePageColorScheme = nil }
+    }
     /// The direct listener faulted in this process. One-way: only a new
     /// launch clears it.
     @Published private(set) var directListenerFault = false

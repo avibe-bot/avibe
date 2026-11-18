@@ -623,8 +623,12 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         }
         overrideUserInterfaceStyle = style
         // In a sheet the grabber and corners belong to the presented
-        // controller, so it takes the same appearance.
-        if startScreen.isSheet, let presented = presentationController?.presentedViewController
+        // controller, so it takes the same appearance; until this page is in
+        // the hierarchy there is no presentation to ask.
+        guard startScreen.isSheet, parent != nil || presentingViewController != nil else {
+            return
+        }
+        if let presented = presentationController?.presentedViewController
             ?? parent?.presentationController?.presentedViewController
         {
             presented.overrideUserInterfaceStyle = style

@@ -2503,6 +2503,14 @@ describe('mobile instance sheet', () => {
       await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
     });
 
+    it('offers Switch instance only on the Account the avatar\'s sheet opens on', async () => {
+      await openSheet();
+      fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long\.address@example\.com/ }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+      // Account pushed from the list has Back to it instead.
+      expect(screen.queryByRole('button', { name: 'mobileApp.account.switch' })).toBeNull();
+    });
+
     it('is the sheet\'s root: Account with Close, and no Back for the edge swipe to press', async () => {
       await openAccountRoot();
       expect(screen.getByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeTruthy();
