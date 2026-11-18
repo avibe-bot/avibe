@@ -300,7 +300,10 @@ const providerErrorKey = (
   provider: SignInProvider,
 ): MobileErrorKey | null => {
   switch (error.code) {
+    // A closed window says nothing; so does an attempt that an account change (a sign-out
+    // elsewhere) ended, since the page follows that change.
     case 'provider_cancelled':
+    case 'stale_session':
       return null;
     case 'provider_unavailable':
       return 'mobileApp.provider.unavailable';
@@ -1796,8 +1799,9 @@ function EmptyInstances({
   errorKey: MobileErrorKey | null;
   /**
    * A Google, GitHub or Apple sign-in in the App just created this account and it has no
-   * instances (Product, 2026-11-18): someone who already had an account may have reached a new
-   * one, so the page says so and offers sign-out. A hint only; it decides nothing.
+   * instances (Product, 2026-11-18): one small grey line after the install hint tells someone who
+   * already had an account how to get back, with sign-out as a text link. Most people here are
+   * new, so the install choices stay the main path. A hint only; it decides nothing.
    */
   newAccount?: boolean;
   signingOut?: boolean;
@@ -1833,20 +1837,6 @@ function EmptyInstances({
           <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRefresh} />
         </div>
       ) : null}
-      {newAccount && !cli && onLogout ? (
-        <div className={cn(raised, 'mb-6 flex flex-col gap-4')}>
-          <p className="text-sm leading-6 text-muted">{t('mobileApp.empty.newAccount')}</p>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={locked}
-            className="w-full rounded-full"
-            onClick={onLogout}
-          >
-            {signingOut ? t('mobileApp.account.signingOut') : t('mobileApp.empty.newAccountSignOut')}
-          </Button>
-        </div>
-      ) : null}
       {cli ? (
         <div className={cn(raised, 'flex flex-col gap-4')}>
           <p className="text-sm leading-6 text-muted">{t('mobileApp.empty.cliBody')}</p>
@@ -1872,7 +1862,23 @@ function EmptyInstances({
         </div>
       ) : (
         <>
-          <p className="mb-6 text-sm leading-7 text-muted">{t('mobileApp.empty.body')}</p>
+          <p className={cn('text-sm leading-7 text-muted', newAccount && onLogout ? 'mb-2' : 'mb-6')}>
+            {t('mobileApp.empty.body')}
+          </p>
+          {newAccount && onLogout ? (
+            <p className="mb-6 text-xs leading-6 text-muted">
+              {t('mobileApp.empty.newAccount')}
+              <Button
+                type="button"
+                variant="link"
+                disabled={locked}
+                className="ml-1 h-auto p-0 align-baseline text-xs"
+                onClick={onLogout}
+              >
+                {signingOut ? t('mobileApp.account.signingOut') : t('mobileApp.empty.newAccountSignOut')}
+              </Button>
+            </p>
+          ) : null}
           <div className="flex flex-col gap-4">
             <button
               type="button"

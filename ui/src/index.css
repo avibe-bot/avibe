@@ -589,9 +589,11 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   /* Elevation and edges (see the @theme entries). Dark separates layers by
      surface lightness: a white hairline and a top highlight, light from above,
      with black shadows that only read below a floating layer. */
-  --provider-button: #131314;
-  --provider-button-foreground: #e3e3e3;
-  --provider-button-border: #8e918f;
+  /* Google's light theme on dark too (its guidelines allow the light, dark or neutral fill on
+     any background), so the three marks weigh the same beside Apple's white. */
+  --provider-button: #ffffff;
+  --provider-button-foreground: #1f1f1f;
+  --provider-button-border: #747775;
   --apple-sign-in: #ffffff;
   --apple-sign-in-foreground: #000000;
   --apple-sign-in-border: transparent;

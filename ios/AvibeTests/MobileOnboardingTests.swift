@@ -909,21 +909,27 @@ final class MobileOnboardingTests: XCTestCase {
 
     func testTheAppOpensOnlyTheControlPlaneLaunchRoute() {
         let controlPlane = MobileControlPlaneConfiguration.productionURL
+        let launch = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA"
         XCTAssertTrue(MobileProviderRoute.isAllowedBrowserURL(
-            URL(string: "https://avibe.bot/api/mobile/auth/browser?launch=abc")!, controlPlane: controlPlane
+            URL(string: "https://avibe.bot/api/mobile/auth/browser?launch=\(launch)")!, controlPlane: controlPlane
         ))
         for raw in [
-            "http://avibe.bot/api/mobile/auth/browser?launch=abc",
-            "https://evil.avibe.bot/api/mobile/auth/browser?launch=abc",
-            "https://avibe.bot:8443/api/mobile/auth/browser?launch=abc",
-            "https://user@avibe.bot/api/mobile/auth/browser?launch=abc",
-            "https://avibe.bot/api/mobile/auth/browser?launch=abc#x",
+            "http://avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://evil.avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://avibe.bot:8443/api/mobile/auth/browser?launch=\(launch)",
+            "https://user@avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://avibe.bot/api/mobile/auth/browser?launch=abc",
+            "https://avibe.bot/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLB",
+            "https://avibe.bot/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA=",
+            "https://avibe.bot:443/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA",
+            "https://avibe.bot/api/mobile/auth/%62rowser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA",
+            "https://avibe.bot/api/mobile/auth/browser?launch=\(launch)#x",
             "https://avibe.bot/api/mobile/auth/browser?launch=",
             "https://avibe.bot/api/mobile/auth/browser",
             "https://avibe.bot/api/mobile/auth/browser?launch=a&launch=b",
             "https://avibe.bot/api/mobile/auth/browser?launch=a&next=/",
-            "https://avibe.bot/api/mobile/auth/browser/?launch=abc",
-            "https://accounts.google.com/o/oauth2/v2/auth?launch=abc",
+            "https://avibe.bot/api/mobile/auth/browser/?launch=\(launch)",
+            "https://accounts.google.com/o/oauth2/v2/auth?launch=\(launch)",
         ] {
             XCTAssertFalse(
                 MobileProviderRoute.isAllowedBrowserURL(URL(string: raw)!, controlPlane: controlPlane), raw
@@ -976,7 +982,7 @@ final class MobileOnboardingTests: XCTestCase {
         let web = FakeWebAuthenticator()
         var openedState: String?
         web.handler = { url, host, path in
-            XCTAssertEqual(url.absoluteString, "http://127.0.0.1:43127/api/mobile/auth/browser?launch=launch-1")
+            XCTAssertEqual(url.absoluteString, "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")
             XCTAssertEqual(host, "127.0.0.1")
             XCTAssertEqual(path, "/mobile/auth/complete")
             return URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(openedState!)")!
@@ -985,7 +991,7 @@ final class MobileOnboardingTests: XCTestCase {
             openedState = state
             return .browser(
                 transactionID: "transaction-1",
-                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=launch-1")!
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
             )
         }
         let fresh = snapshot(accountID: "account-1", instances: [])
@@ -1036,7 +1042,7 @@ final class MobileOnboardingTests: XCTestCase {
                 sentState = state
                 return .browser(
                     transactionID: "transaction-1",
-                    url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=launch-1")!
+                    url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
                 )
             }
             web.handler = { _, _, _ in
@@ -1208,6 +1214,55 @@ final class MobileOnboardingTests: XCTestCase {
         case .failure(let error):
             XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.providerCancelled.code)
         }
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+    }
+
+    // One token-owning operation at a time: while a sign-in window is open, no other sign-in
+    // may start, and the late result of an attempt never touches a newer generation's store.
+    func testAnOpenProviderAttemptHoldsTheCoordinatorAndItsLateResultLeavesTheNewerStore() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        let opened = expectation(description: "window open")
+        var release: CheckedContinuation<URL, Error>?
+        web.handler = { _, _, _ in
+            try await withCheckedThrowingContinuation { continuation in
+                release = continuation
+                opened.fulfill()
+            }
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow()) }
+        await fulfillment(of: [opened], timeout: 30)
+
+        do {
+            _ = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+            XCTFail("A second attempt must not start")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        do {
+            _ = try await coordinator.requestOTP(email: "alex@example.com")
+            XCTFail("An email code must not start either")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        XCTAssertEqual(transport.providerStarts.count, 1)
+
+        // Sign-out wins; the attempt's window is closed, and its own late answer arrives after.
+        web.onCancel = {}
+        _ = try await coordinator.logout()
+        let afterSignOut = store.identifier
+        release?.resume(returning: URL(string: "https://127.0.0.1/mobile/auth/complete?code=late&state=x")!)
+        _ = await attempt.result
+        XCTAssertEqual(store.identifier, afterSignOut)
         XCTAssertTrue(transport.providerExchanges.isEmpty)
     }
 
@@ -5108,7 +5163,7 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
             ? .apple(transactionID: "transaction-1", nonce: "server-nonce")
             : .browser(
                 transactionID: "transaction-1",
-                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=launch-1")!
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
             )
     }
     private(set) var providerStarts: [(provider: MobileSignInProvider, challenge: String, state: String)] = []

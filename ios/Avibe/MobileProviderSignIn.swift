@@ -93,7 +93,7 @@ enum MobileProviderRoute {
             items.count == 1,
             items[0].name == "launch",
             let launch = items[0].value,
-            !launch.isEmpty
+            isCanonicalToken(launch)
         else {
             return false
         }
@@ -160,6 +160,18 @@ enum MobileProviderRoute {
         default:
             return .invalid
         }
+    }
+
+    /// A 32-byte random value in canonical unpadded base64url: exactly 43 characters, the last
+    /// one carrying no unused bits. The contract's launch ticket, transaction id and nonce.
+    static func isCanonicalToken(_ value: String) -> Bool {
+        guard
+            value.utf8.count == 43,
+            value.range(of: #"^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$"#, options: .regularExpression) != nil
+        else {
+            return false
+        }
+        return true
     }
 
     static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
@@ -242,13 +254,17 @@ final class MobileWebAuthenticator: NSObject, MobileWebAuthenticating {
             }
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.pending?.session.cancel()
+                self?.cancel()
             }
         }
     }
 
+    /// A programmatic cancel does not call the session's completion handler, so the attempt
+    /// is finished here as well.
     func cancel() {
-        pending?.session.cancel()
+        guard let pending else { return }
+        pending.session.cancel()
+        finish(pending.session, with: .failure(MobileAccountError.providerCancelled))
     }
 
     static func mappedError(_ error: Error?) -> MobileAccountError {
@@ -363,10 +379,12 @@ extension MobileAppleAuthorizer: ASAuthorizationControllerDelegate {
     ) {
         guard
             let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
-            let identityToken = credential.identityToken.flatMap({ String(data: $0, encoding: .utf8) }),
-            let authorizationCode = credential.authorizationCode.flatMap({ String(data: $0, encoding: .utf8) }),
-            !identityToken.isEmpty,
-            !authorizationCode.isEmpty
+            let tokenData = credential.identityToken,
+            let codeData = credential.authorizationCode,
+            (1...16_384).contains(tokenData.count),
+            (1...4_096).contains(codeData.count),
+            let identityToken = String(data: tokenData, encoding: .utf8),
+            let authorizationCode = String(data: codeData, encoding: .utf8)
         else {
             finish(controller, with: .failure(MobileAccountError.network))
             return

@@ -49,20 +49,22 @@ page only starts them. The owner picked layout B at 13:12:
   labelled for VoiceOver with the full wording: 「使用 Google 继续」,
   「使用 GitHub 继续」, and Apple's own Simplified Chinese title
   「通过 Apple 继续」 / "Continue with Apple".
-- Google and GitHub use Google's sign-in button colours, as on avibe.bot's
-  login card (`provider-button` tokens): light `#FFFFFF` fill, `#747775`
-  outline, `#1F1F1F` mark; dark `#131314`, `#8E918F`, `#E3E3E3`. Apple keeps
-  its HIG styles (`apple-sign-in` tokens): white with a black outline on
-  light, white on dark.
+- Google and GitHub use Google's light sign-in button theme in both
+  appearances (`provider-button` tokens): `#FFFFFF` fill, `#747775` outline,
+  `#1F1F1F` mark; Google allows its light, dark or neutral theme on any
+  background. Apple keeps its HIG styles (`apple-sign-in` tokens): white with
+  a black outline on light, white on dark. So in dark mode all three are
+  white circles of equal weight (Product, 2026-11-18).
 - Unlike the avibe.bot card, where the providers come first, email stays
   first here because the App expects most people to use it (owner: hierarchy
   by expected use).
 - A provider sign-in that did not finish says so in one line above the email
-  button (`welcome/providers-row-error`, proposed); closing the window or
-  sheet says nothing.
+  button (`welcome/providers-row-error`); closing the window or sheet says
+  nothing.
 - An account a provider sign-in in the App just created, with no instances,
-  shows one line and an outline 「退出登录」 above the usual ways to add an
-  instance (`empty/new-account`, proposed; Product's copy, 2026-11-18).
+  shows one small grey line right after the install hint, ending in a text
+  link 「退出登录」 (`empty/new-account`). No card and no button: most people
+  there are new, and the install choices stay the main path.
 
 ## Frame inventory
 
@@ -72,8 +74,8 @@ flow, and `account/long-email` verifies the account wrapping policy.
 
 | File / surface | States |
 | --- | --- |
-| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, `providers-row`, proposed: `providers-row-error` |
-| `empty` | `default` (desktop + CLI choices), `cli`, proposed: `new-account` |
+| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, `providers-row`, `providers-row-error` |
+| `empty` | `default` (desktop + CLI choices), `cli`, `new-account` |
 | `account` | `default`, `no-instance`, `long-email` |
 | `native` | `instance-error`, `window-topbar` |
 | `alignment` — shipped references, no locale suffix | `account-reference`, `error-reference` |

@@ -307,7 +307,7 @@
       "offlineBody": "Start Avibe on that computer and connect it to the internet. Then refresh the list or choose another online instance."
     },
     "empty": {
-      "newAccount": "This account was just created and has no instances yet. If you already have an Avibe account, sign out and sign in the way you did before.",
+      "newAccount": "Already have an Avibe account? This one was just created; sign out and sign in the way you did before.",
       "newAccountSignOut": "Sign out",
       "title": "Bring your work along.",
       "subtitle": "Run on your computer. Connect from your phone.",

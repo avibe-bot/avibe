@@ -1026,7 +1026,10 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             case ("POST", "/api/mobile/auth/start"):
                 let body = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]) ?? [:]
                 if body["provider"] as? String == "apple" {
-                    return .json(#"{"transaction_id":"transaction-apple","nonce":"server-nonce"}"#)
+                    return .json(#"{"transaction_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE","nonce":"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNI"}"#)
+                }
+                if body["state"] as? String == "state-short" {
+                    return .json(#"{"transaction_id":"short","browser_url":"\#(state.baseURL!.absoluteString)api/mobile/auth/browser?launch=x"}"#)
                 }
                 if body["provider"] as? String == "github" {
                     return LocalHTTPResponse(
@@ -1036,7 +1039,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     )
                 }
                 return .json(
-                    #"{"transaction_id":"transaction-google","browser_url":"\#(state.baseURL!.absoluteString)api/mobile/auth/browser?launch=launch-1"}"#
+                    #"{"transaction_id":"GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA","browser_url":"\#(state.baseURL!.absoluteString)api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA"}"#
                 )
             case ("POST", "/api/mobile/auth/exchange"):
                 return LocalHTTPResponse(
@@ -1074,8 +1077,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertEqual(
             google,
             .browser(
-                transactionID: "transaction-google",
-                url: URL(string: "\(baseURL.absoluteString)api/mobile/auth/browser?launch=launch-1")!
+                transactionID: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA",
+                url: URL(string: "\(baseURL.absoluteString)api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
             )
         )
         do {
@@ -1084,11 +1087,17 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         } catch let error as MobileAccountError {
             XCTAssertEqual(error, .providerUnavailable)
         }
+        do {
+            _ = try await transport.providerStart(provider: .google, challenge: "challenge-s", state: "state-short")
+            XCTFail("Expected a non-canonical transaction id to be refused")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .network)
+        }
         let apple = try await transport.providerStart(provider: .apple, challenge: "challenge-a", state: "state-a")
-        XCTAssertEqual(apple, .apple(transactionID: "transaction-apple", nonce: "server-nonce"))
+        XCTAssertEqual(apple, .apple(transactionID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE", nonce: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNI"))
 
         let exchanged = try await transport.providerExchange(
-            transactionID: "transaction-google",
+            transactionID: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA",
             code: "one-time",
             verifier: "verifier-g"
         )
@@ -1101,7 +1110,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertEqual(googleCookies.first(where: { $0.name == "avibe_session" })?.value, "google")
 
         let appleExchanged = try await transport.appleExchange(
-            transactionID: "transaction-apple",
+            transactionID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
             identityToken: "id-token",
             authorizationCode: "auth-code",
             verifier: "verifier-a"
@@ -1111,7 +1120,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let origin = WebOrigin(url: baseURL, requiresHTTPS: false)?.serialized
         let posts = state.requests().filter { $0.method == "POST" }
         XCTAssertEqual(posts.map(\.path), [
-            "/api/mobile/auth/start", "/api/mobile/auth/start", "/api/mobile/auth/start",
+            "/api/mobile/auth/start", "/api/mobile/auth/start", "/api/mobile/auth/start", "/api/mobile/auth/start",
             "/api/mobile/auth/exchange", "/api/mobile/auth/apple",
         ])
         for post in posts {
@@ -1122,10 +1131,10 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any]) as NSDictionary
         }
         XCTAssertEqual(bodies[0], ["provider": "google", "code_challenge": "challenge-g", "state": "state-g"])
-        XCTAssertEqual(bodies[2], ["provider": "apple", "code_challenge": "challenge-a", "state": "state-a"])
-        XCTAssertEqual(bodies[3], ["transaction_id": "transaction-google", "code": "one-time", "code_verifier": "verifier-g"])
-        XCTAssertEqual(bodies[4], [
-            "transaction_id": "transaction-apple",
+        XCTAssertEqual(bodies[3], ["provider": "apple", "code_challenge": "challenge-a", "state": "state-a"])
+        XCTAssertEqual(bodies[4], ["transaction_id": "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA", "code": "one-time", "code_verifier": "verifier-g"])
+        XCTAssertEqual(bodies[5], [
+            "transaction_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
             "identity_token": "id-token",
             "authorization_code": "auth-code",
             "code_verifier": "verifier-a",

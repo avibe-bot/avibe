@@ -906,9 +906,6 @@ final class MobileSessionCoordinator {
                         verifier: secrets.verifier
                     )
                 case (.apple, .apple(let transactionID, let nonce)):
-                    guard !nonce.isEmpty else {
-                        throw MobileAccountError.network
-                    }
                     let credential = try await self.appleAuthorizer.authorize(
                         nonce: MobileAppleNonce.hashed(nonce),
                         state: secrets.state,

@@ -203,12 +203,16 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         guard response.boolean("ok") else {
             throw Self.mappedError(for: .providerStart, response: response)
         }
-        guard let transactionID = response.string("transactionID"), !transactionID.isEmpty else {
+        guard
+            let transactionID = response.string("transactionID"),
+            MobileProviderRoute.isCanonicalToken(transactionID)
+        else {
             throw MobileAccountError.network
         }
         switch provider {
         case .google, .github:
             guard
+                response["nonce"] == nil || response["nonce"] is NSNull,
                 let rawBrowserURL = response.string("browserURL"),
                 let browserURL = URL(string: rawBrowserURL)
             else {
@@ -216,7 +220,11 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             }
             return .browser(transactionID: transactionID, url: browserURL)
         case .apple:
-            guard let nonce = response.string("nonce"), !nonce.isEmpty else {
+            guard
+                response["browserURL"] == nil || response["browserURL"] is NSNull,
+                let nonce = response.string("nonce"),
+                MobileProviderRoute.isCanonicalToken(nonce)
+            else {
                 throw MobileAccountError.network
             }
             return .apple(transactionID: transactionID, nonce: nonce)

@@ -899,10 +899,15 @@ below.
   `apple-app-site-association` authorise it) and
   `prefersEphemeralWebBrowserSession` off, so Safari's Google or GitHub
   sign-in is reused. The callback is read only in its exact shape:
-  `https`, that host and path, no port, userinfo or fragment, `state`
-  equal in constant time, and exactly one of `code` (opaque, at most 4 KiB)
-  or an `error` the App knows; anything else is `invalid_or_expired` and is
-  never exchanged.
+  `https`, that host and path, no port, userinfo or fragment content (the
+  backend may end it with a bare `#` so the browser drops an earlier hop's
+  fragment), `state` equal in constant time, and exactly one of `code`
+  (opaque, at most 4 KiB) or an `error` the App knows; anything else is
+  `invalid_or_expired` and is never exchanged. The answered browser address
+  must carry a canonical 43-character `launch`, and start's `transaction_id`
+  and Apple `nonce` must be canonical too, or nothing opens (`network`).
+  The App has no URL or user-activity handler for the callback path, so an
+  unsolicited callback reaches nothing.
 - The exchange's `204` sets the account cookies in this store; the
   existing `/api/mobile/session` read then decides: signed in, the existing
   two-step gate, or `invalid_or_expired` for `401`. An optional

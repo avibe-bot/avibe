@@ -307,7 +307,7 @@
       "offlineBody": "在这台电脑上启动 Avibe 并连接网络，然后刷新列表，或选择其他在线实例。"
     },
     "empty": {
-      "newAccount": "这是刚新建的账号，里面还没有实例。如果你已经有 Avibe 账号，请退出后用原来的方式登录。",
+      "newAccount": "已经有 Avibe 账号？这是刚新建的账号，请退出后用原来的方式登录。",
       "newAccountSignOut": "退出登录",
       "title": "让电脑与手机相连。",
       "subtitle": "在电脑上运行，从手机上连接",

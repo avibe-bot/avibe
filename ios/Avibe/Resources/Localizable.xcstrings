@@ -39,13 +39,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Use Continue with Apple on the App’s sign-in screen."
+            "value" : "Sign in with Apple on the App’s sign-in screen."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请在 App 的登录页选择「通过 Apple 继续」。"
+            "value" : "请在 App 的登录页用 Apple 登录。"
           }
         }
       }
@@ -605,13 +605,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Use Continue with GitHub on the App’s sign-in screen."
+            "value" : "Sign in with GitHub on the App’s sign-in screen."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请在 App 的登录页选择「使用 GitHub 继续」。"
+            "value" : "请在 App 的登录页用 GitHub 登录。"
           }
         }
       }
@@ -637,13 +637,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Use Continue with Google on the App’s sign-in screen."
+            "value" : "Sign in with Google on the App’s sign-in screen."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请在 App 的登录页选择「使用 Google 继续」。"
+            "value" : "请在 App 的登录页用 Google 登录。"
           }
         }
       }
