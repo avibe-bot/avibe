@@ -1017,12 +1017,24 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
     func testProviderStartAndExchangesPostTheAgreedJSONAndReadTheSessionInThisStore() async throws {
         let state = HTTPFixtureState()
         let sessionJSON = Self.sessionJSON
+        let configs = HTTPFixtureState()
         let server = try LocalHTTPServer { request in
             state.record(request)
             let cookies = request.headers["cookie"] ?? ""
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
-                return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":["apple","google","bogus","google",7]}"#)
+                configs.record(request)
+                // 1: readiness. 2: the list. 3: no list. 4: not an array. 5: unavailable.
+                switch configs.requests().count {
+                case 3:
+                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon"}"#)
+                case 4:
+                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":"google"}"#)
+                case 5:
+                    return LocalHTTPResponse(status: 503, headers: [("Content-Type", "application/json")], body: Data("{}".utf8))
+                default:
+                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":["apple","google","bogus","google",7]}"#)
+                }
             case ("POST", "/api/mobile/auth/start"):
                 let body = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]) ?? [:]
                 if body["provider"] as? String == "apple" {
@@ -1112,6 +1124,20 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertEqual(snapshot.account.email, "alex@example.com")
         let googleCookies = await allCookies(in: dataStore.httpCookieStore)
         XCTAssertEqual(googleCookies.first(where: { $0.name == "avibe_session" })?.value, "google")
+
+        // With an account cookie in the store, the list is still read without it; a missing or
+        // malformed list is none, and an unreadable config is `nil` (the page keeps its list).
+        let withoutList = await transport.advertisedProviders()
+        XCTAssertEqual(withoutList, [])
+        let malformed = await transport.advertisedProviders()
+        XCTAssertEqual(malformed, [])
+        let unavailable = await transport.advertisedProviders()
+        XCTAssertNil(unavailable)
+        let listReads = configs.requests().dropFirst()
+        XCTAssertEqual(listReads.count, 4)
+        for read in listReads {
+            XCTAssertNil(read.headers["cookie"])
+        }
 
         let appleExchanged = try await transport.appleExchange(
             transactionID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",

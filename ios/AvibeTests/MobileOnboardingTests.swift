@@ -1348,6 +1348,24 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(transport.providerExchanges.isEmpty)
     }
 
+    // The advertised list decorates signed-out answers; a slow read never holds them up.
+    func testTheAdvertisedListIsReadWithinItsBoundOrLeftOut() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.advertised = [.github, .apple]
+        let coordinator = makeCoordinator(defaults: makeDefaults(), transports: [transport])
+        coordinator.activateAccountSurface()
+
+        let quick = await coordinator.advertisedProviders(within: 5)
+        XCTAssertEqual(quick, [.github, .apple])
+
+        transport.advertisedDelay = 5_000_000_000
+        let clock = ContinuousClock()
+        let started = clock.now
+        let slow = await coordinator.advertisedProviders(within: 0.05)
+        XCTAssertNil(slow)
+        XCTAssertLessThan(clock.now - started, .seconds(2))
+    }
+
     func testSignInWithProviderAcceptsOnlyGoogleGitHubOrApple() async throws {
         let controller = MobileOnboardingViewController(
             coordinator: makeCoordinator(
@@ -5313,10 +5331,14 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         return try await verifySecondFactorHandler(proof)
     }
 
-    var advertised: [MobileSignInProvider] = []
+    var advertised: [MobileSignInProvider]? = []
+    var advertisedDelay: UInt64 = 0
 
-    func advertisedProviders() async -> [MobileSignInProvider] {
-        advertised
+    func advertisedProviders() async -> [MobileSignInProvider]? {
+        if advertisedDelay > 0 {
+            try? await Task.sleep(nanoseconds: advertisedDelay)
+        }
+        return advertised
     }
 
     func providerStart(

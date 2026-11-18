@@ -1298,7 +1298,7 @@ private final class StandInAccountTransport: MobileAuthTransporting {
         session.map(MobileSessionDiscovery.signedIn)
     }
 
-    func advertisedProviders() async -> [MobileSignInProvider] {
+    func advertisedProviders() async -> [MobileSignInProvider]? {
         []
     }
 

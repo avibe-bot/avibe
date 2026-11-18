@@ -508,8 +508,9 @@ protocol MobileAuthTransporting: AnyObject {
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
     /// The providers avibe.bot's mobile broker accepts now: `mobile_providers`
-    /// in `GET /api/config/auth`. Never throws: anything unreadable is none.
-    func advertisedProviders() async -> [MobileSignInProvider]
+    /// in `GET /api/config/auth` (missing or malformed is none). `nil` when
+    /// the config could not be read at all. Never throws.
+    func advertisedProviders() async -> [MobileSignInProvider]?
     /// `POST /api/mobile/auth/start`: a browser address for Google and GitHub,
     /// the server's nonce for Apple. Throws `providerUnavailable`,
     /// `rate_limited`, or `network`.
@@ -862,10 +863,27 @@ final class MobileSessionCoordinator {
     }
 
     /// The providers Welcome may offer: those avibe.bot advertises for the App
-    /// right now. A display gate only; the broker still decides each attempt.
-    func advertisedProviders() async -> [MobileSignInProvider] {
-        guard let transport else { return [] }
-        return await transport.advertisedProviders()
+    /// right now, or `nil` when that could not be read within `seconds`. A
+    /// display gate only; the broker still decides each attempt. The read
+    /// never holds up the answer it decorates for longer than `seconds`.
+    func advertisedProviders(within seconds: Double) async -> [MobileSignInProvider]? {
+        guard let transport else { return nil }
+        final class Once { var settled = false }
+        let once = Once()
+        return await withCheckedContinuation { continuation in
+            Task { @MainActor in
+                let providers = await transport.advertisedProviders()
+                guard !once.settled else { return }
+                once.settled = true
+                continuation.resume(returning: providers)
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                guard !once.settled else { return }
+                once.settled = true
+                continuation.resume(returning: nil)
+            }
+        }
     }
 
     /// Whether the signed-in account was created by this generation's provider sign-in, as the

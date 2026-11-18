@@ -186,18 +186,19 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         return try decodeDiscovery(response)
     }
 
-    func advertisedProviders() async -> [MobileSignInProvider] {
+    func advertisedProviders() async -> [MobileSignInProvider]? {
         guard
             let response = try? await evaluateJSON(
                 Self.advertisedProvidersScript,
                 operation: .fetchSession,
                 arguments: [:]
             ),
-            response.boolean("ok"),
-            let names = response["providers"] as? [Any]
+            response.boolean("ok")
         else {
-            return []
+            return nil
         }
+        // The server answered: a missing or malformed list means none.
+        let names = response["providers"] as? [Any] ?? []
         // Known names, once each, in the App's own order.
         let advertised = Set(names.compactMap { ($0 as? String).flatMap(MobileSignInProvider.init(rawValue:)) })
         return MobileSignInProvider.allCases.filter(advertised.contains)

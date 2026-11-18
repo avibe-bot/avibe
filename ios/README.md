@@ -876,9 +876,10 @@ below.
 
 - Welcome shows only the providers avibe.bot advertises for the App now:
   `mobile_providers` in `GET /api/config/auth`, read fresh by the hidden
-  transport and added natively to every signed-out session answer as
-  `providers` (known names once each, in the App's order; absent, malformed
-  or empty means email alone). So the App can ship before the broker
+  transport (without cookies) and added natively to a signed-out session
+  answer as `providers` when it answers within 2 s (known names once each,
+  in the App's order; a missing or malformed list means none). An answer
+  without it leaves the page's last list, which starts empty: email alone. So the App can ship before the broker
   serves a provider, and each mark appears when avibe.bot enables it.
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
   `provider` exactly `google`, `github` or `apple`; any other value or an extra key

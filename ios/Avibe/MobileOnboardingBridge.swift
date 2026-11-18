@@ -477,15 +477,18 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
 
     /// A session answer for the page. A signed-in account that this generation's provider
     /// sign-in created carries `new_account: true`, a hint for the empty state only. A
-    /// signed-out answer carries `providers`, the sign-ins avibe.bot offers the App now; Welcome
-    /// shows only those.
+    /// signed-out answer carries `providers`, the sign-ins avibe.bot offers the App now, when
+    /// they could be read within 2 s; Welcome shows only those.
     private func sessionResult(_ state: MobileSessionState) async -> Any {
         var object = state.jsonObject
         switch state {
         case .signedIn where coordinator.accountWasJustCreated:
             object["new_account"] = true
         case .signedOut:
-            object["providers"] = await coordinator.advertisedProviders().map(\.rawValue)
+            // Only a list the server answered in time: otherwise the page keeps what it had.
+            if let providers = await coordinator.advertisedProviders(within: 2) {
+                object["providers"] = providers.map(\.rawValue)
+            }
         default:
             break
         }

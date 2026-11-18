@@ -977,11 +977,15 @@ describe('mobile onboarding', () => {
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithApple' })).toBeNull();
 
-      // A signed-out answer without the list (a failed password sign-in) keeps it.
-      mobile.signInWithProvider.mockResolvedValueOnce({ status: 'signedOut' });
+      // A signed-out answer without the list (its read did not answer in time) keeps it:
+      // sign in with GitHub, then sign out with an answer that names no providers.
+      mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
       fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
-      await waitFor(() => expect(mobile.signInWithProvider).toHaveBeenCalledWith('github'));
-      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeTruthy();
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.title' }));
+      mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.signOut' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeTruthy();
     });
 
     it('AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances', async () => {
