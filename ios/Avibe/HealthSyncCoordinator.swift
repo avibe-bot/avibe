@@ -42,6 +42,8 @@ final class HealthSyncCoordinator: ObservableObject {
     private var uploadingIDs: Set<String> = []
     private var backgroundDelivery = false
     private var pollTask: Task<Void, Never>?
+    // Identifies the loop `pollTask` tracks; a retired loop never clears a newer handle.
+    private var pollID: UUID?
     private var syncTask: Task<[String: String], Error>?
     private var syncID: UUID?
     private var retryTask: Task<Void, Never>?
@@ -186,6 +188,7 @@ final class HealthSyncCoordinator: ObservableObject {
         uploadingIDs.removeAll()
         pollTask?.cancel()
         pollTask = nil
+        pollID = nil
         syncTask?.cancel()
         syncTask = nil
         syncID = nil
@@ -406,6 +409,7 @@ final class HealthSyncCoordinator: ObservableObject {
     private func stopForegroundWork() {
         pollTask?.cancel()
         pollTask = nil
+        pollID = nil
         retryTask?.cancel()
         retryTask = nil
     }
@@ -453,13 +457,22 @@ final class HealthSyncCoordinator: ObservableObject {
     private func beginPolling() {
         guard pollTask == nil, foreground, identity != nil, store?.state.suspended != true else { return }
         let token = epoch
+        let id = UUID()
+        pollID = id
         pollTask = Task { [weak self] in
             guard let self else { return }
-            defer { if self.epoch == token { self.pollTask = nil } }
-            while !Task.isCancelled && self.epoch == token && self.foreground && self.identity != nil {
+            defer {
+                if self.pollID == id {
+                    self.pollTask = nil
+                    self.pollID = nil
+                }
+            }
+            while !Task.isCancelled && self.pollID == id && self.epoch == token
+                    && self.foreground && self.identity != nil {
                 do { try await self.claimAndProcess(requestID: nil, wait: 25) }
                 catch {
-                    guard self.epoch == token else { break }
+                    // A retired loop handles nothing, schedules nothing and does not wait.
+                    guard !Task.isCancelled, self.pollID == id, self.epoch == token else { break }
                     await self.handle(error, expectedEpoch: token)
                     if self.identity == nil { break }
                     if !Self.isTerminal(error) { self.scheduleRetry(token) }
@@ -492,7 +505,9 @@ final class HealthSyncCoordinator: ObservableObject {
                 previous.acknowledged = false
                 try store.update { $0.completed[id] = previous }
                 if !previous.ready { _ = try await synchronize(requestID: id) }
+                try requireCurrent(token)
                 try await drainUploads()
+                try requireCurrent(token)
                 try await sendResults()
                 continue
             }

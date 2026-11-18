@@ -305,6 +305,16 @@ may wait behind a held manifest within the same pass.
 Bootstrap now delivers navigation requested before it completed (notification
 taps and selected-instance links) before awaiting Health restoration.
 
+Task handles are generation-matched. The poll loop records its own identity: a
+loop retired by entering the background, suspension, cleanup or a pause can no
+longer clear the handle of a newer loop, and it handles no error, schedules no
+retry and sends no further request; checks after every await in claim
+processing enforce this. Synchronization and convergence tasks already match
+their own identity or epoch. An upload wait stays bounded at 40 seconds rather
+than cancellable, so durable enqueue work is never abandoned. Each upload ID has
+at most one waiter, because the only wait is for the payload its own
+synchronization has just enqueued.
+
 Existing limits remain: `sendResults` stops at its first failing result, and a
 request the instance purged (404 `request_not_found`) keeps failing on later
 passes. Real system event ordering, background session redelivery timing and
