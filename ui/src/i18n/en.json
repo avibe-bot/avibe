@@ -58,8 +58,6 @@
       "needsPermission": "Computer Use — permission needed",
       "needsPermissionAccessibility": "Computer Use — Accessibility permission needed",
       "needsPermissionScreenRecording": "Computer Use — Screen Recording needed; add Avibe in System Settings",
-      "screenRecordingTitle": "Screen Recording permission needed",
-      "screenRecordingGuide": "Avibe opened System Settings → Privacy & Security → Screen & System Audio Recording. Click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the Screen Recording grant; return to Avibe when it reopens. It will start automatically after both permissions are granted.",
       "needsRuntime": "Computer Use — restart the Avibe service",
       "runtimeUnavailable": "Computer Use — waiting for the Avibe service",
       "runtimeTooOld": "Computer Use — restart the Avibe service",
@@ -3123,7 +3121,19 @@
     "diagnosticUnknown": "Not observed",
     "diagnosticQuicInactive": "Unverified · {{protocol}} active",
     "diagnosticQuicInactiveHelp": "Avibe confirms QUIC only after the active Connector demonstrates it. The Connector is currently using {{protocol}}.",
-    "diagnosticVersion": "{{version}}"
+    "diagnosticVersion": "{{version}}",
+    "direct": {
+      "label": "Direct",
+      "stateReady": "ready",
+      "stateAwaitingPermission": "waiting for permission",
+      "stateDenied": "not permitted",
+      "stateAwaitingCertificate": "waiting for certificate",
+      "stateNotRunning": "not running",
+      "certificate": "Certificate valid until {{date}}",
+      "detail": "{{certificate}} · {{page}}",
+      "pageDirect": "This page's live connection: direct",
+      "pageOther": "This page's live connection: not direct"
+    }
   },
   "models": {
     "eligibility": {
@@ -3623,7 +3633,8 @@
     "openMobileAccount": "Account and Avibes",
     "signOut": "Sign out",
     "signingOut": "Signing out…",
-    "resizeSidebar": "Resize sidebar"
+    "resizeSidebar": "Resize sidebar",
+    "directTag": "Direct"
   },
   "workbench": {
     "eyebrow": "Agent OS",

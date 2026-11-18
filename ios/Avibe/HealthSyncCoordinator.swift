@@ -27,6 +27,10 @@ final class HealthSyncCoordinator: ObservableObject {
     private let now: () -> Date
     private var store: HealthDeviceStore?
     private var identity: HealthDeviceIdentity?
+    // A committed identity owns ACKs across temporary account authorization pauses.
+    private var committedEpoch: UUID?
+    private var uploadEpochs: [String: UUID] = [:]
+    private var authorizationPaused = false
     private var epoch = UUID()
     private var consentContinuation: CheckedContinuation<Bool, Never>?
     private var connecting: UUID?
@@ -123,16 +127,35 @@ final class HealthSyncCoordinator: ObservableObject {
             if let identity, identity.accountID != accountID || !bindingMatches(identity)
                 || (!instances.isEmpty && !instances.contains(identity.instanceID)) {
                 _ = beginCleanup(unregister: true)
+            } else if identity != nil, authorizationPaused {
+                let token = epoch
+                Task { @MainActor [weak self] in
+                    guard let self, self.epoch == token else { return }
+                    self.resumeAuthorizedConnection()
+                }
             }
         }
     }
 
+    private func resumeAuthorizedConnection() {
+        guard authorizationPaused, !restoring, connecting == nil, !cleanupPending,
+              (try? requireAccount()) != nil else { return }
+        authorizationPaused = false
+        let token = epoch
+        Task { @MainActor [weak self] in
+            guard let self, self.epoch == token, self.connecting == nil else { return }
+            await self.resume(foreground: self.foreground)
+        }
+    }
+
     private func pauseAuthority() {
+        authorizationPaused = true
         epoch = UUID()
         reader.stopObserving()
         uploader.invalidate()
         uploadingIDs.removeAll()
-        setBackground()
+        pollTask?.cancel()
+        pollTask = nil
         syncTask?.cancel()
         syncTask = nil
         syncID = nil
@@ -233,6 +256,8 @@ final class HealthSyncCoordinator: ObservableObject {
                 $0.committedDeviceID = candidate.deviceID
             }
             identity = candidate
+            committedEpoch = operationEpoch
+            authorizationPaused = false
             committed = true
             uploader.reconnect()
             let workEpoch = operationEpoch
@@ -286,7 +311,10 @@ final class HealthSyncCoordinator: ObservableObject {
         guard connecting == nil, !restoring else { return }
         restoring = true
         let token = epoch
-        defer { restoring = false }
+        defer {
+            restoring = false
+            resumeAuthorizedConnection()
+        }
         await cleanupTask?.value
         guard epoch == token else { return }
         do {
@@ -316,6 +344,7 @@ final class HealthSyncCoordinator: ObservableObject {
                 return
             }
             guard store?.state.suspended != true else { return }
+            if identity == nil { committedEpoch = token }
             identity = saved
             uploader.reconnect()
             await registerObservers()
@@ -508,14 +537,16 @@ final class HealthSyncCoordinator: ObservableObject {
         // Send one monotonic sequence at a time; background completion advances it.
         if let id = store.state.uploads.first, !uploadingIDs.contains(id) {
             uploadingIDs.insert(id)
+            uploadEpochs[id] = committedEpoch
             do { try await uploader.upload(id: id, file: store.file(id), identity: identity) }
             catch { uploadingIDs.remove(id); throw error }
         }
     }
 
     private func uploadCompleted(id: String, result: Result<[String: Any], Error>) async {
-        guard let store, store.state.uploads.first == id, identity != nil,
-              uploadingIDs.contains(id), (try? requireAccount()) != nil else { return }
+        guard let store, store.state.uploads.first == id, let identity,
+              !cleanupPending, store.state.committedDeviceID == identity.deviceID,
+              let committedEpoch, uploadEpochs[id] == committedEpoch else { return }
         uploadingIDs.remove(id)
         let token = epoch
         do {
@@ -527,6 +558,7 @@ final class HealthSyncCoordinator: ObservableObject {
                 if (data["failures"] as? [[String: Any]])?.isEmpty == true { $0.initialBackfillPending = false }
                 for key in $0.completed.keys where $0.completed[key]?.uploadID == id { $0.completed[key]?.uploadID = nil }
             }
+            uploadEpochs.removeValue(forKey: id)
             finishWaiters(id, result: .success(()))
             try await sendResults()
             try await drainUploads()
@@ -646,6 +678,9 @@ final class HealthSyncCoordinator: ObservableObject {
         connecting = nil
         answerConsent(false)
         identity = nil
+        committedEpoch = nil
+        uploadEpochs.removeAll()
+        authorizationPaused = false
         reader.stopObserving()
         uploader.invalidate()
         setBackground()

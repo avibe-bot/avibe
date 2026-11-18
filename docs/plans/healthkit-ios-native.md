@@ -124,3 +124,45 @@ old bridge expectation that pending upload must return failed. The revised test
 requires connected before logout and still forbids successful request receipts.
 No physical-device, signing, provisioning, installation or release evidence is
 implied. Independent exact-head review and current-head CI remain pending.
+
+## Final integration follow-up (2026-11-18)
+
+Independent review accepted the identity lifecycle candidate, then identified an
+ACK arriving during an account authorization pause that could be discarded. ACK
+bookkeeping now belongs to the committed connection, independently of temporary
+work epochs: the current queue head, committed device marker and captured
+connection epoch must match, and the accepted sequence must equal the stored
+payload sequence. Authorization still gates every subsequent device request and
+result submission. A stale sequence response is not treated as an upload ACK.
+Logout or replacement pairing retires the connection epoch, so an old ACK cannot
+consume a new connection's payload, even when both use the same sequence.
+
+Reauthentication resumes a paused committed connection once, subject to the
+existing epoch, active-connect and restore gates. A real WebKit consumer test
+also checks that an invalidated account's runtime cannot reenter health connect.
+The exact bridge-method set adds only `health.connect`.
+
+The final integration retains master
+`cee7a6e41281d431db28fe269773645088f2deae`, including the Direct rendezvous
+source/transport lifetime and the system-schedule wiring. Its mobile resources
+were regenerated from source with the documented build and license-generation
+commands. The unsigned build-for-testing exited 0.
+
+The complete six-class simulator run executed 358 tests: DirectPath 106,
+HealthSync 41, HealthDataReader 18, MobileOnboarding 85 and SystemSchedule 49
+passed; NavigationPolicy executed 59 with one unexpected failure in
+`testRootViewHandsTheStatusBarToTheSurfaceOnTop`
+(`InvalidTransition`, idle to failed(deinit)). The overall exit was 65. The
+original 345-test result and the integrated result remain separate; rebuilding
+the mobile resources resolved the earlier DirectPath fixture failure, and the
+bridge method-set test now passes without weakening its assertion.
+
+One authorized baseline comparison built that exact master in an independent
+worktree and DerivedData, regenerated its own mobile resources, and ran only the
+same status-bar test on the same iOS 26.4 simulator with the same test options.
+It executed one test, failed once with the identical idle-to-failed(deinit)
+error, and exited 65. The generated bundle inventories matched
+(`9e3f368460eb1438088bbadb39094716faae43f30bfa3181c2e8775c94341883`).
+This establishes a reproducible baseline failure; it does not make the complete
+candidate run green. No product code, assertion or timeout was changed for this
+comparison, and neither run was retried.

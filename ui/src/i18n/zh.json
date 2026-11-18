@@ -58,8 +58,6 @@
       "needsPermission": "电脑操作 — 需要权限",
       "needsPermissionAccessibility": "电脑操作 — 需要辅助功能权限",
       "needsPermissionScreenRecording": "电脑操作 — 需要屏幕录制权限；请在系统设置中添加 Avibe",
-      "screenRecordingTitle": "需要屏幕录制权限",
-      "screenRecordingGuide": "Avibe 已打开“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”。请点击 +，或将 Avibe 拖入列表，然后启用它。获得“屏幕录制”授权后，macOS 可能会退出并重新打开 Avibe；应用重新打开后请返回。两个权限都授权后，应用会自动启动。",
       "needsRuntime": "电脑操作 — 请重启 Avibe 服务",
       "runtimeUnavailable": "电脑操作 — 正在等待 Avibe 服务",
       "runtimeTooOld": "电脑操作 — 请重启 Avibe 服务",
@@ -3123,7 +3121,19 @@
     "diagnosticUnknown": "尚未观测",
     "diagnosticQuicInactive": "未验证 · 当前 {{protocol}}",
     "diagnosticQuicInactiveHelp": "Avibe 只会在当前 Connector 实际使用 QUIC 后确认该路径；当前 Connector 正在使用 {{protocol}}。",
-    "diagnosticVersion": "{{version}}"
+    "diagnosticVersion": "{{version}}",
+    "direct": {
+      "label": "直连",
+      "stateReady": "已就绪",
+      "stateAwaitingPermission": "等待授权",
+      "stateDenied": "未获准",
+      "stateAwaitingCertificate": "等待证书",
+      "stateNotRunning": "未运行",
+      "certificate": "证书有效期至 {{date}}",
+      "detail": "{{certificate}} · {{page}}",
+      "pageDirect": "本页当前连接：直连",
+      "pageOther": "本页当前连接：未走直连"
+    }
   },
   "models": {
     "eligibility": {
@@ -3623,7 +3633,8 @@
     "openMobileAccount": "账号与 Avibe",
     "signOut": "退出登录",
     "signingOut": "正在退出…",
-    "resizeSidebar": "调整侧栏宽度"
+    "resizeSidebar": "调整侧栏宽度",
+    "directTag": "直连"
   },
   "workbench": {
     "eyebrow": "Agent OS",

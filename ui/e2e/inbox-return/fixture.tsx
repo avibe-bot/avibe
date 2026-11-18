@@ -69,7 +69,8 @@ export function Fixture() {
       reply: (id: number) => {
         setSessions((prev) => {
           const row = prev.find((item) => item.session_id === `session-${id}`) ?? makeRow(id);
-          return [{ ...row, preview_text: `A new reply in ${id}.` }, ...prev.filter((item) => item !== row)];
+          // The row carries its new count, as the server's ``inbox.session.updated`` does.
+          return [{ ...row, preview_text: `A new reply in ${id}.`, unread_count: row.unread_count + 1 }, ...prev.filter((item) => item !== row)];
         });
         setUnread((prev) => ({ ...prev, [`session-${id}`]: (prev[`session-${id}`] ?? 0) + 1 }));
       },

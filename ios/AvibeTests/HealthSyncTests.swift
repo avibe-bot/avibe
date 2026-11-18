@@ -927,6 +927,109 @@ final class HealthSyncTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.path))
     }
 
+    @MainActor
+    func testAcknowledgedUploadSurvivesAccountAuthorizationGatesWithoutRetransmission() async throws {
+        for pause in [false, true] {
+            let fixture = try coordinatorFixture()
+            var accountID: String? = "account-1"
+            fixture.coordinator.accountIDProvider = { accountID }
+            let operation = fixture.connect()
+            try await eventually { fixture.coordinator.consent != nil }
+            fixture.coordinator.answerConsent(true)
+            let connected = await operation.value
+            XCTAssertEqual(connected, "connected")
+            try await eventually { fixture.uploader.uploads.count == 1 }
+            let upload = fixture.uploader.uploads[0]
+            accountID = nil
+            if pause { fixture.coordinator.accountEvent(.authorizationUnavailable) }
+            await fixture.uploader.acknowledge(upload)
+            let acknowledged = try HealthDeviceStore(directory: fixture.directory).state
+            XCTAssertTrue(acknowledged.uploads.isEmpty)
+            XCTAssertNil(acknowledged.completed["request-1"]?.uploadID)
+            XCTAssertFalse(acknowledged.completed["request-1"]?.acknowledged ?? true)
+            XCTAssertTrue(fixture.client.results.isEmpty)
+            accountID = "account-1"
+            if pause {
+                fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+            } else { await fixture.coordinator.resume(foreground: false) }
+            try await eventually { fixture.client.results.count == 1 }
+            XCTAssertEqual(fixture.client.results[0]["outcome"] as? String, "succeeded")
+            XCTAssertEqual(fixture.uploader.uploads.count, 1)
+        }
+    }
+
+    @MainActor
+    func testOldConnectionAckCannotConsumeNewConnectionPayloadWithTheSameSequence() async throws {
+        let fixture = try coordinatorFixture()
+        let first = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        _ = await first.value
+        try await eventually { fixture.uploader.uploads.count == 1 }
+        let old = fixture.uploader.uploads[0]
+        await fixture.coordinator.logout()
+        fixture.client.claims = [[claim(token: "new-lease")]]
+        let replacement = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        _ = await replacement.value
+        try await eventually { fixture.uploader.uploads.count == 2 }
+        let current = fixture.uploader.uploads[1]
+        XCTAssertEqual(old.sequence, current.sequence)
+        XCTAssertNotEqual(old.id, current.id)
+        await fixture.uploader.acknowledge(old)
+        let pending = try HealthDeviceStore(directory: fixture.directory).state
+        XCTAssertEqual(pending.uploads, [current.id])
+        XCTAssertEqual(pending.completed["request-1"]?.uploadID, current.id)
+        XCTAssertTrue(fixture.client.results.isEmpty)
+        await fixture.uploader.acknowledge(current)
+        try await eventually { fixture.client.results.count == 1 }
+        XCTAssertEqual(fixture.client.results[0]["outcome"] as? String, "succeeded")
+    }
+
+    @MainActor
+    func testAuthenticatedEventRestartsPausedObserversOnlyOnce() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var accountID: String? = "account-1"
+        fixture.coordinator.accountIDProvider = { accountID }
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertEqual(fixture.reader.starts, 1)
+        accountID = nil
+        fixture.coordinator.accountEvent(.authorizationUnavailable)
+        XCTAssertNil(fixture.reader.observer)
+        accountID = "account-1"
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        try await eventually { fixture.reader.starts == 2 && fixture.client.calls.filter { $0.path.hasSuffix("/manifest") }.count == 2 }
+        XCTAssertNotNil(fixture.reader.observer)
+        XCTAssertEqual(fixture.reader.starts, 2)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    @MainActor
+    func testInvalidatedRuntimeWebViewRejectsHealthConnectAfterAccountTransition() async throws {
+        let server = try LocalHTTPServer { _ in .html("<!doctype html><title>Health fixture</title>") }
+        let baseURL = try await server.start()
+        addTeardownBlock { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        var calls = 0
+        let controller = WebViewController(instanceOrigin: origin, websiteDataStore: .nonPersistent(),
+            healthConnect: { _, _, _ in calls += 1; return "connected" },
+            didStartLoading: {}, didFinishLoading: {}, didFailLoading: {})
+        controller.loadViewIfNeeded()
+        let webView = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
+        webView.load(URLRequest(url: baseURL))
+        try await WebKitReadiness.waitForDocument(in: webView)
+        let script = "return await window.avibeNative.call('health.connect', {requestId:'request-1', pairingCode:'fixture'});"
+        let before = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
+        XCTAssertEqual((before as? [String: String])?["state"], "connected")
+        XCTAssertEqual(calls, 1)
+        _ = controller.invalidateForAccountTransition()
+        let after = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
+        XCTAssertEqual((after as? [String: String])?["state"], "failed")
+        XCTAssertEqual(calls, 1)
+    }
+
     private func temporaryDirectory() throws -> URL {
         var template = Array((NSTemporaryDirectory() + "HealthSyncTests.XXXXXX").utf8CString)
         let path = try XCTUnwrap(mkdtemp(&template))
@@ -1070,7 +1173,9 @@ private final class HealthFakeReader: HealthDataReading {
             metricStates: ["steps": "empty", "activity": "empty", "workouts": "empty", "sleep": "empty"]
         )
     }
+    private(set) var starts = 0
     func startObserving(onChange: @escaping () async -> Void) async -> Bool {
+        starts += 1
         observer = onChange
         return true
     }

@@ -1453,9 +1453,10 @@ final class MobileSessionCoordinator {
     /// push-management request, which the App makes on its own while it
     /// opens, or a refresh of the signed-in account. Any other operation, a
     /// reset, a sign-out, or an account change does not keep it, and neither
-    /// does a changed generation, store, or stored selection. Only the
-    /// runtime WebView's registration asks this; the open itself and direct
-    /// authorization still ask `isCurrentRuntime`.
+    /// does a changed generation, store, or stored selection. The open path
+    /// asks this (the open, route preparation, the release of a held open,
+    /// and the runtime WebView's registration); direct authorization still
+    /// asks `isCurrentRuntime`.
     func keepsSelectedRuntime(_ runtime: MobileRuntimeContext) -> Bool {
         keepsSelection && isSelectedRuntime(runtime)
     }

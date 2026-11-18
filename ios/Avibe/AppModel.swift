@@ -1633,7 +1633,11 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     private func openRuntime(_ runtime: MobileRuntimeContext) -> Bool {
-        guard sessionCoordinator.isSelectedRuntime(runtime) else {
+        // The open path asks `keepsSelectedRuntime`: a push update the open
+        // itself starts (or any selection-keeping request) does not end it;
+        // a reset, a sign-out, an account change, or any other operation
+        // does. Direct authorization keeps asking `isCurrentRuntime`.
+        guard sessionCoordinator.keepsSelectedRuntime(runtime) else {
             return false
         }
         if let pendingPushOpened,
@@ -1673,7 +1677,7 @@ final class AppModel: ObservableObject {
             return self.runtimeIdentity == identity
                 && self.runtimeOpenAttempt?.id == identity
                 && self.route == .loading
-                && self.sessionCoordinator.isSelectedRuntime(runtime)
+                && self.sessionCoordinator.keepsSelectedRuntime(runtime)
         }
         Task { [weak self] in
             await directPathController.prepareRoute(
@@ -1689,7 +1693,7 @@ final class AppModel: ObservableObject {
                 // Something newer took the route, or the total budget ended.
                 return
             }
-            guard self.sessionCoordinator.isSelectedRuntime(runtime) else {
+            guard self.sessionCoordinator.keepsSelectedRuntime(runtime) else {
                 self.terminateRuntimeOpen(
                     attemptID: identity,
                     reason: .accountTransition,
@@ -1753,9 +1757,10 @@ final class AppModel: ObservableObject {
                 attemptID: deferred.identity
             ) {
                 deferredOpen = nil
-            } else if !sessionCoordinator.isSelectedRuntime(deferred.runtime) {
+            } else if !sessionCoordinator.keepsSelectedRuntime(deferred.runtime) {
                 // The selection ended underneath; do not leave the spinner
-                // or its attempt alive.
+                // or its attempt alive. A push update in flight (one the open
+                // or the return to the foreground started) keeps it.
                 deferredOpen = nil
                 retireRuntimeOpenForAccountTransition()
                 stopRuntime()
