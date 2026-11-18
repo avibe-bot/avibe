@@ -246,6 +246,11 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
      asks for more contrast, and its edge is the fill plus `shadow-elevation-0`.
      Every value is a runtime variable re-anchored per palette, like `--card-wash`. */
   --color-edge: var(--edge-border);
+  /* Sign in with Apple keeps Apple's styles (HIG): white with a black outline on light,
+     white on dark, so it weighs the same as the other sign-in buttons. */
+  --color-apple-sign-in: var(--apple-sign-in);
+  --color-apple-sign-in-foreground: var(--apple-sign-in-foreground);
+  --color-apple-sign-in-border: var(--apple-sign-in-border);
   --color-field: var(--field);
   --color-field-hover: var(--field-hover);
   --color-field-edge: var(--field-border);
@@ -580,6 +585,9 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   /* Elevation and edges (see the @theme entries). Dark separates layers by
      surface lightness: a white hairline and a top highlight, light from above,
      with black shadows that only read below a floating layer. */
+  --apple-sign-in: #f5f1e8;
+  --apple-sign-in-foreground: #080812;
+  --apple-sign-in-border: transparent;
   --edge-border: transparent;
   --field-border: transparent;
   --field: rgba(255, 255, 255, 0.05);
@@ -782,6 +790,9 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
 
     /* Elevation and edges (see the @theme entries). Light shadows take the
        brand's deep teal, rgb(10 52 44), instead of grey, under an ink ring. */
+    --apple-sign-in: #ffffff;
+    --apple-sign-in-foreground: #0a0a14;
+    --apple-sign-in-border: #0a0a14;
     --edge-border: transparent;
     --field-border: transparent;
     --field: rgba(8, 8, 18, 0.045);
@@ -937,6 +948,9 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
 
   /* Elevation and edges (see the @theme entries). Light shadows take the
      brand's deep teal, rgb(10 52 44), instead of grey, under an ink ring. */
+  --apple-sign-in: #ffffff;
+  --apple-sign-in-foreground: #0a0a14;
+  --apple-sign-in-border: #0a0a14;
   --edge-border: transparent;
   --field-border: transparent;
   --field: rgba(8, 8, 18, 0.045);

@@ -52,8 +52,8 @@ const LABEL_KEYS = {
 
 /**
  * Google, GitHub and Apple below the email action, as secondary buttons that use avibe.bot's
- * wording. Sign in with Apple keeps Apple's own style: black on light, white on dark
- * (the foreground pair), the same size as the others.
+ * wording. Sign in with Apple keeps Apple's own style: white with a black outline on light, white
+ * on dark (the `apple-sign-in` tokens), the same size and weight as the others.
  * Design: mobile-app/welcome/providers-*.
  */
 export function SignInProviderButtons({
@@ -77,7 +77,7 @@ export function SignInProviderButtons({
             disabled={disabled}
             className={cn(
               'h-11 w-full gap-2 rounded-full text-sm font-medium',
-              apple && 'bg-foreground text-background hover:bg-foreground/90 active:bg-foreground/90',
+              apple && 'border border-apple-sign-in-border bg-apple-sign-in text-apple-sign-in-foreground hover:bg-apple-sign-in/90 active:bg-apple-sign-in/90',
             )}
             onClick={() => onProvider(provider)}
           >
@@ -116,7 +116,7 @@ export function SignInProviderRow({
             aria-label={t(LABEL_KEYS[provider])}
             className={cn(
               'size-12 rounded-full p-0',
-              apple && 'bg-foreground text-background hover:bg-foreground/90 active:bg-foreground/90',
+              apple && 'border border-apple-sign-in-border bg-apple-sign-in text-apple-sign-in-foreground hover:bg-apple-sign-in/90 active:bg-apple-sign-in/90',
             )}
             onClick={() => onProvider(provider)}
           >

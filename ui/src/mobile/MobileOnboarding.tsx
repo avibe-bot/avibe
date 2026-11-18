@@ -505,9 +505,9 @@ export function WelcomeScreen({
   return (
     <CloudScreen>
       <Brand />
-      <div className={cn('relative flex flex-1 flex-col items-center justify-center', compactHero ? 'py-4 [@media(max-height:700px)]:py-1' : 'py-8')}>
+      <div className={cn('relative flex flex-1 flex-col items-center justify-center', compactHero ? 'pt-4 pb-10 [@media(max-height:700px)]:pt-0' : 'py-8')}>
         {/* Short phones (iPhone SE) keep every sign-in button on the first screen. */}
-        <div className={cn('relative grid place-items-center', compactHero ? 'mb-6 size-48 [@media(max-height:700px)]:mb-3 [@media(max-height:700px)]:size-28' : 'mb-8 size-64')}>
+        <div className={cn('relative grid place-items-center', compactHero ? 'mb-6 size-48 [@media(max-height:700px)]:mb-3 [@media(max-height:700px)]:size-20' : 'mb-8 size-64')}>
           <div className="absolute inset-0 rounded-full border border-edge bg-surface/30 shadow-elevation-0" />
           <div className={cn('absolute rounded-full border border-surface/70 bg-surface/30', compactHero ? 'inset-5' : 'inset-6')} />
           <img
@@ -515,7 +515,7 @@ export function WelcomeScreen({
             alt={t('mobileApp.welcome.mascotAlt')}
             className={cn(
               'relative object-contain motion-safe:animate-[mobile-mascot-arrive_var(--motion-spring-smooth-duration)_var(--motion-spring-smooth)_both]',
-              compactHero ? 'size-40 [@media(max-height:700px)]:size-24' : 'size-52',
+              compactHero ? 'size-40 [@media(max-height:700px)]:size-16' : 'size-52',
             )}
           />
           <span className={cn('absolute -right-1 grid size-12 rotate-12 place-items-center rounded-2xl border border-edge bg-surface shadow-elevation-0', compactHero ? 'top-5 [@media(max-height:700px)]:hidden' : 'top-9')}>

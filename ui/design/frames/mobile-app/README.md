@@ -47,12 +47,13 @@ starts them. Contract for these frames:
   accounts in avibe.bot's login-card order and wording (Google, then GitHub, then
   Apple): 「使用 Google 继续」, 「使用 GitHub 继续」, and Apple's own
   Simplified Chinese title 「通过 Apple 继续」 / "Continue with Apple".
-- Sign in with Apple keeps Apple's button style: black on light, white on dark
-  (the `foreground`/`background` pair), at the same size as the other two.
-- Two proposals: `welcome/providers` (A, recommended) draws them as secondary
+- Sign in with Apple keeps Apple's button styles: white with a black outline on
+  light and white on dark (the `apple-sign-in` tokens), at the same size and
+  weight as the other two (Product, 2026-11-18: black read as a second primary).
+- Two proposals: `welcome/providers` (A) draws them as secondary
   buttons and shrinks the hero so the first screen holds every sign-in button at
   390×844 and, with the hero's badges hidden, at 375×667 (`providers-small`);
-  `welcome/providers-row` (B) draws one row of round marks with the same wording
+  `welcome/providers-row` (B, Product's suggestion) draws one row of round marks with the same wording
   as accessible labels and keeps the original hero. The owner chooses one; the
   other is deleted before merge.
 - Unlike the avibe.bot card, where the providers come first, email stays first
