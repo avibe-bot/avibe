@@ -439,7 +439,17 @@ the sandbox's window goes to the browser with every other link.
     the main window is hidden, are each closed without ever being on screen.
     For input, the test sandbox page arms itself half a second after it starts
     running and logs every click and key it receives, and the probe delivers
-    clicks, a Return key and a Command key to the window every 30 ms. No
+    clicks, a key and a Command key to the window every 30 ms, also while
+    the card is not on screen. Each event carries a name the page logs back (a
+    click its place, a key its character and physical key), and the probe
+    records on the main thread when it handed each one over and what the
+    windows read then. Where the card leaves and returns, the check is on
+    when an event was handed over, not on when the page logged it: nothing
+    handed over between the leaving and two seconds after the return may
+    reach the page, some must have been handed then, and anything the page
+    logged that no turn handed over fails. (The page logs an event a moment
+    after the shell took it; judged by the page's time, an event rightly
+    taken just before the card left looked like one taken after.) No
     input may be logged before 0.75 seconds after a card is first displayed
     (with a page that was armed long before it could paint); before 2 seconds
     after the card comes back with the main window, or the user returns from
@@ -449,7 +459,7 @@ the sandbox's window goes to the browser with every other link.
     card as hidden; on the CI runner it did not, so that case is not proven.
     Clicks must be logged afterwards, so the check cannot pass by never
     delivering. For the time an event was made: after both intervals have
-    passed, the probe hands a card a click, a Return key and a Command key
+    passed, the probe hands a card a click, a key and a Command key
     dated a tenth of a second after the card appeared, dated before it
     appeared, and dated zero, and earlier, while the card is not yet live, the
     same three dated an hour ahead; none may be logged; the same three dated

@@ -347,7 +347,10 @@ on macOS 26. The probe plays the Workbench and the sandbox from two loopback
 origins with a disposable data store. It reads back what a window's own views
 draw to check that an opener's page is never displayed, and it delivers clicks
 and keys to the window through the application's own event dispatch to check
-that none reaches a card before the interval is over. It compiles the
+that none reaches a card before the interval is over. Each event carries a
+name the page logs back, and the probe records when it handed each one over,
+so where a card leaves and returns the check is on when an event was handed
+to the window, not on when the page got round to logging it. It compiles the
 module's source file into itself, so the library exports nothing for it, and
 enters one step below the signature check, which no test executable can pass.
 For the same reason it must not use anything of the library: that would put a
