@@ -2,7 +2,7 @@
 name: computer-use
 slug: computer-use
 description: Use Avibe's local Computer Use CLI for carefully bounded desktop observation and actions.
-version: 1.3.0
+version: 1.4.0
 ---
 
 # Computer Use
@@ -75,6 +75,20 @@ once it stops changing or the timeout ends.
 - For virtualized content, the tree and screenshot describe the current viewport,
   not the full document. Scrolling replaces that content: observe and capture
   what you need as you scroll; do not assume earlier rows remain in the tree.
+
+## Unresolved dialogs and Dock targets
+
+Readiness describes observable content. The driver must still prove where an
+input would go. An observation with `observation_only: true` has no action
+tokens or screenshot capture binding. A visible dialog with
+`app_dialog_unresolved` needs manual handling: tell the user that Computer Use
+cannot confirm input would reach only this window, ask them to handle it, and
+observe again afterward. Do not substitute Return/Escape, a pixel click,
+foreground delivery, or a PID-only key for a refused exact-window action.
+
+An explicit Dock target returns `dock_unsupported`. Computer Use cannot control
+the Dock; ask the user to remove an icon by dragging it out manually. Do not
+edit Dock preferences or use another input route to bypass this boundary.
 
 ## SDK cheat-sheet
 

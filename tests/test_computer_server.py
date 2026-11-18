@@ -3175,3 +3175,58 @@ async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
         }
     )
     await upstream.close()
+
+
+@pytest.mark.parametrize("code", [
+    "app_dialog_unresolved", "off_space_or_ax_unresolved",
+])
+@pytest.mark.parametrize("nested", [False, True])
+def test_ownership_refusal_preserves_driver_evidence(code, nested):
+    """CU-TRANSPORT-01: normalize driver envelopes without losing diagnostics."""
+    refusal = {
+        "code": code,
+        "reason": "current-space AX ownership unresolved",
+        "diagnostics": {"ax_windows": {"status": "empty", "count": 0}},
+    }
+    effect = "refused"
+    envelope = {"effect": effect, "pid": 41, "window_id": 9}
+    envelope.update({"refusal": refusal} if nested else refusal)
+    result = _fold_tool_result({"result": {
+        "isError": True,
+        "structuredContent": envelope,
+        "content": [{"type": "text", "text": "Raw driver diagnostic"}],
+    }}, tool_name="click")
+    payload = result["structuredContent"]
+    assert payload["code"] == code
+    assert payload["params"]["pid"] == 41
+    assert payload["params"]["window_id"] == 9
+    assert payload["params"]["effect"] == effect
+    evidence = payload["params"]["refusal"] if nested else payload["params"]
+    assert evidence["reason"] == refusal["reason"]
+    assert evidence["diagnostics"] == refusal["diagnostics"]
+    if code != "off_space_or_ax_unresolved":
+        assert payload["detail"] == (
+            "This dialog is visible, but Computer Use can't confirm that input would reach only this window. Handle it manually, then continue."
+        )
+        assert payload["params"]["driver_detail"] == refusal["reason"]
+    else:
+        assert payload["detail"] == refusal["reason"]
+    # A diagnostic code alone cannot assert that no actuator ran.
+    assert "dispatched" not in payload
+    assert json.loads(result["content"][0]["text"]) == payload
+
+
+def test_ownership_refusal_diagnostics_remain_redacted():
+    result = _fold_tool_result({"result": {
+        "isError": True,
+        "structuredContent": {
+            "refusal": {
+                "code": "app_dialog_unresolved",
+                "reason": "api_key=supersecretvalue123456\nAX lookup failed",
+                "diagnostics": {"errors": ["api_key=supersecretvalue123456"]},
+            },
+        },
+    }})
+    serialized = json.dumps(result)
+    assert "supersecretvalue123456" not in serialized
+    assert "[redacted]" in serialized

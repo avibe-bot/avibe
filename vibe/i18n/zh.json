@@ -968,6 +968,8 @@
         "activeTurnRequired": "Computer Use 要求调用方当前有活动的 Avibe Turn。",
         "computerUseUnavailable": "Computer Use 当前不可用（状态={statusCode}：{status}；原因={reasonCode}：{reason}）。",
         "targetBusy": "请求的 Computer Use 目标正忙，请在当前操作完成后重试。",
+        "appDialogUnresolved": "能看到这个弹窗，但无法确认操作只会作用于它。请手动处理后再继续。",
+        "dockUnsupported": "电脑操作无法控制程序坞。若要移除图标，请手动将它拖出程序坞。",
         "genericDriverError": "Computer Use driver 返回了错误。",
         "invalidDriverArguments": "Computer Use 参数无效。",
         "observeFirst": "发送输入前，请重新观察精确窗口。",

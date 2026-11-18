@@ -20,11 +20,12 @@ pub const COMPUTER_USE_STATE_FILE: &str = "computer-use.json";
 pub const COMPUTER_USE_LOCK_FILE: &str = "computer-use.lock";
 pub const COMPUTER_USE_SOCKET_FILE: &str = "cua-driver.sock";
 pub const COMPUTER_USE_DRIVER_VERSION: &str = "0.31.0";
-pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944";
+pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "45e30d82b6744d334029fae30b350a9e611fe5fe6f90b403126f6a4d819dc456";
 pub const COMPUTER_USE_WINDOWS_TOOL_SNAPSHOT_SHA256: &str =
     "20bfe2c6c205c22e35465706736704f5f8effbab88a1e79357646f556d9a5cad";
 pub const COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256: &[&str] = &[
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
+    "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944",
     "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe",
     "1614e37e369df122b2bb74be4d1c790f304c9325d3b57b301deb62f8c11e8fd6",
     "37b99238c5f59a64ddece25467aa51148ac6267baa928cbb5d3404196d9d4c71",
@@ -936,6 +937,14 @@ mod tests {
         let actual = lower_hex(&Sha256::digest(SNAPSHOT));
         assert_eq!(actual, COMPUTER_USE_TOOL_SNAPSHOT_SHA256);
         assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256.contains(&actual.as_str()));
+        assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256
+            .contains(&"d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944"));
+        for unpublished in [
+            "27d4b76dcc11094eff496d9bb02d64d2b3ae685e563b5f8ae1a843f9626ddd96",
+            "7fb9414763af068eabd1cb4a371c4ee95160879dc693e5104031e41f118c7259",
+        ] {
+            assert!(!COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256.contains(&unpublished));
+        }
         assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256
             .contains(&"f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe"));
         assert!(COMPUTER_USE_APPROVED_TOOL_SNAPSHOT_SHA256

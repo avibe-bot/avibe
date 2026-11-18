@@ -6,7 +6,7 @@ for this variant. The package workflow downloads the pinned source archive,
 verifies its SHA-256, applies the patch recorded in `sources.json`, builds the
 requested macOS target, and records the resulting provenance.
 
-## `avibe-raw-single-click-reopen-v2`
+## `avibe-dialog-diagnostics-v3`
 
 Patch: `patches/0001-macos-raw-single-click.patch`
 
@@ -46,6 +46,25 @@ and global teardown. The default process test keeps the cursor overlay disabled
 so ordinary `cargo test` runs remain hermetic; the overlay-enabled macOS variant
 is ignored and reserved for an explicit logged-in GUI acceptance run.
 
+The C1 addition bounds AX window resolution and retains structured diagnostic
+facts for exact current-Space windows. A known visible dialog whose ownership
+cannot be resolved reports `app_dialog_unresolved`; unknown or off-Space cases
+retain `off_space_or_ax_unresolved`. Recovery is observation-only and grants no
+input authorization: it does not install action ownership, enable click/type,
+retry an actuator, or escalate to foreground or pixels. The existing input
+admission remains authoritative.
+
+Only `get_window_state.description` changes in the managed macOS tool metadata;
+`right_click` and the remaining tool definitions keep their baseline contracts.
+The snapshot is captured from the canonical SDK inventory with desktop
+preparation and cursor disabled, and no registered host tools. The built helper's
+`dump-docs` is checked against all 29 allowed descriptions, input schemas, and
+three emitted annotation hints. It does not expose output schemas, capabilities,
+risk, or open-world hints; those fields come from the full canonical inventory.
+Full native MCP transport capture and live AX/dialog acceptance remain deferred.
+An ad-hoc arm64 metadata artifact is not signed/notarized Desktop acceptance.
+Windows native security acceptance remains the existing Windows CI responsibility.
+
 The upstream investigation found no consumable maintainer-accepted contract
 with these semantics. The relevant discussions are:
 
@@ -80,7 +99,7 @@ patch, whose raw selector stays background-only.
 
 Patch: `patches/0002-windows-security-boundary.patch`
 
-Apply this supplement only to the pinned source **after the complete, unchanged
+Apply this supplement only to the pinned source **after the complete manifest-pinned
 0001 patch**. Production `sources.json`, the Windows tool snapshot, and
 preparation now select the ordered 0001 → 0002 chain; macOS preparation still
 selects 0001 alone. The hosted Windows source-test step explicitly applies both
@@ -147,8 +166,9 @@ provided binary keeps its existing metadata-only runner path.
 This changes the Windows driver build input: the supplement SHA, both manifest
 patch entries, and the snapshot provenance must move together. Tool definitions
 and output schemas are unchanged; native MCP `tools/list` capture remains the
-verification boundary. The source archive and complete macOS 0001 patch remain
-pinned unchanged. A released Windows binary must be rebuilt from this chain;
+verification boundary. The source archive remains pinned; the complete macOS 0001 hash is recorded
+in the ordered manifest chain. The Windows snapshot binds unchanged 0002 because
+C1 changes no Windows tool metadata. A released Windows binary must be rebuilt from this chain;
 Python-only updating does not repair a text-only refusal from an older driver.
 
 ### Known-by-design shared-source scope

@@ -31,6 +31,8 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from core.agent_core.ai.errors import redact_provider_text
+from core.computer_cli import translate_computer_error
+from vibe.i18n import t as i18n_t
 from core.computer_use import (
     COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS,
     ComputerUseState,
@@ -63,8 +65,10 @@ _ADMISSION_RETRY_LIMIT = 1
 # Cua retires a named session after five idle minutes and then refuses every
 # ordinary call for that label before dispatching it; only ``start_session``
 # revives the name. The daemon gate reports it as ``tool_invocation_failed``
-# and the in-tool admission as an unstructured refusal, both with this text.
-_DRIVER_SESSION_ENDED_CODES = frozenset({"tool_invocation_failed", "upstream_tool_error"})
+# and in-tool admission as a nested ``session_ended`` refusal, both with this text.
+_DRIVER_SESSION_ENDED_CODES = frozenset({
+    "tool_invocation_failed", "upstream_tool_error", "session_ended",
+})
 _DRIVER_SESSION_ENDED_DETAIL = "session has ended"
 _SESSION_LIFECYCLE_TOOLS = frozenset(
     {"start_session", "end_session", "get_session", "list_sessions"}
@@ -622,6 +626,18 @@ def _diagnostic_from_content(value: Any) -> str | bytes | None:
     return None
 
 
+def _driver_diagnostic_value(value: Any) -> Any:
+    """Keep diagnostic structure while applying the existing prose redaction."""
+
+    if isinstance(value, str):
+        return _bounded_diagnostic(value) or ""
+    if isinstance(value, dict):
+        return {key: _driver_diagnostic_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_driver_diagnostic_value(item) for item in value]
+    return value
+
+
 def _driver_error_params(value: Mapping[str, Any]) -> dict[str, Any]:
     structured_params = value.get("params")
     params = dict(structured_params) if isinstance(structured_params, dict) else {}
@@ -633,6 +649,9 @@ def _driver_error_params(value: Mapping[str, Any]) -> dict[str, Any]:
             params.pop(key)
         else:
             params[key] = diagnostic
+    for key in ("refusal", "reason", "diagnostics", "pid", "window_id", "effect", "status"):
+        if key in value:
+            params[key] = _driver_diagnostic_value(value[key])
     exit_code = value.get("exit_code")
     if isinstance(exit_code, int) and not isinstance(exit_code, bool):
         params.setdefault("exit_code", exit_code)
@@ -715,18 +734,27 @@ def _fold_tool_result(
         return _error_result("upstream_protocol_error")
     structured = result.pop("structuredContent", None)
     if result.get("isError") is True:
-        if isinstance(structured, dict) and isinstance(structured.get("code"), str):
-            code = structured["code"]
+        refusal = structured.get("refusal") if isinstance(structured, dict) else None
+        error = refusal if isinstance(refusal, dict) else structured
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            code = error["code"]
             detail = (
-                _diagnostic_from_mapping(structured)
+                _diagnostic_from_mapping(error)
+                or _diagnostic_from_mapping(structured)
                 or _diagnostic_from_mapping(structured.get("params"))
                 or _diagnostic_from_content(result.get("content"))
             )
+            params = _driver_error_params(structured)
+            if code == "app_dialog_unresolved":
+                raw_detail = _bounded_diagnostic(detail)
+                if raw_detail:
+                    params["driver_detail"] = raw_detail
+                detail = translate_computer_error({"code": code}, translate=i18n_t)
             return _error_result(
                 code,
                 detail=detail,
                 dispatched=False if structured.get("dispatched") is False else None,
-                result_params=_driver_error_params(structured),
+                result_params=params,
             )
         return _error_result(
             "upstream_tool_error",

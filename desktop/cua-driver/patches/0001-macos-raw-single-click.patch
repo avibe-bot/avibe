@@ -1,6 +1,322 @@
---- a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs	2026-09-30 23:15:43
-+++ b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs	2026-10-30 21:58:30
-@@ -929,12 +929,18 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs
+index 4fa4e14..ec42f9f 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs
+@@ -81,7 +81,13 @@ impl Harness {
+         pointer_oracle: Option<&Path>,
+         keep_ordered_front: bool,
+     ) -> Self {
+-        let harness = Self::spawn(command_oracle, pointer_oracle, keep_ordered_front, None);
++        let harness = Self::spawn(
++            command_oracle,
++            pointer_oracle,
++            keep_ordered_front,
++            None,
++            false,
++        );
+         // Settle for window creation + activation.
+         std::thread::sleep(Duration::from_millis(800));
+         harness.await_presented();
+@@ -91,7 +97,14 @@ impl Harness {
+     /// Launch a harness that holds off entering its run loop for `delay`
+     /// after registering its window, without waiting for its launch posture.
+     fn launch_slowly(delay: Duration) -> Self {
+-        Self::spawn(None, None, false, Some(delay))
++        Self::spawn(None, None, false, Some(delay), false)
++    }
++
++    fn launch_with_raw_click_target() -> Self {
++        let harness = Self::spawn(None, None, false, None, true);
++        std::thread::sleep(Duration::from_millis(800));
++        harness.await_presented();
++        harness
+     }
+ 
+     fn spawn(
+@@ -99,6 +112,7 @@ impl Harness {
+         pointer_oracle: Option<&Path>,
+         keep_ordered_front: bool,
+         launch_delay: Option<Duration>,
++        raw_click_target: bool,
+     ) -> Self {
+         let exe = harness_exe();
+         assert!(
+@@ -122,6 +136,9 @@ impl Harness {
+         if let Some(delay) = launch_delay {
+             command.env("CUA_APPKIT_LAUNCH_DELAY_MS", delay.as_millis().to_string());
+         }
++        if raw_click_target {
++            command.env("CUA_APPKIT_RAW_CLICK_TARGET", "1");
++        }
+         let app = command
+             .spawn()
+             .unwrap_or_else(|error| panic!("launch AppKit harness {exe:?}: {error}"));
+@@ -1646,6 +1663,88 @@ fn harness_appkit_counter_px_background() {
+     );
+ }
+ 
++#[test]
++#[ignore]
++fn harness_appkit_raw_single_click_bypasses_hollow_ax_press() {
++    let case = native_background_case(
++        "appkit",
++        "raw_single_click",
++        Targeting::Px,
++        DriverRoute::MacosCgEventPid,
++    );
++    execute_case(case, |evidence| {
++        let mut driver = McpDriver::spawn_macos_daemon_proxy_named("appkit-raw-single-click")
++            .expect("start macOS daemon proxy");
++        *evidence = recording_evidence(driver.recording_dir());
++        let harness = Harness::launch_with_raw_click_target();
++        let (wid, _) = driver
++            .find_window(harness.pid as i64, "CuaTestHarness AppKit")
++            .expect("find raw click receiver window");
++        let (_, passed) = run_with_background_oracles(
++            &mut driver,
++            TargetWindow {
++                pid: harness.pid,
++                native_id: wid,
++            },
++            |driver| {
++                let pre = snapshot_elements(driver, harness.pid, wid);
++                assert!(pre.tree_text().contains("raw_ax_presses=0"));
++                assert!(pre.tree_text().contains("raw_mouse_downs=0"));
++                assert!(pre.tree_text().contains("raw_mouse_ups=0"));
++                let (x, y, width, height) = element_pixel_frame(&pre, "btn-raw-hit-test");
++
++                let auto = driver.call(
++                    "click",
++                    serde_json::json!({
++                        "pid": harness.pid,
++                        "window_id": wid,
++                        "x": x + width / 2.0,
++                        "y": y + height / 2.0,
++                        "count": 1,
++                        "delivery_mode": "background"
++                    }),
++                );
++                assert!(!auto.is_error(), "default click failed: {}", auto.text());
++                std::thread::sleep(Duration::from_millis(250));
++                let after_auto = snapshot_elements(driver, harness.pid, wid);
++                assert!(
++                    after_auto.tree_text().contains("raw_ax_presses=1")
++                        && after_auto.tree_text().contains("raw_mouse_downs=0")
++                        && after_auto.tree_text().contains("raw_mouse_ups=0"),
++                    "default count=1 click must preserve AX-first behavior:\n{}",
++                    after_auto.tree_text()
++                );
++
++                let raw = driver.call(
++                    "click",
++                    serde_json::json!({
++                        "pid": harness.pid,
++                        "window_id": wid,
++                        "x": x + width / 2.0,
++                        "y": y + height / 2.0,
++                        "button": "left",
++                        "count": 1,
++                        "delivery_mode": "background",
++                        "click_mode": "raw"
++                    }),
++                );
++                assert!(!raw.is_error(), "raw click failed: {}", raw.text());
++                std::thread::sleep(Duration::from_millis(250));
++                let after_raw = snapshot_elements(driver, harness.pid, wid);
++                assert!(
++                    after_raw.tree_text().contains("raw_ax_presses=1")
++                        && after_raw.tree_text().contains("raw_mouse_downs=1")
++                        && after_raw.tree_text().contains("raw_mouse_ups=1"),
++                    "raw count=1 click must deliver exactly one native pair without AX:\n{}",
++                    after_raw.tree_text()
++                );
++            },
++        )
++        .unwrap_or_else(|error| panic!("background desktop contract failed: {error}"));
++        Observation::delivered_with_fixture_state(passed)
++    });
++}
++
+ #[test]
+ #[ignore]
+ fn harness_appkit_right_click_px_foreground() {
+diff --git a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/installed_app_launch_macos_test.rs b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/installed_app_launch_macos_test.rs
+index 525ff4a..8493fd9 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/installed_app_launch_macos_test.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/installed_app_launch_macos_test.rs
+@@ -9,7 +9,7 @@
+ 
+ #![cfg(target_os = "macos")]
+ 
+-use std::process::Command;
++use std::process::{Child, Command, Stdio};
+ use std::thread::sleep;
+ use std::time::{Duration, Instant};
+ 
+@@ -51,6 +51,66 @@ fn activate_bundle(bundle_id: &str) {
+     let _ = osascript(&format!(r#"tell application id "{bundle_id}" to activate"#));
+ }
+ 
++fn set_process_visible(process_name: &str, visible: bool) {
++    let _ = osascript(&format!(
++        r#"tell application "System Events" to set visible of application process "{process_name}" to {visible}"#
++    ));
++}
++
++fn process_visible(process_name: &str) -> Option<bool> {
++    osascript(&format!(
++        r#"tell application "System Events" to visible of application process "{process_name}""#
++    ))
++    .and_then(|value| match value.as_str() {
++        "true" => Some(true),
++        "false" => Some(false),
++        _ => None,
++    })
++}
++
++const TEST_APP_BUNDLE: &str = "com.trycua.harness.appkit";
++const TEST_APP_PROCESS: &str = "CuaTestHarness.AppKit";
++
++struct TestOwnedApp {
++    child: Child,
++    pid: u32,
++}
++
++impl TestOwnedApp {
++    fn launch() -> Self {
++        let app = cua_driver_testkit::harness_app("harness-appkit", "CuaTestHarness.AppKit.app");
++        let executable = app.join("Contents/MacOS/CuaTestHarness.AppKit");
++        assert!(
++            executable.exists(),
++            "required test-owned AppKit fixture is missing at {executable:?}; run the fixture build"
++        );
++        let mut child = Command::new(&executable)
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .spawn()
++            .unwrap_or_else(|error| panic!("launch AppKit fixture {executable:?}: {error}"));
++        let pid = child.id();
++        let deadline = Instant::now() + Duration::from_secs(20);
++        while !cua_driver_testkit::observer::macos::application_presented(pid) {
++            if Instant::now() >= deadline {
++                let _ = child.kill();
++                let _ = child.wait();
++                panic!("AppKit fixture pid {pid} did not finish launching within 20 seconds");
++            }
++            sleep(Duration::from_millis(50));
++        }
++        Self { child, pid }
++    }
++}
++
++impl Drop for TestOwnedApp {
++    fn drop(&mut self) {
++        let _ = self.child.kill();
++        let _ = self.child.wait();
++        sleep(Duration::from_millis(200));
++    }
++}
++
+ fn wait_for_frontmost(bundle_id: &str, timeout: Duration) -> bool {
+     let deadline = Instant::now() + timeout;
+     while Instant::now() < deadline {
+@@ -78,7 +138,11 @@ fn kill_app_process(process_name: &str) {
+     sleep(Duration::from_millis(800));
+ }
+ 
+-fn launch_and_assert_frontmost_unchanged(driver: &mut McpDriver, bundle_id: &str, label: &str) {
++fn launch_and_assert_frontmost_unchanged(
++    driver: &mut McpDriver,
++    bundle_id: &str,
++    label: &str,
++) -> i64 {
+     let before = frontmost_bundle_id();
+     assert_eq!(
+         before.as_deref(),
+@@ -92,8 +156,9 @@ fn launch_and_assert_frontmost_unchanged(driver: &mut McpDriver, bundle_id: &str
+         "{label}: launch_app({bundle_id}) failed: {}",
+         launch.text()
+     );
++    let pid = launch.structured()["pid"].as_i64().unwrap_or(0);
+     assert!(
+-        launch.structured()["pid"].as_i64().unwrap_or(0) > 0,
++        pid > 0,
+         "{label}: launch_app({bundle_id}) returned no pid: {:?}",
+         launch.raw
+     );
+@@ -105,6 +170,7 @@ fn launch_and_assert_frontmost_unchanged(driver: &mut McpDriver, bundle_id: &str
+         Some(FINDER_BUNDLE),
+         "{label}: launch_app({bundle_id}) stole focus; frontmost after launch was {after:?}"
+     );
++    pid
+ }
+ 
+ fn run_launch_case(cell_id: &str, bundle_id: &str, process_name: &str, label: &str) {
+@@ -156,3 +222,59 @@ fn calculator_launch_preserves_finder_frontmost() {
+         "calculator",
+     );
+ }
++
++#[test]
++#[ignore]
++fn appkit_launch_reopens_hidden_running_app_without_focus_steal() {
++    let case = CaseSpec::delivered(
++        "macos-appkit-reopen-hidden",
++        "reopen a hidden running app",
++        "appkit",
++        "launch_app",
++        Targeting::NotApplicable,
++        Delivery::Background,
++        Scope::Desktop,
++        DriverRoute::Composite,
++        vec![OracleKind::Focus, OracleKind::Protocol],
++    );
++    execute_case(case, |evidence| {
++        let app = TestOwnedApp::launch();
++        ensure_finder_frontmost();
++        let mut driver = McpDriver::spawn_macos_daemon_proxy_named("macos-appkit-reopen-hidden")
++            .expect("start installed macOS daemon proxy");
++        *evidence = recording_evidence(driver.recording_dir());
++        driver.start_behavior_recording();
++
++        let pid =
++            launch_and_assert_frontmost_unchanged(&mut driver, TEST_APP_BUNDLE, "initial launch");
++        assert_eq!(
++            pid, app.pid as i64,
++            "launch_app should target the test-owned AppKit fixture"
++        );
++        set_process_visible(TEST_APP_PROCESS, false);
++        assert_eq!(
++            process_visible(TEST_APP_PROCESS),
++            Some(false),
++            "the test-owned AppKit fixture should be hidden before the reopen request"
++        );
++        ensure_finder_frontmost();
++
++        let reopened_pid =
++            launch_and_assert_frontmost_unchanged(&mut driver, TEST_APP_BUNDLE, "reopen");
++        assert_eq!(
++            reopened_pid, app.pid as i64,
++            "reopen should return the recorded test-owned fixture pid"
++        );
++        sleep(Duration::from_millis(1200));
++        assert_eq!(
++            process_visible(TEST_APP_PROCESS),
++            Some(true),
++            "launch_app should make an already-running hidden test app visible"
++        );
++
++        Observation::delivered(
++            vec![OracleKind::Focus, OracleKind::Protocol],
++            Default::default(),
++        )
++    });
++}
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
+index b963748..3525ac8 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
+@@ -929,12 +929,18 @@ mod peer_authentication_tests {
  /// accepts connections, and serves requests until `{"method":"shutdown"}`.
  ///
  /// This is `async` and must be called from a tokio runtime.
@@ -20,7 +336,7 @@
      use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
      use tokio::net::UnixListener;
  
-@@ -993,8 +999,7 @@
+@@ -993,8 +999,7 @@ pub async fn run_serve(
          Some(port) => Some(crate::driver_service_http::start(sdk.clone(), port).await?),
          None => None,
      };
@@ -30,7 +346,7 @@
          tokio::select! {
              result = listener.accept() => {
                  let (stream, _) = result?;
-@@ -1379,13 +1384,29 @@
+@@ -1379,13 +1384,29 @@ pub async fn run_serve(
              }
              _ = &mut shutdown_rx => {
                  eprintln!("Cua Driver daemon shutting down.");
@@ -63,7 +379,7 @@
      }
  
      // Accepted connections may still own SDK/session state after the listener
-@@ -1401,8 +1422,7 @@
+@@ -1401,8 +1422,7 @@ pub async fn run_serve(
      sdk.shutdown()
          .await
          .map_err(|error| anyhow::anyhow!("shut down SDK runtime: {error}"))?;
@@ -73,7 +389,7 @@
  }
  
  #[cfg(target_os = "windows")]
-@@ -1661,7 +1681,7 @@
+@@ -1661,7 +1681,7 @@ pub async fn run_serve(
      sdk: std::sync::Arc<crate::sdk_adapter::SdkAdapter>,
      socket_path: &str,
      pid_file_path: Option<&str>,
@@ -82,7 +398,7 @@
      use std::os::windows::io::AsRawHandle as _;
      use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
      use tokio::net::windows::named_pipe::ServerOptions;
-@@ -2173,7 +2193,7 @@
+@@ -2173,7 +2193,7 @@ pub async fn run_serve(
          .map_err(|error| anyhow::anyhow!("shut down SDK runtime: {error}"))?;
      match fatal_error {
          Some(error) => Err(error),
@@ -91,7 +407,7 @@
      }
  }
  
-@@ -2219,7 +2239,7 @@
+@@ -2219,7 +2239,7 @@ pub async fn run_serve(
      _sdk: std::sync::Arc<crate::sdk_adapter::SdkAdapter>,
      _socket_path: &str,
      _pid_file_path: Option<&str>,
@@ -100,7 +416,7 @@
      anyhow::bail!("cua-driver serve is not supported on this platform");
  }
  
-@@ -2283,9 +2303,19 @@
+@@ -2283,9 +2303,19 @@ pub fn run_serve_cmd(
          }
      };
      let result = rt.block_on(run_serve(sdk, &socket_path, pid_file_path.as_deref()));
@@ -123,7 +439,7 @@
      if let Err(e) = result {
          eprintln!("cua-driver serve error: {e}");
          std::process::exit(1);
-@@ -2568,7 +2598,188 @@
+@@ -2568,6 +2598,187 @@ mod socket_tests {
          drop(first);
      }
  }
@@ -137,7 +453,7 @@
 +    use std::process::{Command, Stdio};
 +    use std::sync::OnceLock;
 +    use std::time::{Duration, Instant};
- 
++
 +    const CHILD_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_CHILD";
 +    const SOCKET_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_SOCKET";
 +    const PID_FILE_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_PID_FILE";
@@ -308,318 +624,14 @@
 +        run_parent_liveness_test(true);
 +    }
 +}
-+
+ 
  #[cfg(all(test, unix))]
  mod gate_tests {
-     //! Ended-session resurrection guard wired into the `call` dispatch.
---- a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs	2026-09-30 23:15:43
-+++ b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs	2026-10-30 21:58:30
-@@ -81,7 +81,13 @@
-         pointer_oracle: Option<&Path>,
-         keep_ordered_front: bool,
-     ) -> Self {
--        let harness = Self::spawn(command_oracle, pointer_oracle, keep_ordered_front, None);
-+        let harness = Self::spawn(
-+            command_oracle,
-+            pointer_oracle,
-+            keep_ordered_front,
-+            None,
-+            false,
-+        );
-         // Settle for window creation + activation.
-         std::thread::sleep(Duration::from_millis(800));
-         harness.await_presented();
-@@ -91,14 +97,22 @@
-     /// Launch a harness that holds off entering its run loop for `delay`
-     /// after registering its window, without waiting for its launch posture.
-     fn launch_slowly(delay: Duration) -> Self {
--        Self::spawn(None, None, false, Some(delay))
-+        Self::spawn(None, None, false, Some(delay), false)
-     }
- 
-+    fn launch_with_raw_click_target() -> Self {
-+        let harness = Self::spawn(None, None, false, None, true);
-+        std::thread::sleep(Duration::from_millis(800));
-+        harness.await_presented();
-+        harness
-+    }
-+
-     fn spawn(
-         command_oracle: Option<&Path>,
-         pointer_oracle: Option<&Path>,
-         keep_ordered_front: bool,
-         launch_delay: Option<Duration>,
-+        raw_click_target: bool,
-     ) -> Self {
-         let exe = harness_exe();
-         assert!(
-@@ -121,6 +135,9 @@
-         }
-         if let Some(delay) = launch_delay {
-             command.env("CUA_APPKIT_LAUNCH_DELAY_MS", delay.as_millis().to_string());
-+        }
-+        if raw_click_target {
-+            command.env("CUA_APPKIT_RAW_CLICK_TARGET", "1");
-         }
-         let app = command
-             .spawn()
-@@ -1648,6 +1665,88 @@
- 
- #[test]
- #[ignore]
-+fn harness_appkit_raw_single_click_bypasses_hollow_ax_press() {
-+    let case = native_background_case(
-+        "appkit",
-+        "raw_single_click",
-+        Targeting::Px,
-+        DriverRoute::MacosCgEventPid,
-+    );
-+    execute_case(case, |evidence| {
-+        let mut driver = McpDriver::spawn_macos_daemon_proxy_named("appkit-raw-single-click")
-+            .expect("start macOS daemon proxy");
-+        *evidence = recording_evidence(driver.recording_dir());
-+        let harness = Harness::launch_with_raw_click_target();
-+        let (wid, _) = driver
-+            .find_window(harness.pid as i64, "CuaTestHarness AppKit")
-+            .expect("find raw click receiver window");
-+        let (_, passed) = run_with_background_oracles(
-+            &mut driver,
-+            TargetWindow {
-+                pid: harness.pid,
-+                native_id: wid,
-+            },
-+            |driver| {
-+                let pre = snapshot_elements(driver, harness.pid, wid);
-+                assert!(pre.tree_text().contains("raw_ax_presses=0"));
-+                assert!(pre.tree_text().contains("raw_mouse_downs=0"));
-+                assert!(pre.tree_text().contains("raw_mouse_ups=0"));
-+                let (x, y, width, height) = element_pixel_frame(&pre, "btn-raw-hit-test");
-+
-+                let auto = driver.call(
-+                    "click",
-+                    serde_json::json!({
-+                        "pid": harness.pid,
-+                        "window_id": wid,
-+                        "x": x + width / 2.0,
-+                        "y": y + height / 2.0,
-+                        "count": 1,
-+                        "delivery_mode": "background"
-+                    }),
-+                );
-+                assert!(!auto.is_error(), "default click failed: {}", auto.text());
-+                std::thread::sleep(Duration::from_millis(250));
-+                let after_auto = snapshot_elements(driver, harness.pid, wid);
-+                assert!(
-+                    after_auto.tree_text().contains("raw_ax_presses=1")
-+                        && after_auto.tree_text().contains("raw_mouse_downs=0")
-+                        && after_auto.tree_text().contains("raw_mouse_ups=0"),
-+                    "default count=1 click must preserve AX-first behavior:\n{}",
-+                    after_auto.tree_text()
-+                );
-+
-+                let raw = driver.call(
-+                    "click",
-+                    serde_json::json!({
-+                        "pid": harness.pid,
-+                        "window_id": wid,
-+                        "x": x + width / 2.0,
-+                        "y": y + height / 2.0,
-+                        "button": "left",
-+                        "count": 1,
-+                        "delivery_mode": "background",
-+                        "click_mode": "raw"
-+                    }),
-+                );
-+                assert!(!raw.is_error(), "raw click failed: {}", raw.text());
-+                std::thread::sleep(Duration::from_millis(250));
-+                let after_raw = snapshot_elements(driver, harness.pid, wid);
-+                assert!(
-+                    after_raw.tree_text().contains("raw_ax_presses=1")
-+                        && after_raw.tree_text().contains("raw_mouse_downs=1")
-+                        && after_raw.tree_text().contains("raw_mouse_ups=1"),
-+                    "raw count=1 click must deliver exactly one native pair without AX:\n{}",
-+                    after_raw.tree_text()
-+                );
-+            },
-+        )
-+        .unwrap_or_else(|error| panic!("background desktop contract failed: {error}"));
-+        Observation::delivered_with_fixture_state(passed)
-+    });
-+}
-+
-+#[test]
-+#[ignore]
- fn harness_appkit_right_click_px_foreground() {
-     run_case(
-         native_foreground_case(
---- a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/installed_app_launch_macos_test.rs	2026-09-30 23:15:43
-+++ b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/installed_app_launch_macos_test.rs	2026-10-30 22:01:25
-@@ -10,6 +10,6 @@
- #![cfg(target_os = "macos")]
- 
--use std::process::Command;
-+use std::process::{Child, Command, Stdio};
- use std::thread::sleep;
- use std::time::{Duration, Instant};
- 
-@@ -51,6 +51,66 @@
-     let _ = osascript(&format!(r#"tell application id "{bundle_id}" to activate"#));
- }
- 
-+fn set_process_visible(process_name: &str, visible: bool) {
-+    let _ = osascript(&format!(
-+        r#"tell application "System Events" to set visible of application process "{process_name}" to {visible}"#
-+    ));
-+}
-+
-+fn process_visible(process_name: &str) -> Option<bool> {
-+    osascript(&format!(
-+        r#"tell application "System Events" to visible of application process "{process_name}""#
-+    ))
-+    .and_then(|value| match value.as_str() {
-+        "true" => Some(true),
-+        "false" => Some(false),
-+        _ => None,
-+    })
-+}
-+
-+const TEST_APP_BUNDLE: &str = "com.trycua.harness.appkit";
-+const TEST_APP_PROCESS: &str = "CuaTestHarness.AppKit";
-+
-+struct TestOwnedApp {
-+    child: Child,
-+    pid: u32,
-+}
-+
-+impl TestOwnedApp {
-+    fn launch() -> Self {
-+        let app = cua_driver_testkit::harness_app("harness-appkit", "CuaTestHarness.AppKit.app");
-+        let executable = app.join("Contents/MacOS/CuaTestHarness.AppKit");
-+        assert!(
-+            executable.exists(),
-+            "required test-owned AppKit fixture is missing at {executable:?}; run the fixture build"
-+        );
-+        let mut child = Command::new(&executable)
-+            .stdout(Stdio::null())
-+            .stderr(Stdio::null())
-+            .spawn()
-+            .unwrap_or_else(|error| panic!("launch AppKit fixture {executable:?}: {error}"));
-+        let pid = child.id();
-+        let deadline = Instant::now() + Duration::from_secs(20);
-+        while !cua_driver_testkit::observer::macos::application_presented(pid) {
-+            if Instant::now() >= deadline {
-+                let _ = child.kill();
-+                let _ = child.wait();
-+                panic!("AppKit fixture pid {pid} did not finish launching within 20 seconds");
-+            }
-+            sleep(Duration::from_millis(50));
-+        }
-+        Self { child, pid }
-+    }
-+}
-+
-+impl Drop for TestOwnedApp {
-+    fn drop(&mut self) {
-+        let _ = self.child.kill();
-+        let _ = self.child.wait();
-+        sleep(Duration::from_millis(200));
-+    }
-+}
-+
- fn wait_for_frontmost(bundle_id: &str, timeout: Duration) -> bool {
-     let deadline = Instant::now() + timeout;
-     while Instant::now() < deadline {
-@@ -81,4 +81,8 @@
--fn launch_and_assert_frontmost_unchanged(driver: &mut McpDriver, bundle_id: &str, label: &str) {
-+fn launch_and_assert_frontmost_unchanged(
-+    driver: &mut McpDriver,
-+    bundle_id: &str,
-+    label: &str,
-+) -> i64 {
-     let before = frontmost_bundle_id();
-     assert_eq!(
-         before.as_deref(),
-@@ -93,7 +97,8 @@
-         launch.text()
-     );
--    assert!(
--        launch.structured()["pid"].as_i64().unwrap_or(0) > 0,
-+    let pid = launch.structured()["pid"].as_i64().unwrap_or(0);
-+    assert!(
-+        pid > 0,
-         "{label}: launch_app({bundle_id}) returned no pid: {:?}",
-         launch.raw
-     );
-@@ -104,5 +109,6 @@
-         Some(FINDER_BUNDLE),
-         "{label}: launch_app({bundle_id}) stole focus; frontmost after launch was {after:?}"
-     );
-+    pid
- }
- 
-@@ -156,3 +159,59 @@
-         "calculator",
-     );
- }
-+
-+#[test]
-+#[ignore]
-+fn appkit_launch_reopens_hidden_running_app_without_focus_steal() {
-+    let case = CaseSpec::delivered(
-+        "macos-appkit-reopen-hidden",
-+        "reopen a hidden running app",
-+        "appkit",
-+        "launch_app",
-+        Targeting::NotApplicable,
-+        Delivery::Background,
-+        Scope::Desktop,
-+        DriverRoute::Composite,
-+        vec![OracleKind::Focus, OracleKind::Protocol],
-+    );
-+    execute_case(case, |evidence| {
-+        let app = TestOwnedApp::launch();
-+        ensure_finder_frontmost();
-+        let mut driver = McpDriver::spawn_macos_daemon_proxy_named("macos-appkit-reopen-hidden")
-+            .expect("start installed macOS daemon proxy");
-+        *evidence = recording_evidence(driver.recording_dir());
-+        driver.start_behavior_recording();
-+
-+        let pid =
-+            launch_and_assert_frontmost_unchanged(&mut driver, TEST_APP_BUNDLE, "initial launch");
-+        assert_eq!(
-+            pid, app.pid as i64,
-+            "launch_app should target the test-owned AppKit fixture"
-+        );
-+        set_process_visible(TEST_APP_PROCESS, false);
-+        assert_eq!(
-+            process_visible(TEST_APP_PROCESS),
-+            Some(false),
-+            "the test-owned AppKit fixture should be hidden before the reopen request"
-+        );
-+        ensure_finder_frontmost();
-+
-+        let reopened_pid =
-+            launch_and_assert_frontmost_unchanged(&mut driver, TEST_APP_BUNDLE, "reopen");
-+        assert_eq!(
-+            reopened_pid, app.pid as i64,
-+            "reopen should return the recorded test-owned fixture pid"
-+        );
-+        sleep(Duration::from_millis(1200));
-+        assert_eq!(
-+            process_visible(TEST_APP_PROCESS),
-+            Some(true),
-+            "launch_app should make an already-running hidden test app visible"
-+        );
-+
-+        Observation::delivered(
-+            vec![OracleKind::Focus, OracleKind::Protocol],
-+            Default::default(),
-+        )
-+    });
-+}
---- a/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs	2026-09-30 23:15:43
-+++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs	2026-10-30 22:04:35
-@@ -122,10 +122,10 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
+index 0903d2a..bb31709 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/mod.rs
+@@ -122,10 +122,10 @@ fn enumerate_running_apps() -> (Vec<AppInfo>, RunningAppStates) {
  /// Replaces a prior `open -g -b` shell-out. The NSWorkspace path:
  ///   * honors `activates = false` so LaunchServices doesn't bring the
  ///     target frontmost,
@@ -634,7 +646,7 @@
  ///   * returns the actual `NSRunningApplication.processIdentifier`
  ///     without needing a separate `list_running_apps` lookup, so we
  ///     can't race a same-bundle-id helper that happens to be running.
-@@ -135,10 +135,7 @@
+@@ -135,10 +135,7 @@ pub fn launch_app(bundle_id: &str) -> anyhow::Result<i32> {
      // NSURL verbatim. Going via a `path` string and back loses the
      // alias/cryptex metadata Safari (and other Cryptex-installed apps)
      // need to relaunch from `/System/Cryptexes/App/...`.
@@ -646,7 +658,7 @@
      let running = nsworkspace::open_application(bundle_id, &cfg)
          .with_context(|| format!("Failed to launch {bundle_id}"))?;
      let pid: i32 = unsafe { running.processIdentifier() };
-@@ -155,14 +152,18 @@
+@@ -155,16 +152,20 @@ pub fn launch_app_by_name(name: &str) -> anyhow::Result<i32> {
      let located = locate_by_name(name)
          .ok_or_else(|| anyhow::anyhow!("Could not locate app with name '{name}'"))?;
      let (app_ref, bid) = located.app_ref_and_bundle_id();
@@ -659,18 +671,22 @@
          .with_context(|| format!("Failed to launch '{name}'"))?;
      let pid: i32 = unsafe { running.processIdentifier() };
      Ok(pid)
-+}
-+
+ }
+ 
 +fn background_launch_config(apple_event_bundle_id: Option<String>) -> nsworkspace::OpenConfig {
 +    nsworkspace::OpenConfig {
 +        apple_event_bundle_id,
 +        ..Default::default()
 +    }
- }
- 
++}
++
  /// Launch a bundle with URL handoff. Mirrors Swift's
---- a/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs	2026-09-30 23:15:43
-+++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs	2026-10-30 22:04:35
+ /// `NSWorkspace.open(urls:withApplicationAt:configuration:)` flow.
+ ///
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs b/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs
+index 7893a01..8e21bed 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/apps/nsworkspace.rs
 @@ -14,15 +14,15 @@
  //!   * `addsToRecentItems = false` (don't pollute the Apple menu)
  //!   * `createsNewApplicationInstance = …`
@@ -691,7 +707,7 @@
  //! `init(eventClass:eventID:targetDescriptor:returnID:transactionID:)`
  //! selector which `objc2-foundation 0.2.2` does not bind natively — we
  //! hand-roll the binding in [`apple_event`] via `extern_methods!`.
-@@ -45,6 +45,7 @@
+@@ -45,6 +45,7 @@ const fn fourcc(s: &[u8; 4]) -> u32 {
  
  const K_CORE_EVENT_CLASS: u32 = fourcc(b"aevt"); // kCoreEventClass
  const K_AE_OPEN_APPLICATION: u32 = fourcc(b"oapp"); // kAEOpenApplication
@@ -699,7 +715,7 @@
  const K_AUTO_GENERATE_RETURN_ID: i16 = -1; // kAutoGenerateReturnID
  const K_ANY_TRANSACTION_ID: i32 = 0; // kAnyTransactionID
  
-@@ -63,12 +64,35 @@
+@@ -63,12 +64,35 @@ pub struct OpenConfig {
      pub environment: std::collections::HashMap<String, String>,
      /// Force a fresh application instance even if one is already running.
      pub creates_new_instance: bool,
@@ -738,7 +754,7 @@
  /// One-shot timeout for the LaunchServices completion handler. A wedged
  /// `open(...)` call returns `Err(LaunchError::Timeout)` instead of hanging
  /// the calling thread forever.
-@@ -99,8 +123,8 @@
+@@ -99,8 +123,8 @@ pub enum LaunchError {
  /// ```
  /// — the URL points to a `.app` bundle, NSWorkspace launches it,
  /// `activates = false` keeps the prior frontmost app on top, and the
@@ -749,7 +765,7 @@
  /// `app_url` may be either:
  ///   * a bundle id (`com.apple.Safari`) — resolved via
  ///     `NSWorkspace.URLForApplicationWithBundleIdentifier`, preserving
-@@ -116,8 +140,12 @@
+@@ -116,8 +140,12 @@ pub fn open_application(
  ) -> Result<Retained<NSRunningApplication>, LaunchError> {
      let ws = unsafe { NSWorkspace::sharedWorkspace() };
      let url = resolve_application_url(&ws, app_url)?;
@@ -763,7 +779,7 @@
  
      let (tx, rx) = std::sync::mpsc::sync_channel::<CompletionResult>(1);
      // NSWorkspace may invoke its completion on another thread; retain atomic
-@@ -152,7 +180,7 @@
+@@ -152,7 +180,7 @@ pub fn open_urls_with_application(
  ) -> Result<Retained<NSRunningApplication>, LaunchError> {
      let ws = unsafe { NSWorkspace::sharedWorkspace() };
      let url = resolve_application_url(&ws, app_url)?;
@@ -772,7 +788,7 @@
      let reconciliation = Reconciliation::new(cfg);
  
      let ns_urls: Vec<Retained<NSURL>> = urls
-@@ -190,7 +218,10 @@
+@@ -190,7 +218,10 @@ pub fn open_urls_with_application(
  ///
  /// Always sets `activates = false` and `addsToRecentItems = false` to match
  /// Swift's background-launch invariant.
@@ -784,7 +800,7 @@
      let config = unsafe { NSWorkspaceOpenConfiguration::configuration() };
      unsafe {
          config.setActivates(false);
-@@ -230,7 +261,7 @@
+@@ -230,7 +261,7 @@ fn build_configuration(cfg: &OpenConfig) -> Retained<NSWorkspaceOpenConfiguratio
  
          if let Some(bid) = &cfg.apple_event_bundle_id {
              if !bid.is_empty() {
@@ -793,18 +809,18 @@
                  config.setAppleEvent(Some(&event));
              }
          }
-@@ -321,6 +352,10 @@
-     fn running_application(&self) -> Option<Retained<NSRunningApplication>> {
+@@ -322,6 +353,10 @@ impl Reconciliation {
          let bundle_id = self.bundle_id.as_deref()?;
          running_application_for_bundle(bundle_id, &self.pids_before_request, self.require_new_pid)
-+    }
+     }
 +
 +    fn target_already_running(&self) -> bool {
 +        !self.pids_before_request.is_empty()
-     }
++    }
  }
  
-@@ -460,7 +495,10 @@
+ fn running_pids_for_bundle(bundle_id: &str) -> HashSet<i32> {
+@@ -460,7 +495,10 @@ fn wait_for_launch_signal<T>(
  
  #[cfg(test)]
  mod tests {
@@ -816,11 +832,10 @@
      use std::collections::HashSet;
      use std::sync::mpsc;
      use std::time::Duration;
-@@ -526,24 +564,45 @@
-             reconciliation_pid(&HashSet::from([100]), &before, false),
+@@ -527,23 +565,44 @@ mod tests {
              Some(100)
          );
-+    }
+     }
 +
 +    #[test]
 +    fn running_existing_app_uses_reopen_event() {
@@ -834,7 +849,7 @@
 +        let event = application_event(false, false);
 +        assert_eq!(event, ApplicationEvent::Open);
 +        assert_eq!(event.code(), K_AE_OPEN_APPLICATION);
-     }
++    }
 +
 +    #[test]
 +    fn new_instance_uses_open_event_even_when_app_is_running() {
@@ -866,7 +881,7 @@
          let target_string = NSString::from_str(bid);
          let target: Retained<NSAppleEventDescriptor> =
              unsafe { NSAppleEventDescriptor::descriptorWithBundleIdentifier(&target_string) };
-@@ -554,7 +613,7 @@
+@@ -554,7 +613,7 @@ mod apple_event {
              let event: Retained<NSAppleEventDescriptor> = msg_send_id![
                  alloc,
                  initWithEventClass: K_CORE_EVENT_CLASS,
@@ -875,9 +890,1162 @@
                  targetDescriptor: &*target,
                  returnID: K_AUTO_GENERATE_RETURN_ID,
                  transactionID: K_ANY_TRANSACTION_ID,
---- a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs	2026-09-30 23:15:43
-+++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs	2026-10-30 21:58:30
-@@ -60,6 +60,26 @@
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+index 4ce13be..9409037 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/bindings.rs
+@@ -82,6 +82,7 @@ extern "C" {
+         timeout_in_seconds: f32,
+     ) -> AXError;
+     pub fn AXUIElementGetTypeID() -> CFTypeID;
++    pub fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
+     pub fn AXIsProcessTrusted() -> bool;
+     /// `AXIsProcessTrustedWithOptions(options)` — when called with
+     /// `{kAXTrustedCheckOptionPrompt: true}` raises the system Accessibility
+@@ -760,6 +761,103 @@ pub unsafe fn copy_ax_windows(element: AXUIElementRef) -> Vec<AXUIElementRef> {
+         .collect()
+ }
+ 
++/// Read-only evidence about an AX element-list query. No content is collected.
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
++pub struct AxWindowsDiagnostics {
++    pub status: String,
++    pub error: Option<i32>,
++    pub raw_count: usize,
++    pub accepted_count: usize,
++}
++
++impl AxWindowsDiagnostics {
++    pub(crate) fn status(status: &str) -> Self {
++        Self {
++            status: status.into(),
++            error: None,
++            raw_count: 0,
++            accepted_count: 0,
++        }
++    }
++}
++
++/// Diagnostic variant for observation only. Action enumeration remains unchanged.
++/// The caller owns every returned reference.
++///
++/// # Safety
++/// `app` must be a live application AX element.
++pub unsafe fn copy_ax_windows_diagnosed(
++    app: AXUIElementRef,
++) -> (Vec<AXUIElementRef>, AxWindowsDiagnostics) {
++    copy_element_list_diagnosed(app, "AXWindows", usize::MAX)
++}
++
++/// Bounded, typed list read. Invalid entries are counted but never cast to AX.
++///
++/// # Safety
++/// `element` must be live; the caller releases every returned reference.
++pub(crate) unsafe fn copy_element_list_diagnosed(
++    element: AXUIElementRef,
++    name: &str,
++    limit: usize,
++) -> (Vec<AXUIElementRef>, AxWindowsDiagnostics) {
++    let attr = CFStr::new(name);
++    let mut value: CFTypeRef = std::ptr::null();
++    let error = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
++    diagnose_element_list(value, error, limit)
++}
++
++/// Consumes the copied CF value, including malformed/error results.
++unsafe fn diagnose_element_list(
++    value: CFTypeRef,
++    error: AXError,
++    limit: usize,
++) -> (Vec<AXUIElementRef>, AxWindowsDiagnostics) {
++    let mut diagnostic = AxWindowsDiagnostics::status("ok");
++    if error != kAXErrorSuccess {
++        if !value.is_null() {
++            CFRelease(value);
++        }
++        diagnostic.status = "api_error".into();
++        diagnostic.error = Some(error);
++        return (vec![], diagnostic);
++    }
++    if value.is_null() {
++        diagnostic.status = "null_value".into();
++        return (vec![], diagnostic);
++    }
++    if core_foundation::base::CFGetTypeID(value) != CFArray::<CFTypeRef>::type_id() {
++        CFRelease(value);
++        diagnostic.status = "wrong_type".into();
++        return (vec![], diagnostic);
++    }
++    let array = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
++    diagnostic.raw_count = array.len() as usize;
++    let mut elements = Vec::new();
++    for index in 0..diagnostic.raw_count.min(limit) {
++        if let Some(item) = array.get(index as _) {
++            let item = *item;
++            if !item.is_null() && core_foundation::base::CFGetTypeID(item) == AXUIElementGetTypeID()
++            {
++                CFRetain(item);
++                elements.push(item as AXUIElementRef);
++            }
++        }
++    }
++    diagnostic.accepted_count = elements.len();
++    diagnostic.status = if diagnostic.raw_count == 0 {
++        "empty"
++    } else if diagnostic.raw_count > limit {
++        "truncated"
++    } else if diagnostic.accepted_count != diagnostic.raw_count {
++        "invalid_entries"
++    } else {
++        "ok"
++    }
++    .into();
++    (elements, diagnostic)
++}
++
+ /// Highest AX element id probed when looking for an off-Space window.
+ /// Window elements are allocated early in an app's lifetime (Calculator's
+ /// main window is id 42); alt-tab-macos probes the same order of magnitude.
+@@ -861,6 +959,50 @@ mod tests {
+     use super::*;
+     use core_foundation::{boolean::CFBoolean, number::CFNumber};
+ 
++    #[test]
++    fn c1_ax_windows_diagnostics_preserve_error_null_type_and_counts() {
++        unsafe {
++            let (elements, diagnostic) = diagnose_element_list(std::ptr::null(), -25204, 128);
++            assert!(elements.is_empty());
++            assert_eq!(diagnostic.status, "api_error");
++            assert_eq!(diagnostic.error, Some(-25204));
++            assert_eq!(
++                diagnose_element_list(std::ptr::null(), 0, 128).1.status,
++                "null_value"
++            );
++
++            let text = CFStr::new("wrong type");
++            CFRetain(text.as_CFTypeRef());
++            assert_eq!(
++                diagnose_element_list(text.as_CFTypeRef(), 0, 128).1.status,
++                "wrong_type"
++            );
++            let array = CFArray::from_CFTypes(&[text]);
++            CFRetain(array.as_CFTypeRef());
++            let (elements, diagnostic) = diagnose_element_list(array.as_CFTypeRef(), 0, 128);
++            assert!(elements.is_empty());
++            assert_eq!(diagnostic.status, "invalid_entries");
++            assert_eq!(diagnostic.raw_count, 1);
++            assert_eq!(diagnostic.accepted_count, 0);
++            assert_eq!(
++                serde_json::to_value(&diagnostic).unwrap()["status"],
++                "invalid_entries"
++            );
++
++            let empty = CFArray::<CFStr>::from_CFTypes(&[]);
++            CFRetain(empty.as_CFTypeRef());
++            assert_eq!(
++                diagnose_element_list(empty.as_CFTypeRef(), 0, 128).1.status,
++                "empty"
++            );
++            CFRetain(array.as_CFTypeRef());
++            assert_eq!(
++                diagnose_element_list(array.as_CFTypeRef(), 0, 0).1.status,
++                "truncated"
++            );
++        }
++    }
++
+     #[test]
+     fn remote_token_layout_is_pid_zero_coco_element_id() {
+         let token = remote_token_bytes(0x0102_0304, 42);
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs
+index c521a21..d0c6440 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs
+@@ -29,3 +29,5 @@ pub use tree::{
+     walk_tree, walk_tree_bounded, AXNode, TreeWalkResult, DEFAULT_MAX_DEPTH, DEFAULT_MAX_ELEMENTS,
+ };
+ pub use window_scope::WindowScope;
++
++pub mod window_resolution;
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
+index 540b105..60b5408 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/tree.rs
+@@ -13,6 +13,7 @@
+ 
+ use super::bindings::*;
+ use super::launch::{is_still_launching, LaunchStep, LaunchWait};
++use super::window_resolution::{copy_observation_window, WindowObservationDiagnostics};
+ use super::window_scope::{decide_window_scope, ScopeDecision, TopLevelCandidate, WindowScope};
+ use core_foundation::base::{CFEqual, CFRelease, CFRetain, CFTypeRef};
+ use cua_driver_core::walk_budget::{WalkBudget, WalkOutcome};
+@@ -210,8 +211,31 @@ pub fn walk_tree_budgeted(
+     window_id: Option<u32>,
+     query: Option<&str>,
+     max_depth: usize,
+-    mut budget: WalkBudget,
++    budget: WalkBudget,
+ ) -> TreeWalkResult {
++    walk_tree_observation(pid, window_id, query, max_depth, budget, false).0
++}
++
++/// Observation evidence is separate from the tree and from action admission.
++pub fn walk_tree_budgeted_diagnosed(
++    pid: i32,
++    window_id: Option<u32>,
++    query: Option<&str>,
++    max_depth: usize,
++    budget: WalkBudget,
++) -> (TreeWalkResult, Option<WindowObservationDiagnostics>) {
++    walk_tree_observation(pid, window_id, query, max_depth, budget, true)
++}
++
++fn walk_tree_observation(
++    pid: i32,
++    window_id: Option<u32>,
++    query: Option<&str>,
++    max_depth: usize,
++    mut budget: WalkBudget,
++    recover_missing: bool,
++) -> (TreeWalkResult, Option<WindowObservationDiagnostics>) {
++    let mut diagnostics = None;
+     let mut nodes: Vec<AXNode> = Vec::new();
+     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
+     let mut index_counter = 0usize;
+@@ -220,15 +244,19 @@ pub fn walk_tree_budgeted(
+     unsafe {
+         let app_elem = AXUIElementCreateApplication(pid);
+         if app_elem.is_null() {
+-            return TreeWalkResult {
+-                tree_markdown: String::new(),
+-                nodes,
+-                truncated: false,
+-                walk: budget.outcome(),
+-                // No application AX element at all, so a requested window
+-                // certainly did not resolve.
+-                window_scope: window_id.map(|_| WindowScope::AxUnresolved { ax_window_count: 0 }),
+-            };
++            return (
++                TreeWalkResult {
++                    tree_markdown: String::new(),
++                    nodes,
++                    truncated: false,
++                    walk: budget.outcome(),
++                    // No application AX element at all, so a requested window
++                    // certainly did not resolve.
++                    window_scope: window_id
++                        .map(|_| WindowScope::AxUnresolved { ax_window_count: 0 }),
++                },
++                None,
++            );
+         }
+         set_messaging_timeout(app_elem);
+ 
+@@ -250,7 +278,7 @@ pub fn walk_tree_budgeted(
+             let attempt_started = Instant::now();
+             super::enablement::ensure_chromium_ax_enabled(pid, app_elem);
+ 
+-            let top_level = copy_top_level(app_elem, pid, window_id);
++            let (mut top_level, ax_windows) = copy_top_level(app_elem, pid, window_id);
+ 
+             // Scope: keep non-window children (menu bar) + the target window —
+             // but ONLY once the target window has actually been identified. When
+@@ -261,7 +289,34 @@ pub fn walk_tree_budgeted(
+                 let walk = top_level.clone();
+                 break (top_level, walk);
+             };
+-            let decision = scope_top_level(&top_level, pid, wid);
++            let mut decision = scope_top_level(&top_level, pid, wid);
++            let mut evidence = WindowObservationDiagnostics {
++                owner_pid: pid,
++                requested_window_id: wid,
++                on_current_space: crate::windows::window_on_current_space_by_id(wid),
++                ax_windows,
++                resolution: None,
++            };
++            if recover_missing && matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
++                let (recovered, resolution) =
++                    copy_observation_window(app_elem, &top_level, pid, wid, budget.time_limit());
++                // The resolver temporarily uses a shorter per-proxy timeout.
++                // Restore the application bound before a possible launch retry.
++                set_messaging_timeout(app_elem);
++                evidence.resolution = Some(resolution);
++                if let Some(element) = recovered {
++                    // Recovery observes only the exact surface, never its root
++                    // or unrelated application children. Action gates retain
++                    // their independent AXWindows-based admission policy.
++                    let index = top_level.len();
++                    top_level.push(element);
++                    decision = ScopeDecision {
++                        scope: WindowScope::Matched,
++                        walk: vec![index],
++                    };
++                }
++            }
++            diagnostics = Some(evidence);
+             if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                 match launch_wait.step(attempt_started, Instant::now(), || is_still_launching(pid))
+                 {
+@@ -319,13 +374,16 @@ pub fn walk_tree_budgeted(
+         tree_markdown.push_str(&note);
+     }
+ 
+-    TreeWalkResult {
+-        tree_markdown,
+-        nodes,
+-        truncated: walk.truncated(),
+-        walk,
+-        window_scope,
+-    }
++    (
++        TreeWalkResult {
++            tree_markdown,
++            nodes,
++            truncated: walk.truncated(),
++            walk,
++            window_scope,
++        },
++        diagnostics,
++    )
+ }
+ 
+ /// The application's top-level AX children: `AXChildren` ∪ `AXWindows`.
+@@ -338,14 +396,19 @@ unsafe fn copy_top_level(
+     app_elem: AXUIElementRef,
+     pid: i32,
+     window_id: Option<u32>,
+-) -> Vec<AXUIElementRef> {
++) -> (Vec<AXUIElementRef>, AxWindowsDiagnostics) {
+     let mut top_level = copy_children(app_elem);
+     // A requested window on another Space is absent from AXWindows; the
+     // `_including` variant recovers it by exact CGWindowID.
+-    let from_windows = match window_id {
+-        Some(wid) => copy_ax_windows_including(app_elem, pid, wid),
+-        None => copy_ax_windows(app_elem),
+-    };
++    let (mut from_windows, diagnostics) = copy_ax_windows_diagnosed(app_elem);
++    if let Some(wid) = window_id {
++        let listed = from_windows
++            .iter()
++            .any(|&window| ax_get_window_id(window) == Some(wid));
++        if !listed && crate::windows::window_on_current_space_by_id(wid) == Some(false) {
++            from_windows.extend(copy_ax_window_by_remote_token(pid, wid));
++        }
++    }
+     for w in from_windows {
+         // AXChildren and AXWindows can return different proxy pointers for
+         // the same native window. CFEqual compares their AX identity;
+@@ -361,7 +424,7 @@ unsafe fn copy_top_level(
+             CFRelease(w as CFTypeRef);
+         }
+     }
+-    top_level
++    (top_level, diagnostics)
+ }
+ 
+ /// Decide which of `top_level` a walk scoped to `wid` covers.
+@@ -375,7 +438,10 @@ unsafe fn scope_top_level(top_level: &[AXUIElementRef], pid: i32, wid: u32) -> S
+             let identifier = copy_string_attr(child, "AXIdentifier");
+             // Match AX window element → CGWindowID via private SPI.
+             // Only windows carry one, so skip the round-trip elsewhere.
+-            let ax_window_id = if role == "AXWindow" {
++            let mut child_pid = 0;
++            let same_pid =
++                AXUIElementGetPid(child, &mut child_pid) == kAXErrorSuccess && child_pid == pid;
++            let ax_window_id = if role == "AXWindow" && same_pid {
+                 ax_get_window_id(child)
+             } else {
+                 None
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/window_resolution.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/window_resolution.rs
+new file mode 100644
+index 0000000..e661a42
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/window_resolution.rs
+@@ -0,0 +1,698 @@
++//! Observation-only recovery. Native IDs and explicit AX edges are evidence;
++//! titles, geometry, process identity alone, and remote tokens are not.
++
++use super::bindings::*;
++use core_foundation::{
++    base::{CFEqual, CFRelease, CFRetain, CFTypeRef, TCFType},
++    string::CFString,
++};
++use serde::Serialize;
++use std::{
++    collections::VecDeque,
++    time::{Duration, Instant},
++};
++
++const MAX_NODES: usize = 128;
++const MAX_DEPTH: usize = 8;
++const MAX_QUERIES: usize = 512;
++const MAX_DURATION: Duration = Duration::from_millis(300);
++const CALL_TIMEOUT_SECONDS: f32 = 0.03;
++
++#[derive(Debug, Clone, Serialize)]
++pub struct QueryEvidence {
++    pub attribute: String,
++    pub status: String,
++    pub error: Option<i32>,
++    pub raw_count: usize,
++    pub accepted_count: usize,
++}
++
++#[derive(Debug, Clone, Default, Serialize)]
++pub struct ResolutionDiagnostics {
++    pub status: String,
++    pub own_window_id: Option<u32>,
++    pub root_window_id: Option<u32>,
++    pub focused_window_id: Option<u32>,
++    pub visited_count: usize,
++    pub mapped_count: usize,
++    pub repeated_nodes: usize,
++    pub pid_mismatches: usize,
++    pub truncated: bool,
++    pub queries: Vec<QueryEvidence>,
++}
++
++#[derive(Debug, Clone, Serialize)]
++pub struct WindowObservationDiagnostics {
++    pub owner_pid: i32,
++    pub requested_window_id: u32,
++    /// WindowServer's on-screen list membership, not a proof of modality.
++    pub on_current_space: Option<bool>,
++    pub ax_windows: AxWindowsDiagnostics,
++    pub resolution: Option<ResolutionDiagnostics>,
++}
++
++#[derive(Debug, Clone)]
++struct Facts {
++    pid: i32,
++    role: String,
++    window_id: Option<u32>,
++}
++
++trait Graph {
++    fn facts(&mut self, node: usize) -> Option<Facts>;
++    fn edges(&mut self, node: usize, attribute: &'static str) -> Vec<usize>;
++    fn exhausted(&self) -> bool;
++    fn invalid_relationship(&self) -> bool {
++        false
++    }
++}
++
++#[derive(Debug, PartialEq, Eq)]
++struct Match {
++    node: usize,
++    own: u32,
++    root: u32,
++}
++
++// Fixtures and the native adapter execute exactly the same resolver. A queued
++// node carries the nearest explicitly traversed window ancestor; a focused
++// sheet additionally has to establish that ancestor through AXParent.
++fn resolve<G: Graph>(
++    graph: &mut G,
++    app: usize,
++    seeds: &[usize],
++    pid: i32,
++    requested: u32,
++) -> (Option<Match>, ResolutionDiagnostics) {
++    let mut report = ResolutionDiagnostics {
++        status: "unresolved".into(),
++        ..Default::default()
++    };
++    let Some(app_facts) = graph.facts(app) else {
++        return (None, report);
++    };
++    if app_facts.pid != pid || app_facts.role != "AXApplication" {
++        report.status = "invalid_application".into();
++        return (None, report);
++    }
++    let mut queue = VecDeque::new();
++    let focused = graph.edges(app, "AXFocusedWindow");
++    for node in focused {
++        if let Some(facts) = graph.facts(node) {
++            if facts.pid == pid && matches!(facts.role.as_str(), "AXWindow" | "AXSheet") {
++                report.focused_window_id = facts.window_id;
++            }
++        }
++        queue.push_back((node, None, 0));
++    }
++    queue.extend(seeds.iter().copied().map(|n| (n, None, 0)));
++    queue.extend(
++        graph
++            .edges(app, "AXChildren")
++            .into_iter()
++            .map(|n| (n, None, 0)),
++    );
++    let mut visited = Vec::new();
++    while let Some((node, ancestor, depth)) = queue.pop_front() {
++        if graph.exhausted() || visited.len() >= MAX_NODES {
++            report.truncated = true;
++            break;
++        }
++        if visited.contains(&(node, ancestor)) {
++            report.repeated_nodes += 1;
++            continue;
++        }
++        visited.push((node, ancestor));
++        report.visited_count += 1;
++        let Some(facts) = graph.facts(node) else {
++            continue;
++        };
++        if facts.pid != pid {
++            report.pid_mismatches += 1;
++            continue;
++        }
++        let is_surface = matches!(facts.role.as_str(), "AXWindow" | "AXSheet");
++        if is_surface && facts.window_id.is_some() {
++            report.mapped_count += 1;
++        }
++        if is_surface && facts.window_id == Some(requested) {
++            let root = if facts.role == "AXSheet" {
++                // Parent IDs are distinct evidence; never substitute the root
++                // for a sheet's own native ID (including an aliased sheet ID).
++                match parent_window(graph, node, pid, &mut report) {
++                    Ok(parent) if parent.is_none() || ancestor.is_none() || parent == ancestor => {
++                        parent.or(ancestor).filter(|root| *root != requested)
++                    }
++                    _ => None,
++                }
++            } else {
++                Some(requested)
++            };
++            if let Some(root) = root {
++                if !graph.exhausted() {
++                    report.status = "exact_relationship_match".into();
++                    report.own_window_id = Some(requested);
++                    report.root_window_id = Some(root);
++                    return (
++                        Some(Match {
++                            node,
++                            own: requested,
++                            root,
++                        }),
++                        report,
++                    );
++                }
++            }
++        }
++        if depth >= MAX_DEPTH {
++            report.truncated = true;
++            continue;
++        }
++        let root = if facts.role == "AXWindow" {
++            facts.window_id.or(ancestor)
++        } else {
++            ancestor
++        };
++        for attribute in ["AXSheets", "AXChildren"] {
++            for child in graph.edges(node, attribute) {
++                // Bound pending work as well as visited nodes; wide lists and
++                // duplicate edges cannot create an unbounded queue.
++                if queue.len() >= MAX_NODES {
++                    report.truncated = true;
++                    break;
++                }
++                queue.push_back((child, root, depth + 1));
++            }
++        }
++    }
++    report.truncated |= graph.exhausted();
++    (None, report)
++}
++
++fn parent_window<G: Graph>(
++    graph: &mut G,
++    node: usize,
++    pid: i32,
++    report: &mut ResolutionDiagnostics,
++) -> Result<Option<u32>, ()> {
++    let mut seen = vec![node];
++    let mut current = node;
++    for _ in 0..MAX_DEPTH {
++        let parents = graph.edges(current, "AXParent");
++        if graph.invalid_relationship() || graph.exhausted() {
++            return Err(());
++        }
++        let Some(parent) = parents.into_iter().next() else {
++            // A directly exposed sheet may omit AXParent. The caller can use
++            // an already traversed AXSheets/AXChildren edge in that case.
++            return if current == node { Ok(None) } else { Err(()) };
++        };
++        if seen.contains(&parent) {
++            report.repeated_nodes += 1;
++            return Err(());
++        }
++        seen.push(parent);
++        let facts = graph.facts(parent).ok_or(())?;
++        if facts.pid != pid {
++            report.pid_mismatches += 1;
++            return Err(());
++        }
++        if facts.role == "AXWindow" {
++            return facts.window_id.map(Some).ok_or(());
++        }
++        if facts.role == "AXApplication" {
++            return Ok(None);
++        }
++        current = parent;
++    }
++    report.truncated = true;
++    Err(())
++}
++
++struct NativeGraph {
++    // Own one retain per canonical AX identity. CFEqual, not pointer equality,
++    // recognizes native proxies returned by different attributes.
++    elements: Vec<AXUIElementRef>,
++    deadline: Instant,
++    queries: Vec<QueryEvidence>,
++    stopped: bool,
++}
++
++impl NativeGraph {
++    unsafe fn intern(&mut self, element: AXUIElementRef) -> Option<usize> {
++        if let Some(index) = self
++            .elements
++            .iter()
++            .position(|&other| CFEqual(other as CFTypeRef, element as CFTypeRef) != 0)
++        {
++            CFRelease(element as CFTypeRef);
++            return Some(index);
++        }
++        if self.elements.len() >= MAX_NODES {
++            self.stopped = true;
++            CFRelease(element as CFTypeRef);
++            return None;
++        }
++        self.elements.push(element);
++        Some(self.elements.len() - 1)
++    }
++
++    fn prepare(&mut self, node: usize) -> bool {
++        if self.exhausted() {
++            self.stopped = true;
++            return false;
++        }
++        unsafe {
++            AXUIElementSetMessagingTimeout(self.elements[node], CALL_TIMEOUT_SECONDS);
++        }
++        true
++    }
++
++    fn record(&mut self, attribute: &str, diagnostic: AxWindowsDiagnostics) {
++        self.queries.push(QueryEvidence {
++            attribute: attribute.into(),
++            status: diagnostic.status,
++            error: diagnostic.error,
++            raw_count: diagnostic.raw_count,
++            accepted_count: diagnostic.accepted_count,
++        });
++    }
++
++    unsafe fn value(&mut self, node: usize, attribute: &str) -> Option<CFTypeRef> {
++        if !self.prepare(node) {
++            return None;
++        }
++        let name = CFString::new(attribute);
++        let mut value = std::ptr::null();
++        let error = AXUIElementCopyAttributeValue(
++            self.elements[node],
++            name.as_concrete_TypeRef(),
++            &mut value,
++        );
++        let mut diagnostic = AxWindowsDiagnostics::status("ok");
++        diagnostic.error = (error != kAXErrorSuccess).then_some(error);
++        diagnostic.status = if error != kAXErrorSuccess {
++            "api_error"
++        } else if value.is_null() {
++            "null_value"
++        } else {
++            "ok"
++        }
++        .into();
++        self.record(attribute, diagnostic);
++        if error != kAXErrorSuccess || value.is_null() {
++            if !value.is_null() {
++                CFRelease(value);
++            }
++            None
++        } else {
++            Some(value)
++        }
++    }
++}
++
++impl Graph for NativeGraph {
++    fn facts(&mut self, node: usize) -> Option<Facts> {
++        unsafe {
++            if !self.prepare(node) {
++                return None;
++            }
++            let mut pid = 0;
++            let error = AXUIElementGetPid(self.elements[node], &mut pid);
++            let mut diagnostic =
++                AxWindowsDiagnostics::status(if error == 0 { "ok" } else { "api_error" });
++            diagnostic.error = (error != 0).then_some(error);
++            self.record("AXUIElementGetPid", diagnostic);
++            if error != 0 {
++                return None;
++            }
++            let role = self.value(node, "AXRole")?;
++            if core_foundation::base::CFGetTypeID(role) != CFString::type_id() {
++                CFRelease(role);
++                self.queries.last_mut().unwrap().status = "wrong_type".into();
++                return None;
++            }
++            let role = CFString::wrap_under_create_rule(role as _).to_string();
++            let window_id = if matches!(role.as_str(), "AXWindow" | "AXSheet") {
++                if !self.prepare(node) {
++                    return None;
++                }
++                let mut id = 0;
++                let error = _AXUIElementGetWindow(self.elements[node], &mut id);
++                let mut diagnostic = AxWindowsDiagnostics::status(if error != 0 {
++                    "api_error"
++                } else if id == 0 {
++                    "no_window_id"
++                } else {
++                    "ok"
++                });
++                diagnostic.error = (error != 0).then_some(error);
++                self.record("_AXUIElementGetWindow", diagnostic);
++                (error == 0 && id != 0).then_some(id)
++            } else {
++                None
++            };
++            Some(Facts {
++                pid,
++                role,
++                window_id,
++            })
++        }
++    }
++
++    fn edges(&mut self, node: usize, attribute: &'static str) -> Vec<usize> {
++        unsafe {
++            if matches!(attribute, "AXParent" | "AXFocusedWindow") {
++                let Some(value) = self.value(node, attribute) else {
++                    return vec![];
++                };
++                if core_foundation::base::CFGetTypeID(value) != AXUIElementGetTypeID() {
++                    CFRelease(value);
++                    self.queries.last_mut().unwrap().status = "wrong_type".into();
++                    return vec![];
++                }
++                let query = self.queries.last_mut().unwrap();
++                query.raw_count = 1;
++                query.accepted_count = 1;
++                self.intern(value as AXUIElementRef).into_iter().collect()
++            } else {
++                if !self.prepare(node) {
++                    return vec![];
++                }
++                let (elements, diagnostic) =
++                    copy_element_list_diagnosed(self.elements[node], attribute, MAX_NODES);
++                self.stopped |= diagnostic.status == "truncated";
++                self.record(attribute, diagnostic);
++                elements
++                    .into_iter()
++                    .filter_map(|element| self.intern(element))
++                    .collect()
++            }
++        }
++    }
++
++    fn exhausted(&self) -> bool {
++        self.stopped || self.queries.len() >= MAX_QUERIES || Instant::now() >= self.deadline
++    }
++
++    fn invalid_relationship(&self) -> bool {
++        self.queries.last().is_some_and(|query| {
++            query.status == "wrong_type"
++                || (query.status == "api_error"
++                    && query.error != Some(kAXErrorAttributeUnsupported)
++                    && query.error != Some(kAXErrorNoValue))
++        })
++    }
++}
++
++impl Drop for NativeGraph {
++    fn drop(&mut self) {
++        unsafe {
++            for &element in &self.elements {
++                // Do not leave the observation's short timeout on cached proxies.
++                AXUIElementSetMessagingTimeout(element, 0.0);
++                CFRelease(element as CFTypeRef);
++            }
++        }
++    }
++}
++
++/// Recover a missing surface using only explicit, bounded AX relationships.
++/// This never grants input eligibility. Caller owns the returned retain.
++///
++/// # Safety
++/// `app` and `seeds` must be valid AX references for the duration of this call.
++pub unsafe fn copy_observation_window(
++    app: AXUIElementRef,
++    seeds: &[AXUIElementRef],
++    pid: i32,
++    requested: u32,
++    timeout: Option<Duration>,
++) -> (Option<AXUIElementRef>, ResolutionDiagnostics) {
++    let mut graph = NativeGraph {
++        elements: Vec::new(),
++        deadline: Instant::now() + timeout.unwrap_or(MAX_DURATION).min(MAX_DURATION),
++        queries: Vec::new(),
++        stopped: false,
++    };
++    CFRetain(app as CFTypeRef);
++    graph.intern(app);
++    let seed_ids: Vec<_> = seeds
++        .iter()
++        .take(MAX_NODES - 1)
++        .filter_map(|&element| {
++            CFRetain(element as CFTypeRef);
++            graph.intern(element)
++        })
++        .collect();
++    let (matched, mut report) = resolve(&mut graph, 0, &seed_ids, pid, requested);
++    report.truncated |= graph.exhausted() || seeds.len() >= MAX_NODES;
++    report.queries = std::mem::take(&mut graph.queries);
++    let element = matched.map(|matched| {
++        let element = graph.elements[matched.node];
++        CFRetain(element as CFTypeRef);
++        element
++    });
++    (element, report)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::collections::HashMap;
++
++    #[derive(Default)]
++    struct Fixture {
++        nodes: HashMap<usize, Facts>,
++        links: HashMap<(usize, &'static str), Vec<usize>>,
++        reads: usize,
++        limit: usize,
++        malformed_parent: bool,
++    }
++    impl Fixture {
++        fn app() -> Self {
++            let mut graph = Self {
++                limit: usize::MAX,
++                ..Default::default()
++            };
++            graph.node(0, 7, "AXApplication", None);
++            graph
++        }
++        fn node(&mut self, id: usize, pid: i32, role: &str, window_id: Option<u32>) {
++            self.nodes.insert(
++                id,
++                Facts {
++                    pid,
++                    role: role.into(),
++                    window_id,
++                },
++            );
++        }
++        fn edge(&mut self, from: usize, attribute: &'static str, to: &[usize]) {
++            self.links.insert((from, attribute), to.to_vec());
++        }
++    }
++    impl Graph for Fixture {
++        fn facts(&mut self, node: usize) -> Option<Facts> {
++            self.reads += 1;
++            self.nodes.get(&node).cloned()
++        }
++        fn edges(&mut self, node: usize, attribute: &'static str) -> Vec<usize> {
++            self.reads += 1;
++            self.links
++                .get(&(node, attribute))
++                .cloned()
++                .unwrap_or_default()
++        }
++        fn exhausted(&self) -> bool {
++            self.reads >= self.limit
++        }
++        fn invalid_relationship(&self) -> bool {
++            self.malformed_parent
++        }
++    }
++
++    // CU-MODAL-01: recovery requires an exact surface and same-PID graph evidence.
++    #[test]
++    fn c1_exact_children_and_focused_window_recover_without_windows_list() {
++        for edge in ["AXChildren", "AXFocusedWindow"] {
++            let mut graph = Fixture::app();
++            graph.node(1, 7, "AXWindow", Some(22));
++            graph.edge(0, edge, &[1]);
++            let (matched, report) = resolve(&mut graph, 0, &[], 7, 22);
++            assert_eq!(
++                matched,
++                Some(Match {
++                    node: 1,
++                    own: 22,
++                    root: 22
++                })
++            );
++            assert_eq!(report.own_window_id, Some(22));
++        }
++    }
++
++    #[test]
++    fn c1_sheet_preserves_own_and_root_and_never_inherits_parent_focus() {
++        let mut graph = Fixture::app();
++        graph.node(1, 7, "AXWindow", Some(11));
++        graph.node(2, 7, "AXSheet", Some(22));
++        graph.edge(0, "AXFocusedWindow", &[1]);
++        graph.edge(1, "AXSheets", &[2]);
++        let (matched, report) = resolve(&mut graph, 0, &[1], 7, 22);
++        assert_eq!(
++            matched,
++            Some(Match {
++                node: 2,
++                own: 22,
++                root: 11
++            })
++        );
++        assert_eq!(report.focused_window_id, Some(11));
++    }
++
++    #[test]
++    fn c1_nested_sheet_keeps_root_window_separate_from_intermediate_sheet() {
++        let mut graph = Fixture::app();
++        graph.node(1, 7, "AXWindow", Some(11));
++        graph.node(2, 7, "AXSheet", Some(22));
++        graph.node(3, 7, "AXSheet", Some(33));
++        graph.edge(1, "AXSheets", &[2]);
++        graph.edge(2, "AXSheets", &[3]);
++        graph.edge(3, "AXParent", &[2]);
++        graph.edge(2, "AXParent", &[1]);
++        assert_eq!(resolve(&mut graph, 0, &[1], 7, 33).0.unwrap().root, 11);
++    }
++
++    #[test]
++    fn c1_focused_sheet_requires_explicit_parent_window() {
++        let mut graph = Fixture::app();
++        graph.node(1, 7, "AXWindow", Some(11));
++        graph.node(2, 7, "AXSheet", Some(22));
++        graph.edge(0, "AXFocusedWindow", &[2]);
++        assert!(resolve(&mut graph, 0, &[], 7, 22).0.is_none());
++        graph.edge(2, "AXParent", &[1]);
++        assert_eq!(resolve(&mut graph, 0, &[], 7, 22).0.unwrap().root, 11);
++    }
++
++    #[test]
++    fn c1_identity_and_relationship_are_both_required() {
++        for (pid, role, id) in [
++            (8, "AXWindow", Some(22)),
++            (7, "AXWindow", Some(11)),
++            (7, "AXWindow", None),
++            (7, "AXGroup", Some(22)),
++        ] {
++            let mut graph = Fixture::app();
++            graph.node(1, pid, role, id);
++            graph.edge(0, "AXChildren", &[1]);
++            assert!(resolve(&mut graph, 0, &[], 7, 22).0.is_none());
++        }
++        let mut graph = Fixture::app();
++        graph.node(1, 7, "AXWindow", Some(22));
++        assert!(
++            resolve(&mut graph, 0, &[], 7, 22).0.is_none(),
++            "unreachable same-PID surface is not evidence"
++        );
++    }
++
++    #[test]
++    fn c1_focused_sheet_can_be_reached_again_with_sheet_edge_evidence() {
++        let mut graph = Fixture::app();
++        graph.node(1, 7, "AXWindow", Some(11));
++        graph.node(2, 7, "AXSheet", Some(22));
++        graph.edge(0, "AXFocusedWindow", &[2]);
++        graph.edge(1, "AXSheets", &[2]);
++        assert_eq!(resolve(&mut graph, 0, &[1], 7, 22).0.unwrap().root, 11);
++    }
++
++    #[test]
++    fn c1_invalid_parent_evidence_cannot_be_overridden_by_a_sheet_edge() {
++        for foreign in [false, true] {
++            let mut graph = Fixture::app();
++            graph.node(1, 7, "AXWindow", Some(11));
++            graph.node(2, 7, "AXSheet", Some(22));
++            graph.node(3, if foreign { 8 } else { 7 }, "AXGroup", None);
++            graph.edge(1, "AXSheets", &[2]);
++            graph.edge(2, "AXParent", &[3]);
++            graph.edge(3, "AXParent", &[2]);
++            assert!(resolve(&mut graph, 0, &[1], 7, 22).0.is_none());
++        }
++    }
++
++    #[test]
++    fn c1_sheet_cannot_claim_parent_window_id() {
++        let mut graph = Fixture::app();
++        graph.node(1, 7, "AXWindow", Some(22));
++        graph.node(2, 7, "AXSheet", Some(22));
++        graph.edge(0, "AXFocusedWindow", &[2]);
++        graph.edge(2, "AXParent", &[1]);
++        assert!(resolve(&mut graph, 0, &[], 7, 22).0.is_none());
++    }
++
++    #[test]
++    fn c1_wrong_type_parent_and_unknown_parent_identity_fail_closed() {
++        for malformed in [false, true] {
++            let mut graph = Fixture::app();
++            graph.node(1, 7, "AXWindow", Some(11));
++            graph.node(2, 7, "AXSheet", Some(22));
++            graph.edge(1, "AXSheets", &[2]);
++            graph.malformed_parent = malformed;
++            if !malformed {
++                graph.edge(2, "AXParent", &[99]);
++            }
++            assert!(resolve(&mut graph, 0, &[1], 7, 22).0.is_none());
++        }
++    }
++
++    #[test]
++    fn c1_foreign_intermediate_nodes_cannot_bridge_to_a_same_pid_window() {
++        let mut graph = Fixture::app();
++        graph.node(1, 8, "AXGroup", None);
++        graph.node(2, 7, "AXWindow", Some(22));
++        graph.edge(0, "AXChildren", &[1]);
++        graph.edge(1, "AXChildren", &[2]);
++        let (matched, report) = resolve(&mut graph, 0, &[], 7, 22);
++        assert!(matched.is_none());
++        assert_eq!(report.pid_mismatches, 1);
++    }
++
++    #[test]
++    fn c1_depth_and_node_caps_report_incomplete_evidence() {
++        let mut deep = Fixture::app();
++        for n in 1..=MAX_DEPTH + 3 {
++            deep.node(n, 7, "AXGroup", None);
++            deep.edge(n - 1, "AXChildren", &[n]);
++        }
++        let (matched, report) = resolve(&mut deep, 0, &[], 7, 22);
++        assert!(matched.is_none());
++        assert!(report.truncated);
++        assert!(report.visited_count <= MAX_DEPTH + 1);
++
++        let mut wide = Fixture::app();
++        for n in 1..=MAX_NODES + 1 {
++            wide.node(n, 7, "AXGroup", None);
++        }
++        wide.edge(0, "AXChildren", &(1..=MAX_NODES + 1).collect::<Vec<_>>());
++        let (matched, report) = resolve(&mut wide, 0, &[], 7, 22);
++        assert!(matched.is_none());
++        assert!(report.truncated);
++        assert!(report.visited_count <= MAX_NODES);
++    }
++
++    #[test]
++    fn c1_cycles_and_budget_exhaustion_remain_bounded() {
++        let mut graph = Fixture::app();
++        graph.node(1, 7, "AXGroup", None);
++        graph.edge(0, "AXChildren", &[1]);
++        graph.edge(1, "AXChildren", &[1]);
++        let (matched, report) = resolve(&mut graph, 0, &[], 7, 22);
++        assert!(matched.is_none());
++        assert!(report.repeated_nodes > 0);
++        assert!(graph.reads < 20);
++        graph.limit = 1;
++        let (matched, report) = resolve(&mut graph, 0, &[], 7, 22);
++        assert!(matched.is_none());
++        assert!(report.truncated);
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/ax/window_scope.rs b/libs/cua-driver/rust/crates/platform-macos/src/ax/window_scope.rs
+index f23b53b..e7e546b 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/ax/window_scope.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/window_scope.rs
+@@ -14,7 +14,7 @@ use crate::windows::WindowOwner;
+ /// What the requested `window_id` turned out to be.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum WindowScope {
+-    /// A top-level AXWindow reported the requested CGWindowID.
++    /// An AXWindow or AXSheet reported the requested CGWindowID.
+     Matched,
+     /// WindowServer has no record of the requested CGWindowID — closed,
+     /// stale, or fabricated.
+@@ -54,7 +54,7 @@ pub struct TopLevelCandidate {
+     /// themselves as `open-panel` / `save-panel`.
+     pub identifier: Option<String>,
+     /// `_AXUIElementGetWindow` result, when the SPI resolved one. Only read
+-    /// for `AXWindow` roles.
++    /// for `AXWindow` / `AXSheet` roles.
+     pub ax_window_id: Option<u32>,
+ }
+ 
+@@ -133,7 +133,9 @@ where
+     let matched: Vec<usize> = candidates
+         .iter()
+         .enumerate()
+-        .filter(|(_, c)| c.role == "AXWindow" && c.ax_window_id == Some(requested))
++        .filter(|(_, c)| {
++            matches!(c.role.as_str(), "AXWindow" | "AXSheet") && c.ax_window_id == Some(requested)
++        })
+         .map(|(i, _)| i)
+         .collect();
+ 
+@@ -165,8 +167,11 @@ where
+         .iter()
+         .enumerate()
+         .filter(|(i, c)| {
+-            (c.role != "AXWindow" || matched.contains(i))
+-                && !(dialog_scope && c.role == "AXMenuBar")
++            if dialog_scope {
++                matched.contains(i)
++            } else {
++                c.role != "AXWindow" || matched.contains(i)
++            }
+         })
+         .map(|(i, _)| i)
+         .collect();
+@@ -180,6 +185,33 @@ where
+ mod tests {
+     use super::*;
+ 
++    // CU-MODAL-01: exact sheet scope never includes its parent or sibling surfaces.
++    #[test]
++    fn exact_sheet_keeps_its_own_id_and_walks_only_itself() {
++        let candidates = [
++            TopLevelCandidate::new("AXWindow", Some(11)),
++            TopLevelCandidate::new("AXSheet", Some(22)),
++            TopLevelCandidate::new("AXMenuBar", None),
++            TopLevelCandidate::new("AXSheet", Some(33)),
++        ];
++        let d = decide_window_scope(&candidates, 22, never_called);
++        assert_eq!(d.scope, WindowScope::Matched);
++        assert_eq!(d.walk, vec![1]);
++    }
++
++    #[test]
++    fn dialog_scope_excludes_unrelated_top_level_surfaces() {
++        let candidates = [
++            TopLevelCandidate::new("AXWindow", Some(22)).with_subrole("AXDialog"),
++            TopLevelCandidate::new("AXSheet", Some(33)),
++            TopLevelCandidate::new("AXGroup", None),
++        ];
++        assert_eq!(
++            decide_window_scope(&candidates, 22, never_called).walk,
++            vec![0]
++        );
++    }
++
+     fn panel_service_owner() -> WindowOwner {
+         WindowOwner::ForeignPid {
+             owner_pid: 900,
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+index 7996734..69992dc 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+@@ -60,6 +60,26 @@ enum PixelActivationPolicy {
      ForegroundAssist,
  }
  
@@ -904,7 +2072,7 @@
  #[derive(Clone, Copy, Debug)]
  struct SelectionPixelTarget {
      screen_x: f64,
-@@ -196,7 +216,10 @@
+@@ -196,7 +216,10 @@ fn def() -> &'static ToolDef {
               Pixel path: routes through the CGEvent left/right/middle mouse-button primitives. \
               AX path: \"right\" maps to AXShowMenu (same surface as the dedicated `right_click` \
               tool); \"middle\" has no AX equivalent and falls back to a pixel middle-click at the \
@@ -916,7 +2084,7 @@
               action: press (default), show_menu, pick, confirm, cancel, open.\n\
               from_zoom: set true after a zoom call to auto-translate zoom-image pixel \
               coordinates to full-window space."
-@@ -224,6 +247,11 @@
+@@ -224,6 +247,11 @@ fn def() -> &'static ToolDef {
                      "description": "Mouse button. Default: \"left\" — omit for legacy left-click behaviour. Pixel path uses the matching CGEvent primitive; AX path maps \"right\" to AXShowMenu and falls back to a pixel middle-click at the element's center for \"middle\"."
                  },
                  "count":         { "type": "integer", "description": "Click count (pixel path only). Default 1." },
@@ -928,7 +2096,7 @@
                  "modifier": {
                      "type": "array",
                      "items": { "type": "string" },
-@@ -277,6 +305,24 @@
+@@ -277,6 +305,24 @@ impl Tool for ClickTool {
          let has_window_id = args.get("window_id").map(|v| !v.is_null()).unwrap_or(false);
          let has_xy = args.get("x").map(|v| v.is_number()).unwrap_or(false)
              && args.get("y").map(|v| v.is_number()).unwrap_or(false);
@@ -953,11 +2121,10 @@
          let capture_id = args.opt_str("capture_id");
          if capture_id.is_some() && !has_xy {
              return ToolResult::error("click.capture_id requires pixel coordinates x and y.")
-@@ -459,6 +505,25 @@
-         let from_zoom = args.bool_or("from_zoom", false);
+@@ -460,6 +506,25 @@ impl Tool for ClickTool {
          let debug_image_out = args.opt_str("debug_image_out");
          let modifiers: Vec<String> = args.str_array("modifier");
-+
+ 
 +        if click_mode.is_raw()
 +            && (element_guard.is_some()
 +                || args.get("target").is_some()
@@ -976,10 +2143,11 @@
 +            )
 +            .with_structured(serde_json::json!({ "code": "invalid_arguments" }));
 +        }
- 
++
          // PID-routed key transitions can look correct for one AX poll and then
          // collapse to a plain click once AppKit resolves the gesture. Refuse
-@@ -987,7 +1052,8 @@
+         // that false-success path. The explicit foreground rung uses physical
+@@ -987,7 +1052,8 @@ impl Tool for ClickTool {
              // backend after resolving the requested screen point. This keeps
              // targeting (PX) orthogonal to delivery (AX) and avoids making a
              // Chromium/AppKit window key merely to satisfy first-mouse rules.
@@ -989,17 +2157,16 @@
                  && window_id.is_some()
                  && button_str == "left"
                  && count == 1
-@@ -1640,9 +1706,29 @@
-         assert!(
+@@ -1641,6 +1707,26 @@ mod tests {
              desc.contains("middle"),
              "description should mention middle button"
-+        );
+         );
 +        assert!(
 +            desc.contains("click_mode"),
 +            "description should mention the raw single-click selector"
-         );
-     }
- 
++        );
++    }
++
 +    #[test]
 +    fn schema_advertises_opt_in_raw_click_mode() {
 +        let d = def();
@@ -1014,14 +2181,1257 @@
 +        assert_eq!(ClickMode::parse("auto"), Some(ClickMode::Auto));
 +        assert_eq!(ClickMode::parse("RAW"), Some(ClickMode::Raw));
 +        assert_eq!(ClickMode::parse("semantic"), None);
+     }
+ 
+     /// Regression for the Swift→Rust port gap: only a raw background left
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+index ffee395..bfef0f1 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs
+@@ -71,8 +71,10 @@ fn def() -> &'static ToolDef {
+             window belongs to the panel service, not the app). If the window is live under \
+             this pid but its accessibility surface can't be resolved, the tree comes back \
+             EMPTY with `degraded_reason: ax_window_unresolved` and the screenshot of the \
+-            requested window; background input is refused until it resolves, so \
+-            re-snapshot or act with `delivery_mode:\"foreground\"`. When that pid is an \
++            requested window. `ax_diagnostics` reports native errors and bounded \
++            relationship evidence. Current-Space unresolved windows require manual \
++            handling; visibility does not establish input safety. A recovered surface \
++            is observation-only and issues no action tokens. When that pid is an \
+             app still launching (its window exists before it answers accessibility), the \
+             walk first waits up to `timeout_ms` for it; if it never answers, the tree comes \
+             back EMPTY with `degraded_reason: ax_app_launching`, `truncated: true` and \
+@@ -299,14 +301,14 @@ impl Tool for GetWindowStateTool {
+             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
+         let timeout_ms = cua_driver_core::tool_schema::resolve_timeout_ms(args.get("timeout_ms"));
+ 
+-        let (tree_result, prepared_snapshot) = if want_tree {
++        let (tree_result, prepared_snapshot, observation_diagnostics) = if want_tree {
+             let q = query.clone();
+             // `timeout_ms` bounds the walk itself: it returns the partial tree
+             // when the budget runs out. The outer deadline is only a backstop
+             // for an AX call that ignores the per-element messaging timeout
+             // (dropping a spawn_blocking JoinHandle cannot cancel it).
+             let walk_future = tokio::task::spawn_blocking(move || {
+-                let tree = crate::ax::tree::walk_tree_budgeted(
++                let (tree, diagnostics) = crate::ax::tree::walk_tree_budgeted_diagnosed(
+                     pid,
+                     Some(window_id),
+                     q.as_deref(),
+@@ -314,14 +316,14 @@ impl Tool for GetWindowStateTool {
+                     cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
+                 );
+                 let payload = crate::ax::snapshot::AxSnapshot::from_nodes(&tree.nodes);
+-                (tree, payload)
++                (tree, payload, diagnostics)
+             });
+             // A launching app is waited on for up to `timeout_ms` before the
+             // walk's own `timeout_ms` starts (see `ax::launch`).
+             let backstop =
+                 std::time::Duration::from_millis(timeout_ms) * 2 + AX_WALK_BACKSTOP_GRACE;
+             match tokio::time::timeout(backstop, walk_future).await {
+-                Ok(Ok((tree, payload))) => (Some(tree), Some(payload)),
++                Ok(Ok((tree, payload, diagnostics))) => (Some(tree), Some(payload), diagnostics),
+                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
+                 Err(_elapsed) => {
+                     return ToolResult::error(format!(
+@@ -334,7 +336,7 @@ impl Tool for GetWindowStateTool {
+                 }
+             }
+         } else {
+-            (None, None)
++            (None, None, None)
+         };
+ 
+         // The window can close, or its CGWindow can be re-parented onto another
+@@ -348,9 +350,11 @@ impl Tool for GetWindowStateTool {
+         }
+         // `window_scope` is None only when no window_id was requested, which
+         // this tool never does — so treat that as resolved.
+-        let scope_matched = window_scope.as_ref().is_none_or(|s| s.is_matched());
+-
+-        let removed = (!scope_matched && !observation_only)
++        let publishable = observation_can_publish_snapshot(
++            window_scope.as_ref(),
++            observation_diagnostics.as_ref(),
++        );
++        let removed = (!publishable && !observation_only)
+             .then(|| self.state.snapshots.remove(pid, u64::from(window_id)))
+             .flatten();
+ 
+@@ -372,7 +376,6 @@ impl Tool for GetWindowStateTool {
+         // and native dimensions, the WindowServer bounds it was validated
+         // against, and the raw capture's backing scale.
+         let mut screenshot_frame_error = None;
+-        let mut screenshot_resize_scale = None;
+         let screenshot = if should_capture {
+             let out_file = screenshot_out_file.clone();
+             let res = tokio::task::spawn_blocking(move || -> Result<
+@@ -449,9 +452,6 @@ impl Tool for GetWindowStateTool {
+             }).await;
+             match res {
+                 Ok(Ok((png, file_path, w, h, orig_w, orig_h, bounds, scale))) => {
+-                    if !observation_only {
+-                        screenshot_resize_scale = Some(orig_w as f64 / w as f64);
+-                    }
+                     Some((png, file_path, w, h, orig_w, orig_h, bounds, scale))
+                 }
+                 Ok(Err(e)) => {
+@@ -475,240 +475,47 @@ impl Tool for GetWindowStateTool {
+         let screenshot_file_path = screenshot
+             .as_ref()
+             .and_then(|(_, fp, _, _, _, _, _, _)| fp.clone());
+-        let screenshot_frame = screenshot
+-            .as_ref()
+-            .map(|(_, _, _, _, _, _, bounds, scale)| (bounds.clone(), *scale));
+-
+-        // Build response.
+-        let mut content: Vec<Content> = Vec::new();
+-
+-        if let Some((png, ref file_path, w, h, _, _, _, _)) = screenshot.as_ref() {
+-            if file_path.is_none() {
+-                use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+-                content.push(Content::image_png(BASE64.encode(png)));
+-            }
+-
+-            // Summary text line (matching Swift reference format).
+-            let element_count = tree_result
+-                .as_ref()
+-                .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
+-                .unwrap_or(0);
+-            let summary = if let Some(ref r) = tree_result {
+-                format!(
+-                    "window_id={window_id} pid={pid} size={}x{} elements={element_count}\n\n{}",
+-                    w, h, r.tree_markdown
+-                )
+-            } else {
+-                format!("window_id={window_id} pid={pid} size={}x{}", w, h)
+-            };
+-            content.push(Content::text(summary));
+-        } else if let Some(ref r) = tree_result {
+-            let element_count = r.nodes.iter().filter(|n| n.element_index.is_some()).count();
+-            content.push(Content::text(format!(
+-                "window_id={window_id} pid={pid} elements={element_count}\n\n{}",
+-                r.tree_markdown
+-            )));
+-        }
+ 
+-        if content.is_empty() {
+-            return ToolResult::error(
+-                "No content produced (neither AX tree nor screenshot succeeded)",
+-            );
+-        }
+-
+-        let element_count = tree_result
+-            .as_ref()
+-            .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
+-            .unwrap_or(0);
+-        let tree_md = tree_result
+-            .as_ref()
+-            .map(|r| r.tree_markdown.clone())
+-            .unwrap_or_default();
+-
+-        let snapshot_payload = prepared_snapshot.or_else(|| {
+-            screenshot_resize_scale
+-                .is_some()
+-                .then(|| crate::ax::snapshot::AxSnapshot::from_nodes(&[]))
+-        });
+-        let (snapshot_id, replaced) = snapshot_payload
+-            .filter(|_| scope_matched && !observation_only)
+-            .and_then(|payload| {
++        let mut response = assemble_window_observation(
++            pid,
++            window_id,
++            tree_result.as_ref(),
++            observation_diagnostics.as_ref(),
++            screenshot.as_ref(),
++            prepared_snapshot,
++            query.as_deref(),
++            timeout_ms,
++            observation_only,
++            removed,
++            |payload, scale| {
+                 self.state.snapshots.publish_for_session(
+                     pid,
+                     u64::from(window_id),
+                     payload,
+                     session_id.as_deref(),
+-                    screenshot_resize_scale,
++                    scale,
+                 )
+-            })
+-            .unzip();
+-        let capture_id = match (snapshot_id, screenshot.as_ref()) {
+-            (Some(_), Some((png, _, width, height, native_width, native_height, _, _))) => {
+-                match self.state.capture_bindings.publish_window(
++            },
++            || {
++                let (png, _, width, height, native_width, native_height, _, _) = screenshot
++                    .as_ref()
++                    .expect("capture publication requires a screenshot");
++                self.state.capture_bindings.publish_window(
+                     &args,
+                     pid,
+                     window_id,
+                     png.clone(),
+                     (*width, *height),
+                     (*native_width, *native_height),
+-                ) {
+-                    Ok(capture_id) => Some(capture_id),
+-                    Err(error) => return error,
+-                }
+-            }
+-            _ => None,
+-        };
+-
+-        // Build the structured `elements` array — one entry per actionable
+-        // node, matching the order (and indices) of the markdown rendering.
+-        // This is the preferred consumption path; `tree_markdown` is kept
+-        // alongside for back-compat with existing text-parsing callers
+-        // (Hermes' regex parser, Codex, Claude Code) and is signalled as
+-        // preferred-for-back-compat-only via the `_note` field below.
+-        let elements_json: Vec<serde_json::Value> = match (snapshot_id, tree_result.as_ref()) {
+-            (Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, Some(sid)),
+-            (None, Some(r)) if scope_matched => build_elements_array_with_token(&r.nodes, None),
+-            _ => Vec::new(),
+-        };
+-        let elements_json = cua_driver_core::element_query::project_elements_for_query(
+-            elements_json,
+-            query.as_deref(),
+-            &tree_md,
+-        );
+-        // Screenshot pixels of the delivered capture: window origin in screen
+-        // points, delivered pixels per point (backing scale x downsizing).
+-        let elements_json = match (screenshot_frame.as_ref(), screenshot_dims) {
+-            (Some((bounds, _)), Some((width, _))) if bounds.width > 0.0 => {
+-                cua_driver_core::element_frame::with_screenshot_frames(
+-                    elements_json,
+-                    (bounds.x, bounds.y),
+-                    f64::from(width) / bounds.width,
+                 )
+-            }
+-            _ => elements_json,
+-        };
+-        let filtered_element_count = elements_json.len();
+-        // The structured array intentionally contains only actionable nodes,
+-        // and AX child reads can fail independently of the element/depth caps.
+-        // Until the walker exposes a proof over the projected search domain,
+-        // absence must remain unknown rather than being claimed complete.
+-        let elements_complete = false;
+-
+-        let mut structured = serde_json::json!({
+-            "window_id": window_id,
+-            "pid": pid,
+-            "element_count": element_count,
+-            "total_element_count": element_count,
+-            "returned_element_count": filtered_element_count,
+-            "elements_complete": elements_complete,
+-            "tree_markdown": tree_md,
+-            "elements": elements_json,
+-            "_note": "Prefer `elements` — `tree_markdown` will continue to work \
+-                but new fields will only be added to the structured side. \
+-                Issue #22865: use `max_elements` / `max_depth` to bound the \
+-                AX walk on apps with very large trees."
+-        });
+-        if query.is_some() {
+-            structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
+-        }
+-        if let Some(r) = tree_result.as_ref() {
+-            r.walk.apply(&mut structured);
+-        }
+-        // Surface 6: an opaque snapshot identifier consumers can log
+-        // alongside the per-element tokens for debug correlation. Same value
+-        // embedded in every `element_token` emitted in `elements[]` above.
+-        // Additive — old consumers ignore it. Absent when no snapshot was
+-        // registered (unresolved window scope).
+-        if let Some(sid) = snapshot_id {
+-            structured["snapshot_id"] =
+-                serde_json::json!(cua_driver_core::element_token::format_snapshot_id(sid));
+-        }
+-        let invalidated: Vec<String> = removed
+-            .into_iter()
+-            .chain(replaced.into_iter().flatten())
+-            .map(cua_driver_core::element_token::format_snapshot_id)
+-            .collect();
+-        if !invalidated.is_empty() {
+-            content.push(Content::text(format!(
+-                "Invalidated snapshots {}: their element_tokens are stale.",
+-                invalidated.join(", ")
+-            )));
+-            structured["invalidated_snapshot_ids"] = serde_json::json!(invalidated);
+-        }
+-        if let Some(capture_id) = capture_id {
+-            structured["capture_id"] = serde_json::json!(capture_id);
+-        }
+-        // Best-effort-background ladder, rung (2). Both rungs point the agent at
+-        // the same next move: an empty AX tree means element_index has nothing
+-        // to bind to, so the deliberate action is an element px action — read
+-        // the screenshot already in this response and click by pixel (x,y).
+-        // macOS can pixel-target in the background, so the recommendation is
+-        // `px`, not `foreground`.
+-        let app_lookup_timed_out = tree_result
+-            .as_ref()
+-            .is_some_and(|r| r.walk.reason() == Some("app_lookup_timeout"));
+-        match degradation_for(
+-            tree_result.is_some(),
+-            element_count,
+-            window_scope.as_ref(),
+-            app_lookup_timed_out,
+-        ) {
+-            Degradation::None => {}
+-            Degradation::AxTreeEmpty => {
+-                structured["degraded"] = serde_json::json!(true);
+-                structured["degraded_reason"] = serde_json::json!(
+-                    "ax_tree_empty: the AX walk returned no actionable elements. The \
+-                     window may be a non-AX surface (canvas/WebGL/custom-drawn) or its \
+-                     accessibility tree was not ready (Chromium/Electron require an \
+-                     AX-enable + settle). Do not treat element data as authoritative — \
+-                     re-snapshot if the app just launched, otherwise switch to the \
+-                     visual path."
+-                );
+-                structured["escalation"] = serde_json::json!({
+-                    "recommended": "px",
+-                    "reason": "non-AX surface — act by pixel (x,y) off the screenshot \
+-                               in this response (an element px action)."
+-                });
+-            }
+-            Degradation::AxAppLaunching => {
+-                structured["degraded"] = serde_json::json!(true);
+-                structured["degraded_reason"] = serde_json::json!(format!(
+-                    "ax_app_launching: window_id {window_id} exists and is owned by pid \
+-                     {pid}, but that app has not finished launching and did not answer \
+-                     accessibility within the {timeout_ms} ms timeout_ms budget. The tree is \
+-                     returned EMPTY because the window's accessibility surface is not \
+-                     available yet."
+-                ));
+-                structured["escalation"] = serde_json::json!({
+-                    "recommended": "foreground",
+-                    "reason": "observation-only until the app finishes launching: re-snapshot \
+-                               in a moment or with a larger timeout_ms. Background input \
+-                               (including px) is refused while the window's AX surface is \
+-                               unresolved; act with delivery_mode:\"foreground\" only if \
+-                               you cannot wait."
+-                });
+-            }
+-            Degradation::AxWindowUnresolved { ax_window_count } => {
+-                structured["degraded"] = serde_json::json!(true);
+-                structured["degraded_reason"] = serde_json::json!(format!(
+-                    "ax_window_unresolved: window_id {window_id} exists and is owned by \
+-                     pid {pid}, but none of the {ax_window_count} AXWindow element(s) \
+-                     under that pid reports this CGWindowID. The tree is returned EMPTY \
+-                     on purpose: the accessibility elements reachable under this pid \
+-                     belong to other surfaces (the menu bar, other windows), not to the \
+-                     requested window, so presenting them would misground the next \
+-                     action."
+-                ));
+-                structured["escalation"] = serde_json::json!({
+-                    "recommended": "foreground",
+-                    "reason": "observation-only: the screenshot in this response IS the \
+-                               requested window, but background input (including px) is \
+-                               refused while its AX surface is unresolved — events could \
+-                               reach a same-process sibling window. Re-snapshot after the \
+-                               app settles, or act with delivery_mode:\"foreground\"."
+-                });
+-            }
++            },
++        );
++        if response.is_error == Some(true) {
++            return response;
+         }
++        let Some(structured) = response.structured_content.as_mut() else {
++            return response;
++        };
+         // Additive read-only `background_input` capability section (macOS
+         // background input v1): the same fresh facts that gate every
+         // background mutation, reported per route so an agent can choose
+@@ -729,27 +536,6 @@ impl Tool for GetWindowStateTool {
+                 structured["background_input"] = report;
+             }
+         }
+-        if let Some((sw, sh)) = screenshot_dims {
+-            structured["screenshot_width"] = serde_json::json!(sw);
+-            structured["screenshot_height"] = serde_json::json!(sh);
+-            // Surface 7: emit an explicit `screenshot_mime_type` on the
+-            // structured payload so consumers don't have to sniff the magic
+-            // bytes off the base64 PNG (`iVBOR` = PNG, `/9j/` = JPEG) to
+-            // know what they're holding. `Content::image_png` already carries
+-            // `mimeType` on the protocol image part — this mirrors it onto
+-            // the structured side. Additive: keeps every existing field.
+-            structured["screenshot_mime_type"] = serde_json::json!("image/png");
+-        }
+-        if let Some((bounds, scale)) = screenshot_frame {
+-            structured["window_bounds"] = serde_json::json!({
+-                "x": bounds.x,
+-                "y": bounds.y,
+-                "width": bounds.width,
+-                "height": bounds.height
+-            });
+-            structured["screenshot_scale"] = serde_json::json!(scale);
+-            structured["screenshot_frame_valid"] = serde_json::json!(true);
+-        }
+         if let Some(error) = screenshot_frame_error {
+             structured["screenshot_frame_valid"] = serde_json::json!(false);
+             structured["screenshot_error"] = super::px_frame::error_structured(&error);
+@@ -771,17 +557,342 @@ impl Tool for GetWindowStateTool {
+             }
+         }
+         cua_driver_core::window_inspection::mark_browser_chrome_capture_coverage(
+-            &mut structured,
++            structured,
+             chromium_browser_window(pid).then_some(
+                 cua_driver_core::window_inspection::BrowserChromeCaptureCoverage::MayBeIncomplete,
+             ),
+         );
+-        ToolResult {
+-            content,
+-            is_error: None,
+-            structured_content: Some(structured),
+-            action_record: None,
++        response
++    }
++}
++// Captured pixels and geometry already validated by the native capture path.
++type WindowCapture = (
++    Vec<u8>,
++    Option<String>,
++    u32,
++    u32,
++    u32,
++    u32,
++    crate::windows::WindowBounds,
++    f64,
++);
++
++/// Assemble the actual response and gate both publications together. Native
++/// acquisition stays outside so fixtures can consume this path without AX/GUI.
++#[allow(clippy::too_many_arguments)]
++fn assemble_window_observation(
++    pid: i32,
++    window_id: u32,
++    tree_result: Option<&crate::ax::TreeWalkResult>,
++    observation_diagnostics: Option<&crate::ax::window_resolution::WindowObservationDiagnostics>,
++    screenshot: Option<&WindowCapture>,
++    prepared_snapshot: Option<crate::ax::snapshot::AxSnapshot>,
++    query: Option<&str>,
++    timeout_ms: u64,
++    observation_only: bool,
++    removed: Option<u32>,
++    publish_snapshot: impl FnOnce(
++        crate::ax::snapshot::AxSnapshot,
++        Option<f64>,
++    ) -> Option<(u32, Vec<u32>)>,
++    publish_capture: impl FnOnce() -> Result<String, ToolResult>,
++) -> ToolResult {
++    let window_scope = tree_result.and_then(|r| r.window_scope.as_ref());
++    let scope_matched = window_scope.is_none_or(|s| s.is_matched());
++    let publishable = observation_can_publish_snapshot(window_scope, observation_diagnostics);
++    let screenshot_dims = screenshot.map(|(_, _, w, h, _, _, _, _)| (*w, *h));
++    let screenshot_frame =
++        screenshot.map(|(_, _, _, _, _, _, bounds, scale)| (bounds.clone(), *scale));
++    let screenshot_resize_scale = screenshot
++        .filter(|_| !observation_only)
++        .map(|(_, _, w, _, original_w, _, _, _)| *original_w as f64 / *w as f64);
++    // Build response.
++    let mut content: Vec<Content> = Vec::new();
++
++    if let Some((png, ref file_path, w, h, _, _, _, _)) = screenshot.as_ref() {
++        if file_path.is_none() {
++            use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
++            content.push(Content::image_png(BASE64.encode(png)));
+         }
++
++        // Summary text line (matching Swift reference format).
++        let element_count = tree_result
++            .as_ref()
++            .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
++            .unwrap_or(0);
++        let summary = if let Some(r) = tree_result {
++            format!(
++                "window_id={window_id} pid={pid} size={}x{} elements={element_count}\n\n{}",
++                w, h, r.tree_markdown
++            )
++        } else {
++            format!("window_id={window_id} pid={pid} size={}x{}", w, h)
++        };
++        content.push(Content::text(summary));
++    } else if let Some(r) = tree_result {
++        let element_count = r.nodes.iter().filter(|n| n.element_index.is_some()).count();
++        content.push(Content::text(format!(
++            "window_id={window_id} pid={pid} elements={element_count}\n\n{}",
++            r.tree_markdown
++        )));
 +    }
 +
-     /// Regression for the Swift→Rust port gap: only a raw background left
-     /// click with an exact window may intentionally activate the target
-     /// without raising it. Other background buttons retain strict suppression,
---- a/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift	2026-09-30 23:15:43
-+++ b/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift	2026-10-30 21:58:30
-@@ -55,6 +55,11 @@
++    if content.is_empty() {
++        return ToolResult::error("No content produced (neither AX tree nor screenshot succeeded)");
++    }
++
++    let element_count = tree_result
++        .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
++        .unwrap_or(0);
++    let tree_md = tree_result
++        .map(|r| r.tree_markdown.clone())
++        .unwrap_or_default();
++
++    let snapshot_payload = prepared_snapshot.or_else(|| {
++        screenshot_resize_scale
++            .is_some()
++            .then(|| crate::ax::snapshot::AxSnapshot::from_nodes(&[]))
++    });
++    let (snapshot_id, replaced) = snapshot_payload
++        .filter(|_| publishable && !observation_only)
++        .and_then(|payload| publish_snapshot(payload, screenshot_resize_scale))
++        .unzip();
++    let capture_id = if snapshot_id.is_some() && screenshot.is_some() {
++        match publish_capture() {
++            Ok(id) => Some(id),
++            Err(error) => return error,
++        }
++    } else {
++        None
++    };
++
++    // Build the structured `elements` array — one entry per actionable
++    // node, matching the order (and indices) of the markdown rendering.
++    // This is the preferred consumption path; `tree_markdown` is kept
++    // alongside for back-compat with existing text-parsing callers
++    // (Hermes' regex parser, Codex, Claude Code) and is signalled as
++    // preferred-for-back-compat-only via the `_note` field below.
++    let elements_json: Vec<serde_json::Value> = match (snapshot_id, tree_result) {
++        (Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, Some(sid)),
++        (None, Some(r)) if scope_matched => build_elements_array_with_token(&r.nodes, None),
++        _ => Vec::new(),
++    };
++    let elements_json =
++        cua_driver_core::element_query::project_elements_for_query(elements_json, query, &tree_md);
++    // Screenshot pixels of the delivered capture: window origin in screen
++    // points, delivered pixels per point (backing scale x downsizing).
++    let elements_json = match (screenshot_frame.as_ref(), screenshot_dims) {
++        (Some((bounds, _)), Some((width, _))) if bounds.width > 0.0 => {
++            cua_driver_core::element_frame::with_screenshot_frames(
++                elements_json,
++                (bounds.x, bounds.y),
++                f64::from(width) / bounds.width,
++            )
++        }
++        _ => elements_json,
++    };
++    let filtered_element_count = elements_json.len();
++    // The structured array intentionally contains only actionable nodes,
++    // and AX child reads can fail independently of the element/depth caps.
++    // Until the walker exposes a proof over the projected search domain,
++    // absence must remain unknown rather than being claimed complete.
++    let elements_complete = false;
++
++    let mut structured = serde_json::json!({
++        "window_id": window_id,
++        "pid": pid,
++        "element_count": element_count,
++        "total_element_count": element_count,
++        "returned_element_count": filtered_element_count,
++        "elements_complete": elements_complete,
++        "tree_markdown": tree_md,
++        "elements": elements_json,
++        "_note": "Prefer `elements` — `tree_markdown` will continue to work \
++            but new fields will only be added to the structured side. \
++            Issue #22865: use `max_elements` / `max_depth` to bound the \
++            AX walk on apps with very large trees."
++    });
++    if query.is_some() {
++        structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
++    }
++    if let Some(r) = tree_result {
++        r.walk.apply(&mut structured);
++    }
++    // Surface 6: an opaque snapshot identifier consumers can log
++    // alongside the per-element tokens for debug correlation. Same value
++    // embedded in every `element_token` emitted in `elements[]` above.
++    // Additive — old consumers ignore it. Absent when no snapshot was
++    // registered (unresolved window scope).
++    if let Some(sid) = snapshot_id {
++        structured["snapshot_id"] =
++            serde_json::json!(cua_driver_core::element_token::format_snapshot_id(sid));
++    }
++    let invalidated: Vec<String> = removed
++        .into_iter()
++        .chain(replaced.into_iter().flatten())
++        .map(cua_driver_core::element_token::format_snapshot_id)
++        .collect();
++    if !invalidated.is_empty() {
++        content.push(Content::text(format!(
++            "Invalidated snapshots {}: their element_tokens are stale.",
++            invalidated.join(", ")
++        )));
++        structured["invalidated_snapshot_ids"] = serde_json::json!(invalidated);
++    }
++    if let Some(capture_id) = capture_id {
++        structured["capture_id"] = serde_json::json!(capture_id);
++    }
++    // Best-effort-background ladder, rung (2). Both rungs point the agent at
++    // the same next move: an empty AX tree means element_index has nothing
++    // to bind to, so the deliberate action is an element px action — read
++    // the screenshot already in this response and click by pixel (x,y).
++    // macOS can pixel-target in the background, so the recommendation is
++    // `px`, not `foreground`.
++    let app_lookup_timed_out =
++        tree_result.is_some_and(|r| r.walk.reason() == Some("app_lookup_timeout"));
++    match degradation_for(
++        tree_result.is_some(),
++        element_count,
++        window_scope,
++        app_lookup_timed_out,
++    ) {
++        Degradation::None => {}
++        Degradation::AxTreeEmpty => {
++            structured["degraded"] = serde_json::json!(true);
++            structured["degraded_reason"] = serde_json::json!(
++                "ax_tree_empty: the AX walk returned no actionable elements. The \
++                     window may be a non-AX surface (canvas/WebGL/custom-drawn) or its \
++                     accessibility tree was not ready (Chromium/Electron require an \
++                     AX-enable + settle). Do not treat element data as authoritative — \
++                     re-snapshot if the app just launched, otherwise switch to the \
++                     visual path."
++            );
++            structured["escalation"] = serde_json::json!({
++                "recommended": "px",
++                "reason": "non-AX surface — act by pixel (x,y) off the screenshot \
++                           in this response (an element px action)."
++            });
++        }
++        Degradation::AxAppLaunching => {
++            structured["degraded"] = serde_json::json!(true);
++            structured["degraded_reason"] = serde_json::json!(format!(
++                "ax_app_launching: window_id {window_id} exists and is owned by pid \
++                     {pid}, but that app has not finished launching and did not answer \
++                     accessibility within the {timeout_ms} ms timeout_ms budget. The tree is \
++                     returned EMPTY because the window's accessibility surface is not \
++                     available yet."
++            ));
++            structured["escalation"] = serde_json::json!({
++                "recommended": "foreground",
++                "reason": "observation-only until the app finishes launching: re-snapshot \
++                           in a moment or with a larger timeout_ms. Background input \
++                           (including px) is refused while the window's AX surface is \
++                           unresolved; act with delivery_mode:\"foreground\" only if \
++                           you cannot wait."
++            });
++        }
++        Degradation::AxWindowUnresolved { ax_window_count } => {
++            structured["degraded"] = serde_json::json!(true);
++            structured["degraded_reason"] = serde_json::json!(format!(
++                "ax_window_unresolved: window_id {window_id} exists and is owned by \
++                     pid {pid}, but none of the {ax_window_count} AXWindow element(s) \
++                     under that pid reports this CGWindowID. The tree is returned EMPTY \
++                     on purpose: the accessibility elements reachable under this pid \
++                     belong to other surfaces (the menu bar, other windows), not to the \
++                     requested window, so presenting them would misground the next \
++                     action."
++            ));
++            structured["escalation"] = unresolved_observation_guidance(None);
++        }
++    }
++    if let Some(diagnostics) = observation_diagnostics {
++        structured["ax_diagnostics"] = serde_json::json!(diagnostics);
++        if scope_matched && !publishable {
++            structured["observation_only"] = serde_json::json!(true);
++            structured["observation_note"] = serde_json::json!(
++                    "The exact accessibility surface was recovered for observation only. No action tokens were issued; input admission is unchanged."
++                );
++            // Recovery outranks the ordinary empty-tree visual-input rung.
++            // Replace its prose as well as its recommended route.
++            let mut guidance = unresolved_observation_guidance(Some(true));
++            guidance["reason"] = serde_json::json!("ax_recovered_observation_only");
++            structured["degraded"] = serde_json::json!(true);
++            structured["degraded_reason"] = serde_json::json!(DIALOG_MANUAL_GUIDANCE);
++            structured["reason"] = guidance["reason"].clone();
++            structured["next_action"] = guidance["next_action"].clone();
++            structured["escalation"] = guidance;
++        }
++        if matches!(
++            window_scope,
++            Some(crate::ax::WindowScope::AxUnresolved { .. })
++        ) {
++            let guidance = unresolved_observation_guidance(diagnostics.on_current_space);
++            structured["reason"] = guidance["reason"].clone();
++            structured["next_action"] = guidance["next_action"].clone();
++            structured["escalation"] = guidance;
++        }
++    }
++    if let Some((sw, sh)) = screenshot_dims {
++        structured["screenshot_width"] = serde_json::json!(sw);
++        structured["screenshot_height"] = serde_json::json!(sh);
++        // Surface 7: emit an explicit `screenshot_mime_type` on the
++        // structured payload so consumers don't have to sniff the magic
++        // bytes off the base64 PNG (`iVBOR` = PNG, `/9j/` = JPEG) to
++        // know what they're holding. `Content::image_png` already carries
++        // `mimeType` on the protocol image part — this mirrors it onto
++        // the structured side. Additive: keeps every existing field.
++        structured["screenshot_mime_type"] = serde_json::json!("image/png");
++    }
++    if let Some((bounds, scale)) = screenshot_frame {
++        structured["window_bounds"] = serde_json::json!({
++            "x": bounds.x,
++            "y": bounds.y,
++            "width": bounds.width,
++            "height": bounds.height
++        });
++        structured["screenshot_scale"] = serde_json::json!(scale);
++        structured["screenshot_frame_valid"] = serde_json::json!(true);
++    }
++    ToolResult {
++        content,
++        is_error: None,
++        structured_content: Some(structured),
++        action_record: None,
++    }
++}
++
++/// A supplemental observation is not a new action surface. In particular,
++/// foreground actions must not gain tokens from observation-only recovery.
++fn observation_can_publish_snapshot(
++    scope: Option<&crate::ax::WindowScope>,
++    diagnostics: Option<&crate::ax::window_resolution::WindowObservationDiagnostics>,
++) -> bool {
++    scope.is_none_or(|scope| scope.is_matched())
++        && !diagnostics
++            .and_then(|d| d.resolution.as_ref())
++            .is_some_and(|r| r.own_window_id.is_some())
++}
++
++pub(super) const DIALOG_MANUAL_GUIDANCE: &str = "This dialog is visible, but Computer Use can't confirm that input would reach only this window. Handle it manually, then continue.";
++
++/// Current-Space visibility is observation evidence, never modal/input proof.
++fn unresolved_observation_guidance(on_current_space: Option<bool>) -> Value {
++    if on_current_space == Some(true) {
++        serde_json::json!({
++            "reason": "current_space_ax_unresolved",
++            "code": "app_dialog_unresolved",
++            "next_action": "manual",
++            "recommended": "manual",
++            "message": DIALOG_MANUAL_GUIDANCE
++        })
++    } else {
++        serde_json::json!({
++            "reason": "off_space_or_ax_unresolved",
++            "code": "off_space_or_ax_unresolved",
++            "next_action": "observe",
++            "recommended": "observe",
++            "message": "Computer Use could not resolve this window's accessibility surface. Bring the requested window into view manually, then observe it again."
++        })
+     }
+ }
+ 
+@@ -1018,6 +1129,242 @@ mod window_scope_contract_tests {
+     use super::*;
+     use crate::ax::WindowScope;
+ 
++    fn local_screenshot() -> WindowCapture {
++        // Valid local image bytes; no capture API, file or application is used.
++        let mut png = std::io::Cursor::new(Vec::new());
++        image::DynamicImage::new_rgba8(1, 1)
++            .write_to(&mut png, image::ImageFormat::Png)
++            .unwrap();
++        (
++            png.into_inner(),
++            None,
++            1,
++            1,
++            1,
++            1,
++            crate::windows::WindowBounds {
++                x: 0.0,
++                y: 0.0,
++                width: 1.0,
++                height: 1.0,
++            },
++            1.0,
++        )
++    }
++
++    #[test]
++    fn review_p2_recovered_empty_tree_with_screenshot_has_only_manual_guidance() {
++        use crate::ax::{
++            bindings::AxWindowsDiagnostics,
++            window_resolution::{ResolutionDiagnostics, WindowObservationDiagnostics},
++        };
++        let diagnostics = WindowObservationDiagnostics {
++            owner_pid: 7,
++            requested_window_id: 22,
++            on_current_space: Some(true),
++            ax_windows: AxWindowsDiagnostics::status("empty"),
++            resolution: Some(ResolutionDiagnostics {
++                status: "exact_relationship_match".into(),
++                own_window_id: Some(22),
++                root_window_id: Some(11),
++                ..Default::default()
++            }),
++        };
++        let tree = crate::ax::TreeWalkResult {
++            tree_markdown: "- AXStaticText = welcome".into(),
++            nodes: vec![],
++            truncated: false,
++            walk: cua_driver_core::walk_budget::WalkBudget::nodes_only(10).outcome(),
++            window_scope: Some(WindowScope::Matched),
++        };
++        let screenshot = local_screenshot();
++        let response = assemble_window_observation(
++            7,
++            22,
++            Some(&tree),
++            Some(&diagnostics),
++            Some(&screenshot),
++            Some(crate::ax::snapshot::AxSnapshot::from_nodes(&[])),
++            None,
++            1000,
++            false,
++            None,
++            |_, _| panic!("recovery must not publish a snapshot"),
++            || panic!("recovery must not publish a capture binding"),
++        );
++        assert!(response.is_error.is_none());
++        let structured = response.structured_content.unwrap();
++        assert_eq!(structured["screenshot_width"], 1);
++        assert_eq!(structured["screenshot_frame_valid"], true);
++        assert_eq!(structured["elements"], serde_json::json!([]));
++        assert!(structured.get("snapshot_id").is_none());
++        assert!(structured.get("capture_id").is_none());
++        assert!(!structured.to_string().contains("element_token"));
++        assert_eq!(structured["observation_only"], true);
++        assert_eq!(structured["escalation"]["recommended"], "manual");
++        assert_eq!(structured["next_action"], "manual");
++        assert_eq!(structured["degraded_reason"],
++            "This dialog is visible, but Computer Use can't confirm that input would reach only this window. Handle it manually, then continue.");
++        for phrase in ["act by pixel", "visual path", "delivery_mode", "foreground"] {
++            assert!(
++                !structured.to_string().contains(phrase),
++                "contradictory guidance: {structured}"
++            );
++        }
++    }
++
++    #[test]
++    fn review_p2_normal_empty_tree_and_capture_only_keep_publication_semantics() {
++        let screenshot = local_screenshot();
++        let tree = crate::ax::TreeWalkResult {
++            tree_markdown: "- AXWindow".into(),
++            nodes: vec![],
++            truncated: false,
++            walk: cua_driver_core::walk_budget::WalkBudget::nodes_only(10).outcome(),
++            window_scope: Some(WindowScope::Matched),
++        };
++        for tree_result in [Some(&tree), None] {
++            let snapshots = std::cell::Cell::new(0);
++            let captures = std::cell::Cell::new(0);
++            let response = assemble_window_observation(
++                7,
++                22,
++                tree_result,
++                None,
++                Some(&screenshot),
++                None,
++                None,
++                1000,
++                false,
++                Some(40),
++                |payload, scale| {
++                    assert!(payload.elements.is_empty());
++                    assert_eq!(scale, Some(1.0));
++                    snapshots.set(snapshots.get() + 1);
++                    Some((42, vec![41]))
++                },
++                || {
++                    captures.set(captures.get() + 1);
++                    Ok("capture-test".into())
++                },
++            );
++            assert_eq!(snapshots.get(), 1);
++            assert_eq!(captures.get(), 1);
++            assert!(response.is_error.is_none());
++            let data = response.structured_content.unwrap();
++            assert_eq!(
++                data["snapshot_id"],
++                cua_driver_core::element_token::format_snapshot_id(42)
++            );
++            assert_eq!(data["capture_id"], "capture-test");
++            assert_eq!(
++                data["invalidated_snapshot_ids"],
++                serde_json::json!([
++                    cua_driver_core::element_token::format_snapshot_id(40),
++                    cua_driver_core::element_token::format_snapshot_id(41),
++                ])
++            );
++            if tree_result.is_some() {
++                assert_eq!(data["escalation"]["recommended"], "px");
++            } else {
++                assert!(data.get("degraded").is_none());
++                assert!(data.get("escalation").is_none());
++            }
++        }
++    }
++
++    #[test]
++    fn review_p2_internal_observation_and_capture_failure_keep_existing_results() {
++        let screenshot = local_screenshot();
++        let observation = assemble_window_observation(
++            7,
++            22,
++            None,
++            None,
++            Some(&screenshot),
++            None,
++            None,
++            1000,
++            true,
++            None,
++            |_, _| panic!("internal observation cannot publish"),
++            || panic!("internal observation cannot bind a capture"),
++        );
++        let data = observation.structured_content.unwrap();
++        assert!(data.get("snapshot_id").is_none());
++        assert!(data.get("capture_id").is_none());
++        assert_eq!(data["screenshot_frame_valid"], true);
++        let failed = assemble_window_observation(
++            7,
++            22,
++            None,
++            None,
++            Some(&screenshot),
++            None,
++            None,
++            1000,
++            false,
++            None,
++            |_, _| Some((42, vec![])),
++            || Err(ToolResult::error("capture binding failed")),
++        );
++        assert_eq!(failed.is_error, Some(true));
++        assert!(failed.structured_content.is_none());
++        assert!(format!("{:?}", failed.content).contains("capture binding failed"));
++    }
++
++    #[test]
++    fn c1_recovery_does_not_publish_action_tokens_or_capture_bindings() {
++        use crate::ax::{
++            bindings::AxWindowsDiagnostics,
++            window_resolution::{ResolutionDiagnostics, WindowObservationDiagnostics},
++        };
++        let mut diagnostics = WindowObservationDiagnostics {
++            owner_pid: 7,
++            requested_window_id: 22,
++            on_current_space: Some(true),
++            ax_windows: AxWindowsDiagnostics::status("empty"),
++            resolution: Some(ResolutionDiagnostics {
++                status: "exact_relationship_match".into(),
++                own_window_id: Some(22),
++                root_window_id: Some(11),
++                ..Default::default()
++            }),
++        };
++        assert!(!observation_can_publish_snapshot(
++            Some(&WindowScope::Matched),
++            Some(&diagnostics)
++        ));
++        diagnostics.resolution = None;
++        assert!(observation_can_publish_snapshot(
++            Some(&WindowScope::Matched),
++            Some(&diagnostics)
++        ));
++        assert!(!observation_can_publish_snapshot(
++            Some(&WindowScope::AxUnresolved { ax_window_count: 0 }),
++            Some(&diagnostics)
++        ));
++    }
++
++    #[test]
++    fn c1_unresolved_guidance_never_recommends_input_bypass() {
++        for current in [Some(true), Some(false), None] {
++            let guidance = unresolved_observation_guidance(current);
++            assert_eq!(
++                guidance["code"],
++                if current == Some(true) {
++                    "app_dialog_unresolved"
++                } else {
++                    "off_space_or_ax_unresolved"
++                }
++            );
++            assert_ne!(guidance["recommended"], "foreground");
++            assert!(!guidance.to_string().contains("delivery_mode"));
++        }
++        assert_eq!(unresolved_observation_guidance(Some(true))["message"],
++            "This dialog is visible, but Computer Use can't confirm that input would reach only this window. Handle it manually, then continue.");
++    }
++
+     fn panel_mismatch() -> WindowScope {
+         WindowScope::OwnerPidMismatch {
+             owner_pid: 900,
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+index e5d6b5a..3c84305 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs
+@@ -214,9 +214,6 @@ async fn decide_background_window_action(
+     element_ptr: Option<usize>,
+     action: cua_driver_core::background_input::BackgroundAction,
+ ) -> Result<(), cua_driver_core::protocol::ToolResult> {
+-    use cua_driver_core::background_input::{
+-        decide_background_input, BackgroundInputDecision, ExactWindowTarget,
+-    };
+     let element_guard =
+         element_ptr.map(|ptr| unsafe { crate::ax::snapshot::RetainedElement::retain(ptr) });
+     let facts = match tokio::task::spawn_blocking(move || {
+@@ -232,10 +229,72 @@ async fn decide_background_window_action(
+             )));
+         }
+     };
+-    match decide_background_input(ExactWindowTarget { pid, window_id }, &facts, action) {
++    finish_background_window_decision(pid, window_id, &facts, action, || {
++        tokio::task::spawn_blocking(move || {
++            crate::windows::window_on_current_space_by_id(window_id)
++        })
++    })
++    .await
++}
++
++// Optional WindowServer evidence must not hold an established refusal (or its
++// per-PID lease) behind a slow lookup. No second AX query is needed here.
++const REFUSAL_EVIDENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
++
++/// Finish a decision from acquired facts; the reader provides optional context
++/// only after refusal and can never dispatch or change an Execute decision.
++async fn finish_background_window_decision<F, E>(
++    pid: i32,
++    window_id: u32,
++    facts: &cua_driver_core::background_input::BackgroundTargetFacts,
++    action: cua_driver_core::background_input::BackgroundAction,
++    read_current_space: impl FnOnce() -> F,
++) -> Result<(), cua_driver_core::protocol::ToolResult>
++where
++    F: std::future::Future<Output = Result<Option<bool>, E>>,
++{
++    use cua_driver_core::background_input::{
++        decide_background_input, BackgroundInputDecision, ExactWindowTarget,
++    };
++    match decide_background_input(ExactWindowTarget { pid, window_id }, facts, action) {
+         BackgroundInputDecision::Execute { .. } => Ok(()),
+-        BackgroundInputDecision::Refuse(refusal) => {
+-            Err(background_refusal_result(pid, window_id, &refusal))
++        BackgroundInputDecision::Refuse(mut refusal) => {
++            let mut diagnostics = None;
++            if refusal.code
++                == cua_driver_core::background_input::refusal_codes::OFF_SPACE_OR_AX_UNRESOLVED
++            {
++                let (on_current_space, status) =
++                    match tokio::time::timeout(REFUSAL_EVIDENCE_TIMEOUT, async {
++                        read_current_space().await
++                    })
++                    .await
++                    {
++                        Ok(Ok(Some(current))) => (Some(current), "ok"),
++                        Ok(Ok(None)) => (None, "unknown"),
++                        Ok(Err(_)) => (None, "error"),
++                        Err(_) => (None, "timeout"),
++                    };
++                diagnostics = Some(serde_json::json!({
++                    "source": "initial_admission_facts",
++                    "ax_window_present": facts.ax_window_present,
++                    "on_current_space": on_current_space,
++                    "current_space_source": "window_server",
++                    "current_space_status": status,
++                    "modal_proven": false,
++                }));
++                if on_current_space == Some(true) {
++                    refusal.code = "app_dialog_unresolved";
++                    refusal.reason = get_window_state::DIALOG_MANUAL_GUIDANCE.into();
++                    refusal.advice = None;
++                }
++            }
++            let mut result = background_refusal_result(pid, window_id, &refusal);
++            if let (Some(structured), Some(diagnostics)) =
++                (result.structured_content.as_mut(), diagnostics)
++            {
++                structured["diagnostics"] = diagnostics;
++            }
++            Err(result)
+         }
+     }
+ }
+@@ -1129,3 +1188,172 @@ mod recording_start_guard_tests {
+         let _ = rec.stop_owner(None);
+     }
+ }
++
++#[cfg(test)]
++mod refusal_evidence_review_tests {
++    use super::*;
++    use cua_driver_core::background_input::{
++        BackgroundAction, BackgroundTargetFacts, ElementAncestry, WindowServerOwnership,
++    };
++
++    fn unresolved() -> BackgroundTargetFacts {
++        BackgroundTargetFacts {
++            window_server: WindowServerOwnership::SamePid,
++            ax_window_present: false,
++            target_minimized: None,
++            app_hidden: None,
++            competing_keyboard_destinations: 0,
++            element: ElementAncestry::NotAddressed,
++        }
++    }
++
++    #[tokio::test]
++    async fn review_p2_known_refusal_does_not_wait_for_delayed_optional_evidence() {
++        let result = tokio::time::timeout(
++            std::time::Duration::from_millis(500),
++            finish_background_window_decision(
++                7,
++                22,
++                &unresolved(),
++                BackgroundAction::GenericKey,
++                || std::future::pending::<Result<Option<bool>, ()>>(),
++            ),
++        )
++        .await
++        .expect("known refusal must return promptly even if optional evidence never answers");
++        let refusal = result.err().expect("no actuator permission");
++        assert_eq!(
++            refusal.structured_content.unwrap()["code"],
++            "off_space_or_ax_unresolved"
++        );
++    }
++
++    #[tokio::test]
++    async fn review_p2_current_space_evidence_only_enriches_refusal() {
++        for (evidence, status) in [
++            (Ok(Some(true)), "ok"),
++            (Ok(Some(false)), "ok"),
++            (Ok(None), "unknown"),
++            (Err(()), "error"),
++        ] {
++            let calls = std::cell::Cell::new(0);
++            let response = finish_background_window_decision(
++                7,
++                22,
++                &unresolved(),
++                BackgroundAction::GenericKey,
++                || {
++                    calls.set(calls.get() + 1);
++                    std::future::ready(evidence)
++                },
++            )
++            .await
++            .expect_err("diagnostic evidence cannot authorize an actuator");
++            assert_eq!(calls.get(), 1, "no retry");
++            assert_eq!(response.is_error, Some(true));
++            let data = response.structured_content.unwrap();
++            assert_eq!(data["effect"], "refused");
++            let current = evidence.ok().flatten();
++            assert_eq!(
++                data["code"],
++                if current == Some(true) {
++                    "app_dialog_unresolved"
++                } else {
++                    "off_space_or_ax_unresolved"
++                }
++            );
++            if current == Some(true) {
++                assert_eq!(data["reason"], get_window_state::DIALOG_MANUAL_GUIDANCE);
++                assert!(data.get("escalation").is_none());
++            }
++            let diagnostics = &data["diagnostics"];
++            assert_eq!(diagnostics["source"], "initial_admission_facts");
++            assert_eq!(diagnostics["ax_window_present"], false);
++            assert_eq!(diagnostics["on_current_space"], serde_json::json!(current));
++            assert_eq!(diagnostics["current_space_status"], status);
++            assert_eq!(diagnostics["modal_proven"], false);
++            assert!(
++                diagnostics.get("ax_windows").is_none(),
++                "no new AXWindows query"
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn review_p2_delayed_true_false_unknown_preserve_original_refusal() {
++        for current in [Some(true), Some(false), None] {
++            let calls = std::cell::Cell::new(0);
++            let completed = std::cell::Cell::new(false);
++            let result = tokio::time::timeout(
++                std::time::Duration::from_millis(500),
++                finish_background_window_decision(
++                    7,
++                    22,
++                    &unresolved(),
++                    BackgroundAction::GenericKey,
++                    || async {
++                        calls.set(calls.get() + 1);
++                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
++                        completed.set(true);
++                        Ok::<_, ()>(current)
++                    },
++                ),
++            )
++            .await
++            .expect("optional evidence cannot hold an established refusal");
++            let response = result.expect_err("no actuator permission");
++            assert_eq!(calls.get(), 1, "no retry");
++            assert!(!completed.get(), "must return before delayed evidence");
++            let data = response.structured_content.unwrap();
++            let cua_driver_core::background_input::BackgroundInputDecision::Refuse(original) =
++                cua_driver_core::background_input::decide_background_input(
++                    cua_driver_core::background_input::ExactWindowTarget {
++                        pid: 7,
++                        window_id: 22,
++                    },
++                    &unresolved(),
++                    BackgroundAction::GenericKey,
++                )
++            else {
++                panic!("fixture must already refuse")
++            };
++            assert_eq!(data["code"], original.code);
++            assert_eq!(data["reason"], original.reason);
++            assert_eq!(data["escalation"]["recommended"], original.advice.unwrap());
++            assert_eq!(data["diagnostics"]["current_space_status"], "timeout");
++            assert!(data["diagnostics"]["on_current_space"].is_null());
++        }
++    }
++
++    #[tokio::test]
++    async fn review_p2_other_refusals_and_execute_skip_optional_reader() {
++        let mut facts = unresolved();
++        facts.window_server = WindowServerOwnership::ForeignPid { owner_pid: 8 };
++        let refusal = finish_background_window_decision(
++            7,
++            22,
++            &facts,
++            BackgroundAction::WindowPointer,
++            || -> std::future::Ready<Result<Option<bool>, ()>> { panic!("unneeded lookup") },
++        )
++        .await
++        .expect_err("foreign owner must refuse");
++        assert_eq!(
++            refusal.structured_content.unwrap()["code"],
++            "owner_pid_mismatch"
++        );
++        facts.window_server = WindowServerOwnership::SamePid;
++        facts.ax_window_present = true;
++        facts.target_minimized = Some(false);
++        facts.app_hidden = Some(false);
++        assert!(finish_background_window_decision(
++            7,
++            22,
++            &facts,
++            BackgroundAction::WindowPointer,
++            || -> std::future::Ready<Result<Option<bool>, ()>> { panic!("unneeded lookup") },
++        )
++        .await
++        .is_ok());
++    }
++}
+diff --git a/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift b/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift
+index 4621a46..f8f0125 100644
+--- a/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift
++++ b/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift
+@@ -55,6 +55,11 @@ let kMenuActionAID = "lbl-menu-action"
  let kScrollerAID = "scroll-tall"
  let kScrollOffsetAID = "lbl-scroll-offset"
  let kAccelCountAID = "lbl-accel-count"
@@ -1033,7 +3443,7 @@
  let kScrollTopMarker = "SCROLL_TOP_MARKER_v1"
  let kScrollBottomMarker = "SCROLL_BOTTOM_MARKER_v1"
  let kExitButtonAID = "btn-exit"
-@@ -130,6 +135,12 @@
+@@ -130,6 +135,12 @@ final class HarnessWindowController: NSObject, NSTextFieldDelegate, NSTableViewD
      let scrollOffsetLabel = NSTextField(labelWithString: "scroll_offset=0")
      let accelCountLabel = NSTextField(labelWithString: "accel_fired=0")
      var accelCount = 0
@@ -1046,11 +3456,10 @@
      var keyMonitor: Any?
      // Opt-in jev-use task controls and their app-owned state file.
      let taskStatePath = ProcessInfo.processInfo.environment[kTaskStateEnv]
-@@ -263,6 +274,31 @@
-         clickRow.addArrangedSubview(clickCountLabel)
+@@ -264,6 +275,31 @@ final class HarnessWindowController: NSObject, NSTextFieldDelegate, NSTableViewD
          clickRow.addArrangedSubview(accelCountLabel)
          content.addArrangedSubview(clickRow)
-+
+ 
 +        if ProcessInfo.processInfo.environment[kRawClickTargetEnv] == "1" {
 +            content.addArrangedSubview(sectionLabel("raw_click_target"))
 +            let rawTarget = HitTestOnlyView(harness: self)
@@ -1075,10 +3484,11 @@
 +            ])
 +            content.addArrangedSubview(rawRow)
 +        }
- 
++
          // slider — NSSlider drives the `drag` / `set_value` tools (AXValue).
          content.addArrangedSubview(sectionLabel("slider"))
-@@ -700,6 +736,18 @@
+         let slider = NSSlider(value: 0, minValue: 0, maxValue: 100,
+@@ -700,6 +736,18 @@ final class HarnessWindowController: NSObject, NSTextFieldDelegate, NSTableViewD
      @objc func onClickTarget() { recordClick("click") }
      func clickTargetSawDouble() { recordClick("double_click") }
      func clickTargetSawRight() { recordClick("right_click") }
@@ -1097,7 +3507,7 @@
      private func recordClick(_ action: String) {
          clicks += 1
          lastActionLabel.stringValue = "last_action=\(action)"
-@@ -729,6 +777,59 @@
+@@ -729,6 +777,59 @@ final class ClickTargetButton: NSButton {
      override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
  }
  
