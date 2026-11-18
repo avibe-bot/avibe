@@ -3123,14 +3123,14 @@
     "diagnosticQuicInactiveHelp": "Avibe 只会在当前 Connector 实际使用 QUIC 后确认该路径；当前 Connector 正在使用 {{protocol}}。",
     "diagnosticVersion": "{{version}}",
     "direct": {
-      "state": "直连：{{state}}",
-      "stateWithCertificate": "直连：{{state}} · 证书有效期至 {{date}}",
+      "label": "直连",
       "stateReady": "已就绪",
-      "stateStarting": "准备中",
-      "stateNotInstalled": "组件未安装",
-      "stateStopping": "正在停止",
-      "stateError": "出错",
-      "stateUnknown": "未知",
+      "stateAwaitingPermission": "等待授权",
+      "stateDenied": "未获准",
+      "stateAwaitingCertificate": "等待证书",
+      "stateNotRunning": "未运行",
+      "certificate": "证书有效期至 {{date}}",
+      "detail": "{{certificate}} · {{page}}",
       "pageDirect": "本页当前连接：直连",
       "pageOther": "本页当前连接：未走直连"
     }

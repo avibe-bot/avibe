@@ -4,13 +4,13 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import i18n from '../i18n';
-import { setLiveStreamDirect } from '../lib/liveStreamVia';
+import { setLiveStreamVia } from '../lib/liveStreamVia';
 import { DirectTag } from './DirectTag';
 
 // ui/design: mobile-app/direct-tag
 afterEach(() => {
   cleanup();
-  act(() => setLiveStreamDirect(false));
+  act(() => setLiveStreamVia(null));
 });
 
 describe('DirectTag', () => {
@@ -18,9 +18,9 @@ describe('DirectTag', () => {
     await i18n.changeLanguage('zh');
     const { container } = render(<DirectTag />);
     expect(container.innerHTML).toBe('');
-    act(() => setLiveStreamDirect(true));
+    act(() => setLiveStreamVia('direct'));
     expect(screen.getByText('直连')).toBeTruthy();
-    act(() => setLiveStreamDirect(false));
+    act(() => setLiveStreamVia('other'));
     expect(container.innerHTML).toBe('');
   });
 });

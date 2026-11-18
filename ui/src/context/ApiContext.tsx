@@ -64,7 +64,7 @@ import {
   type WorkbenchControllerLegState,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
-import { setLiveStreamDirect } from '../lib/liveStreamVia';
+import { setLiveStreamVia } from '../lib/liveStreamVia';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 import {
@@ -3190,7 +3190,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source?.close();
     eventConnectionRef.current = null;
     // `via` speaks for one stream only; the next one answers again.
-    setLiveStreamDirect(false);
+    setLiveStreamVia(null);
     eventControllerLegRef.current = 'unknown';
     // The stamp and the cadence both speak for one socket only; a later stream
     // must earn its own, including the right to be watched on a timer.
@@ -3395,7 +3395,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
         // How this very stream reached the instance (ui/design: mobile-app/direct-tag).
-        if (sourceKind === 'browser') setLiveStreamDirect(parsed.via === 'direct');
+        if (sourceKind === 'browser') {
+          setLiveStreamVia(parsed.via === 'direct' || parsed.via === 'other' ? parsed.via : null);
+        }
         eventConnectionRef.current = {
           sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1,
           source: sourceKind,

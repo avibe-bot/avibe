@@ -3123,14 +3123,14 @@
     "diagnosticQuicInactiveHelp": "Avibe confirms QUIC only after the active Connector demonstrates it. The Connector is currently using {{protocol}}.",
     "diagnosticVersion": "{{version}}",
     "direct": {
-      "state": "Direct: {{state}}",
-      "stateWithCertificate": "Direct: {{state}} · certificate valid until {{date}}",
+      "label": "Direct",
       "stateReady": "ready",
-      "stateStarting": "starting",
-      "stateNotInstalled": "component not installed",
-      "stateStopping": "stopping",
-      "stateError": "error",
-      "stateUnknown": "unknown",
+      "stateAwaitingPermission": "waiting for permission",
+      "stateDenied": "not permitted",
+      "stateAwaitingCertificate": "waiting for certificate",
+      "stateNotRunning": "not running",
+      "certificate": "Certificate valid until {{date}}",
+      "detail": "{{certificate}} · {{page}}",
       "pageDirect": "This page's live connection: direct",
       "pageOther": "This page's live connection: not direct"
     }

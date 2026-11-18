@@ -33,7 +33,7 @@ import {
   WORKBENCH_EVENT_RETRY_INITIAL_MS,
   workbenchEventStaleAfterMs,
 } from '../lib/workbenchEventConnection';
-import { liveStreamDirect, setLiveStreamDirect } from '../lib/liveStreamVia';
+import { liveStreamVia, setLiveStreamVia } from '../lib/liveStreamVia';
 import { ApiProvider, useApi } from './ApiContext';
 
 const STALE_AFTER_MS = workbenchEventStaleAfterMs(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
@@ -401,34 +401,38 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
-  it('says direct only while the stream that reported it lives, and asks each new stream again', () => {
-    setLiveStreamDirect(false);
+  it('says how the live stream came in only while it lives, and asks each new stream again', () => {
+    setLiveStreamVia(null);
     render(<ApiProvider><Subscriber /></ApiProvider>);
-    // No tag before any stream has answered for itself.
-    expect(liveStreamDirect()).toBe(false);
-    FakeEventSource.latest().emit('connected', {
-      sub_id: 1,
+    // Unknown, not "not direct", before any stream has answered for itself.
+    expect(liveStreamVia()).toBeNull();
+    const handshakeVia = (subId: number, via?: string) => FakeEventSource.latest().emit('connected', {
+      sub_id: subId,
       interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
-      via: 'direct',
+      ...(via ? { via } : {}),
     });
+    handshakeVia(1, 'direct');
     emitControllerLeg(true);
-    expect(liveStreamDirect()).toBe(true);
+    expect(liveStreamVia()).toBe('direct');
 
     const first = FakeEventSource.latest();
     awayAndBack({ awayMs: STALE_AFTER_MS });
     expect(first.closed).toBe(true);
-    expect(liveStreamDirect()).toBe(false);
+    // Reconnecting: unknown again until the replacement answers.
+    expect(liveStreamVia()).toBeNull();
 
     // The replacement came in another way: the main listener is only "other".
-    FakeEventSource.latest().emit('connected', {
-      sub_id: 2,
-      interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
-      via: 'other',
-    });
-    expect(liveStreamDirect()).toBe(false);
-    // A server too old to say is not direct either.
-    emitHandshake(3);
-    expect(liveStreamDirect()).toBe(false);
+    handshakeVia(2, 'other');
+    expect(liveStreamVia()).toBe('other');
+    // A later replacement answers for itself, direct again.
+    const second = FakeEventSource.latest();
+    awayAndBack({ awayMs: STALE_AFTER_MS });
+    expect(second.closed).toBe(true);
+    handshakeVia(3, 'direct');
+    expect(liveStreamVia()).toBe('direct');
+    // A server too old to say is unknown, never "not direct".
+    handshakeVia(4);
+    expect(liveStreamVia()).toBeNull();
   });
 
   it('does not let a replacement stream inherit the old one as proof of life', () => {

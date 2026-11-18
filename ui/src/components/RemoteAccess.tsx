@@ -28,7 +28,8 @@ import {
 import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
-import { liveStreamDirect, subscribeLiveStreamDirect } from '../lib/liveStreamVia';
+import { liveStreamVia, subscribeLiveStreamVia } from '../lib/liveStreamVia';
+import { remoteAccessDirectLines } from '../lib/remoteAccessDirect';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
@@ -958,36 +959,34 @@ export const RemoteAccess: React.FC = () => {
   );
 };
 
-const DIRECT_STATE_KEYS = {
-  running: 'remoteAccess.direct.stateReady',
-  starting: 'remoteAccess.direct.stateStarting',
-  'waiting-certificate': 'remoteAccess.direct.stateStarting',
-  'waiting-permission': 'remoteAccess.direct.stateStarting',
-  'transport-not-installed': 'remoteAccess.direct.stateNotInstalled',
-  stopping: 'remoteAccess.direct.stateStopping',
-  error: 'remoteAccess.direct.stateError',
-} as const satisfies Record<string, TranslationKey>;
-
-// The direct ingress, as current facts only: the instance's own state and certificate, and whether
-// this page's live stream came in through it (that stream's own handshake). No drop count and no
-// fallback reason: neither the instance nor the page can know them truthfully today. Shown only
-// while direct is turned on (ui/design: settings/remote-access/direct-*).
+// The direct ingress, as current facts only: the instance's own state and certificate, and how this
+// page's live stream came in (that stream's own handshake; hidden until one has answered). No drop
+// count and no fallback reason: neither the instance nor the page can know them truthfully today.
+// Shown only while direct is turned on (ui/design: settings/remote-access/direct-*).
 const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }> = ({ direct }) => {
-  const { t } = useTranslation();
-  const pageDirect = useSyncExternalStore(subscribeLiveStreamDirect, liveStreamDirect, () => false);
-  if (!direct?.enabled) return null;
-  const stateKey = DIRECT_STATE_KEYS[direct.state as keyof typeof DIRECT_STATE_KEYS];
-  const state = t(stateKey ?? 'remoteAccess.direct.stateUnknown');
-  const notAfter = direct.certificate_not_after ? new Date(direct.certificate_not_after) : null;
-  const date = notAfter && !Number.isNaN(notAfter.getTime()) ? notAfter.toLocaleDateString() : null;
+  const { t, i18n } = useTranslation();
+  const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
+  const [now] = useState(() => Date.now());
+  const lines = remoteAccessDirectLines(direct, pageVia, now);
+  if (!lines) return null;
+  // Written like other Settings dates: the page's own locale.
+  const certificate = lines.certificateDate
+    ? t('remoteAccess.direct.certificate', {
+      date: new Intl.DateTimeFormat(i18n.language, { year: 'numeric', month: 'long', day: 'numeric' })
+        .format(lines.certificateDate),
+    })
+    : null;
+  const page = lines.pageKey ? t(lines.pageKey) : null;
+  const detail = certificate && page
+    ? t('remoteAccess.direct.detail', { certificate, page })
+    : certificate ?? page;
   return (
-    <div className="space-y-1 border-b border-border px-5 py-3.5 text-[12px] text-muted">
-      <div>
-        {date
-          ? t('remoteAccess.direct.stateWithCertificate', { state, date })
-          : t('remoteAccess.direct.state', { state })}
+    <div className="border-b border-border px-5 py-3.5" data-testid="remote-access-direct">
+      <div className="text-[12px] text-muted">{t('remoteAccess.direct.label')}</div>
+      <div className="mt-1">
+        <Badge variant={lines.variant}>{t(lines.stateKey)}</Badge>
       </div>
-      <div>{t(pageDirect ? 'remoteAccess.direct.pageDirect' : 'remoteAccess.direct.pageOther')}</div>
+      {detail && <div className="mt-1.5 text-[12px] text-muted">{detail}</div>}
     </div>
   );
 };
