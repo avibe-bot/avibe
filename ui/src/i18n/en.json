@@ -58,8 +58,6 @@
       "needsPermission": "Computer Use — permission needed",
       "needsPermissionAccessibility": "Computer Use — Accessibility permission needed",
       "needsPermissionScreenRecording": "Computer Use — Screen Recording needed; add Avibe in System Settings",
-      "screenRecordingTitle": "Screen Recording permission needed",
-      "screenRecordingGuide": "Avibe opened System Settings → Privacy & Security → Screen & System Audio Recording. Click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the Screen Recording grant; return to Avibe when it reopens. It will start automatically after both permissions are granted.",
       "needsRuntime": "Computer Use — restart the Avibe service",
       "runtimeUnavailable": "Computer Use — waiting for the Avibe service",
       "runtimeTooOld": "Computer Use — restart the Avibe service",
@@ -209,6 +207,14 @@
     "boot": {
       "loading": "Restoring your account…"
     },
+    "provider": {
+      "unavailable": "This way of signing in isn’t available right now. Use an email code instead.",
+      "googleEmailUnverified": "Verify this email with Google first, or use an email code instead.",
+      "githubEmailUnverified": "Verify this email with GitHub first, or use an email code instead.",
+      "googleFailed": "Couldn’t sign in with Google. Try again.",
+      "githubFailed": "Couldn’t sign in with GitHub. Try again.",
+      "appleFailed": "Couldn’t sign in with Apple. Try again."
+    },
     "welcome": {
       "mascotAlt": "Vibey cloud mascot",
       "greeting": "Hi, I’m Vibey",
@@ -216,9 +222,13 @@
       "titleLine2": "by your side.",
       "bodyLine1": "Avibe on your computer,",
       "bodyLine2": "now in your pocket.",
-      "action": "Sign in / Create account",
       "footerLine1": "Vibey, your built-in AI partner.",
-      "footerLine2": "Connect to your instances or those shared with you."
+      "footerLine2": "Connect to your instances or those shared with you.",
+      "continueWithEmail": "Continue with email",
+      "or": "or",
+      "continueWithGoogle": "Continue with Google",
+      "continueWithGitHub": "Continue with GitHub",
+      "continueWithApple": "Continue with Apple"
     },
     "email": {
       "title": "It starts with an email.",
@@ -295,6 +305,8 @@
       "offlineBody": "Start Avibe on that computer and connect it to the internet. Then refresh the list or choose another online instance."
     },
     "empty": {
+      "newAccount": "Already have an Avibe account? This one was just created; sign out and sign in the way you did before.",
+      "newAccountSignOut": "Sign out",
       "title": "Bring your work along.",
       "subtitle": "Run on your computer. Connect from your phone.",
       "body": "No instances yet. Install Avibe on your computer and pair this account.",
@@ -3123,7 +3135,19 @@
     "diagnosticUnknown": "Not observed",
     "diagnosticQuicInactive": "Unverified · {{protocol}} active",
     "diagnosticQuicInactiveHelp": "Avibe confirms QUIC only after the active Connector demonstrates it. The Connector is currently using {{protocol}}.",
-    "diagnosticVersion": "{{version}}"
+    "diagnosticVersion": "{{version}}",
+    "direct": {
+      "label": "Direct",
+      "stateReady": "ready",
+      "stateAwaitingPermission": "waiting for permission",
+      "stateDenied": "not permitted",
+      "stateAwaitingCertificate": "waiting for certificate",
+      "stateNotRunning": "not running",
+      "certificate": "Certificate valid until {{date}}",
+      "detail": "{{certificate}} · {{page}}",
+      "pageDirect": "This page's live connection: direct",
+      "pageOther": "This page's live connection: not direct"
+    }
   },
   "models": {
     "eligibility": {
@@ -3623,7 +3647,8 @@
     "openMobileAccount": "Account and Avibes",
     "signOut": "Sign out",
     "signingOut": "Signing out…",
-    "resizeSidebar": "Resize sidebar"
+    "resizeSidebar": "Resize sidebar",
+    "directTag": "Direct"
   },
   "workbench": {
     "eyebrow": "Agent OS",
@@ -5533,7 +5558,14 @@
       "share": "Share",
       "shareTitle": "Share this Show Page",
       "copyLink": "Copy link",
-      "nativeShare": "Share…",
+      "shareLink": "Share link",
+      "sharePdf": "Share PDF",
+      "shareImage": "Share image",
+      "exportTitle": "Export visible content",
+      "exportNotice": "Only the currently visible Show content will be included. Unloaded content, videos, and external embeds may be missing. Recipients can keep a copy that Avibe cannot revoke.",
+      "shareFailed": "Couldn’t share. Try again.",
+      "shareExpired": "This share has expired. Share again.",
+      "shareNeedsUpdate": "This version of Avibe can only share links. Update Avibe to export a PDF or image.",
       "access": "Access",
       "sharingAccess": "Access",
       "sharingModeCurrent": "Access: {{mode}}",
@@ -5620,6 +5652,9 @@
     },
     "notifyLabel": "Notify",
     "retryRequested": "Retry requested",
+    "workspaceNotice": {
+      "openSession": "Open session"
+    },
     "failureNextStep": {
       "openModels": "Open Models",
       "askAdmin": "Ask an Avibe admin to fix this in Models.",

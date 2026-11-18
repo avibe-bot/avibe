@@ -7,7 +7,9 @@ import clsx from 'clsx';
 import type { InboxSession } from '../../context/ApiContext';
 import type { Bot } from '../../lib/bots';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { inboxRowStale } from '../../lib/inboxPreview';
 import { BotAvatar } from '../ui/bot-avatar';
+import { Skeleton, SkeletonShimmer } from '../ui/skeleton';
 import { Presence } from '../ui/presence';
 import { BotTag } from './bots/BotTag';
 import { InboxPreview } from './InboxPreview';
@@ -145,7 +147,12 @@ export const InboxCard = memo(function InboxCard({
             <div className="text-[10px] font-bold uppercase tracking-wider text-mint-ink">
               {t('workbench.inbox.agent')}
             </div>
-            {s.preview_text ? (
+            {/* A row read before its newest reply shows no older message in its place (``inboxRowStale``). */}
+            {inboxRowStale(s, unread) ? (
+              <SkeletonShimmer label={t('common.loading')} className="flex flex-col gap-1 rounded-md">
+                <Skeleton className="h-[1lh] w-11/12 text-[13px]" />
+              </SkeletonShimmer>
+            ) : s.preview_text ? (
               <InboxPreview
                 text={s.preview_text}
                 className={clsx(

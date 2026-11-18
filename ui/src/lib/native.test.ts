@@ -10,6 +10,7 @@ import {
   nativePushStatusOutcome,
   nativePushSubscribe,
   nativePushUnsubscribeOutcome,
+  nativeSharePresent,
   nativeShowAccount,
   nativeVoicePermission,
   onNativePushOpened,
@@ -335,5 +336,70 @@ describe('native shell bridge', () => {
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith('/chat/ses_1?from=push#latest');
+  });
+});
+
+describe('native Show sharing', () => {
+  const capabilities = {
+    version: 1,
+    inbound_kinds: [],
+    outbound_kinds: ['link', 'pdf', 'image'],
+    max_bytes: { pdf: 52428800, image: 52428800, link: 32768 },
+    max_total_bytes: 52428800,
+    max_attachments: 1,
+    supports_pending: false,
+  };
+  const shareBridge = (
+    present: (params: Record<string, unknown>) => unknown,
+    probe: () => unknown = () => capabilities,
+    shareDraft = 1,
+  ) => installBridge({
+    capabilities: { app: 1, 'c1.share_draft': shareDraft },
+    call: vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'share.capabilities') return probe();
+      if (method === 'share.present') return present(params ?? {});
+      return null;
+    }) as NonNullable<Window['avibeNative']>['call'],
+  });
+
+  it('accepts only an answer to the same operation and kind', async () => {
+    const echo = (extra: Record<string, unknown>) => (params: Record<string, unknown>) => ({ ...params, ...extra });
+    const cases: [(params: Record<string, unknown>) => unknown, object][] = [
+      [echo({ status: 'completed' }), { kind: 'pdf', status: 'completed' }],
+      [echo({ status: 'cancelled', error: { code: 'ignored' } }), { kind: 'pdf', status: 'cancelled' }],
+      [echo({ status: 'expired' }), { status: 'expired', error: { code: 'expired' } }],
+      [echo({ status: 'failed', error: { code: 'not_visible' } }), { status: 'failed', error: { code: 'not_visible' } }],
+      [echo({ operationId: 'another', status: 'completed' }), { status: 'failed', error: { code: 'invalid_response' } }],
+      [echo({ kind: 'image', status: 'completed' }), { status: 'failed', error: { code: 'invalid_response' } }],
+      [() => null, { status: 'failed', error: { code: 'invalid_response' } }],
+      [() => { throw { code: 'busy', message: 'busy' }; }, { status: 'failed', error: { code: 'busy' } }],
+    ];
+    for (const [present, expected] of cases) {
+      shareBridge(present);
+      const result = await nativeSharePresent('pdf', 'ses-1');
+      expect(result).toMatchObject(expected);
+      if (result.status === 'completed' || result.status === 'cancelled') expect(result.error).toBeUndefined();
+    }
+  });
+
+  it('never presents without the capability, a matching probe, or a bounded Session', async () => {
+    const refusals: [() => ReturnType<typeof installBridge>, string, string][] = [
+      [() => installBridge(), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => capabilities, 0), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => ({ ...capabilities, version: 2 })), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => ({ ...capabilities, outbound_kinds: ['link'] })), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => { throw new Error('gone'); }), 'ses-1', 'unavailable'],
+      [() => shareBridge(() => null), '', 'invalid_request'],
+      [() => shareBridge(() => null), 'x'.repeat(201), 'invalid_request'],
+    ];
+    for (const [install, sessionId, code] of refusals) {
+      const call = install();
+      await expect(nativeSharePresent('image', sessionId)).resolves.toMatchObject({
+        kind: 'image',
+        status: 'failed',
+        error: { code },
+      });
+      expect(call).not.toHaveBeenCalledWith('share.present', expect.anything());
+    }
   });
 });

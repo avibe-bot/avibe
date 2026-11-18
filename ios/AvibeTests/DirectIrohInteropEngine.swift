@@ -73,10 +73,10 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
         lock.withLock { if !stopping { state.peerFailure = failure } }
     }
 
-    func bind(secretKey: Data) async throws -> any DirectIrohEndpoint {
+    func bind(secretKey: Data, relayURLs: [String]) async throws -> any DirectIrohEndpoint {
         begin()
         defer { end() }
-        let base = try await binding.bind(secretKey: secretKey)
+        let base = try await binding.bind(secretKey: secretKey, relayURLs: relayURLs)
         let endpoint = Endpoint(base: base, owner: self)
         let stopped = lock.withLock {
             if !stopping { endpoints.append(endpoint) }
@@ -123,11 +123,13 @@ final class InteropEngine: DirectIrohEngine, @unchecked Sendable {
         private let lock = NSLock()
         private var closing: Task<Void, Never>?
         init(base: any DirectIrohEndpoint, owner: InteropEngine) { self.base = base; self.owner = owner }
-        func connect(to id: DirectEndpointID, addresses: [String], alpn: Data) async throws -> any DirectIrohConnection {
+        func connect(
+            to id: DirectEndpointID, addresses: [String], relayURL: String?, alpn: Data
+        ) async throws -> any DirectIrohConnection {
             owner.begin()
             defer { owner.end() }
             do {
-                let connection = try await base.connect(to: id, addresses: addresses, alpn: alpn)
+                let connection = try await base.connect(to: id, addresses: addresses, relayURL: relayURL, alpn: alpn)
                 try owner.connected(connection)
                 return Connection(base: connection, owner: owner)
             } catch {

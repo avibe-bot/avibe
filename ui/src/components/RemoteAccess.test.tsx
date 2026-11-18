@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { RemoteAccess } from './RemoteAccess';
+import { remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import { setLiveStreamVia } from '../lib/liveStreamVia';
 import type { RemoteAccessStatus, TunnelQualitySnapshot } from '../context/ApiContext';
 import { InstanceAuthorizationProvider } from '../context/InstanceAuthorizationProvider';
 import { normalizeSessionInfo, OWNER_INSTANCE_CAPABILITIES } from '../lib/sessionInfo';
@@ -108,6 +110,41 @@ function renderPage(role: 'member' | 'owner' = 'owner') {
   return render(<InstanceAuthorizationProvider session={session}><RemoteAccess /></InstanceAuthorizationProvider>);
 }
 
+describe('RemoteAccess direct lines', () => {
+  const NOW = Date.parse('2026-11-18T00:00:00Z');
+  const direct = (state: string, reason = '', certificate_not_after: string | null = '2027-02-14T08:00:00Z') => ({
+    enabled: true, state, reason, certificate_not_after, transport_running: state === 'running', direct_access_allowed: true,
+  });
+
+  it('shows nothing while direct is off', () => {
+    expect(remoteAccessDirectLines(undefined, 'direct', NOW)).toBeNull();
+    expect(remoteAccessDirectLines({ ...direct('running'), enabled: false }, 'direct', NOW)).toBeNull();
+  });
+
+  it('names each instance state truthfully', () => {
+    const key = (state: string, reason?: string) => remoteAccessDirectLines(direct(state, reason), null, NOW)?.stateKey;
+    expect(key('running', 'published')).toBe('remoteAccess.direct.stateReady');
+    expect(key('waiting-permission', 'permission_denied')).toBe('remoteAccess.direct.stateDenied');
+    expect(key('waiting-permission', 'owner_not_running')).toBe('remoteAccess.direct.stateAwaitingPermission');
+    expect(key('waiting-certificate', 'certificate_not_ready')).toBe('remoteAccess.direct.stateAwaitingCertificate');
+    for (const state of ['starting', 'stopping', 'error', 'transport-not-installed', 'disabled', 'unexpected']) {
+      expect(key(state)).toBe('remoteAccess.direct.stateNotRunning');
+    }
+  });
+
+  it('shows a certificate date only while it is still valid', () => {
+    expect(remoteAccessDirectLines(direct('running'), null, NOW)?.certificateDate?.toISOString()).toBe('2027-02-14T08:00:00.000Z');
+    expect(remoteAccessDirectLines(direct('running', '', '2026-11-01T00:00:00Z'), null, NOW)?.certificateDate).toBeNull();
+    expect(remoteAccessDirectLines(direct('running', '', null), null, NOW)?.certificateDate).toBeNull();
+  });
+
+  it('hides the page line until a live stream has answered', () => {
+    expect(remoteAccessDirectLines(direct('running'), null, NOW)?.pageKey).toBeNull();
+    expect(remoteAccessDirectLines(direct('running'), 'direct', NOW)?.pageKey).toBe('remoteAccess.direct.pageDirect');
+    expect(remoteAccessDirectLines(direct('running'), 'other', NOW)?.pageKey).toBe('remoteAccess.direct.pageOther');
+  });
+});
+
 describe('RemoteAccess', () => {
   beforeEach(() => {
     api.pairVibeCloudRemoteAccess.mockReset();
@@ -119,6 +156,24 @@ describe('RemoteAccess', () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it('draws the direct lines only while direct is on, with the page line once a stream answered', async () => {
+    setLiveStreamVia(null);
+    renderPage();
+    await screen.findByText('remoteAccess.connector');
+    expect(screen.queryByTestId('remote-access-direct')).toBeNull();
+    cleanup();
+
+    api.remoteAccessStatus.mockResolvedValue(runningStatus({
+      direct: { enabled: true, state: 'running', reason: 'published', certificate_not_after: null, transport_running: true, direct_access_allowed: true },
+    }));
+    renderPage();
+    const lines = await screen.findByTestId('remote-access-direct');
+    expect(lines.textContent).toBe('remoteAccess.direct.labelremoteAccess.direct.stateReady');
+    act(() => setLiveStreamVia('direct'));
+    expect(lines.textContent).toBe('remoteAccess.direct.labelremoteAccess.direct.stateReadyremoteAccess.direct.pageDirect');
+    act(() => setLiveStreamVia(null));
   });
 
   it('RA-TQ-040 explains automatic waiting without disabling a manual retry', async () => {

@@ -270,7 +270,9 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
         driver["patch"]["contract"]
         == ("click.click_mode=raw; embedded parent-liveness cleanup; "
         "running launch_app uses kAEReopenApplication ('rapp') without activation; "
-        "cold and new-instance launch use 'oapp'")
+        "cold and new-instance launch use 'oapp'; "
+        "bounded AX window resolution and unresolved-dialog diagnostics; "
+        "recovery is observation-only and grants no input authorization")
     )
     assert driver["patch"]["upstream_refs"]
     assert driver["patch"]["upgrade_plan"]
@@ -288,20 +290,8 @@ def test_built_contract_reads_dump_docs_input_schema_without_stderr_contaminatio
         if command[1:] == ["--version"]:
             return "cua-driver 0.31.0\n"
         assert command[1:] == ["dump-docs", "--type", "mcp"]
-        output = json.dumps(
-            {
-                "tools": [
-                    {
-                        "name": "click",
-                        "input_schema": {
-                            "properties": {
-                                "click_mode": {"enum": ["auto", "raw"]},
-                            }
-                        },
-                    }
-                ]
-            }
-        )
+        tools = json.loads(_SCRIPT["TOOL_SNAPSHOT"].read_text())["tools"]
+        output = json.dumps({"tools": [_macos_docs_projection(tool) for tool in tools]})
         if kwargs.get("stderr") is _SCRIPT["subprocess"].STDOUT:
             return "Cua Driver sends content-free product telemetry.\n" + output
         return output
@@ -336,7 +326,7 @@ def test_built_contract_rejects_snapshot_input_schema_shape(
 
     with pytest.raises(
         ValueError,
-        match="does not expose click.click_mode",
+        match="dump-docs does not match",
     ):
         _SCRIPT["verify_built_contract"](tmp_path / "cua-driver")
 
@@ -542,3 +532,45 @@ def test_source_extraction_rejects_non_regular_driver_members(tmp_path: Path) ->
             archive,
             tmp_path / "extracted",
         )
+
+
+def _macos_docs_projection(tool: dict) -> dict:
+    return {
+        "name": tool["name"],
+        "description": tool["description"],
+        "input_schema": tool["inputSchema"],
+        "read_only": tool["annotations"]["readOnlyHint"],
+        "destructive": tool["annotations"]["destructiveHint"],
+        "idempotent": tool["annotations"]["idempotentHint"],
+    }
+
+
+@pytest.mark.parametrize("mutation", [
+    None, "description", "input_schema", "read_only", "destructive", "idempotent",
+    "missing-tool", "duplicate-tool",
+])
+def test_macos_built_contract_checks_every_allowed_docs_field(monkeypatch, tmp_path, mutation):
+    tools = json.loads(_SCRIPT["TOOL_SNAPSHOT"].read_text())["tools"]
+    docs = {"tools": [_macos_docs_projection(tool) for tool in tools]}
+    # Mutate an ordinary discovery tool, so a click-only check cannot pass.
+    target = next(tool for tool in docs["tools"] if tool["name"] == "list_windows")
+    if mutation in {"description", "input_schema"}:
+        target[mutation] = "unexpected metadata"
+    elif mutation in {"read_only", "destructive", "idempotent"}:
+        target[mutation] = not target[mutation]
+    elif mutation == "missing-tool":
+        docs["tools"].remove(target)
+    elif mutation == "duplicate-tool":
+        docs["tools"].append(dict(target))
+
+    def output(command, **kwargs):
+        if command[1:] == ["--version"]:
+            return "cua-driver 0.31.0\n"
+        return json.dumps(docs)
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    if mutation:
+        with pytest.raises(ValueError, match="dump-docs"):
+            _SCRIPT["verify_built_contract"](tmp_path / "cua-driver")
+    else:
+        _SCRIPT["verify_built_contract"](tmp_path / "cua-driver")

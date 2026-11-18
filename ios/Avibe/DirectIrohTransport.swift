@@ -5,8 +5,8 @@ import WebKit
 
 // The direct transport over iroh (rows A1 and A2 of
 // docs/plans/remote-direct-phase1.md; docs/plans/remote-direct-ios.md
-// section 12). Nothing in the App creates it: `AvibeApp` registers no
-// transport, and no build links an iroh binary yet.
+// section 12). `AvibeApp` registers the binding-backed transport; the
+// transport remains inactive until the selected runtime is ready.
 // Design: docs/plans/remote-direct-ios-transport.md.
 
 /// What the transport is asked to reach: one opened runtime's instance.
@@ -663,10 +663,13 @@ final class DirectIrohTransport {
             if
                 let session,
                 session.offer.generation == offer.generation,
-                session.offer.endpointID == offer.endpointID
+                session.offer.endpointID == offer.endpointID,
+                session.offer.relay == offer.relay
             {
-                // The same endpoint and addresses: the path stays, under
-                // the new answer's deadline.
+                // The same endpoint, addresses and relay: the path stays,
+                // under the new answer's deadline. The instance advances
+                // the generation when its relay or relay policy changes;
+                // a changed relay under the same generation is retired too.
                 lease = accepted
                 session.authority.renew(deadline: accepted.deadline)
                 armLeaseTimer()
@@ -686,7 +689,7 @@ final class DirectIrohTransport {
                 }
                 return
             }
-            // A new endpoint key or address set. The old path is retired
+            // A new endpoint key, address set or relay. The old path is retired
             // before the new one is dialled: new connections use the
             // public origin until the new path answers.
             guard endSessionReportingLoss() else {
@@ -910,7 +913,9 @@ final class DirectIrohTransport {
                     allowed: allowed,
                     discard: closeEndpoint,
                     { () async throws -> any DirectIrohEndpoint in
-                        try await engine.bind(secretKey: key.secret)
+                        // Relays only for an answer under a known relay
+                        // policy; otherwise none, as before.
+                        try await engine.bind(secretKey: key.secret, relayURLs: offer.relay?.relayURLs ?? [])
                     }
                 )
             }
@@ -921,7 +926,7 @@ final class DirectIrohTransport {
             let addresses = offer.addresses.map(\.socketAddress)
             let alpn = Data(DirectRendezvous.alpn.utf8)
             let connection: any DirectIrohConnection = try await directIrohDeadline(
-                timing.dialSeconds,
+                offer.relay == nil ? timing.dialSeconds : timing.relayDialSeconds,
                 discard: closeConnection
             ) {
                 try await directIrohCall(
@@ -931,6 +936,7 @@ final class DirectIrohTransport {
                         try await endpoint.connect(
                             to: offer.endpointID,
                             addresses: addresses,
+                            relayURL: offer.relay?.url,
                             alpn: alpn
                         )
                     }
@@ -1286,7 +1292,8 @@ final class DirectIrohTransport {
 
 // What joins this transport to the local proxy's seam
 // (`DirectTransport.swift`). The transport keeps its own value types; this
-// is the whole mapping. Nothing in the App creates the transport yet.
+// is the whole mapping. `AvibeApp` supplies the real binding and rendezvous
+// source; tests may still inject a stand-in transport.
 
 extension DirectIrohSelection {
     /// The selection for a target the path controller issued. The

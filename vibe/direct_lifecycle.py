@@ -77,7 +77,10 @@ def resolve_direct_transport_binary(config: V2Config) -> Path | None:
         return None
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
-    return DirectTransportRuntimeManager().resolve_binary()
+    manager = DirectTransportRuntimeManager()
+    if config.remote_access.vibe_cloud.public_relay_trial:
+        return manager.resolve_binary(require_public_trial=True)
+    return manager.resolve_binary()
 
 
 def managed_direct_hostname(config: V2Config) -> str | None:
@@ -99,6 +102,7 @@ def _config_signature(config: V2Config) -> tuple[Any, ...]:
     return (
         bool(cloud.direct), cloud.instance_id, cloud.public_url,
         remote_access._pairing_identity_fingerprint(remote_access._pairing_identity_from_cloud(cloud)),
+        cloud.public_relay_trial,
     )
 
 
@@ -111,9 +115,9 @@ def _default_ingress_factory(app: Any, **kwargs: Any) -> Any:
     return DirectIngress(app, **kwargs)
 
 
-def _default_supervisor_factory(executable: str, ingress: Any, rendezvous: DirectRendezvous) -> Any:
+def _default_supervisor_factory(executable: str, ingress: Any, rendezvous: DirectRendezvous, **kwargs: Any) -> Any:
     from vibe.direct_transport import DirectTransportSupervisor
-    return DirectTransportSupervisor(executable, ingress, rendezvous)
+    return DirectTransportSupervisor(executable, ingress, rendezvous, **kwargs)
 
 
 def _certificate_usable(result: CertificateResult | None) -> bool:
@@ -558,7 +562,12 @@ class DirectAccessLifecycle:
         await ingress._start_prepared(prepared)
         if not self._can_commit(generation, ingress):
             return
-        self._supervisor = self._supervisor_factory(binary, self._ingress, _OwnedRendezvous(self, generation, ingress))
+        from vibe.direct_rendezvous import PUBLIC_TRIAL
+
+        self._supervisor = self._supervisor_factory(
+            binary, self._ingress, _OwnedRendezvous(self, generation, ingress),
+            **({"relay_policy": PUBLIC_TRIAL} if self._config.remote_access.vibe_cloud.public_relay_trial else {}),
+        )
         await self._supervisor.start()
         if generation != self._generation or self._gate()[2] is None:
             return

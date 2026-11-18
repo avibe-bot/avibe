@@ -16585,6 +16585,16 @@ def cmd_remote_direct(args):
     from vibe import remote_access
 
     action = getattr(args, "direct_command", None)
+    if action == "relay":
+        from vibe.authorization import current_invocation_authority
+
+        if current_invocation_authority() is not None:
+            print("Run this command from the instance host shell.", file=sys.stderr)
+            return 1
+        enabled = args.trial_state == "on"
+        update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "public_relay_trial", enabled))
+        print(f"Public relay trial setting: {args.trial_state}. Direct-path permission and installation are unchanged.")
+        return 0
     if action == "install":
         from core.direct_transport_runtime import DirectTransportRuntimeManager
 
@@ -19383,7 +19393,7 @@ def build_parser():
     )
     remote_direct_subparsers = remote_direct_parser.add_subparsers(
         dest="direct_command",
-        metavar="{on,off,status,install}",
+        metavar="{on,off,status,install,relay}",
         required=True,
     )
     for direct_action, direct_help in (
@@ -19399,6 +19409,10 @@ def build_parser():
                 error_help_command=f"vibe remote direct {direct_action} --help",
             )
         )
+
+    relay_parser = remote_direct_subparsers.add_parser("relay", help="Configure optional relay use on this host")
+    trial_parser = relay_parser.add_subparsers(dest="relay_command", required=True).add_parser("public-trial")
+    trial_parser.add_argument("trial_state", choices=("on", "off"))
 
     direct_install_parser = remote_direct_subparsers.add_parser(
         "install",
@@ -21412,6 +21426,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "direct", "on"): "owner",
     ("remote", "direct", "off"): "owner",
     ("remote", "direct", "status"): "member",
+    ("remote", "direct", "relay", "public-trial"): "owner",
     ("remote", "direct", "install"): "owner",
     # Launch at login writes a login item on this machine, outside the instance.
     ("autostart", "on"): "owner",

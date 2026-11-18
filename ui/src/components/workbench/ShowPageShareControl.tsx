@@ -1,21 +1,73 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
+import { Check, Copy, ExternalLink, FileText, Image as ImageIcon, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '../ui/button';
+import { ConfirmDialog } from '../ui/confirm-dialog';
 import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { showDockId } from '../../context/dockDoc';
-import { isNativeShell } from '../../lib/native';
+import { useToast } from '../../context/ToastContext';
+import {
+  hasNativeShare,
+  isNativeShell,
+  nativeSharePresent,
+  type NativeShareKind,
+  type NativeShareResult,
+} from '../../lib/native';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
 import { copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
+
+type ShowExportKind = Exclude<NativeShareKind, 'link'>;
+
+/**
+ * The frame the native shell captures: an iframe marked with this Session, shown on screen now. A
+ * frame that takes no pointer events (annotation mode) is covered by its own tools, and the shell's
+ * hit test cannot reach it, so it is not offered. Read when the popover opens, before the host
+ * reacts to the open popover with the same style.
+ */
+function isShowFrameVisible(sessionId: string): boolean {
+  if (typeof document === 'undefined') return false;
+  return Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe[data-avibe-show-session]'))
+    .some((frame) => {
+      if (frame.dataset.avibeShowSession !== sessionId || !frame.isConnected) return false;
+      if (typeof frame.checkVisibility === 'function' && !frame.checkVisibility()) return false;
+      if (window.getComputedStyle(frame).pointerEvents === 'none') return false;
+      const rect = frame.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0
+        && rect.right > 0 && rect.bottom > 0
+        && rect.left < window.innerWidth && rect.top < window.innerHeight;
+    });
+}
+
+// Overlays still playing their exit motion (index.css `motion-*`); Radix unmounts each when its
+// motion ends. A capture taken earlier would include them.
+const LEAVING_OVERLAY = ['motion-popover', 'motion-dialog', 'motion-card', 'motion-scrim']
+  .map((name) => `.${name}[data-state="closed"]`)
+  .join(', ');
+const OVERLAY_EXIT_LIMIT_MS = 1000;
+
+const nextFrame = () => new Promise<void>((resolve) => {
+  window.requestAnimationFrame(() => resolve());
+});
+
+/** Resolves once the share UI has left the screen: its exit motion is over and two frames painted. */
+async function waitForShareUiToLeave(): Promise<void> {
+  const start = performance.now();
+  await nextFrame();
+  while (document.querySelector(LEAVING_OVERLAY) && performance.now() - start < OVERLAY_EXIT_LIMIT_MS) {
+    await nextFrame();
+  }
+  await nextFrame();
+  await nextFrame();
+}
 
 export const ShowPageShareControl: React.FC<{
   sessionId: string;
@@ -40,6 +92,7 @@ export const ShowPageShareControl: React.FC<{
 }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const { showToast } = useToast();
   const dock = useDock();
   const { pages, mergePage, reload } = useShowPageInventory();
   const inventoryPage = pages.find((page) => page.session_id === sessionId);
@@ -50,6 +103,12 @@ export const ShowPageShareControl: React.FC<{
   const [access, setAccess] = useState<ShowPageAccess | null>(initialAccess);
   const [accessError, setAccessError] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [frameVisible, setFrameVisible] = useState(false);
+  const [exportConfirm, setExportConfirm] = useState<ShowExportKind | null>(null);
+  const [shareBusy, setShareBusy] = useState<NativeShareKind | null>(null);
+  const shareBusyRef = useRef(false);
+  const exportConfirmRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const reqSeq = useRef(0);
   const hasObservedPayloadRef = useRef(false);
 
@@ -71,9 +130,14 @@ export const ShowPageShareControl: React.FC<{
   const payload = canReadPayload ? candidatePayload : null;
   const offline = payload?.visibility === 'offline' || payload?.offline === true;
   const link = payload && !offline ? copyHref(payload) ?? '' : '';
-  const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const nativeShell = isNativeShell();
+  const nativeShareAvailable = hasNativeShare();
+  const canWebShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  const canShareLink = nativeShareAvailable || canWebShare;
+  // PDF and image exist only in the App; a shell that predates them explains the update instead.
+  const showExport = nativeShell && !!payload && frameVisible;
   const iosStandalone = isIosDevice() && isStandalonePwa();
-  const showAddToHome = !isNativeShell() && !!link && (iosStandalone || isRealMobileSafari());
+  const showAddToHome = !nativeShell && !!link && (iosStandalone || isRealMobileSafari());
 
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);
@@ -165,7 +229,10 @@ export const ShowPageShareControl: React.FC<{
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
     onOpenChange?.(next);
-    if (next) refresh();
+    if (next) {
+      setFrameVisible(isShowFrameVisible(sessionId));
+      refresh();
+    }
   };
 
   const handleShowAccessApplied = () => {
@@ -180,8 +247,38 @@ export const ShowPageShareControl: React.FC<{
     }
   };
 
-  const nativeShare = async () => {
+  const reportShareResult = (result: NativeShareResult) => {
+    // The system sheet closing is the whole answer to a completed or cancelled share.
+    if (result.status === 'completed' || result.status === 'cancelled') return;
+    if (result.status === 'expired') {
+      showToast(t('chat.showPage.shareExpired'), 'error');
+    } else if (result.error?.code === 'capability_mismatch') {
+      showToast(t('chat.showPage.shareNeedsUpdate'), 'error');
+    } else {
+      showToast(t('chat.showPage.shareFailed'), 'error');
+    }
+  };
+
+  const presentNativeShare = async (kind: NativeShareKind) => {
+    if (shareBusyRef.current) return;
+    shareBusyRef.current = true;
+    setShareBusy(kind);
+    try {
+      if (kind !== 'link') await waitForShareUiToLeave();
+      reportShareResult(await nativeSharePresent(kind, sessionId));
+    } finally {
+      shareBusyRef.current = false;
+      setShareBusy(null);
+      if (kind !== 'link') triggerRef.current?.focus({ preventScroll: true });
+    }
+  };
+
+  const shareLink = async () => {
     if (!link) return;
+    if (nativeShareAvailable) {
+      await presentNativeShare('link');
+      return;
+    }
     try {
       await navigator.share({ title: t('chat.showPage.title'), url: link });
     } catch {
@@ -189,10 +286,31 @@ export const ShowPageShareControl: React.FC<{
     }
   };
 
+  const requestExport = (kind: ShowExportKind) => {
+    if (shareBusyRef.current) return;
+    // The popover closes first so only the confirmation stands over the page, and it must not hand
+    // focus back to its trigger once the confirmation holds it.
+    exportConfirmRef.current = true;
+    handleOpenChange(false);
+    setExportConfirm(kind);
+  };
+
+  const closeExportConfirm = () => {
+    exportConfirmRef.current = false;
+    setExportConfirm(null);
+  };
+
+  const confirmExport = () => {
+    const kind = exportConfirm;
+    closeExportConfirm();
+    if (kind) void presentNativeShare(kind);
+  };
+
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <Button
+          ref={triggerRef}
           type="button"
           variant="ghost"
           size="icon"
@@ -208,6 +326,9 @@ export const ShowPageShareControl: React.FC<{
         align="end"
         className="max-h-[var(--radix-popover-content-available-height)] w-[min(23rem,calc(100vw-1rem))] space-y-3 overflow-y-auto"
         data-window-owner-id={ownerWindowId}
+        onCloseAutoFocus={(event) => {
+          if (exportConfirmRef.current) event.preventDefault();
+        }}
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
 
@@ -268,18 +389,49 @@ export const ShowPageShareControl: React.FC<{
             >
               {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
             </Button>
-            {canNativeShare ? (
+            {canShareLink ? (
               <Button
                 type="button"
                 variant="outline"
                 size="icon"
                 className="size-8 shrink-0"
-                disabled={!link}
-                onClick={nativeShare}
-                aria-label={t('chat.showPage.nativeShare')}
+                disabled={!link || shareBusy !== null}
+                onClick={shareLink}
+                aria-label={t('chat.showPage.shareLink')}
               >
-                <Share2 className="size-3.5" />
+                {shareBusy === 'link'
+                  ? <Loader2 className="size-3.5 animate-spin" />
+                  : <Share2 className="size-3.5" />}
               </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {showExport ? (
+          <div className="border-t border-border pt-3">
+            <div className="text-xs font-medium text-foreground">{t('chat.showPage.exportTitle')}</div>
+            <div className="mt-2 grid grid-cols-2 gap-1.5">
+              {([
+                ['pdf', FileText, 'chat.showPage.sharePdf'],
+                ['image', ImageIcon, 'chat.showPage.shareImage'],
+              ] as const).map(([kind, Icon, label]) => (
+                <Button
+                  key={kind}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!nativeShareAvailable || shareBusy !== null}
+                  onClick={() => requestExport(kind)}
+                >
+                  {shareBusy === kind
+                    ? <Loader2 className="size-3.5 animate-spin" />
+                    : <Icon className="size-3.5" />}
+                  {t(label)}
+                </Button>
+              ))}
+            </div>
+            {!nativeShareAvailable ? (
+              <p className="mt-2 text-xs leading-relaxed text-muted">{t('chat.showPage.shareNeedsUpdate')}</p>
             ) : null}
           </div>
         ) : null}
@@ -360,6 +512,21 @@ export const ShowPageShareControl: React.FC<{
           </div>
         ) : null}
       </PopoverContent>
+      <ConfirmDialog
+        open={exportConfirm !== null}
+        onOpenChange={(next) => {
+          if (next) return;
+          closeExportConfirm();
+          // After the confirmation stops trapping focus, which it does once it has closed.
+          window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+        }}
+        title={t('chat.showPage.exportTitle')}
+        description={t('chat.showPage.exportNotice')}
+        confirmLabel={t('common.continue')}
+        cancelLabel={t('common.cancel')}
+        onConfirm={confirmExport}
+        windowOwnerId={ownerWindowId}
+      />
     </Popover>
   );
 };

@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		8C1000000000000000000004 /* ShowShareForegroundTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000013 /* ShowShareForegroundTests.swift */; };
+		8C1000000000000000000001 /* ShowShareCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000011 /* ShowShareCoordinator.swift */; };
+		8C1000000000000000000002 /* ShowShareCoordinator.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000011 /* ShowShareCoordinator.swift */; };
+		8C1000000000000000000003 /* ShowShareTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000012 /* ShowShareTests.swift */; };
 		100000000000000000000001 /* AvibeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* AvibeApp.swift */; };
 		100000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* AppModel.swift */; };
 		1000000000000000000000E8 /* AppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E8 /* AppShortcuts.swift */; };
@@ -47,6 +51,7 @@
 		100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */; };
 		1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C0 /* NativePushCoordinatorTests.swift */; };
 		100000000000000000000015 /* MobilePasskey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
+		100000000000000000000152 /* MobileProviderSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000152 /* MobileProviderSignIn.swift */; };
 		100000000000000000000120 /* DirectIrohByteStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000120 /* DirectIrohByteStream.swift */; };
 		100000000000000000000121 /* DirectIrohEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000121 /* DirectIrohEngine.swift */; };
 		100000000000000000000122 /* DirectIrohTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000122 /* DirectIrohTransport.swift */; };
@@ -92,6 +97,7 @@
 		910000000000000000000151 /* AvibePage.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000151 /* AvibePage.swift */; };
 		91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* MobileOnboardingContainer.swift */; };
 		910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
+		910000000000000000000152 /* MobileProviderSignIn.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000152 /* MobileProviderSignIn.swift */; };
 		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		910000000000000000000008 /* FixtureMobile in Resources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000003 /* FixtureMobile */; };
 		91000000000000000000000D /* NativeBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
@@ -170,6 +176,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		8C1000000000000000000013 /* ShowShareForegroundTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareForegroundTests.swift; sourceTree = "<group>"; };
+		8C1000000000000000000011 /* ShowShareCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareCoordinator.swift; sourceTree = "<group>"; };
+		8C1000000000000000000012 /* ShowShareTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareTests.swift; sourceTree = "<group>"; };
 		200000000000000000000001 /* AvibeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeApp.swift; sourceTree = "<group>"; };
 		200000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		2000000000000000000000F0 /* DirectConnectListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectConnectListener.swift; sourceTree = "<group>"; };
@@ -213,6 +222,7 @@
 		200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransportIntegrationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000C0 /* NativePushCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinatorTests.swift; sourceTree = "<group>"; };
 		200000000000000000000018 /* MobilePasskey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePasskey.swift; sourceTree = "<group>"; };
+		200000000000000000000152 /* MobileProviderSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileProviderSignIn.swift; sourceTree = "<group>"; };
 		200000000000000000000120 /* DirectIrohByteStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohByteStream.swift; sourceTree = "<group>"; };
 		200000000000000000000121 /* DirectIrohEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohEngine.swift; sourceTree = "<group>"; };
 		200000000000000000000122 /* DirectIrohTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohTransport.swift; sourceTree = "<group>"; };
@@ -367,10 +377,12 @@
 				200000000000000000000151 /* AvibePage.swift */,
 				200000000000000000000014 /* MobileOnboardingContainer.swift */,
 				200000000000000000000018 /* MobilePasskey.swift */,
+				200000000000000000000152 /* MobileProviderSignIn.swift */,
 				2000000000000000000000D0 /* NativeBadge.swift */,
 				2000000000000000000000D2 /* SessionNotifications.swift */,
 				200000000000000000000145 /* SystemSchedule.swift */,
 				200000000000000000000010 /* NativeBridge.swift */,
+				8C1000000000000000000011 /* ShowShareCoordinator.swift */,
 				2000000000000000000000A2 /* NativePushCoordinator.swift */,
 				200000000000000000000003 /* NavigationPolicy.swift */,
 				2000000000000000000000A3 /* PushCrypto.swift */,
@@ -423,6 +435,8 @@
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
 				26000000000000000000000030 /* VoiceCaptureTests.swift */,
+				8C1000000000000000000012 /* ShowShareTests.swift */,
+				8C1000000000000000000013 /* ShowShareForegroundTests.swift */,
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
 				200000000000000000000146 /* SystemScheduleTests.swift */,
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
@@ -918,10 +932,12 @@
 				100000000000000000000151 /* AvibePage.swift in Sources */,
 				100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */,
 				100000000000000000000015 /* MobilePasskey.swift in Sources */,
+				100000000000000000000152 /* MobileProviderSignIn.swift in Sources */,
 				1000000000000000000000D0 /* NativeBadge.swift in Sources */,
 				1000000000000000000000D2 /* SessionNotifications.swift in Sources */,
 				100000000000000000000145 /* SystemSchedule.swift in Sources */,
 				10000000000000000000000D /* NativeBridge.swift in Sources */,
+				8C1000000000000000000001 /* ShowShareCoordinator.swift in Sources */,
 				1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */,
 				100000000000000000000003 /* NavigationPolicy.swift in Sources */,
 				1000000000000000000000A3 /* PushCrypto.swift in Sources */,
@@ -961,6 +977,8 @@
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
 				16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */,
+				8C1000000000000000000003 /* ShowShareTests.swift in Sources */,
+				8C1000000000000000000004 /* ShowShareForegroundTests.swift in Sources */,
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
 				100000000000000000000146 /* SystemScheduleTests.swift in Sources */,
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
@@ -1004,6 +1022,7 @@
 			files = (
 				910000000000000000000001 /* SheetFixtureApp.swift in Sources */,
 				91000000000000000000000D /* NativeBridge.swift in Fixture Sources */,
+				8C1000000000000000000002 /* ShowShareCoordinator.swift in Fixture Sources */,
 				91000000000000000000000F /* NativeBadge.swift in Fixture Sources */,
 				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,
 				910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */,
@@ -1013,6 +1032,7 @@
 				910000000000000000000151 /* AvibePage.swift in Fixture Sources */,
 				91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */,
 				910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */,
+				910000000000000000000152 /* MobileProviderSignIn.swift in Fixture Sources */,
 				910000000000000000000007 /* WebOrigin.swift in Fixture Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

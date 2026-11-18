@@ -81,6 +81,11 @@ def test_tool_snapshot_digest_matches_core_and_manifest_pins() -> None:
         Path("desktop/cua-driver/sources.json").read_text(encoding="utf-8")
     )
 
+    assert COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS[
+        "d46448a2f8a03c7be23d52c8089f5a86b3abb61add102b950170d89cc238a944"
+    ] == frozenset(COMPUTER_USE_TOOL_NAMES)
+    assert "27d4b76dcc11094eff496d9bb02d64d2b3ae685e563b5f8ae1a843f9626ddd96" not in COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS
+    assert "7fb9414763af068eabd1cb4a371c4ee95160879dc693e5104031e41f118c7259" not in COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS
     assert actual == COMPUTER_USE_TOOL_SNAPSHOT_SHA256
     assert actual == manifest["driver"]["tool_snapshot_sha256"]
     assert "f446154884a6ac3e3126c1d6ca4a886c8d1caea7f41449124a9ad5ca47e9c7fe" in COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS

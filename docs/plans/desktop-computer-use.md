@@ -629,6 +629,11 @@ restart semantics. These are source/CI checks, not installed-app or owner-deskto
     preserving the distinction that automatic registration did not succeed.
     Revisit the automatic path separately when Developer ID signing exists;
     Developer ID remains outside this Phase 1 signing scope.
+  - **Owner decision (2026-11-18).** The shell shows no native alert of its
+    own when it opens the Screen Recording pane, from the menu switch or the
+    Settings guide: it stacked on the macOS prompt and System Settings. The
+    explanation lives in the Settings guide's Workbench copy and the menu
+    label (`needsPermissionScreenRecording`).
 - **Lifecycle.** The shell runs one state machine whose states are the `D`
   states. Every transition writes `D` first, except that `ready` is written
   only after the health check passes.
@@ -1561,10 +1566,11 @@ The five findings and their owning contracts are:
    the existing shell bootstrap diagnostics. Owning tests cover path
    construction, flavor isolation, permissions, over-limit classification, and
    stderr propagation.
-2. **F2, Screen Recording guidance.** English and Chinese native and
-   Workbench guidance must state that macOS may quit and reopen Avibe after the
-   Screen Recording grant. The two locales keep the same recovery steps and
-   consuming catalog/UI tests protect the parity.
+2. **F2, Screen Recording guidance.** English and Chinese Workbench guidance
+   must state that macOS may quit and reopen Avibe after the Screen Recording
+   grant. The two locales keep the same recovery steps and consuming UI tests
+   protect the parity. (The native alert that also carried it was removed by
+   the 2026-11-18 owner decision.)
 3. **F3, Workbench support on first install.** Workbench support is derived
    from the live native shell's lock ownership. A live shell therefore keeps
    Computer Use visible when the state record is missing or invalid; the

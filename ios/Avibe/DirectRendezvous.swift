@@ -3,8 +3,8 @@ import Foundation
 
 // The rendezvous answer and what the App accepts from it
 // (docs/plans/remote-direct-rendezvous.md section 5). Everything here is
-// pure: no socket, no endpoint, no permission. Nothing in the App calls it
-// until a direct transport is registered, and `AvibeApp` registers none.
+// pure: no socket, endpoint or permission until the registered transport
+// asks for it.
 // Design: docs/plans/remote-direct-ios-transport.md.
 
 /// An iroh endpoint ID in its wire form: an Ed25519 public key, written as
@@ -263,14 +263,60 @@ struct DirectCandidateAddress: Hashable, Sendable {
     }
 }
 
+/// A relay the instance's endpoint is connected to, under a relay policy the
+/// App knows (docs/plans/remote-direct-relay.md, the public-relay owner trial).
+struct DirectTrialRelay: Equatable, Sendable {
+    enum Policy: String, Sendable {
+        /// iroh 1.4.1's n0 production relays, as introducers and fallback.
+        case publicTrialV1 = "public-trial-v1"
+    }
+
+    let policy: Policy
+    /// Exactly one of `relayURLs`.
+    let url: String
+
+    /// The relays a dial under `policy` may use: the pinned iroh 1.4.1
+    /// `defaults::prod::default_relay_map()`, the same map the instance's
+    /// endpoint is bound with.
+    var relayURLs: [String] {
+        switch policy {
+        case .publicTrialV1:
+            return Self.publicTrialRelayURLs
+        }
+    }
+
+    static let publicTrialRelayURLs = ["use1", "usw1", "euc1", "aps1"].map {
+        "https://\($0)-1.relay.n0.iroh.link./"
+    }
+
+    /// The relay an answer names, or nil: an unknown or missing policy, or a
+    /// URL outside the policy's map, means no relay is dialled. It is never
+    /// read as another relay mode.
+    static func admit(policy: String?, url: String?) -> DirectTrialRelay? {
+        guard
+            let policy = policy.flatMap(Policy.init(rawValue:)),
+            let url
+        else {
+            return nil
+        }
+        let relay = DirectTrialRelay(policy: policy, url: url)
+        return relay.relayURLs.contains(url) ? relay : nil
+    }
+}
+
 /// A `ready` answer the App accepted: whom to dial, where, and for how long.
 struct DirectRendezvousOffer: Equatable, Sendable {
-    /// Opaque. Changes when the instance's endpoint key or address set does.
+    /// Opaque. Changes when the instance's endpoint key, address set, relay
+    /// or relay policy does.
     let generation: String
     /// The instance's endpoint. The App dials this identity and no other.
     let endpointID: DirectEndpointID
-    /// At least one and at most eight addresses, each checked by the App.
+    /// At most eight addresses, each checked by the App. Empty only when
+    /// `relay` is set.
     let addresses: [DirectCandidateAddress]
+    /// The relay the instance's endpoint is connected to, or nil: then the
+    /// dial uses no relay at all.
+    let relay: DirectTrialRelay?
     /// How long the answer and the client's admission last, counted from
     /// the moment its request was sent: at most 300 seconds.
     let lifetimeSeconds: Int
@@ -440,14 +486,19 @@ enum DirectRendezvous {
             }
             addresses.append(candidate)
         }
-        guard !addresses.isEmpty else {
+        // A relay is read only under a policy this version knows, with a
+        // URL from that policy's map; anything else is no relay, and the
+        // addresses stay usable on their own.
+        let relay = DirectTrialRelay.admit(policy: endpoint.relay?.policy, url: endpoint.relay?.url)
+        // An answer is dialable with an address, or with a relay alone.
+        guard !addresses.isEmpty || relay != nil else {
             throw DirectRendezvousRejection.noAdmittedAddress
         }
-        // `endpoint.relay` is not read: this version uses no relay.
         return DirectRendezvousOffer(
             generation: generation,
             endpointID: endpointID,
             addresses: addresses,
+            relay: relay,
             lifetimeSeconds: lifetime
         )
     }
@@ -456,6 +507,39 @@ enum DirectRendezvous {
         struct Endpoint: Decodable {
             let id: String
             let addresses: [Address]
+            let relay: Relay?
+
+            enum CodingKeys: String, CodingKey {
+                case id
+                case addresses
+                case relay
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                id = try container.decode(String.self, forKey: .id)
+                addresses = try container.decode([Address].self, forKey: .addresses)
+                // A relay of any shape this version does not read is no
+                // relay; it never fails the answer.
+                relay = try? container.decodeIfPresent(Relay.self, forKey: .relay)
+            }
+        }
+
+        /// The endpoint's relay. Fields of any other type decode as absent.
+        struct Relay: Decodable {
+            let policy: String?
+            let url: String?
+
+            enum CodingKeys: String, CodingKey {
+                case policy
+                case url
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                policy = try? container.decode(String.self, forKey: .policy)
+                url = try? container.decode(String.self, forKey: .url)
+            }
         }
 
         /// One entry of the address list. An entry of any other shape is

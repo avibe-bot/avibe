@@ -21,6 +21,7 @@ const mobile = vi.hoisted(() => ({
   requestOtp: vi.fn(),
   returnToInstance: vi.fn<() => Promise<null>>(),
   selectInstance: vi.fn(),
+  signInWithProvider: vi.fn<(provider: string) => Promise<MobileSessionState>>(),
   signInWithPassword: vi.fn<
     (email: string, password: string) => Promise<MobilePasswordSignInResult>
   >(),
@@ -43,6 +44,7 @@ vi.mock('./bridge', async (importOriginal) => ({
   returnToMobileInstance: mobile.returnToInstance,
   selectMobileInstance: mobile.selectInstance,
   signInMobileWithPassword: mobile.signInWithPassword,
+  signInMobileWithProvider: mobile.signInWithProvider,
   verifyMobileOtp: mobile.verifyOtp,
   verifyMobilePasskey: mobile.verifyPasskey,
   verifyMobileSecondFactor: mobile.verifySecondFactor,
@@ -139,6 +141,8 @@ const resetMobileMocks = () => {
   mobile.returnToInstance.mockReset();
   mobile.selectInstance.mockReset();
   mobile.signInWithPassword.mockReset();
+  mobile.signInWithProvider.mockReset();
+  mobile.signInWithProvider.mockRejectedValue({ code: 'provider_cancelled', message: 'cancelled' });
   mobile.verifyOtp.mockReset();
   mobile.verifyPasskey.mockReset();
   mobile.verifySecondFactor.mockReset();
@@ -266,7 +270,7 @@ const expectedErrorKey = (
 /** Sends the email code and returns its input. */
 const reachCode = async (): Promise<HTMLInputElement> => {
   render(<MobileOnboarding />);
-  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
   fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
     target: { value: 'alex@example.com' },
   });
@@ -277,7 +281,7 @@ const reachCode = async (): Promise<HTMLInputElement> => {
 /** Opens the password step for a valid email and returns its password field. */
 const reachPassword = async (email = 'alex@example.com'): Promise<HTMLInputElement> => {
   render(<MobileOnboarding />);
-  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
   fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
     target: { value: email },
   });
@@ -305,7 +309,7 @@ const openAccount = async (hash: '#account' | '#runtime-account') => {
 const reachSecondFactor = async (state: SecondFactorState = owed()) => {
   mobile.verifyOtp.mockResolvedValueOnce(state);
   render(<MobileOnboarding />);
-  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
   fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
     target: { value: 'alex@example.com' },
   });
@@ -332,7 +336,7 @@ describe('mobile onboarding', () => {
   it('AUTH-SETUP-148 completes email OTP discovery and authorized instance selection', async () => {
     render(<MobileOnboarding />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
     });
@@ -388,7 +392,7 @@ describe('mobile onboarding', () => {
           mobile.requestOtp.mockRejectedValueOnce(error);
           render(<MobileOnboarding />);
           fireEvent.click(await screen.findByRole('button', {
-            name: 'mobileApp.welcome.action',
+            name: 'mobileApp.welcome.continueWithEmail',
           }));
           fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
             target: { value: 'alex@example.com' },
@@ -401,7 +405,7 @@ describe('mobile onboarding', () => {
             .mockRejectedValueOnce(error);
           render(<MobileOnboarding />);
           fireEvent.click(await screen.findByRole('button', {
-            name: 'mobileApp.welcome.action',
+            name: 'mobileApp.welcome.continueWithEmail',
           }));
           fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
             target: { value: 'alex@example.com' },
@@ -413,7 +417,7 @@ describe('mobile onboarding', () => {
           mobile.verifyOtp.mockRejectedValueOnce(error);
           render(<MobileOnboarding />);
           fireEvent.click(await screen.findByRole('button', {
-            name: 'mobileApp.welcome.action',
+            name: 'mobileApp.welcome.continueWithEmail',
           }));
           fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
             target: { value: 'alex@example.com' },
@@ -513,7 +517,7 @@ describe('mobile onboarding', () => {
           );
         }
         expect(
-          screen.queryByRole('button', { name: 'mobileApp.welcome.action' }),
+          screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }),
           `${operation} ${code}`,
         ).toBeNull();
 
@@ -620,7 +624,7 @@ describe('mobile onboarding', () => {
 
         render(<MobileOnboarding />);
         fireEvent.click(await screen.findByRole('button', {
-          name: 'mobileApp.welcome.action',
+          name: 'mobileApp.welcome.continueWithEmail',
         }));
         fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
           target: { value: 'alex@example.com' },
@@ -673,7 +677,7 @@ describe('mobile onboarding', () => {
 
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
@@ -737,7 +741,7 @@ describe('mobile onboarding', () => {
   it('enters Welcome only from an explicit signed-out result', async () => {
     render(<MobileOnboarding />);
     expect(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeTruthy();
     cleanup();
 
@@ -749,7 +753,7 @@ describe('mobile onboarding', () => {
       name: 'mobileApp.instances.refresh',
     }));
     expect(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeTruthy();
     cleanup();
 
@@ -761,7 +765,7 @@ describe('mobile onboarding', () => {
       name: 'mobileApp.account.signOut',
     }));
     expect(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeTruthy();
     cleanup();
 
@@ -770,7 +774,7 @@ describe('mobile onboarding', () => {
     mobile.verifyOtp.mockResolvedValueOnce({ status: 'signedOut' });
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
@@ -785,7 +789,7 @@ describe('mobile onboarding', () => {
     );
     expect(screen.getByLabelText('mobileApp.code.label')).toBeTruthy();
     expect(screen.queryByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeNull();
   });
 
@@ -816,7 +820,7 @@ describe('mobile onboarding', () => {
     );
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
 
     const send = screen.getByRole('button', { name: 'mobileApp.email.send' });
@@ -847,7 +851,7 @@ describe('mobile onboarding', () => {
     });
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
 
@@ -876,7 +880,7 @@ describe('mobile onboarding', () => {
     const user = userEvent.setup();
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
 
@@ -903,7 +907,7 @@ describe('mobile onboarding', () => {
     });
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
 
@@ -953,6 +957,127 @@ describe('mobile onboarding', () => {
     expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
   });
 
+  describe('Google, GitHub and Apple on Welcome', () => {
+    const openWelcome = async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github', 'apple'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+    };
+
+    it('offers only the sign-ins avibe.bot advertises, and keeps them when an answer names none', async () => {
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
+      expect(screen.queryByText('mobileApp.welcome.or')).toBeNull();
+      cleanup();
+
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['github'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' });
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithApple' })).toBeNull();
+
+      // A signed-out answer without the list (its read did not answer in time) keeps it:
+      // sign in with GitHub, then sign out with an answer that names no providers.
+      mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.title' }));
+      mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.signOut' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeTruthy();
+    });
+
+    it('AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances', async () => {
+      await openWelcome();
+      const pending = deferred<MobileSessionState>();
+      mobile.signInWithProvider.mockReturnValueOnce(pending.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
+      expect(mobile.signInWithProvider).toHaveBeenCalledWith('github');
+      await waitFor(() => {
+        for (const name of [
+          'mobileApp.welcome.continueWithEmail',
+          'mobileApp.welcome.continueWithGoogle',
+          'mobileApp.welcome.continueWithGitHub',
+          'mobileApp.welcome.continueWithApple',
+        ]) {
+          expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true);
+        }
+      });
+      pending.resolve(signedIn());
+      await screen.findByText('Personal Avibe');
+      // Authorized selection, as after the email code (AUTH-SETUP-148).
+      fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
+      await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
+    });
+
+    it('says nothing when the person closes the window, and names the provider when its email is unverified', async () => {
+      await openWelcome();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }));
+      await waitFor(() => expect(mobile.signInWithProvider).toHaveBeenCalledWith('apple'));
+      await waitFor(() => {
+        expect(
+          (screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }) as HTMLButtonElement).disabled,
+        ).toBe(false);
+      });
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      mobile.signInWithProvider.mockRejectedValueOnce({ code: 'provider_email_unverified', message: 'unverified' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' }));
+      expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.provider.googleEmailUnverified');
+
+      mobile.signInWithProvider.mockRejectedValueOnce({ code: 'network', message: 'network' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }));
+      await waitFor(() => {
+        expect(screen.getByRole('alert').textContent).toBe('mobileApp.provider.appleFailed');
+      });
+    });
+
+    it('shows each failure its own line, and stays silent when an account change ended the attempt', async () => {
+      await openWelcome();
+      for (const [provider, name, code, line] of [
+        ['github', 'mobileApp.welcome.continueWithGitHub', 'invalid_or_expired', 'mobileApp.provider.githubFailed'],
+        ['google', 'mobileApp.welcome.continueWithGoogle', 'rate_limited', 'mobileApp.code.rateLimited'],
+        ['google', 'mobileApp.welcome.continueWithGoogle', 'provider_unavailable', 'mobileApp.provider.unavailable'],
+        ['apple', 'mobileApp.welcome.continueWithApple', 'local_state_write_failed', 'mobileApp.errors.localRecords'],
+        ['github', 'mobileApp.welcome.continueWithGitHub', 'network', 'mobileApp.errors.network'],
+      ] as const) {
+        mobile.signInWithProvider.mockRejectedValueOnce({ code, message: code });
+        fireEvent.click(screen.getByRole('button', { name }));
+        await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(line));
+        expect(mobile.signInWithProvider).toHaveBeenLastCalledWith(provider);
+      }
+      const stale = deferred<MobileSessionState>();
+      mobile.signInWithProvider.mockReturnValueOnce(stale.promise);
+      const apple = screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }) as HTMLButtonElement;
+      fireEvent.click(apple);
+      await waitFor(() => expect(apple.disabled).toBe(true));
+      stale.reject({ code: 'stale_session', message: 'stale' });
+      // Only once the attempt has settled does the absence of a line say anything.
+      await waitFor(() => expect(apple.disabled).toBe(false));
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('marks an account a provider sign-in just created, until it has an instance', async () => {
+      await openWelcome();
+      mobile.signInWithProvider.mockResolvedValueOnce({ ...signedIn(), instances: [], new_account: true });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' }));
+      expect(await screen.findByText('mobileApp.empty.newAccount')).toBeTruthy();
+      mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.empty.newAccountSignOut' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(mobile.logout).toHaveBeenCalledTimes(1);
+      cleanup();
+
+      // Without the hint, the empty page is the usual one.
+      resetMobileMocks();
+      mobile.bootstrap.mockResolvedValueOnce({ ...signedIn(), instances: [] });
+      render(<MobileOnboarding />);
+      await screen.findByText('mobileApp.empty.title');
+      expect(screen.queryByText('mobileApp.empty.newAccount')).toBeNull();
+    });
+  });
+
   describe('account and data: privacy policy and account deletion', () => {
     const deleteButton = () => screen.getByRole('button', { name: 'mobileApp.account.delete' });
     const privacyButton = () => screen.getByRole('button', { name: 'mobileApp.account.privacy' }) as HTMLButtonElement;
@@ -998,7 +1123,7 @@ describe('mobile onboarding', () => {
       expect(mobile.refresh).not.toHaveBeenCalled();
 
       page.resolve({ completed: true });
-      await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
       expect(mobile.refresh).toHaveBeenCalledTimes(1);
       expect(mobile.logout).not.toHaveBeenCalled();
     });
@@ -1012,7 +1137,7 @@ describe('mobile onboarding', () => {
       await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(privacyButton().disabled).toBe(false));
       expect(screen.getByRole('heading', { name: 'mobileApp.accountData.title' })).toBeTruthy();
-      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.action' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeNull();
     });
 
     it('signs this device out when the page reported the deletion but the read-back did not', async () => {
@@ -1026,7 +1151,7 @@ describe('mobile onboarding', () => {
         mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
         fireEvent.click(deleteButton());
 
-        await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
+        await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
         expect(mobile.logout).toHaveBeenCalledTimes(1);
         cleanup();
         resetMobileMocks();
@@ -1076,7 +1201,7 @@ describe('mobile onboarding', () => {
     });
 
     finishLogout?.({ status: 'signedOut' });
-    await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
+    await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
   });
 
   it('locks every interactive control on each screen that owns an account operation', async () => {
@@ -1092,7 +1217,7 @@ describe('mobile onboarding', () => {
     const send = deferred<{ cooldown_seconds: number }>();
     mobile.requestOtp.mockReturnValueOnce(send.promise);
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     expectScreenLocked();
@@ -1100,7 +1225,7 @@ describe('mobile onboarding', () => {
 
     resetMobileMocks();
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     mobile.verifyOtp.mockReturnValueOnce(deferred<MobileSessionState>().promise);
@@ -1155,7 +1280,7 @@ describe('mobile onboarding', () => {
     });
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     const code = await screen.findByLabelText('mobileApp.code.label');
@@ -1185,7 +1310,7 @@ describe('mobile onboarding', () => {
     mobile.verifyOtp.mockReturnValueOnce(verification.promise);
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     await user.type(await screen.findByLabelText('mobileApp.code.label'), '123456');
@@ -1205,7 +1330,7 @@ describe('mobile onboarding', () => {
     mobile.verifyOtp.mockReturnValueOnce(verification.promise);
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     const code = await screen.findByLabelText('mobileApp.code.label');
@@ -1370,7 +1495,7 @@ describe('mobile onboarding', () => {
     mobile.verifyPasskey.mockResolvedValueOnce({ status: 'signedOut' });
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.usePasskey' }));
-    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
     expect(mobile.logout).not.toHaveBeenCalled();
     cleanup();
 
@@ -1380,7 +1505,7 @@ describe('mobile onboarding', () => {
     fireEvent.click(await screen.findByRole('button', {
       name: 'mobileApp.twoFactor.differentAccount',
     }));
-    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
     expect(mobile.logout).toHaveBeenCalledTimes(1);
     expect(mobile.verifyPasskey).not.toHaveBeenCalled();
   });
@@ -1597,7 +1722,7 @@ describe('mobile password sign-in', () => {
   /** Opens the email step and types `email` in code mode. */
   const reachEmail = async (email: string) => {
     render(<MobileOnboarding />);
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     if (email) fireEvent.change(emailField(), { target: { value: email } });
   };
 
@@ -1874,7 +1999,7 @@ describe('mobile password sign-in', () => {
       } else {
         // Code mode, then Back leaves the step for Welcome.
         fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
-        fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
         expect(emailField().value, name).toBe('alex@example.com');
         fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
       }
@@ -2014,7 +2139,7 @@ describe('mobile password sign-in', () => {
 
     // The next account signs in with its password and owes its own second factor.
     mobile.signInWithPassword.mockResolvedValueOnce(owed({ methods: ['totp'], email: 'sam@example.com' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'sam@example.com' },
     });
@@ -2042,7 +2167,7 @@ describe('mobile password sign-in', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
 
     // A new email sign-in owes no notice for the old password.
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
     });
@@ -2395,7 +2520,7 @@ describe('mobile instance sheet', () => {
       mobile.bootstrap.mockResolvedValueOnce(inSheet());
       mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
       render(<MobileOnboarding />);
-      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
       expect(mobile.refresh).toHaveBeenCalledTimes(1);
     });
 
@@ -2434,7 +2559,7 @@ describe('mobile instance sheet', () => {
       mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
       fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.signOut' }));
       await waitFor(() => expect(mobile.logout).toHaveBeenCalledTimes(1));
-      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
     });
   });
 
@@ -2644,7 +2769,7 @@ describe('mobile launch second factor', () => {
     mobile.verifySecondFactor.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' });
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), { target: { value: email } });
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), { target: { value: '123456' } });

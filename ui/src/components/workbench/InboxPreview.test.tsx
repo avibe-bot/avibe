@@ -74,7 +74,7 @@ describe('Inbox previews', () => {
 
     // What an ``inbox.session.updated`` upsert hands the page: one new row, at
     // the top, and the same row objects for everything else.
-    const updated = { ...row(7, 'A new reply'), last_activity_at: '2026-11-05T00:01:00Z' };
+    const updated = { ...row(7, 'A new reply'), last_activity_at: '2026-11-05T00:01:00Z', unread_count: 1, unread: true };
     feed.inboxSessions = [updated, ...feed.inboxSessions.filter((s) => s.session_id !== 'session-7')];
     feed.unreadBySession = { 'session-7': 1 };
     parsed.contents = [];

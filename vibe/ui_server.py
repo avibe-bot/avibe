@@ -8502,7 +8502,9 @@ def direct_rendezvous():
             reason="hostname_not_direct",
         )
     else:
+        auth = getattr(g, "authorization_context", None)
         result = rendezvous_state.rendezvous.offer(
+            is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
             subject=subject,
@@ -14237,15 +14239,20 @@ async def sessions_messages_create(session_id: str):
 
     def _current_delivery_response() -> dict:
         from storage import message_deliveries
+        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
         with engine.connect() as conn:
             current = message_deliveries.get_delivery(conn, str(message["id"]))
+            # A workspace-addressed notice retries in the Session its failure names
+            # (``core.backend_failure_retry``); its row stays in the workspace Session.
             retry_notice = (
-                messages_service.get_message(
-                    conn, retry_for, session_id=session_id, include_local_error_detail=True,
-                )
+                messages_service.get_message(conn, retry_for, include_local_error_detail=True)
                 if retry_for else None
             )
+            if retry_notice is not None and retry_notice.get("session_id") not in {
+                session_id, WORKSPACE_NOTICE_SESSION_ID,
+            }:
+                retry_notice = None
         if current is None:
             return dict(message)
         payload = message_deliveries.public_delivery_payload(current)
@@ -14690,7 +14697,7 @@ def _workbench_event_heartbeat_interval_ms() -> int:
     return int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
 
 
-def _workbench_event_connected_frame(sub_id: int) -> str:
+def _workbench_event_connected_frame(sub_id: int, *, via: str = "other") -> str:
     """The handshake: this subscription's id, and the cadence it is owed.
 
     Carrying the cadence here is what lets a client hold a brand-new stream to a
@@ -14702,9 +14709,14 @@ def _workbench_event_connected_frame(sub_id: int) -> str:
     A declaration, never proof: a server too old to send this field is simply
     never held to a cadence, and a client must still wait for a heartbeat before
     believing the stream is carrying events.
+
+    ``via`` says how this very stream reached the server: ``"direct"`` when it
+    entered through the direct ingress, ``"other"`` for any other listener
+    (the tunnel, the LAN, or loopback). Only the stream's own scope can answer
+    that; it holds for this stream alone and is reported again on reconnect.
     """
     interval_ms = _workbench_event_heartbeat_interval_ms()
-    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms}}}\n\n'
+    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms},"via":"{via}"}}\n\n'
 
 
 def _workbench_event_heartbeat_frame() -> str:
@@ -14964,6 +14976,7 @@ async def workbench_events():
     from vibe.inbox_bridge import is_bridge_connected
     from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT, broker
 
+    stream_via = "direct" if _is_direct_ingress_request() else "other"
     authorization_context = getattr(g, "authorization_context", None)
     remote_session_identity = getattr(g, "remote_session_identity", None)
     remote_session_payload = getattr(g, "remote_session_payload", None)
@@ -15007,7 +15020,7 @@ async def workbench_events():
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
-            yield _workbench_event_connected_frame(sub_id)
+            yield _workbench_event_connected_frame(sub_id, via=stream_via)
             payload = json.dumps(
                 {
                     "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,

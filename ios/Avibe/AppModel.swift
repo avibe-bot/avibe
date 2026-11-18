@@ -568,6 +568,20 @@ final class AppModel: ObservableObject {
         showRuntimeSheet(startScreen: .sheet, fallback: .account)
     }
 
+    /// A Google, GitHub or Apple sign-in tapped inside an instance page: that page asked avibe.bot to
+    /// sign in, so the App's avibe.bot session has lapsed. Reading it settles that the
+    /// explicit way (a `401` signs out and the App shows its own sign-in screen, which offers
+    /// Google, GitHub and Apple); a session that still reads signed in shows the instance list.
+    func showSignIn() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let state = try? await self.sessionCoordinator.refresh()
+            if case .signedIn = state {
+                self.showInstancePicker()
+            }
+        }
+    }
+
     func showAccountRoot() {
         showRuntimeSheet(startScreen: .sheetAccount, fallback: .account)
     }
@@ -1607,7 +1621,11 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     private func openRuntime(_ runtime: MobileRuntimeContext) -> Bool {
-        guard sessionCoordinator.isSelectedRuntime(runtime) else {
+        // The open path asks `keepsSelectedRuntime`: a push update the open
+        // itself starts (or any selection-keeping request) does not end it;
+        // a reset, a sign-out, an account change, or any other operation
+        // does. Direct authorization keeps asking `isCurrentRuntime`.
+        guard sessionCoordinator.keepsSelectedRuntime(runtime) else {
             return false
         }
         if let pendingPushOpened,
@@ -1647,7 +1665,7 @@ final class AppModel: ObservableObject {
             return self.runtimeIdentity == identity
                 && self.runtimeOpenAttempt?.id == identity
                 && self.route == .loading
-                && self.sessionCoordinator.isSelectedRuntime(runtime)
+                && self.sessionCoordinator.keepsSelectedRuntime(runtime)
         }
         Task { [weak self] in
             await directPathController.prepareRoute(
@@ -1663,7 +1681,7 @@ final class AppModel: ObservableObject {
                 // Something newer took the route, or the total budget ended.
                 return
             }
-            guard self.sessionCoordinator.isSelectedRuntime(runtime) else {
+            guard self.sessionCoordinator.keepsSelectedRuntime(runtime) else {
                 self.terminateRuntimeOpen(
                     attemptID: identity,
                     reason: .accountTransition,
@@ -1727,9 +1745,10 @@ final class AppModel: ObservableObject {
                 attemptID: deferred.identity
             ) {
                 deferredOpen = nil
-            } else if !sessionCoordinator.isSelectedRuntime(deferred.runtime) {
+            } else if !sessionCoordinator.keepsSelectedRuntime(deferred.runtime) {
                 // The selection ended underneath; do not leave the spinner
-                // or its attempt alive.
+                // or its attempt alive. A push update in flight (one the open
+                // or the return to the foreground started) keeps it.
                 deferredOpen = nil
                 retireRuntimeOpenForAccountTransition()
                 stopRuntime()

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { CheckCheck, ChevronDown, Filter, Inbox, RefreshCw, Search } from 'lucide-react';
@@ -16,6 +16,9 @@ import { usePendingVaultRequestsList } from '../../context/PendingVaultRequestsC
 import { liveVaultRequests } from '../../lib/vaultPendingRequests';
 import { VaultPendingRequests } from '../ui/vault-pending-requests';
 import { useMinute } from '../../lib/useMinute';
+import { useLatestRef } from '../../lib/useLatestRef';
+import { readChatViewMode } from '../../lib/chatViewMemory';
+import { UnsavedChangesContext } from '../../context/unsavedChangesContext';
 import { Button } from '../ui/button';
 import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
@@ -150,10 +153,26 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
 
   const capturePosition = useInboxScrollRestoration(listRef, location.key, filter, visible);
 
+  const unreadRef = useLatestRef(unreadBySession);
+  const unsavedChanges = useContext(UnsavedChangesContext);
   const openSession = useCallback((s: InboxSession) => {
+    // Unsaved changes elsewhere ask first; a canceled open reads nothing.
+    const authorization = unsavedChanges ? unsavedChanges.authorizeRouteAction() : { runNavigation: (go: () => void) => go() };
+    if (!authorization) return;
     capturePosition();
-    navigate(`/chat/${encodeURIComponent(s.session_id)}`);
-  }, [capturePosition, navigate]);
+    // Opening a row reads it: it leaves the Unread list now, and the read is synced
+    // behind it (a failed write puts the count, and the row, back). Not a Session
+    // that reopens on its Show Page, whose replies are not shown when it opens
+    // (the Chat page's own rule). Counts are read from a ref: a card is drawn again
+    // only when what it shows changes, and a new ``onOpen`` on every count change
+    // would draw them all.
+    if (
+      capabilities.can_chat
+      && (unreadRef.current[s.session_id] ?? 0) > 0
+      && readChatViewMode(s.session_id) !== 'show-page'
+    ) void markRead(s.session_id);
+    authorization.runNavigation(() => navigate(`/chat/${encodeURIComponent(s.session_id)}`));
+  }, [capabilities.can_chat, capturePosition, markRead, navigate, unreadRef, unsavedChanges]);
 
   const onMarkAllRead = async () => {
     const ids = Object.entries(unreadBySession)

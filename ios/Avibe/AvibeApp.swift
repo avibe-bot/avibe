@@ -54,6 +54,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
+            ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
         }
         return true
@@ -110,7 +111,22 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
 struct AvibeApp: App {
     @UIApplicationDelegateAdaptor(AvibeAppDelegate.self)
     private var appDelegate
-    @StateObject private var appModel = AppModel()
+    @StateObject private var appModel: AppModel
+    /// The source is retained for the lifetime of the App because the
+    /// transport's fetch closure intentionally captures it weakly.
+    private let directRendezvousSource: DirectRendezvousWebViewSource
+
+    init() {
+        let source = DirectRendezvousWebViewSource()
+        let transport = DirectIrohTransport(
+            engine: DirectIrohBinding(),
+            fetchRendezvous: source.fetch
+        )
+        let model = AppModel(directTransport: transport)
+        source.appModel = model
+        directRendezvousSource = source
+        _appModel = StateObject(wrappedValue: model)
+    }
 
     var body: some Scene {
         WindowGroup {

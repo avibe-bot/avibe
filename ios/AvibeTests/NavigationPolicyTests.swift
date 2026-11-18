@@ -203,6 +203,28 @@ final class NavigationPolicyTests: XCTestCase {
     // so GitHub authorization for avibe.bot's sign-in is intercepted in every
     // browsing context, as Google's is. GitHub sign-in for anything else and
     // the rest of github.com are an ordinary site.
+    // avibe.bot's login card also offers Sign in with Apple (owner, 2026-11-18). Inside the App,
+    // the App's own sign-in screen offers it natively, so the web authorization for avibe.bot's
+    // sign-in is intercepted like Google's and GitHub's; Apple's other pages are ordinary sites.
+    func testAppleWebAuthorizationForAvibeIsInterceptedAndTheRestOfAppleIsExternal() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+        let intercepted = URL(string: "https://appleid.apple.com/auth/authorize?client_id=bot.avibe.web&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback&response_mode=form_post")!
+        XCTAssertEqual(policy.destination(for: intercepted), .thirdPartySignIn(.apple))
+        XCTAssertEqual(policy.disposition(for: intercepted, context: .primaryMainFrame), .thirdPartySignIn(.apple))
+        XCTAssertEqual(policy.disposition(for: intercepted, context: .popupMainFrame), .thirdPartySignIn(.apple))
+        XCTAssertEqual(policy.newWindowDisposition(for: intercepted), .thirdPartySignIn(.apple))
+        for raw in [
+            "https://appleid.apple.com/auth/authorize?client_id=other&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
+            "https://appleid.apple.com/auth/authorize?client_id=other",
+            "https://appleid.apple.com/account/manage",
+            "https://support.apple.com/en-us/105078",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .external, raw)
+            XCTAssertEqual(policy.newWindowDisposition(for: url), .childWebView, raw)
+        }
+    }
+
     func testGitHubAuthorizationIsInterceptedAndTheRestOfGitHubIsExternal() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
 

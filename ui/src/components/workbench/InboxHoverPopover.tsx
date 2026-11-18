@@ -11,11 +11,13 @@ import { useBots } from '../../context/BotsContext';
 import { useNotificationPreferences } from '../../context/NotificationPreferencesContext';
 import { useBotRoster } from '../../context/BotRosterContext';
 import { writeInboxFilter } from '../../lib/inboxFilterMemory';
+import { inboxRowStale } from '../../lib/inboxPreview';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Badge } from '../ui/badge';
 import { BotAvatar } from '../ui/bot-avatar';
 import { PopoverContent } from '../ui/popover';
+import { Skeleton, SkeletonShimmer } from '../ui/skeleton';
 import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
 import { BotTag } from './bots/BotTag';
@@ -91,7 +93,12 @@ function InboxPeekRow({
   const replied = s.replied ? (
     <MessageSquareReply className="size-3 shrink-0 text-cyan-ink" aria-label={t('workbench.inbox.replied')} />
   ) : null;
-  const preview = s.preview_text ? (
+  // A row read before its newest reply shows no older message in its place (``inboxRowStale``).
+  const preview = inboxRowStale(s, unread) ? (
+    <SkeletonShimmer label={t('common.loading')} className="flex flex-col gap-1 rounded-md">
+      <Skeleton className="h-[1lh] w-11/12 text-[11.5px]" />
+    </SkeletonShimmer>
+  ) : s.preview_text ? (
     <Suspense fallback={null}>
       <DeferredInboxPreview
         text={s.preview_text}

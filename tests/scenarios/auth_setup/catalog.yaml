@@ -1290,6 +1290,42 @@ scenarios:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_notifications_page_replays_native_preference_on_reveal
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_remote_document_ignores_local_rebind_and_preference_replay
   - id: AUTH-SETUP-180
+    name: Bundled iOS sign-in with Google, GitHub or Apple reaches the instances
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: ios
+    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances
+    reason: >-
+      The bundled Welcome owns the approved provider row (layout B) and
+      consumes the native auth.signInWithProvider state, which answers like
+      the email code. The collected Vitest case drives a provider mark under
+      the page lock, session discovery, and authorized instance selection. As
+      for AUTH-SETUP-148, the Python auth_setup harness drives IM backend
+      auth and cannot reach the bundled page, the system sign-in window, or
+      Apple's sheet, so this case is the iOS provider sign-in closed loop.
+      Focused cases in the same file own each failure line naming the
+      provider, silence on cancel and on an ended attempt, and the
+      new-account line with sign-out.
+  - id: AUTH-SETUP-181
+    name: Native provider sign-in keeps its secrets, callback and store inside their boundaries
+    status: partial
+    kind: authorization
+    layer: contract
+    missing_layer: signed-build-and-hosted-providers
+    backend: ios
+    reason: >-
+      XCTest owns the boundary: the PKCE vector, the exact launch-route and
+      callback tables (state, keys, fragment, bounds), the canonical start
+      values, Apple's hashed nonce and state check, coordinator store
+      rotation on every non-success with the store kept for a second factor,
+      exclusivity and late results, the fixed start/exchange/apple scripts
+      with their Origin and account-created bit, and the bridge's strictness.
+      The catalog citation checker does not collect Swift XCTest. The https
+      callback on a signed build, the real providers and Apple's sheet remain
+      device checks after the backend exchange is deployed.
+    owning_layer: iOS XCTest plus physical-device acceptance
+  - id: AUTH-SETUP-186
     name: A personal unshared instance pairs a fake health device with route-scoped credentials and local-only reads
     status: covered
     kind: authorization

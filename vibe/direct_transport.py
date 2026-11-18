@@ -34,6 +34,8 @@ from typing import Any
 from vibe.direct_ingress import AsyncioByteStream, DirectIngress
 from vibe.direct_rendezvous import (
     DIRECT_ALPN,
+    PUBLIC_TRIAL,
+    PUBLIC_TRIAL_RELAYS,
     DirectEndpoint,
     DirectRendezvous,
     RENDEZVOUS_TTL_SECONDS,
@@ -114,10 +116,16 @@ class DirectTransportSupervisor:
         ingress: DirectIngress,
         rendezvous: DirectRendezvous,
         *,
+        relay_policy: str | None = None,
         stop_grace_seconds: float = STOP_GRACE_SECONDS,
         restart_initial_delay_seconds: float = RESTART_INITIAL_DELAY_SECONDS,
         restart_max_delay_seconds: float = RESTART_MAX_DELAY_SECONDS,
     ) -> None:
+        if relay_policy not in (None, PUBLIC_TRIAL):
+            raise ValueError("unsupported relay policy")
+        self._relay_policy = relay_policy
+        self._relay_origin: str | None = None
+        self._published_addresses: tuple[str, ...] = ()
         self._executable = os.fspath(executable)
         self._ingress = ingress
         self._rendezvous = rendezvous
@@ -399,6 +407,7 @@ class DirectTransportSupervisor:
                 "alpn": DIRECT_ALPN,
                 "stream_addr": f"127.0.0.1:{self._stream_port}",
                 "token": self._token.hex(),
+                **({"relay": {"policy": self._relay_policy}} if self._relay_policy else {}),
                 "max_connections": MAX_CONNECTIONS,
                 "max_streams_per_connection": MAX_STREAMS_PER_CONNECTION,
             },
@@ -422,6 +431,8 @@ class DirectTransportSupervisor:
             message_type = message.get("type")
             if message_type == "ready":
                 self._handle_ready(message)
+            elif message_type == "relay_status":
+                self._handle_relay_status(message)
             elif message_type == "addresses":
                 self._handle_addresses(message)
             elif message_type == "peer_closed":
@@ -467,6 +478,8 @@ class DirectTransportSupervisor:
         if not is_endpoint_id(endpoint_id):
             raise _ProtocolError("invalid_endpoint_id")
         self._endpoint_id = endpoint_id
+        self._relay_origin = None
+        self._published_addresses = tuple(addresses)
         self._admission_listener_generation += 1
         generation = self._admission_listener_generation
         self._active_admission_generation = generation
@@ -479,7 +492,7 @@ class DirectTransportSupervisor:
         )
         try:
             self._rendezvous.publish(
-                DirectEndpoint(endpoint_id=endpoint_id, addresses=tuple(addresses)),
+                DirectEndpoint(endpoint_id, self._published_addresses, relay_policy=self._relay_policy),
                 reason="running",
             )
         except BaseException:
@@ -490,9 +503,22 @@ class DirectTransportSupervisor:
     def _handle_addresses(self, message: dict[str, Any]) -> None:
         if self._endpoint_id is None:
             raise _ProtocolError("addresses_before_ready")
-        addresses = self._addresses(message)
+        self._published_addresses = tuple(self._addresses(message))
+        self._publish_observation()
+
+    def _handle_relay_status(self, message: dict[str, Any]) -> None:
+        if self._endpoint_id is None or self._relay_policy != PUBLIC_TRIAL or "url" not in message:
+            raise _ProtocolError("unexpected_relay_status")
+        url = message["url"]
+        if url is not None and (not isinstance(url, str) or url not in PUBLIC_TRIAL_RELAYS):
+            raise _ProtocolError("invalid_relay_url")
+        self._relay_origin = url
+        self._publish_observation()
+
+    def _publish_observation(self) -> None:
+        assert self._endpoint_id is not None
         self._rendezvous.publish(
-            DirectEndpoint(endpoint_id=self._endpoint_id, addresses=tuple(addresses)),
+            DirectEndpoint(self._endpoint_id, self._published_addresses, self._relay_origin, self._relay_policy),
             reason="running",
         )
 

@@ -64,6 +64,7 @@ import {
   type WorkbenchControllerLegState,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
+import { setLiveStreamVia } from '../lib/liveStreamVia';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 import {
@@ -665,6 +666,15 @@ export type RemoteAccessStatus = {
   settings?: RemoteAccessSettings;
   tunnel_quality?: TunnelQualitySnapshot;
   network_path?: TunnelNetworkPath;
+  /** The instance's direct ingress, as `vibe/direct_lifecycle.py` projects it (no address or key). */
+  direct?: {
+    enabled: boolean;
+    state: string;
+    reason: string;
+    certificate_not_after?: string | null;
+    transport_running?: boolean;
+    direct_access_allowed?: boolean | null;
+  };
   error?: string;
   optimization_started?: boolean;
   retry_at?: string | null;
@@ -3179,6 +3189,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     eventSourceRef.current = null;
     source?.close();
     eventConnectionRef.current = null;
+    // `via` speaks for one stream only; the next one answers again.
+    setLiveStreamVia(null);
     eventControllerLegRef.current = 'unknown';
     // The stamp and the cadence both speak for one socket only; a later stream
     // must earn its own, including the right to be watched on a timer.
@@ -3377,10 +3389,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const parsed = JSON.parse(e.data) as {
           sub_id?: number;
           interval_ms?: unknown;
+          via?: unknown;
           type?: string;
           data?: unknown;
         };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
+        // How this very stream reached the instance (ui/design: mobile-app/direct-tag).
+        if (sourceKind === 'browser') {
+          setLiveStreamVia(parsed.via === 'direct' || parsed.via === 'other' ? parsed.via : null);
+        }
         eventConnectionRef.current = {
           sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1,
           source: sourceKind,

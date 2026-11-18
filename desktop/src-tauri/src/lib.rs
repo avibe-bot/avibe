@@ -221,10 +221,6 @@ struct NativeComputerUseCatalog {
     needs_permission: String,
     needs_permission_accessibility: String,
     needs_permission_screen_recording: String,
-    #[cfg(target_os = "macos")]
-    screen_recording_title: String,
-    #[cfg(target_os = "macos")]
-    screen_recording_guide: String,
     needs_runtime: String,
     runtime_unavailable: String,
     runtime_too_old: String,
@@ -3076,22 +3072,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn computer_use_catalog_contains_screen_recording_recovery_guidance_in_each_locale() {
-        let english = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
-        assert!(english.screen_recording_title.contains("Screen Recording"));
-        assert!(english.screen_recording_guide.to_lowercase().contains("click +"));
-        assert!(english.screen_recording_guide.contains("drag"));
-        assert!(english.screen_recording_guide.contains("quit and reopen"));
-
-        let chinese = native_catalog_for_locales(["zh-CN".to_owned()]).computer_use;
-        assert!(chinese.screen_recording_title.contains("屏幕"));
-        assert!(chinese.screen_recording_guide.contains("拖"));
-        assert!(chinese.screen_recording_guide.contains("+"));
-        assert!(chinese.screen_recording_guide.contains("退出并重新打开"));
     }
 
     #[cfg(target_os = "macos")]

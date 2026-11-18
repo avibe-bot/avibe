@@ -968,6 +968,8 @@
         "activeTurnRequired": "Computer Use requires the caller's active Avibe Turn.",
         "computerUseUnavailable": "Computer Use is currently unavailable (status={statusCode}: {status}; reason={reasonCode}: {reason}).",
         "targetBusy": "The requested Computer Use target is busy. Try again after the operation finishes.",
+        "appDialogUnresolved": "This dialog is visible, but Computer Use can't confirm that input would reach only this window. Handle it manually, then continue.",
+        "dockUnsupported": "Computer Use cannot control the Dock. To remove an icon, drag it out of the Dock manually.",
         "genericDriverError": "The Computer Use driver returned an error.",
         "invalidDriverArguments": "The Computer Use arguments are invalid.",
         "observeFirst": "Observe the exact window again before sending input.",

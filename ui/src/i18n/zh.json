@@ -58,8 +58,6 @@
       "needsPermission": "电脑操作 — 需要权限",
       "needsPermissionAccessibility": "电脑操作 — 需要辅助功能权限",
       "needsPermissionScreenRecording": "电脑操作 — 需要屏幕录制权限；请在系统设置中添加 Avibe",
-      "screenRecordingTitle": "需要屏幕录制权限",
-      "screenRecordingGuide": "Avibe 已打开“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”。请点击 +，或将 Avibe 拖入列表，然后启用它。获得“屏幕录制”授权后，macOS 可能会退出并重新打开 Avibe；应用重新打开后请返回。两个权限都授权后，应用会自动启动。",
       "needsRuntime": "电脑操作 — 请重启 Avibe 服务",
       "runtimeUnavailable": "电脑操作 — 正在等待 Avibe 服务",
       "runtimeTooOld": "电脑操作 — 请重启 Avibe 服务",
@@ -209,6 +207,14 @@
     "boot": {
       "loading": "正在恢复你的账号…"
     },
+    "provider": {
+      "unavailable": "暂时无法使用这种方式登录，请改用邮箱验证码。",
+      "googleEmailUnverified": "请先在 Google 验证这个邮箱，或改用邮箱验证码。",
+      "githubEmailUnverified": "请先在 GitHub 验证这个邮箱，或改用邮箱验证码。",
+      "googleFailed": "没能通过 Google 登录，请重试。",
+      "githubFailed": "没能通过 GitHub 登录，请重试。",
+      "appleFailed": "没能通过 Apple 登录，请重试。"
+    },
     "welcome": {
       "mascotAlt": "Vibey 云团子",
       "greeting": "你好，我是 Vibey",
@@ -216,9 +222,13 @@
       "titleLine2": "随身同行。",
       "bodyLine1": "电脑上的 Avibe，",
       "bodyLine2": "现在也在你的口袋里。",
-      "action": "登录 / 注册",
       "footerLine1": "Vibey，你的内置 AI 伙伴。",
-      "footerLine2": "连接自己的实例，也可以加入别人共享的实例。"
+      "footerLine2": "连接自己的实例，也可以加入别人共享的实例。",
+      "continueWithEmail": "使用邮箱继续",
+      "or": "或",
+      "continueWithGoogle": "使用 Google 继续",
+      "continueWithGitHub": "使用 GitHub 继续",
+      "continueWithApple": "通过 Apple 继续"
     },
     "email": {
       "title": "从一封邮件开始。",
@@ -295,6 +305,8 @@
       "offlineBody": "在这台电脑上启动 Avibe 并连接网络，然后刷新列表，或选择其他在线实例。"
     },
     "empty": {
+      "newAccount": "已经有 Avibe 账号？这是刚新建的账号，请退出后用原来的方式登录。",
+      "newAccountSignOut": "退出登录",
       "title": "让电脑与手机相连。",
       "subtitle": "在电脑上运行，从手机上连接",
       "body": "还没有可用实例。先在电脑上安装 Avibe，并配对这个账号。",
@@ -3123,7 +3135,19 @@
     "diagnosticUnknown": "尚未观测",
     "diagnosticQuicInactive": "未验证 · 当前 {{protocol}}",
     "diagnosticQuicInactiveHelp": "Avibe 只会在当前 Connector 实际使用 QUIC 后确认该路径；当前 Connector 正在使用 {{protocol}}。",
-    "diagnosticVersion": "{{version}}"
+    "diagnosticVersion": "{{version}}",
+    "direct": {
+      "label": "直连",
+      "stateReady": "已就绪",
+      "stateAwaitingPermission": "等待授权",
+      "stateDenied": "未获准",
+      "stateAwaitingCertificate": "等待证书",
+      "stateNotRunning": "未运行",
+      "certificate": "证书有效期至 {{date}}",
+      "detail": "{{certificate}} · {{page}}",
+      "pageDirect": "本页当前连接：直连",
+      "pageOther": "本页当前连接：未走直连"
+    }
   },
   "models": {
     "eligibility": {
@@ -3623,7 +3647,8 @@
     "openMobileAccount": "账号与 Avibe",
     "signOut": "退出登录",
     "signingOut": "正在退出…",
-    "resizeSidebar": "调整侧栏宽度"
+    "resizeSidebar": "调整侧栏宽度",
+    "directTag": "直连"
   },
   "workbench": {
     "eyebrow": "Agent OS",
@@ -5533,7 +5558,14 @@
       "share": "分享",
       "shareTitle": "分享这个 Show Page",
       "copyLink": "复制链接",
-      "nativeShare": "系统分享",
+      "shareLink": "分享链接",
+      "sharePdf": "分享 PDF",
+      "shareImage": "分享图片",
+      "exportTitle": "导出可见内容",
+      "exportNotice": "仅导出当前可见的 Show 内容，未加载内容、视频和外部嵌入可能缺失。接收者可以保留副本，Avibe 无法撤回。",
+      "shareFailed": "无法分享，请重试。",
+      "shareExpired": "分享内容已失效，请重新分享。",
+      "shareNeedsUpdate": "当前 App 版本只能分享链接。更新 Avibe 后可导出 PDF 或图片。",
       "access": "权限",
       "sharingAccess": "访问范围",
       "sharingModeCurrent": "访问范围：{{mode}}",
@@ -5620,6 +5652,9 @@
     },
     "notifyLabel": "通知",
     "retryRequested": "已请求重试",
+    "workspaceNotice": {
+      "openSession": "打开会话"
+    },
     "failureNextStep": {
       "openModels": "打开「模型」页",
       "askAdmin": "请联系 Avibe 管理员在「模型」页处理。",

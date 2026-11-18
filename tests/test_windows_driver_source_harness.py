@@ -114,10 +114,17 @@ def test_production_capture_is_wired_into_the_existing_windows_job():
 def test_windows_manifest_records_ordered_final_patch():
     manifest = json.loads((ROOT / "desktop/cua-driver/sources.json").read_text())
     windows = manifest["driver"]["windows"]
-    assert windows["patches"] == [
-        {"file": windows["patch_order"][0], "sha256": "c464b2cbd3416aeb15dffee396bc0dcf5aa0b01748af8dd79bd84c9a2f58125e"},
-        {"file": windows["patch_order"][1], "sha256": "5f277c1bfc5e0e3d07710e903cf15a68ef5ee3d07f87de1fbe0cf64f364a10a0"},
+    assert windows["patch_order"] == [
+        manifest["driver"]["patch"]["file"],
+        windows["patch"]["file"],
     ]
+    assert windows["patches"] == [
+        {"file": patch["file"], "sha256": patch["sha256"]}
+        for patch in [manifest["driver"]["patch"], windows["patch"]]
+    ]
+    for patch in windows["patches"]:
+        content = (ROOT / "desktop/cua-driver" / patch["file"]).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == patch["sha256"]
     assert windows["patch"]["sha256"] == "5f277c1bfc5e0e3d07710e903cf15a68ef5ee3d07f87de1fbe0cf64f364a10a0"
 
 

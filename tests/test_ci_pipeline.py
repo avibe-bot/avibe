@@ -871,6 +871,8 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
             "$(AppIdentifierPrefix)bot.avibe.ios",
             "$(AppIdentifierPrefix)bot.avibe.ios.push",
         ],
+        # Sign in with Apple (owner, 2026-11-18); the App Store profile must grant it.
+        "com.apple.developer.applesignin": ["Default"],
     }
     app_info = plistlib.loads((ROOT / "ios/Avibe/Resources/Info.plist").read_bytes())
     extension_info = plistlib.loads((ROOT / "ios/NotificationService/Info.plist").read_bytes())

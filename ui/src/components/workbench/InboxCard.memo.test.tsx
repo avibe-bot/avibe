@@ -78,7 +78,7 @@ describe('Inbox cards', () => {
     relative.calls = [];
     // b gets a reply and moves to the top; a and c arrive as new, equal objects.
     feed.inboxSessions = [
-      { ...row('b', '2026-11-06T08:00:00Z'), preview_text: 'A new reply' },
+      { ...row('b', '2026-11-06T08:00:00Z'), preview_text: 'A new reply', unread_count: 2 },
       { ...feed.inboxSessions[0] },
       { ...feed.inboxSessions[2] },
     ];
