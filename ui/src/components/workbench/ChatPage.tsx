@@ -6595,7 +6595,11 @@ export const MessageRow = memo(function MessageRow({
             </span>
           </div>
           {failureSource ? (
-            <WorkspaceNoticeActions message={message} source={failureSource} />
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* The Models step a failure names (no retry from it here: Retry is the workspace action's). */}
+              <FailureNextStep message={message} readOnly={readOnly} />
+              <WorkspaceNoticeActions message={message} source={failureSource} />
+            </div>
           ) : (
           <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
             <FailureNextStep
