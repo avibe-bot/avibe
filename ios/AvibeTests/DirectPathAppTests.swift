@@ -4102,7 +4102,9 @@ final class DirectPathAppTests: XCTestCase {
     ) async throws -> (runtime: MobileRuntimeContext, page: RuntimePage) {
         let before = arrivals ?? notifications.providerPatches.arrivals
         try open()
-        // A launch reads the session first (a restore opens only then).
+        // A launch checks the session first and restores only then, unless
+        // it opens first with the last confirmed session (a relaunch), in
+        // which case this returns at once and the check runs behind the open.
         try await waitForTheBootstrap(of: app)
         try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
