@@ -46,3 +46,12 @@ export function inboxPreviewSource(text: string): string {
   }
   return text;
 }
+
+/** Whether a feed row was read before the newest of its unread replies. The row's
+ *  own ``unread_count`` is the count as of the read that brought its preview; the
+ *  unread map can move past it on its own (a counts read after a push arrived while
+ *  the event stream was down). Its preview is then an older message than the one
+ *  the count stands for, so it is not shown until the row is read again. */
+export function inboxRowStale(row: { unread_count: number }, unread: number): boolean {
+  return unread > (row.unread_count ?? 0);
+}

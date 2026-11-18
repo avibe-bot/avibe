@@ -2461,7 +2461,8 @@ describe('Demand-driven shell bootstrap', () => {
       // The counts moved and the event did not say how, so the map this document
       // holds no longer describes the account. Nothing is in flight to replace it:
       // the feed read that would normally carry one already finished.
-      listInbox.mockResolvedValue({ ...inboxPayload, unread_by_session: { [session.id]: 9 } });
+      // The server's answer: the row moved with the map, as one read reports both.
+      listInbox.mockResolvedValue({ ...inboxPayload, sessions: [{ ...inboxRow, unread_count: 9 }], unread_by_session: { [session.id]: 9 } });
       await act(async () => {
         handlers?.onInboxUnreadChanged?.({});
       });
