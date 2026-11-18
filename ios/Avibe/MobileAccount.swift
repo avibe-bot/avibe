@@ -946,10 +946,20 @@ final class MobileSessionCoordinator {
                     // The selection stays: revoke once this operation has
                     // ended, as ordinary push requests that keep it. One
                     // refused as busy stays pending for push recovery.
-                    let revoke = self.onRevokeInstancePush
-                    Task { @MainActor in
+                    // Only while this account is still the one signed in: a
+                    // later account's registration for the same origin is
+                    // not this one's to revoke.
+                    let accountID = fresh.account.id
+                    Task { @MainActor [weak self] in
                         for origin in removedOrigins {
-                            await revoke(origin)
+                            guard
+                                let self,
+                                self.currentAccount?.id == accountID,
+                                self.pushAccountID == accountID
+                            else {
+                                return
+                            }
+                            await self.onRevokeInstancePush(origin)
                         }
                     }
                 }
