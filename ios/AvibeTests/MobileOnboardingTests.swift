@@ -1825,8 +1825,24 @@ final class MobileOnboardingTests: XCTestCase {
                 onPreparePushLogout: { pushLogouts += 1 },
                 onRevokeInstancePush: { origin in
                     revoked.append(origin)
-                    if let weakCoordinator, let runtime {
+                    guard let weakCoordinator else { return }
+                    if let runtime {
                         selectedDuringRevoke.append(weakCoordinator.keepsSelectedRuntime(runtime))
+                    }
+                    // The revoke's own request must be accepted, not refused
+                    // as busy, whether inside the refresh or after it.
+                    do {
+                        let response = try await weakCoordinator.pushManagementRequest(
+                            PushManagementRequest(
+                                method: "DELETE",
+                                path: "/api/push/apns/registrations/instance-key",
+                                headers: [:],
+                                body: nil
+                            )
+                        )
+                        XCTAssertEqual(response.statusCode, 200, origin)
+                    } catch {
+                        XCTFail("The revoke request was refused: \(error), \(origin)")
                     }
                 }
             )

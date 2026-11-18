@@ -1169,7 +1169,7 @@ final class MobileSessionCoordinator {
         let borrowsCleanup: Bool
         // Only the account's own push cleanup can stand in for this one;
         // one instance's revoke cannot.
-        if case .pushLogout = phase, accountPushCleanup != nil {
+        if case .pushLogout = phase, accountPushCleanup == phase {
             borrowsCleanup = true
         } else {
             borrowsCleanup = false
@@ -1302,7 +1302,7 @@ final class MobileSessionCoordinator {
             // revoke. Clearing first means a cleanup that finishes after a
             // newer sign-in cannot erase that account's record.
             self.pushAccountID = nil
-            let cleanup = UUID()
+            let cleanup = self.phase
             self.accountPushCleanup = cleanup
             defer {
                 if self.accountPushCleanup == cleanup {
@@ -1360,9 +1360,10 @@ final class MobileSessionCoordinator {
         try requireCurrentGeneration(requestGeneration)
     }
 
-    /// The account push cleanup running now, so a sign-out arriving then can
-    /// borrow it; an instance revoke leaves it unset.
-    private var accountPushCleanup: UUID?
+    /// The `.pushLogout` phase of the account push cleanup running now. A
+    /// sign-out borrows only that phase, never an instance revoke's, even
+    /// while an older, superseded cleanup is still finishing.
+    private var accountPushCleanup: Phase?
 
     /// The account this device's push may still be bound to ("" once its
     /// cleanup has run; `init` records it on a first launch of this build).
