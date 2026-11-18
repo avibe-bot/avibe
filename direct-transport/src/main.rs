@@ -427,12 +427,7 @@ async fn handle_connection(
     control.peer_closed(&endpoint_id, reason).await;
 }
 
-async fn run(control: &Control) -> Result<()> {
-    let mut stdin = BufReader::new(tokio::io::stdin());
-    let first = read_command(&mut stdin)
-        .await?
-        .ok_or(SidecarError("start_required"))?;
-    let config = Arc::new(parse_start(first)?);
+fn endpoint_builder(relay: Option<&RelayMap>, admissions: Admissions) -> iroh::endpoint::Builder {
     let transport_config = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(0))
         .max_concurrent_uni_streams(VarInt::from_u32(0))
@@ -450,16 +445,43 @@ async fn run(control: &Control) -> Result<()> {
         .receive_observed_address_reports(false)
         .max_remote_nat_traversal_addresses(8)
         .build();
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(match &config.relay {
+    let mut report = NetReportConfig::minimal();
+    report.https_probes = relay.is_some();
+    Endpoint::builder(presets::Minimal)
+        .relay_mode(match relay {
             None => RelayMode::Disabled,
             Some(map) => RelayMode::Custom(map.clone()),
         })
-        .net_report_config(NetReportConfig::minimal())
+        .net_report_config(report)
         .portmapper_config(PortmapperConfig::Disabled)
         .transport_config(transport_config)
-        .hooks(control.admissions.clone())
+        .hooks(admissions)
         .alpns(vec![ALPN.as_bytes().to_vec()])
+}
+
+async fn relay_updates(
+    initial: Option<RelayUrl>,
+    mut next: impl AsyncFnMut() -> Result<Option<RelayUrl>>,
+    mut emit: impl AsyncFnMut(Option<RelayUrl>) -> Result<()>,
+) -> Result<()> {
+    let mut previous = None;
+    let mut observed = initial;
+    loop {
+        if observed != previous {
+            emit(observed.clone()).await?;
+            previous = observed;
+        }
+        observed = next().await?;
+    }
+}
+
+async fn run(control: &Control) -> Result<()> {
+    let mut stdin = BufReader::new(tokio::io::stdin());
+    let first = read_command(&mut stdin)
+        .await?
+        .ok_or(SidecarError("start_required"))?;
+    let config = Arc::new(parse_start(first)?);
+    let endpoint = endpoint_builder(config.relay.as_ref(), control.admissions.clone())
         .bind()
         .await
         .map_err(|_| SidecarError("endpoint_bind_failed"))?;
@@ -478,40 +500,38 @@ async fn run(control: &Control) -> Result<()> {
         return Err(error);
     }
     // Endpoint readiness does not imply a connected home relay.
-    let relay_task = config.relay.clone().map(|map| {
-        let mut status = endpoint.home_relay_status();
-        let control = control.clone();
-        tokio::spawn(async move {
-            let mut previous: Option<RelayUrl> = None;
-            loop {
-                let observed = status
-                    .get()
-                    .iter()
-                    .filter(|r| r.is_connected() && map.contains(r.url()))
-                    .map(|r| r.url().clone())
-                    .min();
-                if observed != previous {
-                    if let Err(error) = control
-                        .emit(&Message::RelayStatus {
-                            url: observed.as_ref().map(|url| url.as_str()),
-                        })
-                        .await
-                    {
-                        control.fail(error).await;
-                        return;
-                    }
-                    previous = observed;
-                }
-                tokio::select! {
-                    _ = control.stop.wait() => return,
-                    result = status.updated() => if result.is_err() {
-                        control.fail(SidecarError("relay_watcher_closed")).await;
-                        return;
-                    },
-                }
-            }
-        })
-    });
+    let relay_events = async {
+        let Some(map) = config.relay.clone() else {
+            return std::future::pending::<()>().await;
+        };
+        let mut status = endpoint.home_relay_status().map(move |snapshot| {
+            snapshot
+                .iter()
+                .filter(|r| r.is_connected() && map.contains(r.url()))
+                .map(|r| r.url().clone())
+                .min()
+        });
+        let updates = relay_updates(
+            status.get(),
+            async || {
+                status
+                    .updated()
+                    .await
+                    .map_err(|_| SidecarError("relay_watcher_closed"))
+            },
+            async |url| {
+                control
+                    .emit(&Message::RelayStatus {
+                        url: url.as_ref().map(|url| url.as_str()),
+                    })
+                    .await
+            },
+        );
+        if let Err(error) = updates.await {
+            control.fail(error).await;
+        }
+    };
+    tokio::pin!(relay_events);
     let address_task = tokio::spawn(watch_addresses(
         endpoint_watcher,
         ready_address,
@@ -528,6 +548,7 @@ async fn run(control: &Control) -> Result<()> {
         tokio::select! {
             biased;
             _ = control.stop.wait() => break,
+            _ = &mut relay_events => break,
             // Drain finished tasks before more arrivals, so an inbound flood
             // cannot retain an unbounded backlog of completed JoinSet entries.
             _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => {},
@@ -564,10 +585,6 @@ async fn run(control: &Control) -> Result<()> {
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
     let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
-    if let Some(task) = relay_task {
-        task.abort();
-        let _ = task.await;
-    }
     address_task.abort();
     expiry_task.abort();
     control_task.abort();
@@ -584,10 +601,38 @@ async fn run(control: &Control) -> Result<()> {
 mod relay_tests {
     use super::*;
 
-    #[test]
-    fn only_the_pinned_trial_policy_selects_relays() {
+    #[tokio::test]
+    async fn delivered_withdrawal_precedes_reconnect_to_same_relay() {
+        let a: RelayUrl = "https://relay.invalid/".parse().unwrap();
+        let mut delivered = [None, Some(a.clone())].into_iter();
+        let mut emitted = Vec::new();
+        let result = relay_updates(
+            Some(a.clone()),
+            async || delivered.next().ok_or(SidecarError("done")),
+            async |url| {
+                emitted.push(url);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().0, "done");
+        assert_eq!(emitted, [Some(a.clone()), None, Some(a)]);
+    }
+
+    #[tokio::test]
+    async fn only_the_pinned_trial_policy_selects_relays() {
         let offer: RelayOffer = serde_json::from_str(r#"{"policy":"public-trial-v1"}"#).unwrap();
-        let urls: Vec<RelayUrl> = offer.map().urls();
+        let map = offer.map();
+        let dns_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = endpoint_builder(Some(&map), Admissions::new())
+            .dns_resolver(iroh::dns::DnsResolver::with_nameserver(
+                dns_socket.local_addr().unwrap(),
+            ))
+            .bind()
+            .await
+            .unwrap();
+        assert!(endpoint.address_lookup().unwrap().is_empty());
+        let urls: Vec<RelayUrl> = map.urls();
         assert_eq!(urls.len(), 4);
         for region in ["use1", "usw1", "euc1", "aps1"] {
             assert!(
@@ -595,6 +640,10 @@ mod relay_tests {
                     .any(|url| url.as_str() == format!("https://{region}-1.relay.n0.iroh.link./"))
             );
         }
+        for url in urls {
+            assert!(endpoint.remove_relay(&url).await.is_some());
+        }
+        endpoint.close().await;
         for invalid in [
             r#"{"policy":"unknown"}"#,
             r#"{"url":"https://other.invalid"}"#,
