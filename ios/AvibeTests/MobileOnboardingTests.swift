@@ -1024,6 +1024,85 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(coordinator.accountWasJustCreated)
     }
 
+    func testAProviderSignInThatOwesTheSecondFactorKeepsItsStoreAndShowsNoNewAccountHint() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        var sentState = ""
+        transport.providerStartHandler = { _, _, state in
+            sentState = state
+            return .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+        }
+        web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
+        let requirement = MobileSecondFactorRequirement(email: "alex@example.com", gate: .challenge, methods: [.totp])
+        transport.providerExchangeHandler = { _, _, _ in
+            MobileProviderExchange(discovery: .secondFactorRequired(requirement), accountCreated: true)
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
+        let kept = store.identifier
+
+        guard case .twoFactorRequired = state else {
+            return XCTFail("Expected the second factor, got \(state)")
+        }
+        XCTAssertEqual(store.identifier, kept)
+        XCTAssertEqual(transport.providerExchanges.count, 1)
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testAnExchangeThatFailsRotatesTheStoreAndIsNeverRetried() async throws {
+        for failure in [
+            MobileAccountError.invalidOrExpired,
+            .providerEmailUnverified,
+            MobileAccountError(code: "rate_limited", message: "slow down", retryAfterSeconds: 30),
+            .network,
+        ] {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            let web = FakeWebAuthenticator()
+            var sentState = ""
+            transport.providerStartHandler = { _, _, state in
+                sentState = state
+                return .browser(
+                    transactionID: "transaction-1",
+                    url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+                )
+            }
+            web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
+            transport.providerExchangeHandler = { _, _, _ in throw failure }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                webAuthenticator: web
+            )
+            coordinator.activateAccountSurface()
+            let started = store.identifier
+
+            do {
+                _ = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+                XCTFail("Expected \(failure.code)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, failure.code)
+            }
+            XCTAssertEqual(transport.providerExchanges.count, 1, failure.code)
+            XCTAssertNotEqual(store.identifier, started, failure.code)
+            XCTAssertNil(coordinator.currentAccount)
+        }
+    }
+
     func testProviderSignInThatDoesNotSignInRotatesTheStoreAndNeverExchanges() async throws {
         let cases: [(callback: (String) -> String, error: String)] = [
             ({ _ in "cancel" }, MobileAccountError.providerCancelled.code),

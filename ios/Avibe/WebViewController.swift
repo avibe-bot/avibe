@@ -632,7 +632,7 @@ final class WebViewController: UIViewController {
     private let showAccount: () -> Void
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
-    /// The App's own sign-in screen, for a Google or GitHub sign-in tapped inside the page.
+    /// The App's own sign-in screen, for a Google, GitHub or Apple sign-in tapped inside the page.
     private let showSignIn: () -> Void
     private let instanceName: () -> String?
     private let instanceID: () -> String?

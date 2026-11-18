@@ -568,7 +568,7 @@ final class AppModel: ObservableObject {
         showRuntimeSheet(startScreen: .sheet, fallback: .account)
     }
 
-    /// A Google or GitHub sign-in tapped inside an instance page: that page asked avibe.bot to
+    /// A Google, GitHub or Apple sign-in tapped inside an instance page: that page asked avibe.bot to
     /// sign in, so the App's avibe.bot session has lapsed. Reading it settles that the
     /// explicit way (a `401` signs out and the App shows its own sign-in screen, which offers
     /// Google, GitHub and Apple); a session that still reads signed in shows the instance list.

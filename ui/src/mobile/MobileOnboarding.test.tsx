@@ -1005,6 +1005,25 @@ describe('mobile onboarding', () => {
       });
     });
 
+    it('shows each failure its own line, and stays silent when an account change ended the attempt', async () => {
+      await openWelcome();
+      for (const [provider, name, code, line] of [
+        ['github', 'mobileApp.welcome.continueWithGitHub', 'invalid_or_expired', 'mobileApp.provider.githubFailed'],
+        ['google', 'mobileApp.welcome.continueWithGoogle', 'rate_limited', 'mobileApp.code.rateLimited'],
+        ['google', 'mobileApp.welcome.continueWithGoogle', 'provider_unavailable', 'mobileApp.provider.unavailable'],
+        ['apple', 'mobileApp.welcome.continueWithApple', 'local_state_write_failed', 'mobileApp.errors.localRecords'],
+        ['github', 'mobileApp.welcome.continueWithGitHub', 'network', 'mobileApp.errors.network'],
+      ] as const) {
+        mobile.signInWithProvider.mockRejectedValueOnce({ code, message: code });
+        fireEvent.click(screen.getByRole('button', { name }));
+        await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(line));
+        expect(mobile.signInWithProvider).toHaveBeenLastCalledWith(provider);
+      }
+      mobile.signInWithProvider.mockRejectedValueOnce({ code: 'stale_session', message: 'stale' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }));
+      await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    });
+
     it('marks an account a provider sign-in just created, until it has an instance', async () => {
       await openWelcome();
       mobile.signInWithProvider.mockResolvedValueOnce({ ...signedIn(), instances: [], new_account: true });

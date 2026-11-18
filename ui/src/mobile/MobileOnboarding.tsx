@@ -299,6 +299,10 @@ const providerErrorKey = (
   error: MobileBridgeError,
   provider: SignInProvider,
 ): MobileErrorKey | null => {
+  // The account signed in but this iPhone could not keep its records: retrying cannot help.
+  if (error.code === 'local_state_unavailable' || error.code === 'local_state_write_failed') {
+    return 'mobileApp.errors.localRecords';
+  }
   switch (error.code) {
     // A closed window says nothing; so does an attempt that an account change (a sign-out
     // elsewhere) ended, since the page follows that change.
