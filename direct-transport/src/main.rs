@@ -475,13 +475,35 @@ async fn relay_updates(
     }
 }
 
-async fn run(control: &Control) -> Result<()> {
+#[cfg(test)]
+type TestRelay = (
+    RelayMap,
+    fn(iroh::endpoint::Builder) -> iroh::endpoint::Builder,
+);
+
+async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin());
     let first = read_command(&mut stdin)
         .await?
         .ok_or(SidecarError("start_required"))?;
-    let config = Arc::new(parse_start(first)?);
-    let endpoint = endpoint_builder(config.relay.as_ref(), control.admissions.clone())
+    let config = parse_start(first)?;
+    #[cfg(test)]
+    let config = match (&fixture, config.relay.is_some()) {
+        (Some((map, _)), true) => StartConfig {
+            relay: Some(map.clone()),
+            ..config
+        },
+        (Some(_), false) => return Err(SidecarError("trial_required")),
+        (None, _) => config,
+    };
+    let config = Arc::new(config);
+    let builder = endpoint_builder(config.relay.as_ref(), control.admissions.clone());
+    #[cfg(test)]
+    let builder = match fixture {
+        Some((_, trust)) => trust(builder),
+        None => builder,
+    };
+    let endpoint = builder
         .bind()
         .await
         .map_err(|_| SidecarError("endpoint_bind_failed"))?;
@@ -657,7 +679,13 @@ mod relay_tests {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let control = Control::new();
-    let status = match run(&control).await {
+    let status = match run(
+        &control,
+        #[cfg(test)]
+        None,
+    )
+    .await
+    {
         Ok(()) => 0,
         Err(error) => {
             control.fatal(error).await;
