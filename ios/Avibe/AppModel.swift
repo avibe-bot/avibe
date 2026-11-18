@@ -345,6 +345,14 @@ final class AppModel: ObservableObject {
             // account's Inbox. (A session refresh of the same account keeps it.)
             self?.nativeBadge.clear()
             await self?.nativePushCoordinator.prepareForLogout()
+        },
+        onReconcileInstancePush: { [weak self] liveOrigins, accountID in
+            // Instances that left the account's list lose only their own
+            // registrations; the account keeps the rest.
+            await self?.nativePushCoordinator.revokeRegistrations(
+                outside: liveOrigins,
+                accountID: accountID
+            )
         }
     )
 
