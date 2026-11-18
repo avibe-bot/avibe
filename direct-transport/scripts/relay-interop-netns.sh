@@ -15,8 +15,14 @@ done
 # Only the firewall setup needs privilege. Neither the peers nor the fixture
 # can change the namespace policy, and there is no external interface/route.
 repo=$1; shift
-sudo -u "${SUDO_USER:?}" env -i PATH=/usr/bin:/bin HOME="$PWD" PYTHONPATH="$repo" \
+# A nested sudo tries to resolve the runner hostname. Use numeric IDs so
+# dropping privileges does not itself issue DNS requests inside the fixture.
+[[ ${SUDO_UID:?} != 0 && ${SUDO_GID:?} != 0 ]]
+setpriv --reuid="$SUDO_UID" --regid="$SUDO_GID" --clear-groups --no-new-privs \
+  env -i PATH=/usr/bin:/bin HOME="$PWD" PYTHONPATH="$repo" \
   "$@" "$repo/direct-transport/tests/support/relay_driver.py" "$TEST_EXE" "$RELAY_EXE"
 for fw in iptables ip6tables; do
-  "$fw" -nvxL LOOKUP | awk '$3=="DROP" { found=1; if ($1!=0) exit 1 } END { if (!found) exit 1 }'
+  counters=$("$fw" -nvxL LOOKUP)
+  printf '%s lookup counters:\n%s\n' "$fw" "$counters"
+  awk '$3=="DROP" { found=1; if ($1!=0) exit 1 } END { if (!found) exit 1 }' <<<"$counters"
 done
