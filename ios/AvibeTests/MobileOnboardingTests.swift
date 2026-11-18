@@ -1513,6 +1513,154 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(keychain.installation?.providerPatchPending ?? true)
     }
 
+    /// The owner's update morning (TestFlight 27.1 to 31.1): notifications on
+    /// for the instance, then the App is updated. Its first launch finds the
+    /// 24-hour account cookie gone, so avibe.bot asks the same account for
+    /// its second factor again (403 `two_factor_required`); the account page
+    /// reads the session once more while it still owes it, then the factor
+    /// passes and the instance opens. Nothing ended the account session and
+    /// the account did not change, so the instance's notification
+    /// registration must survive: no bulk revoke, the record still active
+    /// and the installation still bound. (Before, the page's refresh ran the
+    /// sign-out push cleanup on the owed factor, and every update cost the
+    /// owner his notifications.)
+    func testAnUpdateLaunchThatOwesTheSecondFactorKeepsNotifications()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let token = Data(repeating: 43, count: 32)
+        let installationID = UUID()
+        let keychain = InMemoryPushKeychainStore()
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 13, count: 32),
+            accountID: "account-1",
+            bindGeneration: 5,
+            providerGeneration: 1229,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "production",
+                topic: "bot.avibe.ios",
+                generation: 1229
+            ),
+            providerPatchPending: false,
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        let generationStore = InMemoryPushGenerationStore()
+        generationStore.generation = 7
+        let vapidPublicKey = PushBase64URL.encode(
+            P256.KeyAgreement.PrivateKey().publicKey.x963Representation
+        )
+        let vapidKeyHash = SHA256.hash(
+            data: try XCTUnwrap(PushBase64URL.decode(vapidPublicKey))
+        ).map { String(format: "%02x", $0) }.joined()
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "studio-key",
+            instanceOrigin: instance.url.absoluteString,
+            accountID: "account-1",
+            accountGeneration: 7,
+            bindGeneration: 5,
+            privateKey: P256.KeyAgreement.PrivateKey().rawRepresentation,
+            authSecret: Data(repeating: 4, count: 16),
+            vapidKeyHash: vapidKeyHash,
+            state: .active,
+            pendingRevoke: false,
+            replacementRegistrationIDs: []
+        ))
+        let marker = InMemoryPushInstallationMarkerStore()
+        marker.installationID = installationID
+
+        // Before the update: signed in with the instance selected.
+        let before = FakeMobileAuthTransport()
+        before.session = snapshot(accountID: "account-1")
+        let previous = makeCoordinator(defaults: defaults, transports: [before])
+        previous.activateAccountSurface()
+        _ = try await previous.bootstrap()
+        _ = try previous.selectInstance(id: instance.id)
+
+        // The updated App's first launch: a new process over the same
+        // defaults, keychain and account store. avibe.bot owes the second
+        // factor until it passes.
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .challenge,
+            methods: [.passkey]
+        )
+        var requests: [String] = []
+        let transports = (0..<8).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.secondFactor = requirement
+            transport.pushManagementHandler = { request in
+                let kind = request.path.split(separator: "/").last.map(String.init) ?? ""
+                requests.append("\(request.method) \(request.path.contains("/registrations/") ? "registration" : kind)")
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return transport
+        }
+        var push: NativePushCoordinator!
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: transports,
+            onOpen: { _ in push.resumeAfterAccountActivation() },
+            onPreparePushLogout: { await push.prepareForLogout() }
+        )
+        push = NativePushCoordinator(
+            keychain: keychain,
+            generationStore: generationStore,
+            managementRequest: { request in
+                try await coordinator.pushManagementRequest(request)
+            },
+            accountProvider: { coordinator.currentAccount },
+            registerForRemoteNotifications: {
+                DispatchQueue.main.async {
+                    push.didRegister(deviceToken: token, environment: "production")
+                }
+            },
+            requestNotificationAuthorization: { true },
+            notificationAuthorizationStatus: { .authorized },
+            installationMarker: marker,
+            notificationCenter: QuietPushNotificationCenter()
+        )
+
+        coordinator.activateAccountSurface()
+        let launch = try await coordinator.bootstrap()
+        XCTAssertEqual(launch, .twoFactorRequired(requirement))
+        // The account page reads the session while it still owes the factor.
+        let owed = try await coordinator.refresh()
+        XCTAssertEqual(owed, .twoFactorRequired(requirement))
+        try await settlePush()
+
+        // The factor passes; the page reads the session and the instance opens.
+        for transport in transports {
+            transport.secondFactor = nil
+            transport.session = snapshot(accountID: "account-1")
+        }
+        let passed = try await coordinator.refresh()
+        XCTAssertEqual(
+            passed,
+            .signedIn(
+                snapshot: snapshot(accountID: "account-1"),
+                selectedInstanceID: instance.id
+            )
+        )
+        _ = try coordinator.selectInstance(id: instance.id)
+        try await settlePush()
+
+        XCTAssertFalse(requests.contains { $0.hasPrefix("POST revoke") }, "\(requests)")
+        XCTAssertFalse(requests.contains("DELETE registration"), "\(requests)")
+        XCTAssertEqual(keychain.installation?.accountID, "account-1")
+        XCTAssertEqual(keychain.installation?.bindGeneration, 5)
+        XCTAssertNil(keychain.installation?.pendingBulkRevokeThroughGeneration)
+        let record = try XCTUnwrap(keychain.loadRecord(kid: "studio-key"))
+        XCTAssertEqual(record.state, .active)
+        XCTAssertFalse(record.pendingRevoke)
+        let status = try await push.status(
+            vapidPublicKey: vapidPublicKey,
+            instanceOrigin: instance.url.absoluteString
+        )
+        XCTAssertEqual(status["state"] as? String, "on", "\(status)")
+    }
+
     /// Gives the push coordinator's queued main-actor work (resume,
     /// recovery, a token callback and its reconciliation, all against
     /// fakes) time to finish.
