@@ -41,12 +41,15 @@ own menu/dialog/drawer variables.
 | --- | --- | --- | --- |
 | 0 flat | cards, rows, panels, inputs | the edge below | the edge below |
 | 1 raised | composer, segmented thumb, switch thumb, setup panel | `ring ink/.04, 0 1px 3px tint/.08` | `top highlight, ring white/.06, 0 1px 2px black/.45` |
-| 2 floating | popover, menu, hover card, tooltip, toast, Dock, jump-to-latest, unfocused window | `ring ink/.07, 0 2px 6px -2px tint/.08, 0 12px 32px -8px tint/.16` | `inset 0 1px 0 white/.07, ring white/.1, 0 2px 6px -2px black/.5, 0 12px 32px -8px black/.6` |
-| 3 overlay | dialog, search palette, drawer, image viewer, focused window | `ring ink/.07, 0 4px 12px -4px tint/.1, 0 28px 64px -16px tint/.24` | `inset 0 1px 0 white/.07, ring white/.1, 0 4px 12px -4px black/.5, 0 24px 64px -12px black/.7` |
+| 2 floating | popover, menu, hover card, tooltip, toast, Dock, jump-to-latest, unfocused window | `ring ink/.07, 0 2px 6px -2px tint/.08, 0 12px 32px -8px tint/.16` | `0 -1px 0 white/.07, ring white/.1, 0 2px 6px -2px black/.5, 0 12px 32px -8px black/.6` |
+| 3 overlay | dialog, search palette, drawer, image viewer, focused window | `ring ink/.07, 0 4px 12px -4px tint/.1, 0 28px 64px -16px tint/.24` | `0 -1px 0 white/.07, ring white/.1, 0 4px 12px -4px black/.5, 0 24px 64px -12px black/.7` |
 | 3 up | a sheet rising from the bottom edge | `0 -1px 0 ink/.07, 0 -12px 32px -12px tint/.16` | `inset 0 1px 0 white/.07, 0 -2px 8px -4px black/.4, 0 -16px 40px -12px black/.6` |
 
 `ink` is `rgb(8 8 18)`, the colour `--border` mixes from; `tint` is the brand's deep teal
 `rgb(10 52 44)`, so Light shadows read as the brand rather than grey; "ring" is a `0 0 0 1px` shadow.
+Dark's top highlight sits on the ring, outside the box (`0 -1px 0`), not inside it: an inset
+highlight sat one pixel inside the transparent border and read as a second line along the top.
+The sheet (3 up) has no ring, so its highlight stays inset.
 Floating and overlay surfaces are opaque `bg-popover` with no border: their ring is in the level's
 shadow. Dark lifts `--popover` one step (`#11111c` → `#161622`) so the surface, not a black smear,
 separates a menu from the card under it. Tokens are themed runtime variables behind `@theme inline`
@@ -56,7 +59,7 @@ entries, the same pattern as `--card-wash`.
 
 | Surface | Edge |
 | --- | --- |
-| Card, panel, row | Transparent border. Light: `ring ink/.04, 0 1px 2px tint/.05, 0 4px 14px -6px tint/.08`. Dark: `inset 0 1px 0 white/.05, ring white/.06`. A card drawn on the page colour takes `--surface`. |
+| Card, panel, row | Transparent border. Light: `ring ink/.04, 0 1px 2px tint/.05, 0 4px 14px -6px tint/.08`. Dark: `0 -1px 0 white/.05, ring white/.06`. A card drawn on the page colour takes `--surface`. |
 | Input, select, textarea, search | Filled: `ink/.045` Light, `white/.05` Dark; no border, no shadow; the fill deepens on hover; focus is the ring. |
 | Outline/secondary button, small bordered action, chip | The same fill, no outline. |
 | Kept | Selected, focus, error, the dashed "add", table and list dividers. |
