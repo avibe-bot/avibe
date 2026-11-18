@@ -123,6 +123,8 @@ def _checked_value(dest: str, actions: list, value: Any) -> Any:
             if value is None or _is_strings(value):
                 return value
         elif isinstance(action, argparse._StoreAction) and action.nargs is None:
+            if value is None and getattr(action, "required", False):
+                raise ValueError(f"Missing required argument: {dest}")
             if value is None and action.option_strings and action.default is None:
                 return value
             if action.type is None and isinstance(value, str):
@@ -320,7 +322,95 @@ async def handle_control_request(
         return failure("deadline_expired", "Control request expired before execution")
     if request.operation == "agent.run":
         return await _agent_run(controller, request, args, run_sync)
+    if request.operation.startswith("schedule."):
+        return await _system_schedule(controller, request, path, run_sync)
     return await _command(controller, request, path, run_sync)
+
+
+async def _system_schedule(controller, request: ControlRequest, path, run_sync) -> dict[str, Any]:
+    """Execute the Agent schedule command in the service that owns SQLite."""
+
+    def execute() -> dict[str, Any]:
+        if request.expired:
+            return failure("deadline_expired", "Control request expired before execution")
+        from core.caller_context import AVIBE_SESSION_ID_ENV
+        from storage import system_schedule_service
+        from vibe import cli
+        from vibe.authorization import invocation_authority
+
+        try:
+            args = _command_arguments(request.operation, path, request.arguments)
+            authority = cli._cli_invocation_authority(request.caller_env)
+            with invocation_authority(authority):
+                cli._require_command_path_admission(path)
+            session_id = request.caller_env.get(AVIBE_SESSION_ID_ENV, "").strip()
+            if not session_id:
+                raise system_schedule_service.SystemScheduleServiceError(
+                    "session_required",
+                    "Run this command from an active Agent Session.",
+                )
+            config = getattr(controller, "config", None)
+            cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
+            instance_id = str(getattr(cloud, "instance_id", "") or "").strip()
+            if not instance_id:
+                raise system_schedule_service.SystemScheduleServiceError(
+                    "instance_not_paired",
+                    "This Avibe instance is not paired with Avibe Cloud.",
+                )
+            if request.operation == "schedule.create":
+                operation = system_schedule_service.create_operation(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    operation_id=args.operation_id,
+                    kind=args.kind,
+                    title=args.title,
+                    fire_at=args.fire_at,
+                    time_zone=args.time_zone,
+                    expires_in=args.expires_in,
+                )
+            elif request.operation == "schedule.status":
+                operation = system_schedule_service.get_operation(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    operation_id=args.operation_id,
+                )
+            elif request.operation == "schedule.cancel":
+                operation = system_schedule_service.cancel_operation(
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    operation_id=args.operation_id,
+                    expires_in=args.expires_in,
+                )
+            else:
+                return failure(
+                    "unsupported_operation",
+                    "This service does not support the requested operation",
+                )
+            return result(
+                {
+                    "ok": True,
+                    "kind": "system_schedule_operation",
+                    "operation": operation,
+                }
+            )
+        except system_schedule_service.SystemScheduleServiceError as exc:
+            payload = {
+                "ok": False,
+                "kind": "error",
+                "code": exc.code,
+                "error": str(exc),
+            }
+            if exc.details:
+                payload["details"] = exc.details
+            return result(payload)
+        except ValueError as exc:
+            return failure("invalid_control_request", str(exc))
+        except cli.TaskCliError as exc:
+            return result(cli._task_error_payload(exc, help_command=f"vibe {' '.join(path)} --help"))
+
+    if request.expired:
+        return failure("deadline_expired", "Control request expired before execution")
+    return await run_sync(execute)
 
 
 async def _command(controller, request: ControlRequest, path, run_sync) -> dict[str, Any]:

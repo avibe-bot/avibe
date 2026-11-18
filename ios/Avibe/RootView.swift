@@ -1,4 +1,23 @@
 import SwiftUI
+import UIKit
+
+@MainActor
+struct SystemScheduleAccessibilityAnnouncer {
+    static let live = SystemScheduleAccessibilityAnnouncer {
+        UIAccessibility.post(notification: $0, argument: nil)
+    }
+
+    let post: (UIAccessibility.Notification) -> Void
+
+    func didPresent(focusTitle: () -> Void) {
+        focusTitle()
+        post(.screenChanged)
+    }
+
+    func didDismiss() {
+        post(.screenChanged)
+    }
+}
 
 struct RootView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -17,8 +36,14 @@ struct RootView: View {
                 } else {
                     BrowserScreen(runtime: runtime)
                         .id(appModel.runtimeIdentity)
-                        .allowsHitTesting(!appModel.route.coversRuntime)
-                        .accessibilityHidden(appModel.route.coversRuntime)
+                        .allowsHitTesting(
+                            !appModel.route.coversRuntime
+                                && appModel.systemScheduleConfirmation == nil
+                        )
+                        .accessibilityHidden(
+                            appModel.route.coversRuntime
+                                || appModel.systemScheduleConfirmation != nil
+                        )
                 }
             }
             if let startScreen = appModel.route.onboardingStartScreen {
@@ -61,6 +86,17 @@ struct RootView: View {
                     alignment: .bottom
                 )
             }
+            if let confirmation = appModel.systemScheduleConfirmation {
+                SystemScheduleConfirmationOverlay(
+                    confirmation: confirmation,
+                    confirm: {
+                        appModel.confirmSystemSchedule(id: confirmation.id)
+                    },
+                    cancel: {
+                        appModel.denySystemSchedule(id: confirmation.id)
+                    }
+                )
+            }
         }
         .sheet(
             isPresented: Binding(
@@ -90,6 +126,195 @@ struct RootView: View {
         }
         .background(Color(uiColor: .systemBackground))
     }
+}
+
+private struct SystemScheduleConfirmationOverlay: View {
+    let confirmation: SystemScheduleConfirmation
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    @AccessibilityFocusState private var titleIsFocused: Bool
+    private let accessibilityAnnouncer =
+        SystemScheduleAccessibilityAnnouncer.live
+
+    private var kindKey: String {
+        confirmation.request.kind == .alarm
+            ? "system_schedule.kind.alarm"
+            : "system_schedule.kind.reminder"
+    }
+
+    private var titleKey: String {
+        confirmation.request.kind == .alarm
+            ? "system_schedule.confirm.alarm.title"
+            : "system_schedule.confirm.reminder.title"
+    }
+
+    private var disclosureKey: String {
+        confirmation.request.kind == .alarm
+            ? "system_schedule.confirm.alarm.disclosure"
+            : "system_schedule.confirm.reminder.disclosure"
+    }
+
+    private var actionKey: String {
+        confirmation.request.kind == .alarm
+            ? "system_schedule.confirm.alarm.action"
+            : "system_schedule.confirm.reminder.action"
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        HStack(spacing: 12) {
+                            Image(
+                                systemName: confirmation.request.kind == .alarm
+                                    ? "alarm.fill"
+                                    : "checklist"
+                            )
+                            .font(.title2)
+                            .foregroundStyle(.tint)
+                            Text(LocalizedStringKey(titleKey))
+                                .font(.title3.weight(.semibold))
+                                .accessibilityFocused($titleIsFocused)
+                        }
+
+                        Text(confirmation.request.title)
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        VStack(spacing: 10) {
+                            SystemScheduleDetailRow(
+                                label: "system_schedule.confirm.type",
+                                value: NSLocalizedString(kindKey, comment: "")
+                            )
+                            SystemScheduleDetailRow(
+                                label: "system_schedule.confirm.when",
+                                value: systemScheduleDateTimeText(
+                                    confirmation.request.fireAt,
+                                    timeZoneIdentifier:
+                                        confirmation.request.timeZoneIdentifier
+                                )
+                            )
+                            SystemScheduleDetailRow(
+                                label: "system_schedule.confirm.time_zone",
+                                value: confirmation.request.timeZoneIdentifier
+                            )
+                            SystemScheduleDetailRow(
+                                label: "system_schedule.confirm.instance",
+                                value: confirmation.instanceName
+                            )
+                            SystemScheduleDetailRow(
+                                label: "system_schedule.confirm.session",
+                                value: confirmation.request.sessionID,
+                                monospaced: true
+                            )
+                        }
+
+                        Text(LocalizedStringKey(disclosureKey))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if confirmation.isSubmitting {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                Text("system_schedule.confirm.submitting")
+                                    .font(.subheadline.weight(.medium))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .accessibilityIdentifier(
+                                "system-schedule-submitting"
+                            )
+                        } else {
+                            HStack(spacing: 12) {
+                                Button("common.cancel", action: cancel)
+                                    .buttonStyle(.bordered)
+                                    .frame(maxWidth: .infinity)
+                                    .accessibilityIdentifier(
+                                        "system-schedule-cancel"
+                                    )
+                                Button(action: confirm) {
+                                    Text(LocalizedStringKey(actionKey))
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityIdentifier(
+                                    "system-schedule-confirm"
+                                )
+                            }
+                            .controlSize(.large)
+                        }
+                    }
+                    .padding(22)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(
+                    maxWidth: 380,
+                    maxHeight: max(0, geometry.size.height - 40)
+                )
+                .background(
+                    Color(uiColor: .systemBackground),
+                    in: RoundedRectangle(
+                        cornerRadius: 20,
+                        style: .continuous
+                    )
+                )
+                .shadow(color: .black.opacity(0.22), radius: 28, y: 14)
+                .position(
+                    x: geometry.size.width / 2,
+                    y: geometry.size.height / 2
+                )
+            }
+            .padding(.horizontal, 20)
+        }
+        .accessibilityIdentifier("system-schedule-confirmation")
+        .accessibilityAddTraits(.isModal)
+        .onAppear {
+            DispatchQueue.main.async {
+                accessibilityAnnouncer.didPresent {
+                    titleIsFocused = true
+                }
+            }
+        }
+        .onDisappear {
+            accessibilityAnnouncer.didDismiss()
+        }
+    }
+}
+
+private struct SystemScheduleDetailRow: View {
+    let label: LocalizedStringKey
+    let value: String
+    var monospaced = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(monospaced ? .caption.monospaced() : .subheadline)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(3)
+        }
+    }
+}
+
+private func systemScheduleDateTimeText(
+    _ date: Date,
+    timeZoneIdentifier: String
+) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = .current
+    formatter.timeZone = TimeZone(identifier: timeZoneIdentifier)
+    formatter.dateStyle = .full
+    formatter.timeStyle = .medium
+    return formatter.string(from: date)
 }
 
 private struct BrowserScreen: View {
@@ -159,11 +384,17 @@ private struct BrowserScreen: View {
                         showAccountRoot: appModel.showAccountRoot,
                         showInstances: appModel.showInstances,
                         instanceName: appModel.selectedInstanceName,
+                        instanceID: { instance.id },
+                        deviceID: { appModel.systemScheduleDeviceID },
                         directStatus: appModel.directStatusProvider,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,
                         reconcileNotifications: appModel.reconcileNotifications,
+                        systemScheduleAdmission: appModel.captureSystemScheduleAdmission,
+                        systemScheduleCapabilities: appModel.systemScheduleCapabilities,
+                        systemScheduleRequest: appModel.requestSystemSchedule,
+                        systemScheduleCancel: appModel.cancelSystemSchedule,
                         accountFallbackVisibilityChanged: {
                             showsAccountFallback = $0
                         },

@@ -8,6 +8,7 @@ export type NativeCapability =
   | 'keyboardResizesViewport'
   | 'notifications'
   | 'push'
+  | 'systemSchedule'
   | 'viewport'
   | 'voice';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
@@ -53,8 +54,51 @@ export type NativeAppInfo = {
   platform: NativePlatform;
   shellVersion: string;
   capabilities: Record<string, number>;
-  /** With `instancePresentation`: the selected instance's display name, owned by the shell. */
-  instance?: { name?: string };
+  /** With `instancePresentation`: the selected instance's identity and display name. */
+  instance?: { id?: string; name?: string };
+  /** With `systemSchedule`: the stable identity of this App installation. */
+  device?: { id?: string };
+};
+
+export type NativeSystemScheduleRequest = {
+  requestId: string;
+  operationId: string;
+  kind: 'alarm' | 'reminder';
+  title: string;
+  fireAt: string;
+  timeZone: string;
+  recurrence: null;
+  instanceId: string;
+  sessionId: string;
+  expiresAt: string;
+};
+
+export type NativeSystemScheduleCancel = Pick<
+  NativeSystemScheduleRequest,
+  'requestId' | 'operationId' | 'kind'
+> & {
+  purpose: 'user';
+};
+
+export type NativeSystemScheduleReceipt = {
+  contract: 1;
+  requestId: string;
+  operationId: string;
+  kind: 'alarm' | 'reminder';
+  state:
+    | 'scheduled'
+    | 'user_denied'
+    | 'permission_denied'
+    | 'unsupported'
+    | 'failed'
+    | 'expired'
+    | 'stale_context'
+    | 'cancelled';
+  systemIdentifier: string | null;
+  fireAt: string | null;
+  timeZone: string | null;
+  authorization: 'not_determined' | 'authorized' | 'denied' | 'restricted' | 'unsupported';
+  error: { code: string; message: string } | null;
 };
 
 interface AvibeNative {
@@ -112,6 +156,26 @@ async function callNative<T>(
 
 export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
   return callNative<NativeAppInfo>('app', 'app.info');
+}
+
+export async function nativeSystemScheduleRequest(
+  request: NativeSystemScheduleRequest,
+): Promise<NativeSystemScheduleReceipt | null> {
+  return callNative<NativeSystemScheduleReceipt>(
+    'systemSchedule',
+    'systemSchedule.request',
+    request,
+  );
+}
+
+export async function nativeSystemScheduleCancel(
+  request: NativeSystemScheduleCancel,
+): Promise<NativeSystemScheduleReceipt | null> {
+  return callNative<NativeSystemScheduleReceipt>(
+    'systemSchedule',
+    'systemSchedule.cancel',
+    request,
+  );
 }
 
 export async function openNativeExternal(url: string): Promise<boolean> {

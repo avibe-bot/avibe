@@ -939,6 +939,8 @@ const NON_KEY_LITERALS = [
   'session.logout',
   'session.refresh',
   'session.selectInstance',
+  'systemSchedule.request',
+  'systemSchedule.cancel',
   'push.opened',
   'push.status',
   'push.subscribe',

@@ -129,6 +129,8 @@
   "POST /api/skills/preview": "editor",
   "POST /api/skills/update": "editor",
   "POST /api/skills/upload": "editor",
+  "POST /api/system-schedule/claim": "editor",
+  "POST /api/system-schedule/receipt": "editor",
   "POST /api/vault/agent-binding": "editor",
   "POST /api/vault/agent-bindings:batch": "editor",
   "POST /api/vault/authz/factors/webauthn": "editor",

@@ -150,7 +150,9 @@ def test_readonly_ready_and_current_future_opens_do_not_need_upgrade_space(tmp_p
 def test_readonly_old_schema_query_is_not_an_upgrade(old_db, monkeypatch):
     free(monkeypatch, 0)
     before = protected_bytes(old_db)
-    assert migrations.background_tables_ready(old_db)
+    # The predecessor lacks newer additive tables; a read-only query can still
+    # open it without upgrading or spending migration capacity.
+    assert not migrations.background_tables_ready(old_db)
     engine = create_sqlite_engine(old_db, read_only=True)
     with engine.connect() as conn:
         assert conn.exec_driver_sql("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").scalar_one() == "2"

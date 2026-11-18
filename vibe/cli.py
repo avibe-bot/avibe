@@ -18902,6 +18902,76 @@ def build_parser():
     # first. See `_dispatch_restart_supervisor`.
     status_parser = subparsers.add_parser("status", help="Show service status")
     _add_json_noop(status_parser)
+    schedule_parser = subparsers.add_parser(
+        "schedule",
+        help="Create, inspect, or cancel a system alarm or reminder on a connected iPhone",
+    )
+    schedule_subparsers = schedule_parser.add_subparsers(
+        dest="schedule_command",
+        metavar="{create,status,cancel}",
+    )
+    schedule_subparsers.required = True
+    schedule_create_parser = schedule_subparsers.add_parser(
+        "create",
+        help="Request a one-time system alarm or reminder",
+    )
+    schedule_create_parser.add_argument(
+        "--kind",
+        choices=("alarm", "reminder"),
+        required=True,
+        help="System item to create.",
+    )
+    schedule_create_parser.add_argument("--title", required=True, help="Title shown by the system item.")
+    schedule_create_parser.add_argument(
+        "--at",
+        dest="fire_at",
+        required=True,
+        help="Exact ISO-8601 time with a UTC offset.",
+    )
+    schedule_create_parser.add_argument(
+        "--time-zone",
+        required=True,
+        help="IANA time zone for the requested wall-clock time.",
+    )
+    schedule_create_parser.add_argument(
+        "--operation-id",
+        required=True,
+        help=(
+            "Stable idempotency key chosen by the Agent. Reuse it for status "
+            "and cancel; do not create a replacement while awaiting_device."
+        ),
+    )
+    schedule_create_parser.add_argument(
+        "--expires-in",
+        type=int,
+        default=300,
+        help=(
+            "Seconds the iPhone may first claim this request (30-900; default "
+            "300). Once claimed, its result may arrive after this window."
+        ),
+    )
+    _add_json_noop(schedule_create_parser)
+    for schedule_action, schedule_help in (
+        ("status", "Read one system schedule operation, including awaiting_device"),
+        ("cancel", "Cancel a system schedule by its existing operation ID"),
+    ):
+        schedule_leaf = schedule_subparsers.add_parser(
+            schedule_action,
+            help=schedule_help,
+        )
+        schedule_leaf.add_argument("operation_id", help="Operation ID returned by create.")
+        if schedule_action == "cancel":
+            schedule_leaf.add_argument(
+                "--expires-in",
+                type=int,
+                default=300,
+                help=(
+                    "Seconds the iPhone may first claim this cancellation "
+                    "(30-900; default 300). A claimed cancellation keeps "
+                    "waiting for its device result."
+                ),
+            )
+        _add_json_noop(schedule_leaf)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Run diagnostics and optional safe repairs",
@@ -21019,6 +21089,7 @@ def build_parser():
     watch_remove_parser.add_argument("watch_id", help="Watch ID from 'vibe watch list'")
     _add_json_noop(watch_remove_parser)
     _hide_subcommands(subparsers, "desktop")
+    subparsers.metavar = "COMMAND"
     return parser
 
 
@@ -21367,6 +21438,9 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("runs", "list"): "editor",
     ("runs", "show"): "editor",
     ("runs", "cancel"): "editor",
+    ("schedule", "create"): "editor",
+    ("schedule", "status"): "editor",
+    ("schedule", "cancel"): "editor",
     ("harness", "status"): "editor",
     ("task", "add"): "editor",
     ("task", "update"): "editor",
@@ -21654,6 +21728,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
     if args.command == "status":
         sys.exit(cmd_status())
+    if args.command == "schedule":
+        sys.exit(_control_command(f"schedule.{args.schedule_command}", args))
     if args.command == "skill":
         sys.exit(cmd_skill(args))
     if args.command == "computer":

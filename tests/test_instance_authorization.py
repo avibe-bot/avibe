@@ -236,8 +236,8 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
 def test_advertised_capability_namespaces_cover_current_and_future_routes() -> None:
     """Every advertised Editor/Viewer surface is a namespace, not a case list.
 
-    A newly added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push
-    route must inherit the same Instance role as the rest of that capability.
+    A newly added Skills, Vault, Harness, Files, Dock, Terminal, System Schedule,
+    or Web Push route must inherit the same Instance role as the rest of that capability.
     The member surface is the opposite shape: an explicit allow-list, so an
     unknown API fails closed to Owner along with allowlist mutation,
     pairing-identity writes, and bulk Agent onboarding.
@@ -250,6 +250,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         "/api/dock",
         "/api/harness",
         "/api/terminal",
+        "/api/system-schedule",
     )
     assert _VIEWER_HTTP_NAMESPACES == (
         "/api/web-push",
@@ -271,6 +272,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("PATCH", "/api/vault/settings"),
         ("POST", "/api/vault/future-mutation"),
         ("POST", "/api/harness/tasks"),
+        ("POST", "/api/system-schedule/claim"),
+        ("POST", "/api/system-schedule/receipt"),
+        ("POST", "/api/system-schedule/future-mutation"),
         ("PATCH", "/api/harness/watches/watch-1"),
         ("GET", "/api/files/list"),
         ("PUT", "/api/files/write"),

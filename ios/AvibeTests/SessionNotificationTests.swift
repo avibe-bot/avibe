@@ -260,6 +260,12 @@ final class SessionNotificationTests: XCTestCase {
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
         }
+        let scheduleDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("I3Fixture.\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scheduleDirectory) }
+        let scheduleStore = FileSystemSystemScheduleStore(
+            fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
+        )
         let appModel = AppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(testBaseURL: baseURL),
@@ -267,6 +273,7 @@ final class SessionNotificationTests: XCTestCase {
             pushGenerationStore: InMemoryPushGenerationStore(),
             pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
             pushNotificationCenter: center,
+            systemScheduleStore: scheduleStore,
             badgeCenter: SessionTestBadgeCenter()
         )
         try await waitUntil {
