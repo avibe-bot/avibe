@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { act, cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SystemScheduleForwarder } from './SystemScheduleForwarder';
@@ -90,6 +90,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.clearAllMocks();
 });
 
@@ -206,6 +207,87 @@ describe('SystemScheduleForwarder', () => {
       device_id: 'device-1',
       lease_token: 'lease-cancel',
       receipt: cancelReceipt,
+    });
+  });
+
+  it.each([
+    { action: 'create', resume: 'poll' },
+    { action: 'create', resume: 'reactivation' },
+    { action: 'cancel', resume: 'poll' },
+    { action: 'cancel', resume: 'reactivation' },
+  ] as const)('backs off a rejected $action until $resume permits replay', async ({
+    action, resume,
+  }) => {
+    vi.useFakeTimers();
+    let reactivate: (() => void) | undefined;
+    activity.onPageReactivated.mockImplementation((callback: () => void) => {
+      reactivate = callback;
+      return () => undefined;
+    });
+    const cancelRequest = {
+      requestId: 'cancel-rejected',
+      operationId: request.operationId,
+      kind: request.kind,
+      purpose: 'user' as const,
+    };
+    const claim = action === 'create'
+      ? createClaim
+      : { ...createClaim, action, request: cancelRequest };
+    const recoveredReceipt = action === 'create'
+      ? receipt
+      : { ...receipt, requestId: cancelRequest.requestId, state: 'cancelled' as const };
+    const nativeCall = action === 'create'
+      ? native.nativeSystemScheduleRequest
+      : native.nativeSystemScheduleCancel;
+    let admitted = false;
+    let rejectNative: ((reason: Error) => void) | undefined;
+    nativeCall.mockImplementation(() => admitted
+      ? Promise.resolve(recoveredReceipt)
+      : new Promise((_, reject) => { rejectNative = reject; }));
+    let accepted = false;
+    apiFetch.mockImplementation(async (path: string, init: RequestInit) => {
+      if (path === '/api/system-schedule/claim') {
+        const body = JSON.parse(init.body as string);
+        return Response.json({
+          ok: true,
+          claim: accepted || body.exclude_lease_tokens.includes(claim.leaseToken)
+            ? null
+            : claim,
+        });
+      }
+      accepted = true;
+      return Response.json({ ok: true });
+    });
+
+    render(<SystemScheduleForwarder />);
+    await act(async () => undefined);
+    expect(nativeCall).toHaveBeenCalledOnce();
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
+
+    await act(async () => { rejectNative?.(new Error('forbidden')); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(resume === 'poll' ? 4_999 : 4_000);
+    });
+
+    expect(nativeCall).toHaveBeenCalledOnce();
+    expect(callsFor('/api/system-schedule/claim')).toHaveLength(2);
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(0);
+
+    admitted = true;
+    await act(async () => {
+      if (resume === 'reactivation') reactivate?.();
+      await vi.advanceTimersByTimeAsync(resume === 'poll' ? 5 : 0);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+
+    expect(nativeCall).toHaveBeenCalledTimes(2);
+    expect(nativeCall).toHaveBeenNthCalledWith(2, claim.request);
+    expect(callsFor('/api/system-schedule/receipt')).toHaveLength(1);
+    expect(JSON.parse(callsFor('/api/system-schedule/receipt')[0][1].body)).toEqual({
+      instance_id: 'instance-1',
+      device_id: 'device-1',
+      lease_token: claim.leaseToken,
+      receipt: recoveredReceipt,
     });
   });
 

@@ -158,7 +158,9 @@ export const SystemScheduleForwarder: FC = () => {
           });
         }
       } catch {
-        // Runtime reissues this sticky lease; Native owns durable idempotency.
+        // Admission may stay unavailable while an account sheet covers Runtime.
+        // Retry the sticky lease on the next poll/reactivation, without spinning.
+        reconcileImmediately = false;
       } finally {
         inFlightLeasesRef.current.delete(key);
         if (reconcileImmediately) {
