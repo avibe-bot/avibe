@@ -56,6 +56,10 @@ fn assertion(id: &[u8], client: &[u8], authenticator: &[u8], signature: &[u8], u
 #[async_trait]
 impl Passkeys for NativePasskeys {
     async fn assert(&self, options: Value, epoch: Epoch) -> Result<Value, ClientError> {
+        // Before any system class is touched: an older Mac has none to allocate.
+        if !self.supported() {
+            return Err(ClientError::new("passkey_unavailable"));
+        }
         epoch.check()?;
         let input = challenge(&options)?;
         #[cfg(target_os = "macos")]
@@ -72,7 +76,45 @@ impl Passkeys for NativePasskeys {
             Err(ClientError::new("passkey_unavailable"))
         }
     }
+    fn supported(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            account_passkeys(
+                objc2_foundation::NSProcessInfo::processInfo()
+                    .operatingSystemVersion()
+                    .majorVersion,
+                crate::macos_vault_window::signed_associated_domains().as_deref(),
+            )
+        }
+        #[cfg(windows)]
+        {
+            windows_native::supported()
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            false
+        }
+    }
 }
+
+/// The relying party the account's passkeys belong to, as the app's own
+/// signature must associate it.
+#[cfg(any(target_os = "macos", test))]
+const ACCOUNT_CREDENTIALS: &str = "webcredentials:avibe.bot";
+
+/// Whether this Mac and this build can assert an avibe.bot passkey natively.
+/// - macOS 13: passkeys ship there. The platform credential classes exist from
+///   12, where passkeys were a preview behind a Safari developer switch.
+/// - The running signature's associated domains name avibe.bot exactly: the
+///   system refuses the relying party otherwise. Only the Developer ID build
+///   (`entitlements/app-developer-id.plist`) carries it; a local, ad-hoc or
+///   cache build does not, and is read here rather than assumed.
+#[cfg(any(target_os = "macos", test))]
+fn account_passkeys(macos_major: isize, associated_domains: Option<&[String]>) -> bool {
+    macos_major >= 13
+        && associated_domains.is_some_and(|domains| domains.iter().any(|domain| domain == ACCOUNT_CREDENTIALS))
+}
+
 pub(crate) fn cancel(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.run_on_main_thread(macos::cancel);
@@ -269,3 +311,34 @@ mod macos {
 #[cfg(windows)]
 #[path = "instance_passkeys_windows.rs"]
 mod windows_native;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_passkeys_need_macos_13_and_the_signed_avibe_association() {
+        let signed = |domains: &[&str]| domains.iter().map(|domain| (*domain).to_owned()).collect::<Vec<_>>();
+        let release = signed(&["webcredentials:sandbox.avibe.bot", "webcredentials:avibe.bot"]);
+        assert!(account_passkeys(13, Some(release.as_slice())));
+        assert!(account_passkeys(26, Some(release.as_slice())));
+        assert!(
+            !account_passkeys(12, Some(release.as_slice())),
+            "a preview behind a developer switch"
+        );
+        assert!(
+            !account_passkeys(11, Some(release.as_slice())),
+            "no platform credential classes"
+        );
+        assert!(!account_passkeys(26, None), "unsigned, ad-hoc or no entitlement");
+        assert!(!account_passkeys(26, Some(signed(&[]).as_slice())));
+        for near in [
+            "webcredentials:sandbox.avibe.bot",
+            "webcredentials:avibe.bot.evil.example",
+            "webcredentials:*.avibe.bot",
+            "applinks:avibe.bot",
+        ] {
+            assert!(!account_passkeys(26, Some(signed(&[near]).as_slice())), "{near}");
+        }
+    }
+}

@@ -20,9 +20,15 @@ export type MobileSessionState =
       status: 'signedOut';
       /**
        * The sign-ins avibe.bot offers the App now (`mobile_providers` in its auth config). Native
-       * adds it to every signed-out session answer; absent means the page keeps what it had.
+       * adds it to a signed-out session answer when its read answered in time; absent means this
+       * answer offers none, so Welcome shows email alone.
        */
       providers?: ('google' | 'github' | 'apple')[];
+      /**
+       * Passkey sign-in with no email first: avibe.bot's `passkey_login_enabled`, read with
+       * `providers` (every iOS the App runs on has the passkey sheet). Absent or not `true` is off.
+       */
+      passkey?: boolean;
     }
   | {
       status: 'signedIn';
@@ -136,8 +142,8 @@ export const signInMobileWithPassword = (
   call('auth.signInWithPassword', { email, password });
 
 /**
- * Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then the backend's
- * one-time exchange, natively.
+ * Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then Supabase's
+ * PKCE or id_token grant and avibe.bot's session, natively.
  * Resolves like `verifyMobileOtp`. Errors: `provider_cancelled` (show nothing),
  * `provider_unavailable`, `provider_email_unverified`, `invalid_or_expired`, `rate_limited`
  * (with `retry_after_seconds`), and `network`.
@@ -146,6 +152,16 @@ export const signInMobileWithProvider = (
   provider: 'google' | 'github' | 'apple',
 ): Promise<MobileSessionState> =>
   call('auth.signInWithProvider', { provider });
+
+/**
+ * Passkey sign-in with no email first (avibe.bot's primary passkey), natively; not the second
+ * factor's `verifyMobilePasskey`. Resolves like `verifyMobileOtp`. Errors: `passkey_cancelled`,
+ * `passkey_unavailable`, `invalid` (avibe.bot did not accept the passkey), `provider_unavailable`
+ * (passkey sign-in is off), `rate_limited`, and `network`. The page offers it only when a
+ * signed-out answer carries `passkey: true`; these errors do not decide that.
+ */
+export const signInMobileWithPasskey = (): Promise<MobileSessionState> =>
+  call('auth.signInWithPasskey');
 
 export const refreshMobileSession = (): Promise<MobileSessionState> =>
   call('session.refresh');
@@ -211,8 +227,4 @@ export const SHEET_ACCOUNT_HASH = '#sheet-account';
 export const isSheetHash = (hash: string): boolean =>
   hash === SHEET_HASH || hash === SHEET_INSTANCES_HASH || hash === SHEET_ACCOUNT_HASH;
 
-/**
- * avibe.bot's Account security page: where an account turns on two-step
- * verification and sets or changes its password.
- */
-export const ACCOUNT_SECURITY_URL = 'https://avibe.bot/app/account/security';
+export { ACCOUNT_SECURITY_URL } from '@/sign-in/links';

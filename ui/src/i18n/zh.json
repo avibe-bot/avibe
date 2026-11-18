@@ -7629,6 +7629,7 @@
     "loginHeroBody": "登录一个账号，连接自己的电脑，也能访问与你共享的实例。",
     "checkInbox": "查看你的邮箱。",
     "loginTitle": "从一封邮件开始。",
+    "signInTitle": "登录 Avibe",
     "codeSent": "验证码已发送至 {{email}}",
     "loginBody": "登录 / 注册你的 avibe.bot 账号",
     "emailCode": "6 位验证码",
@@ -7827,6 +7828,28 @@
     "trustedView": {
       "title": "这台电脑上的 Avibe 桌面应用",
       "body": "你正在使用另一台电脑上的 Avibe，这里更新的是这台电脑上的桌面应用。"
+    }
+  },
+  "signIn": {
+    "passkey": {
+      "use": "使用通行密钥登录",
+      "title": "通行密钥登录",
+      "lead": "用指纹、面容或屏幕锁确认。",
+      "waiting": "正在等待通行密钥…",
+      "waitingHint": "请在设备弹出的提示中完成确认。",
+      "retry": "再试一次",
+      "incomplete": "提示已关闭或超时，或者没有选到可用的通行密钥。可以再试一次，或换一种方式登录。",
+      "failed": "无法用这个通行密钥登录。请重试，或换一种方式登录。",
+      "unsupported": "这台设备暂时无法在这里使用通行密钥，请换一种方式登录。"
+    },
+    "desktop": {
+      "passkeyHint": "用指纹、面容或屏幕锁确认。",
+      "newPasswordBody": "在浏览器中打开 avibe.bot 的「账号安全」，用邮件登录后，选择「设置或修改密码」。",
+      "openInBrowser": "在浏览器中打开",
+      "changeInBrowser": "在浏览器中修改"
+    },
+    "provider": {
+      "continueInBrowser": "请在浏览器中完成登录。"
     }
   }
 }

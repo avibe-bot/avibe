@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -957,14 +957,56 @@ describe('mobile onboarding', () => {
     expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
   });
 
+  describe('AUTH-SETUP-185 the ways in on Welcome follow the signed-out answer', () => {
+    const marks = {
+      google: 'mobileApp.welcome.continueWithGoogle',
+      github: 'mobileApp.welcome.continueWithGitHub',
+      apple: 'mobileApp.welcome.continueWithApple',
+    } as const;
+    const offered = () => ({
+      providers: (Object.keys(marks) as (keyof typeof marks)[])
+        .filter((provider) => screen.queryByRole('button', { name: marks[provider] })),
+      passkey: Boolean(screen.queryByRole('button', { name: 'signIn.passkey.use' })),
+    });
+
+    // Native reads avibe.bot's configuration once per signed-out answer: `providers` is the mobile
+    // broker's list, `passkey` passkey sign-in's switch. Only exact names and `true` count.
+    it.each([
+      ['only Google', { providers: ['google'], passkey: false }, { providers: ['google'], passkey: false }],
+      ['Apple off', { providers: ['google', 'github'], passkey: false }, { providers: ['google', 'github'], passkey: false }],
+      ['all off', { providers: [], passkey: false }, { providers: [], passkey: false }],
+      ['not read', {}, { providers: [], passkey: false }],
+      ['passkey on', { providers: [], passkey: true }, { providers: [], passkey: true }],
+      ['malformed', { providers: ['google', 'facebook', 1], passkey: 'true' }, { providers: ['google'], passkey: false }],
+    ])('AUTH-SETUP-185 %s', async (_name, answer, expected) => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', ...answer } as MobileSessionState);
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(offered()).toEqual(expected);
+    });
+
+    it('AUTH-SETUP-185 coming back to Welcome offers what the new answer names, and email alone when it names none', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: marks.github });
+      mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
+      fireEvent.click(screen.getByRole('button', { name: marks.github }));
+      // The account is gone by the next refresh, and that answer's read did not answer in time.
+      mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.instances.refresh' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(offered()).toEqual({ providers: [], passkey: false });
+    });
+  });
+
   describe('Google, GitHub and Apple on Welcome', () => {
     const openWelcome = async () => {
       mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github', 'apple'] });
       render(<MobileOnboarding />);
-      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithApple' });
     };
 
-    it('offers only the sign-ins avibe.bot advertises, and keeps them when an answer names none', async () => {
+    it('offers only the sign-ins avibe.bot advertises, and email alone when an answer names none', async () => {
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
@@ -977,15 +1019,16 @@ describe('mobile onboarding', () => {
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithApple' })).toBeNull();
 
-      // A signed-out answer without the list (its read did not answer in time) keeps it:
-      // sign in with GitHub, then sign out with an answer that names no providers.
+      // A signed-out answer without the list (its read did not answer in time) offers email alone
+      // (#3946, main 2026-11-18 20:50; #3945 kept the last list): sign in with GitHub, then sign
+      // out with an answer that names no providers.
       mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
       fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
       fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.title' }));
       mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
       fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.signOut' }));
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
-      expect(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeNull();
     });
 
     it('AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances', async () => {

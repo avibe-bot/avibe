@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 import { WorkbenchSidebar } from '@/components/workbench/WorkbenchSidebar';
 import { AppsLauncher } from '@/components/AppsLauncher';
 
-export type DesktopInstanceState = 'signed-out' | 'updates' | 'setup-entry' | 'account' | 'instances' | 'empty' | 'loading' | 'list-error' | 'email' | 'code' | 'code-error' | 'registering' | 'registered' | 'registration-error' | 'conflict' | 'add' | 'advanced' | 'offline' | 'switching' | 'mini' | 'account-remote-disabled' | 'account-long' | 'password' | 'password-help' | 'two-factor' | 'recovery' | 'consent' | 'switch-error' | 'upgrade-error' | 'offline-help' | 'long-content' | 'current-shared' | 'offline-shared' | 'profile' | 'profile-disabled' | 'profile-error' | 'sign-out-error';
+export type DesktopInstanceState = 'signed-out' | 'enroll' | 'updates' | 'setup-entry' | 'account' | 'instances' | 'empty' | 'loading' | 'list-error' | 'email' | 'code' | 'code-error' | 'registering' | 'registered' | 'registration-error' | 'conflict' | 'add' | 'advanced' | 'offline' | 'switching' | 'mini' | 'account-remote-disabled' | 'account-long' | 'password' | 'password-help' | 'two-factor' | 'recovery' | 'consent' | 'switch-error' | 'upgrade-error' | 'offline-help' | 'long-content' | 'current-shared' | 'offline-shared' | 'profile' | 'profile-disabled' | 'profile-error' | 'sign-out-error';
 export type ConnectionStatus = 'signed-in' | 'signed-out' | 'switching' | 'offline';
 export type DesktopInstanceFixture = { state: DesktopInstanceState; lang: 'zh' | 'en'; connection: ConnectionStatus; updateAvailable: boolean };
 const copy = (lang: 'zh' | 'en') => (zh: string, en: string) => lang === 'zh' ? zh : en;

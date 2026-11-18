@@ -438,7 +438,7 @@ fn advertises_passkeys(macos_major: isize, associated_domains: Option<&[String]>
 /// The associated domains in the running process's own code signature, as the
 /// kernel holds them. A build flag would also be true for an ad-hoc or
 /// development build, where WebKit is refused the passkey.
-fn signed_associated_domains() -> Option<Vec<String>> {
+pub(crate) fn signed_associated_domains() -> Option<Vec<String>> {
     // SAFETY: Both calls take the current task and a constant name; the error
     // out-parameter is optional.
     let value = unsafe {

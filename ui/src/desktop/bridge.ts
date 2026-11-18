@@ -30,6 +30,8 @@ export type DesktopClientState = {
   desktop: { version: string; update: DesktopUpdateState };
   consent: null | { instance_id: string; instance_name: string; host: string; scope: string };
   remote_auxiliary: 'local' | 'disabled_incomplete';
+  /** avibe.bot's public sign-in switches as native last read them; absent from older shells. */
+  sign_in?: { providers: ('google' | 'github' | 'apple')[]; passkey: boolean };
 };
 /** Workbench receives presentation only; authentication/enrollment details stay bundled. */
 export type DesktopClientProjection = Pick<DesktopClientState,
@@ -43,6 +45,14 @@ export type DesktopClientAction =
   | { type: 'verify_otp'; code: string }
   | { type: 'verify_second_factor'; method: 'totp' | 'recovery'; code: string }
   | { type: 'verify_passkey' }
+  // Google, GitHub or Apple in the default browser, back through loopback PKCE.
+  | { type: 'sign_in_with_provider'; provider: 'google' | 'github' | 'apple' }
+  // Passkey sign-in with no email first (not the second-factor passkey).
+  | { type: 'sign_in_with_passkey' }
+  // Ends an unfinished sign-in attempt without leaving the account window.
+  | { type: 'abort_sign_in' }
+  // Reads avibe.bot's public sign-in switches into `sign_in`.
+  | { type: 'refresh_sign_in_methods' }
   | { type: 'begin_totp_enrollment' }
   | { type: 'finish_totp_enrollment'; code: string }
   | { type: 'refresh_instances' }

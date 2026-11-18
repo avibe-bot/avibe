@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use avibe_runtime_host::{
     deep_link::DeepLinkReturn,
     instance_client::{
-        account::Passkeys,
+        account::{Passkeys, SystemBrowser},
         coordinator::{ClientView, Coordinator},
         protocol::*,
         storage::{ConnectionRecord, ConnectionStore, Credentials},
@@ -515,15 +515,18 @@ pub fn attach(
         navigation: Mutex::new(None),
         views: Mutex::new(Views::default()),
     });
-    let coordinator = Arc::new(Coordinator::new(
-        config.state,
-        config.record,
-        config.store,
-        transport,
-        credentials,
-        passkeys,
-        view.clone(),
-    ));
+    let coordinator = Arc::new(
+        Coordinator::new(
+            config.state,
+            config.record,
+            config.store,
+            transport,
+            credentials,
+            passkeys,
+            view.clone(),
+        )
+        .with_browser(Arc::new(DefaultBrowser)),
+    );
     app.manage(Client {
         coordinator: coordinator.clone(),
         view,
@@ -531,6 +534,19 @@ pub fn attach(
     });
     coordinator
 }
+/// Provider sign-in opens in the person's default browser, never in a WebView:
+/// providers refuse embedded sign-in, and the browser keeps its own sessions.
+struct DefaultBrowser;
+impl SystemBrowser for DefaultBrowser {
+    fn open(&self, url: &Url) -> Result<(), ClientError> {
+        // Only Supabase's authorization page, over https, reaches the browser.
+        if url.scheme() != "https" || url.path() != "/auth/v1/authorize" {
+            return Err(ClientError::new("invalid_auth_provider"));
+        }
+        tauri_plugin_opener::open_url(url.as_str(), None::<&str>).map_err(|_| ClientError::new("provider_unavailable"))
+    }
+}
+
 fn compatible_asset(bytes: &[u8]) -> bool {
     // The producer emits this fixed static assembly marker. Do not inspect DOM.
     std::str::from_utf8(bytes)

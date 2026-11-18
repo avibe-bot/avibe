@@ -198,5 +198,38 @@
       "type": "sign_out",
       "intent_id": "synthetic-one-use-intent"
     }
+  },
+  {
+    "version": 1,
+    "request_id": "sign-in-provider",
+    "expected_generation": 1,
+    "action": {
+      "type": "sign_in_with_provider",
+      "provider": "github"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "sign-in-passkey",
+    "expected_generation": 1,
+    "action": {
+      "type": "sign_in_with_passkey"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "abort-sign-in",
+    "expected_generation": 1,
+    "action": {
+      "type": "abort_sign_in"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "refresh-sign-in-methods",
+    "expected_generation": 1,
+    "action": {
+      "type": "refresh_sign_in_methods"
+    }
   }
 ]

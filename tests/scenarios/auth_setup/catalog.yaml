@@ -1315,14 +1315,135 @@ scenarios:
     missing_layer: signed-build-and-hosted-providers
     backend: ios
     reason: >-
-      XCTest owns the boundary: the PKCE vector, the exact launch-route and
-      callback tables (state, keys, fragment, bounds), the canonical start
-      values, Apple's hashed nonce and state check, coordinator store
+      XCTest owns the boundary on the backend's existing route (#3946):
+      the PKCE vector, the exact Supabase authorization address bound to
+      this attempt's provider, challenge and state, the callback table
+      (Supabase's keys, state, GoTrue's error fragment copy, bounds), the
+      provider switch read before anything opens (the page offers only the
+      switched-on providers, AUTH-SETUP-185's auth.signInMethods), Apple's hashed nonce to
+      Apple and raw nonce to Supabase with the state check, coordinator store
       rotation on every non-success with the store kept for a second factor,
-      exclusivity and late results, the fixed start/exchange/apple scripts
-      with their Origin and account-created bit, and the bridge's strictness.
-      The catalog citation checker does not collect Swift XCTest. The https
-      callback on a signed build, the real providers and Apple's sheet remain
-      device checks after the backend exchange is deployed.
+      exclusivity and late results, the fixed pkce and id_token grant scripts
+      into /auth/callback, the session read after it as a request with its own
+      deadline, and the bridge's strictness. Known limit, as for the email
+      code and the password: a read that fails after the callback set the
+      cookies still retires the store. The catalog citation
+      checker does not collect Swift XCTest. The hosted project's redirect
+      handling, the https callback on a signed build, the real providers,
+      Apple's enablement and sheet remain device checks.
     owning_layer: iOS XCTest plus physical-device acceptance
+  - id: AUTH-SETUP-182
+    name: One sign-in flow gives the iPhone and Desktop apps the same steps, words and errors
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: shared
+    test:
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: signs in with an email code on the same steps"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: signs in with an email code on the same steps"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: drops a verification an account change ended while it ran"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: drops a verification an account change ended while it ran"
+    reason: >-
+      #3946 moved the sign-in steps into ui/src/sign-in, reached through one
+      adapter per app. The matrix runs every case against both adapters: the
+      iPhone's through the real avibeMobile bridge over a fake native
+      coordinator, the Desktop's through DesktopSignIn over a fake native
+      client that publishes state before replying, as the runtime host may.
+      Cases cover email code, wrong code, send cooldown, password with an
+      authenticator code, wrong password, a closed passkey prompt then a
+      recovery code, the second-factor wait, leaving for another account, a
+      late result after an account change, passkey sign-in with no email, and
+      one capability matrix: each app offers exactly the ways its native side
+      reports avibe.bot switched on (only Google, Apple off, all off, missing,
+      only passkey, every way). Fakes prove the wiring, not real accounts, providers
+      or devices; the existing MobileOnboarding cases still own the iPhone
+      shell.
+  - id: AUTH-SETUP-183
+    name: Desktop signs in with Google, GitHub or Apple through the default browser and loopback PKCE
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: desktop
+    missing_layer: hosted-auth-config-and-real-browser
+    reason: >-
+      Native runs Supabase PKCE in the default browser and returns through a
+      one-transaction listener on 127.0.0.1:0 (RFC 8252 7.3), then redeems the
+      code with its own verifier and reuses the email code's session endpoint
+      and two-step gate. Rust tests in desktop/runtime-host own the boundary:
+      loopback.rs (exact GET /callback with this Host and state, the fixed
+      Supabase callback grammar, bounds, single consumption, port release on
+      success, generation change and timeout) and tests/instance_sign_in.rs
+      (the forged callback is never redeemed, the verifier matches the
+      challenge, tokens never reach published state, each ending's code, abort
+      frees the port and cannot sign a signed-in account out). The public
+      switches are avibe.bot's, not the account's: an account change during
+      the read does not drop them, a commit or rollback that began earlier
+      keeps them, and reads show in the order they started. "Use a different
+      account" forgets an account restored at launch that still owes its second
+      factor (record, then keychain entry); another sign-in keeps that stored
+      account until a different account signs in, then retires its key, and no
+      unfinished sign-in is saved under another account's key. The citation checker does not collect Rust
+      tests. The hosted project's actual
+      redirect handling, real providers, Apple's enablement and a signed
+      Desktop build remain acceptance checks.
+    owning_layer: Rust runtime-host tests plus signed-build acceptance
+    partial_evidence:
+      covers: the page side against a fake native client that holds the browser wait, Cancel sending abort_sign_in, and silence after the abort
+      test: "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-183 Desktop: ends a browser sign-in from the page and says nothing"
+  - id: AUTH-SETUP-184
+    name: Desktop signs in with a passkey and no email, apart from the passkey second factor
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: desktop
+    missing_layer: hosted-passkey-switch-and-real-authenticator
+    reason: >-
+      Native calls avibe.bot's primary passkey options and verify with the
+      boundary's own Accept and Origin, asks the system sheet for a
+      discoverable credential (no allow-list), keeps the binding cookie in the
+      native jar, cancels the flow when the sheet closes, and then discovers
+      the session. It is offered, and runs, only where this system can: macOS
+      13 with the running signature's webcredentials:avibe.bot association
+      (the Developer ID build), Windows with webauthn.dll's API version 1, no
+      other platform; elsewhere native refuses before any request, and the
+      second factor offers no passkey step (no challenge is requested). Rust tests
+      (tests/instance_sign_in.rs, and the macOS rule in the shell's
+      instance_passkeys) own the wire, each ending's code, the refusal, and a
+      late assertion dropped after an abort. An older macOS, Windows itself
+      and a signed build were not run. Whether
+      production enables primary passkeys for all accounts, and a real
+      authenticator on a signed build, remain acceptance checks.
+    owning_layer: Rust runtime-host tests plus signed-build acceptance
+    partial_evidence:
+      covers: the page side, from the first step's passkey link through the dedicated passkey step to the session, against a fake native client
+      test: "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-184 Desktop: signs in with a passkey and no email"
+  - id: AUTH-SETUP-185
+    name: iPhone signs in with a passkey and no email, apart from the passkey second factor
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: ios
+    missing_layer: hosted-passkey-switch-and-real-authenticator
+    reason: >-
+      auth.signInWithPasskey is a closed bridge method (no arguments, refused
+      in the instance sheet). The coordinator runs avibe.bot's primary passkey
+      options, the system sheet with no allow-list and verify in one fresh
+      store, then reads the session separately; a closed sheet cancels the
+      flow and a failed attempt retires the store, but a store that holds an
+      accepted verify is kept until its session is read (backend 884a13c §6),
+      so trying again reads it without a second sheet or verify; a sign-out
+      while that read is out publishes nothing and never reads the store again,
+      and a verify avibe.bot does not accept retires it. Welcome offers passkey
+      sign-in, and each provider, only when auth.signInMethods reports its
+      public switch exactly true. XCTest owns the native side
+      (MobileOnboardingTests, and the WebKit fixture-server tests for the
+      options, verify and cancel scripts and the switches in
+      MobileAuthTransportIntegrationTests);
+      the catalog citation checker does not collect Swift XCTest. Production's
+      passkey switch, a real authenticator and a signed build remain device
+      checks.
+    owning_layer: iOS XCTest plus physical-device acceptance
+    partial_evidence:
+      covers: the page side, offering exactly the ways native reports switched on and email only when the read fails
+      test: "ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-185 a read that fails offers email only"
 next_priority: []

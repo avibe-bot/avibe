@@ -6,7 +6,9 @@ import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
 import { cn } from '../lib/utils';
 import { AccountSecondFactorView } from './AccountSecondFactorView';
-import { AccountLoginView } from './AccountLoginView';
+import { DesktopSignIn } from './DesktopSignIn';
+import { openLinkInNewContext } from '../lib/pwaNavigation';
+import { ACCOUNT_SECURITY_URL } from '../sign-in/links';
 import { InstanceSwitcherView } from './InstanceSwitcherView';
 import { AccountSignOutView } from './AccountSignOutView';
 import { AccountDetailsView } from './AccountDetailsView';
@@ -112,17 +114,14 @@ export function AccountApp() {
     const initial = new URLSearchParams(window.location.search).get('view');
     return isDesktopClientView(initial) ? initial : 'account';
   });
-  const [email, setEmail] = useState('');
+  // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
-  const [password, setPassword] = useState('');
-  const [passwordMode, setPasswordMode] = useState(false);
-  const [passwordHelp, setPasswordHelp] = useState(false);
-  const [editEmail, setEditEmail] = useState(false);
-  const [method, setMethod] = useState<'totp' | 'recovery'>('totp');
   const [busy, setBusy] = useState(false);
   const [reviewChange, setReviewChange] = useState(false);
   const [selection, setSelection] = useState<{ id: string; generation: number; error: string | null } | null>(null);
   const [material, setMaterial] = useState<{ generation: number; result: DesktopClientDirectResult } | null>(null);
+  // "Use a different account" that could not forget the stored account: shown until the next step.
+  const [forgetFailure, setForgetFailure] = useState<{ code: string; generation: number } | null>(null);
   const epoch = useRef(0);
   const requestBusy = useRef(false);
   // Synchronous eligibility spans the request and direct result before React
@@ -134,7 +133,6 @@ export function AccountApp() {
   if (inputGeneration !== state?.generation) {
     setInputGeneration(state?.generation);
     setCode('');
-    setPassword('');
     if (material && material.generation !== state?.generation) setMaterial(null);
   }
   useLayoutEffect(() => {
@@ -181,7 +179,6 @@ export function AccountApp() {
         return false;
       }
       setCode('');
-      if (action.type === 'request_otp') setEditEmail(false);
       if (action.type === 'begin_totp_enrollment' && reply.result?.type === 'totp_enrollment') {
         setMaterial({ generation: reply.state.generation, result: reply.result });
       } else if (action.type === 'finish_totp_enrollment' && reply.result?.type === 'totp_enrolled') {
@@ -202,7 +199,6 @@ export function AccountApp() {
     recoveryProtection.current = null;
     setMaterial(null);
     setCode('');
-    setPassword('');
     setSelection(null);
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
@@ -230,7 +226,6 @@ export function AccountApp() {
       recoveryProtection.current = null;
       setMaterial(null);
       setCode('');
-      setPassword('');
       void send({ type: 'sign_out', intent_id: signOutIntent.intent_id });
     });
     return () => { active = false; };
@@ -281,31 +276,22 @@ export function AccountApp() {
       if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
       else setView('account');
     }}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
-  } else if (state.account.status === 'second_factor_required') {
-    centerLogin = true;
-    content = <AccountSecondFactorView enroll={state.account.gate === 'enroll'} methods={state.account.methods}
-      method={method} code={code} busy={busy} material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
-      onCodeChange={setCode} onMethodChange={(method) => { setCode(''); setMethod(method); }}
-      onVerify={() => void act(direct?.type === 'totp_enrollment' ? { type: 'finish_totp_enrollment', code } : { type: 'verify_second_factor', method, code })}
-      onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onPasskey={() => void act({ type: 'verify_passkey' })} onLocal={() => leave('return_local')} />;
   } else if (state.account.status !== 'signed_in') {
+    // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
+    // "continue on this computer", Back to Workbench and the in-app authenticator setup below.
     centerLogin = true;
-    const verify = state.account.status === 'verifying' && !editEmail;
-    content = <AccountLoginView verify={verify} email={state.account.email ?? ''}
-      value={verify ? code : email} busy={busy} errorMessage={errorMessage}
-      onValueChange={verify ? setCode : setEmail}
-      password={{ active: passwordMode, value: password, forgot: passwordHelp, onChange: setPassword,
-        onToggle: () => { setPassword(''); setPasswordMode(!passwordMode); setPasswordHelp(false); },
-        onForgot: () => { setPassword(''); setPasswordMode(false); setPasswordHelp(true); } }}
-      onSubmit={() => {
-        const action: DesktopClientAction = verify ? { type: 'verify_otp', code } : passwordMode
-          ? { type: 'sign_in_password', email: email.trim(), password } : { type: 'request_otp', email: email.trim() };
-        setPassword('');
-        void act(action);
-      }}
-      onChangeEmail={() => { setCode(''); setEmail(state.account.email ?? ''); setEditEmail(true); }}
-      onResendCode={() => void act({ type: 'request_otp', email: state.account.email ?? email })}
-      onContinueLocal={() => leave('return_local')} />;
+    content = <><DesktopSignIn state={state} send={send}
+      onLocal={() => leave('return_local')}
+      onDifferentAccount={() => void send({ type: 'abort_sign_in' }).then((reply) => {
+        setForgetFailure(reply && 'ok' in reply && !reply.ok ? { code: reply.error.code, generation: reply.state.generation } : null);
+      })}
+      onOpenSecurity={() => { openLinkInNewContext(ACCOUNT_SECURITY_URL, 'noopener,noreferrer'); }}
+      renderEnroll={() => <AccountSecondFactorView code={code} busy={busy}
+        material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
+        onCodeChange={setCode}
+        onVerify={() => void act({ type: 'finish_totp_enrollment', code })}
+        onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onLocal={() => leave('return_local')} />} />
+      {forgetFailure?.generation === state.generation && <p role="alert" className="mx-auto mt-4 w-full max-w-md text-sm leading-6 text-destructive-ink">{explainError(forgetFailure.code)}</p>}</>;
   } else if (state.consent || (state.connection.status === 'switching' && !failedPending) || (state.connection.status === 'remote_unreachable' && view === 'instances')) {
     content = switcher;
   } else if (view === 'profile' || (view === 'account' && ['unknown', 'unpaired', 'paired_this_account'].includes(state.enrollment.status))) {

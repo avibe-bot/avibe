@@ -91,7 +91,7 @@ const CHAT_ROUTE_PATTERN = APPLICATION_ROUTE_PATTERNS[
 ];
 
 function hrefPathname(href: string): string {
-  const rawPathname = href.split(/[?#]/, 1)[0];
+  const rawPathname = href.split(/[?#]/, 1)[0] ?? '';
   return rawPathname.replace(/\/+$/, '') || '/';
 }
 

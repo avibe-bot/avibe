@@ -819,3 +819,40 @@ it.each(['en', 'zh'] as const)('update popup ignores Account presentation and re
   expect(assign).not.toHaveBeenCalled();
   expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
 });
+
+// AUTH-SETUP-183/184: the Desktop sign-in adapter's actions are the shared samples Rust parses.
+it('AUTH-SETUP-183 sends the sign-in actions exactly as the shared request samples', async () => {
+  const { createDesktopSignInAdapter } = await import('./signInAdapter');
+  const sent: unknown[] = [];
+  const send = vi.fn(async (action: unknown) => {
+    sent.push(action);
+    return { version: 1, request_id: 'r', ok: true, state: states.signed_out } as never;
+  });
+  const adapter = createDesktopSignInAdapter(send, { providers: ['google', 'github', 'apple'], passkey: true });
+  await adapter.signInWithProvider('github');
+  await adapter.signInWithPasskey();
+  adapter.abortPending?.();
+  const sample = (type: string) => requests.find((entry) => entry.action.type === type)?.action;
+  expect(sent).toEqual([sample('sign_in_with_provider'), sample('sign_in_with_passkey'), sample('abort_sign_in')]);
+  expect(sample('refresh_sign_in_methods')).toEqual({ type: 'refresh_sign_in_methods' });
+  // A state from a shell that reports the switches parses with them.
+  expect((states.signed_out as { sign_in?: unknown }).sign_in).toEqual({ providers: ['google', 'github'], passkey: false });
+});
+
+// 4095 review P3: "Use a different account" that cannot forget a stored account says so on the
+// first step, and a later step clears it. Native ended the attempt either way.
+it('AUTH-SETUP-183 says when a different account could not forget the stored one', async () => {
+  const signedOut = { ...states.signed_out, generation: states.challenge.generation + 1, revision: states.challenge.revision + 1 };
+  const invoke = mount(states.challenge, (request) => {
+    if (request.action.type === 'abort_sign_in') {
+      window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: signedOut }));
+      return { version: 1, request_id: request.request_id, ok: false, state: signedOut, error: { code: 'credentials_unavailable' } };
+    }
+    return { ...replies.success, state: request.action.type === 'get_state' ? states.challenge : signedOut, request_id: request.request_id };
+  });
+  fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.differentAccount }));
+  await waitFor(() => expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toContain('abort_sign_in'));
+  expect(await screen.findByText(en.desktopClient.errors.request)).toBeTruthy();
+  expect(screen.getByRole('button', { name: en.mobileApp.welcome.continueWithEmail })).toBeTruthy();
+});
+

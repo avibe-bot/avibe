@@ -2,6 +2,7 @@
 pub mod account;
 pub mod coordinator;
 pub mod enrollment;
+pub mod loopback;
 pub mod protocol;
 pub mod selection;
 pub mod storage;

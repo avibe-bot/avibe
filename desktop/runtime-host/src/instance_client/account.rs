@@ -2,12 +2,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::{header::HeaderMap, Method};
+use reqwest::{
+    header::{HeaderMap, HeaderValue, ACCEPT},
+    Method,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
 
 use super::{
+    loopback::{Callback, Loopback, Secrets, WAIT},
     protocol::*,
     transport::{Epoch, NativeSession, Response, Transport},
 };
@@ -19,6 +23,47 @@ pub const EMAIL_REDIRECT: &str = "https://avibe.bot/auth/callback?source=desktop
 pub trait Passkeys: Send + Sync {
     /// The implementation uses a native system sheet, never a WebView bridge.
     async fn assert(&self, options: Value, epoch: Epoch) -> Result<Value, ClientError>;
+    /// Whether this OS can run a discoverable passkey assertion at all. Passkey
+    /// sign-in is offered only when this and avibe.bot's public switch agree.
+    fn supported(&self) -> bool {
+        true
+    }
+}
+
+/// Opens a provider's authorization page in the person's default browser.
+pub trait SystemBrowser: Send + Sync {
+    /// `url` is always Supabase's `/auth/v1/authorize` on the configured auth origin.
+    fn open(&self, url: &Url) -> Result<(), ClientError>;
+}
+
+/// A provider sign-in between its start and its code. Its secrets stay here;
+/// dropping it releases the listener's port.
+pub struct ProviderAttempt {
+    supabase: NativeSession,
+    key: String,
+    secrets: Secrets,
+    loopback: Option<Loopback>,
+    authorize: Url,
+}
+impl ProviderAttempt {
+    /// Opens Supabase's authorization page in the default browser and waits,
+    /// holding no lock, for this attempt's callback. A newer generation (another
+    /// attempt, an account change, return_local, abort, a closed window) ends it.
+    pub async fn browse(&mut self, browser: &dyn SystemBrowser, epoch: &Epoch) -> Result<String, ClientError> {
+        epoch.check()?;
+        let loopback = self.loopback.take().ok_or_else(|| ClientError::new("invalid_action"))?;
+        browser.open(&self.authorize)?;
+        match loopback.wait(&self.secrets.state, epoch, WAIT).await? {
+            Callback::Code(code) => Ok(code),
+            Callback::EmailUnverified => Err(ClientError::new("provider_email_unverified")),
+            Callback::Failed => Err(ClientError::new("invalid_or_expired")),
+        }
+    }
+}
+
+/// avibe.bot's passkey sign-in context: no continuation, next page or language.
+fn primary_passkey_context() -> Value {
+    json!({"continuation": null, "next": null, "lang": null})
 }
 
 #[derive(Clone)]
@@ -32,6 +77,14 @@ pub struct AccountFlow {
     /// then newest. Published order is derived from it, never replaces it.
     server_order: Vec<String>,
     transport: Arc<dyn Transport>,
+    /// Whether this system can run the passkey sheet: a second factor offers
+    /// passkey only then.
+    passkey_sheet: bool,
+    /// The stored account this flow continues: the one restored at launch,
+    /// or the one it signed in. Only that account's key may hold an
+    /// unfinished sign-in (a second factor still owed); a new first factor
+    /// clears it.
+    pub resumes: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -47,7 +100,7 @@ struct FactorProjection {
 }
 
 impl AccountFlow {
-    pub fn new(transport: Arc<dyn Transport>) -> Self {
+    pub fn new(transport: Arc<dyn Transport>, passkey_sheet: bool) -> Self {
         Self {
             session: NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), transport.clone()),
             provider: None,
@@ -56,6 +109,8 @@ impl AccountFlow {
             enrollment_token: None,
             server_order: vec![],
             transport,
+            passkey_sheet,
+            resumes: None,
         }
     }
 
@@ -78,6 +133,7 @@ impl AccountFlow {
             return Err(ClientError::new("invalid_action"));
         }
         self.clear_transient();
+        self.resumes = None;
         // A replacement attempt cannot carry the previous email's verifier or
         // MFA cookie. Failure leaves a usable signed-out state on reload.
         self.session = NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), self.transport.clone());
@@ -136,23 +192,160 @@ impl AccountFlow {
     async fn provider(&mut self, epoch: Epoch) -> Result<(NativeSession, String), ClientError> {
         let response = self.session.request(Method::GET, "/api/config/auth", None).await?;
         let config = successful_json(response)?;
-        let url =
-            Url::parse(string(&config, "supabase_url")?).map_err(|_| ClientError::new("invalid_auth_provider"))?;
-        if url.scheme() != "https"
-            || url.port().is_some()
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.path() != "/"
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(ClientError::new("invalid_auth_provider"));
+        supabase_session(&config, self.transport.clone(), epoch)
+    }
+
+    /// Google, GitHub or Apple, first half: reads avibe.bot's public switch for
+    /// `provider`, draws this attempt's PKCE secrets and binds its loopback
+    /// listener. Nothing of the account changes; the coordinator runs the
+    /// browser round trip (`ProviderAttempt::browse`) without its operation lock.
+    pub async fn start_provider_sign_in(
+        provider: SignInProvider,
+        transport: Arc<dyn Transport>,
+        epoch: Epoch,
+    ) -> Result<ProviderAttempt, ClientError> {
+        let config = auth_config(transport.clone(), Some(epoch.clone())).await?;
+        if config.get(provider.enabled_flag()).and_then(Value::as_bool) != Some(true) {
+            return Err(ClientError::new("provider_unavailable"));
         }
-        let key = string(&config, "supabase_anon_key")?.to_owned();
-        let mut provider = NativeSession::new(url, self.transport.clone());
-        provider.fence(epoch);
-        Ok((provider, key))
+        let (supabase, key) = supabase_session(&config, transport, epoch)?;
+        let secrets = Secrets::new()?;
+        // Bound before the browser opens, so the redirect always has a listener.
+        let loopback = Loopback::bind().await?;
+        let mut authorize = Url::parse(string(&config, "supabase_url")?)
+            .and_then(|origin| origin.join("/auth/v1/authorize"))
+            .map_err(|_| ClientError::new("invalid_auth_provider"))?;
+        authorize
+            .query_pairs_mut()
+            .append_pair("provider", provider.id())
+            .append_pair("redirect_to", loopback.redirect_uri(&secrets.state).as_str())
+            .append_pair("code_challenge", &secrets.challenge)
+            .append_pair("code_challenge_method", "s256");
+        Ok(ProviderAttempt {
+            supabase,
+            key,
+            secrets,
+            loopback: Some(loopback),
+            authorize,
+        })
+    }
+
+    /// Google, GitHub or Apple, second half, under the operation lock: a new
+    /// first factor that redeems the browser's code with this attempt's own
+    /// verifier, then the email code's session endpoint and two-step gate.
+    pub async fn finish_provider_sign_in(
+        &mut self,
+        attempt: ProviderAttempt,
+        code: String,
+        epoch: Epoch,
+        state: &mut ClientState,
+    ) -> Result<(), ClientError> {
+        self.begin_first_factor(epoch.clone(), state)?;
+        let ProviderAttempt {
+            mut supabase,
+            key,
+            secrets,
+            ..
+        } = attempt;
+        supabase.fence(epoch);
+        let response = supabase
+            .request_with_headers(
+                Method::POST,
+                "/auth/v1/token?grant_type=pkce",
+                Some(json!({"auth_code": code, "code_verifier": secrets.verifier})),
+                provider_headers(&key)?,
+            )
+            .await?;
+        if !response.success() {
+            return Err(ClientError::new(match response.status {
+                429 => "rate_limited",
+                400..=499 => "invalid_or_expired",
+                _ => "request_failed",
+            }));
+        }
+        let credentials = response.json()?;
+        self.establish(credentials, state).await
+    }
+
+    /// avibe.bot's public sign-in switches. A switch that is missing or not
+    /// `true` offers nothing (`passkey_login_enabled` included). Public data
+    /// from the fixed control plane: no account generation fences it.
+    pub async fn read_sign_in_methods(transport: Arc<dyn Transport>) -> Result<SignInMethodsState, ClientError> {
+        let config = auth_config(transport, None).await?;
+        let on = |flag: &str| config.get(flag).and_then(Value::as_bool) == Some(true);
+        Ok(SignInMethodsState {
+            providers: [SignInProvider::Google, SignInProvider::Github, SignInProvider::Apple]
+                .into_iter()
+                .filter(|provider| on(provider.enabled_flag()))
+                .collect(),
+            passkey: on("passkey_login_enabled"),
+        })
+    }
+
+    /// Passkey sign-in with no email first: avibe.bot's primary passkey flow,
+    /// a discoverable assertion with no allow-list, then session discovery.
+    /// The second-factor passkey stays `verify_passkey`.
+    pub async fn sign_in_with_passkey(
+        &mut self,
+        passkeys: &dyn Passkeys,
+        epoch: Epoch,
+        state: &mut ClientState,
+    ) -> Result<(), ClientError> {
+        self.begin_first_factor(epoch.clone(), state)?;
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        let response = self
+            .session
+            .request_with_headers(
+                Method::POST,
+                "/api/passkey-primary/options",
+                Some(json!({"context": primary_passkey_context()})),
+                headers.clone(),
+            )
+            .await?;
+        if !response.success() {
+            return Err(primary_passkey_error(&response));
+        }
+        let started = response.json()?;
+        let flow = string(&started, "flow")?.to_owned();
+        let mut options = started["options"].clone();
+        if started["ok"] != true || options["rpId"] != "avibe.bot" {
+            return Err(ClientError::new("invalid_passkey_challenge"));
+        }
+        // Discoverable: the person picks the account in the system sheet.
+        if let Some(options) = options.as_object_mut() {
+            options.remove("allowCredentials");
+        }
+        let assertion = match passkeys.assert(options, epoch.clone()).await {
+            Ok(assertion) => assertion,
+            Err(error) => {
+                // Best effort: an abandoned flow also expires on its own.
+                let _ = self
+                    .session
+                    .request_with_headers(
+                        Method::POST,
+                        "/api/passkey-primary/cancel",
+                        Some(json!({"flow": flow})),
+                        headers,
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
+        epoch.check()?;
+        let response = self
+            .session
+            .request_with_headers(
+                Method::POST,
+                "/api/passkey-primary/verify",
+                Some(json!({"flow": flow, "response": assertion, "context": primary_passkey_context()})),
+                headers,
+            )
+            .await?;
+        if !response.success() {
+            return Err(primary_passkey_error(&response));
+        }
+        self.discover(state).await
     }
 
     pub async fn sign_in_password(
@@ -282,7 +475,12 @@ impl AccountFlow {
                 identity: None,
                 email: Some(factor.email),
                 gate: Some(factor.gate),
-                methods: factor.methods,
+                // A system with no passkey sheet starts at what it can run.
+                methods: factor
+                    .methods
+                    .into_iter()
+                    .filter(|method| self.passkey_sheet || *method != SecondFactorMethod::Passkey)
+                    .collect(),
             };
             self.server_order.clear();
             state.catalog = CatalogState {
@@ -333,6 +531,10 @@ impl AccountFlow {
             || !state.account.methods.contains(&SecondFactorMethod::Passkey)
         {
             return Err(ClientError::new("invalid_action"));
+        }
+        // No challenge for a sheet this system cannot show.
+        if !passkeys.supported() {
+            return Err(ClientError::new("passkey_unavailable"));
         }
         let challenge = successful_json(
             self.session
@@ -425,6 +627,65 @@ pub fn successful_json(response: Response) -> Result<Value, ClientError> {
         Err(response.error())
     }
 }
+/// avibe.bot's public auth configuration, read with no account cookie. An
+/// account operation fences its read to its epoch; the public switches don't.
+async fn auth_config(transport: Arc<dyn Transport>, epoch: Option<Epoch>) -> Result<Value, ClientError> {
+    let mut control_plane = NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), transport);
+    if let Some(epoch) = epoch {
+        control_plane.fence(epoch);
+    }
+    let response = control_plane.request(Method::GET, "/api/config/auth", None).await?;
+    successful_json(response)
+}
+
+/// The Supabase origin avibe.bot names, as a session of its own.
+fn supabase_session(
+    config: &Value,
+    transport: Arc<dyn Transport>,
+    epoch: Epoch,
+) -> Result<(NativeSession, String), ClientError> {
+    let url = Url::parse(string(config, "supabase_url")?).map_err(|_| ClientError::new("invalid_auth_provider"))?;
+    if url.scheme() != "https"
+        || url.port().is_some()
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ClientError::new("invalid_auth_provider"));
+    }
+    let key = string(config, "supabase_anon_key")?.to_owned();
+    let mut provider = NativeSession::new(url, transport);
+    provider.fence(epoch);
+    Ok((provider, key))
+}
+
+/// avibe.bot's primary passkey answers (`lib/passkey-primary/http.ts`), as the flow's codes.
+fn primary_passkey_error(response: &Response) -> ClientError {
+    let error = response.error();
+    let code = match (response.status, error.code.as_str()) {
+        (429, _) => "rate_limited",
+        // Off. A 403 is the HTTP boundary refusing the request, not an audience
+        // answer: that one is verify's `verification_failed`.
+        (503, _) => "provider_unavailable",
+        (400, "verification_failed") => "invalid",
+        (409, "flow_cancelled") | (410, "flow_expired") => "passkey_cancelled",
+        _ => "request_failed",
+    };
+    let mut mapped = ClientError::new(code);
+    if code == "rate_limited" {
+        mapped.retry_after_seconds = response
+            .headers
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|seconds| seconds.clamp(1, 255) as u8);
+    }
+    mapped
+}
+
 fn provider_headers(key: &str) -> Result<HeaderMap, ClientError> {
     let mut headers = HeaderMap::new();
     headers.insert(

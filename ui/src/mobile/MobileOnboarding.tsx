@@ -1,19 +1,13 @@
 import {
   AlertTriangle,
   ArrowLeft,
-  ArrowRight,
   Check,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
-  Eye,
-  EyeOff,
-  KeyRound,
   Laptop,
-  Mail,
   MonitorDown,
   RotateCw,
-  ShieldCheck,
   Sparkles,
   UserRound,
   Loader2,
@@ -21,7 +15,6 @@ import {
 } from 'lucide-react';
 import {
   createContext,
-  type FormEvent,
   type ReactNode,
   useCallback,
   useContext,
@@ -34,11 +27,8 @@ import { useTranslation } from 'react-i18next';
 
 import heroMascot from '../../../assets/mascot/cloud-tuanzi-v2.png';
 import logo from '@/assets/logo.png';
-import mailMascot from '@/assets/pet/vibey-message.png';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Skeleton, SkeletonShimmer } from '@/components/ui/skeleton';
 import type { TranslationKey } from '@/i18n/types';
 import { cn } from '@/lib/utils';
@@ -52,18 +42,11 @@ import {
   openMobileExternal,
   openMobilePage,
   refreshMobileSession,
-  requestMobileOtp,
   returnToMobileInstance,
   selectMobileInstance,
-  signInMobileWithPassword,
-  signInMobileWithProvider,
   type MobileBridgeError,
   type MobileInstance,
   type MobileSessionState,
-  type MobileWeakPasswordReason,
-  verifyMobileOtp,
-  verifyMobilePasskey,
-  verifyMobileSecondFactor,
   isSheetHash,
   SHEET_ACCOUNT_HASH,
   SHEET_INSTANCES_HASH,
@@ -82,18 +65,22 @@ import {
 } from './InstanceList';
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
 import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
-import { SignInDivider, SignInProviderRow, type SignInProvider } from './SignInProviders';
+import { raised } from '@/sign-in/chrome';
+import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/sign-in/chromeContext';
+import { pageErrorKey, type SignInErrorKey } from '@/sign-in/errors';
+import { useOperationOwner, type OperationToken } from '@/sign-in/operationOwner';
+import { PasskeySignIn, SignInStart, WeakPasswordNotice } from '@/sign-in/screens';
+import type { SignInProvider, WeakPasswordReason } from '@/sign-in/types';
+import { type SignInBusyAction, useSignInFlow } from '@/sign-in/useSignInFlow';
+import { mobileSignInAdapter, mobileSignInStep } from './signInAdapter';
+import { mobileSignInMethods } from './useSignInMethods';
 import { AboutSection, AccountDataContent, AccountLinkRow, LicensesContent } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
 type Screen =
   | 'boot'
   | 'bootError'
-  | 'welcome'
-  | 'email'
-  | 'code'
-  | 'forgot'
-  | 'secondFactor'
+  | 'signIn'
   | 'weakPassword'
   | 'instances'
   | 'empty'
@@ -105,120 +92,16 @@ type Screen =
 
 type BusyAction =
   | 'boot'
-  | 'send'
-  | 'verify'
-  | 'resend'
-  | 'signIn'
-  | 'provider'
-  | 'passkey'
   | 'refresh'
   | 'select'
   | 'logout'
   | 'deleteAccount'
   | 'return';
-type CooldownSource = 'client' | 'provider' | null;
-type CooldownScope = 'send' | 'all' | null;
-type MobileOperation =
-  | 'bootstrap'
-  | 'request'
-  | 'verify'
-  | 'password'
-  | 'totp'
-  | 'recovery'
-  | 'passkey'
-  | 'refresh'
-  | 'select'
-  | 'logout';
-type MobileErrorKey =
-  | 'mobileApp.email.invalid'
-  | 'mobileApp.code.invalid'
-  | 'mobileApp.code.rateLimited'
-  | 'mobileApp.password.invalid'
-  | 'mobileApp.password.unconfirmed'
-  | 'mobileApp.password.rateLimited'
-  | 'mobileApp.twoFactor.passkeyFailed'
-  | 'mobileApp.twoFactor.codeInvalid'
-  | 'mobileApp.twoFactor.recoveryInvalid'
-  | 'mobileApp.twoFactor.rateLimited'
-  | 'mobileApp.errors.network'
-  | 'mobileApp.errors.localRecords'
-  | ProviderErrorKey;
-/** What a Google, GitHub or Apple sign-in that did not finish says on Welcome. */
-type ProviderErrorKey =
-  | 'mobileApp.provider.unavailable'
-  | 'mobileApp.provider.googleEmailUnverified'
-  | 'mobileApp.provider.githubEmailUnverified'
-  | 'mobileApp.provider.googleFailed'
-  | 'mobileApp.provider.githubFailed'
-  | 'mobileApp.provider.appleFailed';
-type SecondFactorSession = Extract<MobileSessionState, { status: 'twoFactorRequired' }>;
-type SecondFactorStep = 'passkey' | 'totp' | 'recovery' | 'setup';
+type MobileErrorKey = SignInErrorKey;
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const CODE_PATTERN = /^\d{6}$/;
 // Native opens the account page with this fragment over a live instance, and
 // then answers `app.returnToInstance`; `#account` has no instance behind it.
 const RUNTIME_ACCOUNT_HASH = '#runtime-account';
-const DEFAULT_COOLDOWN_SECONDS = 60;
-const FAILED_COOLDOWN_SECONDS = 15;
-// Sign in waits this long after a password rate limit that names no Retry-After.
-const PASSWORD_RETRY_SECONDS = 60;
-// avibe.bot counts second-factor attempts over this window.
-const SECOND_FACTOR_RETRY_MINUTES = 15;
-const PASSKEY_FAILURES = new Set(['passkey_cancelled', 'passkey_unavailable', 'invalid']);
-
-const providerCooldownSeconds = (error: MobileBridgeError): number => {
-  if (typeof error.retry_after_seconds === 'number' && error.retry_after_seconds > 0) {
-    return Math.max(1, Math.ceil(error.retry_after_seconds));
-  }
-  return error.code === 'rate_limited' ? FAILED_COOLDOWN_SECONDS : 0;
-};
-
-type OperationToken = number;
-
-function useOperationOwner() {
-  const nextToken = useRef(0);
-  const currentToken = useRef<OperationToken | null>(null);
-  const [operation, setOperation] = useState<{
-    token: OperationToken;
-    action: BusyAction;
-  } | null>(null);
-
-  const beginOperation = useCallback((action: BusyAction): OperationToken | null => {
-    if (currentToken.current !== null) return null;
-    const token = nextToken.current + 1;
-    nextToken.current = token;
-    currentToken.current = token;
-    setOperation({ token, action });
-    return token;
-  }, []);
-
-  const ownsOperation = useCallback(
-    (token: OperationToken): boolean => currentToken.current === token,
-    [],
-  );
-
-  const finishOperation = useCallback((token: OperationToken): boolean => {
-    if (currentToken.current !== token) return false;
-    currentToken.current = null;
-    setOperation((active) => active?.token === token ? null : active);
-    return true;
-  }, []);
-
-  const isOperationLocked = useCallback(
-    (): boolean => currentToken.current !== null,
-    [],
-  );
-
-  return {
-    beginOperation,
-    busy: operation?.action ?? null,
-    finishOperation,
-    isOperationLocked,
-    locked: operation !== null,
-    ownsOperation,
-  };
-}
 
 const installGuideUrl = (language: string): string =>
   language.toLowerCase().startsWith('zh')
@@ -228,104 +111,8 @@ const installGuideUrl = (language: string): string =>
 const desktopDownloadUrl = 'https://avibe.bot/#install';
 
 const screenForSession = (session: MobileSessionState): Screen => {
-  if (session.status === 'signedOut') return 'welcome';
-  if (session.status === 'twoFactorRequired') return 'secondFactor';
+  if (session.status !== 'signedIn') return 'signIn';
   return session.instances.length === 0 ? 'empty' : 'instances';
-};
-
-/** Passkey first when the account has one; an account that must turn it on sets it up. */
-const firstSecondFactorStep = (session: SecondFactorSession): SecondFactorStep => {
-  if (session.gate === 'enroll') return 'setup';
-  if (session.methods.includes('passkey')) return 'passkey';
-  return session.methods.includes('totp') ? 'totp' : 'recovery';
-};
-
-const secondFactorRetrySeconds = (error: MobileBridgeError): number =>
-  typeof error.retry_after_seconds === 'number' && error.retry_after_seconds > 0
-    ? error.retry_after_seconds
-    : SECOND_FACTOR_RETRY_MINUTES * 60;
-
-const secondFactorRetryMinutes = (error: MobileBridgeError): number =>
-  Math.ceil(secondFactorRetrySeconds(error) / 60);
-
-/** True when an edit, not a re-render, makes a six-digit code complete. */
-const completesCode = (next: string, previous: string): boolean =>
-  CODE_PATTERN.test(next) && next !== previous;
-
-const pageErrorKey = (
-  error: MobileBridgeError,
-  operation: MobileOperation,
-): MobileErrorKey => {
-  if (error.code === 'local_state_unavailable' || error.code === 'local_state_write_failed') {
-    return 'mobileApp.errors.localRecords';
-  }
-  if (operation === 'password') {
-    if (error.code === 'invalid_credentials') return 'mobileApp.password.invalid';
-    if (error.code === 'email_not_confirmed') return 'mobileApp.password.unconfirmed';
-    if (error.code === 'rate_limited') return 'mobileApp.password.rateLimited';
-    return 'mobileApp.errors.network';
-  }
-  if (
-    (error.code === 'invalid_email' || error.code === 'email_address_invalid')
-    && operation === 'request'
-  ) {
-    return 'mobileApp.email.invalid';
-  }
-  if (error.code === 'invalid_or_expired' && operation === 'verify') {
-    return 'mobileApp.code.invalid';
-  }
-  if (operation === 'totp' || operation === 'recovery' || operation === 'passkey') {
-    if (error.code === 'rate_limited') return 'mobileApp.twoFactor.rateLimited';
-    if (operation === 'passkey' && PASSKEY_FAILURES.has(error.code)) {
-      return 'mobileApp.twoFactor.passkeyFailed';
-    }
-    if (error.code === 'invalid') {
-      return operation === 'totp'
-        ? 'mobileApp.twoFactor.codeInvalid'
-        : 'mobileApp.twoFactor.recoveryInvalid';
-    }
-  }
-  if (error.code === 'rate_limited') {
-    return 'mobileApp.code.rateLimited';
-  }
-  return 'mobileApp.errors.network';
-};
-
-/**
- * A provider sign-in's failure on Welcome, or `null` when the person closed it (nothing to say).
- * Copy approved by Product 2026-11-18; the email check names the provider.
- */
-const providerErrorKey = (
-  error: MobileBridgeError,
-  provider: SignInProvider,
-): MobileErrorKey | null => {
-  // The account signed in but this iPhone could not keep its records: retrying cannot help.
-  if (error.code === 'local_state_unavailable' || error.code === 'local_state_write_failed') {
-    return 'mobileApp.errors.localRecords';
-  }
-  switch (error.code) {
-    // A closed window says nothing; so does an attempt that an account change (a sign-out
-    // elsewhere) ended, since the page follows that change.
-    case 'provider_cancelled':
-    case 'stale_session':
-      return null;
-    case 'provider_unavailable':
-      return 'mobileApp.provider.unavailable';
-    case 'provider_email_unverified':
-      if (provider === 'google') return 'mobileApp.provider.googleEmailUnverified';
-      if (provider === 'github') return 'mobileApp.provider.githubEmailUnverified';
-      return 'mobileApp.provider.appleFailed';
-    case 'rate_limited':
-      return 'mobileApp.code.rateLimited';
-    case 'invalid_or_expired':
-      return provider === 'google'
-        ? 'mobileApp.provider.googleFailed'
-        : provider === 'github'
-          ? 'mobileApp.provider.githubFailed'
-          : 'mobileApp.provider.appleFailed';
-    default:
-      return provider === 'apple' ? 'mobileApp.provider.appleFailed' : 'mobileApp.errors.network';
-  }
 };
 
 /** In the instance sheet (`#sheet`) the page scrolls its document, which native hands to the sheet. */
@@ -441,32 +228,6 @@ function Brand({
   );
 }
 
-function Primary({
-  children,
-  disabled,
-  onClick,
-  type = 'button',
-}: {
-  children: ReactNode;
-  disabled?: boolean;
-  onClick?: () => void;
-  type?: 'button' | 'submit';
-}) {
-  return (
-    <Button
-      type={type}
-      variant="brand"
-      size="lg"
-      disabled={disabled}
-      onClick={onClick}
-      className="w-full gap-3 rounded-full"
-    >
-      {children}
-      <ArrowRight className="size-4" />
-    </Button>
-  );
-}
-
 function PageTitle({
   title,
   subtitle,
@@ -479,24 +240,6 @@ function PageTitle({
       <h1 className="text-3xl font-semibold leading-tight">{title}</h1>
       {subtitle ? <p className="mt-4 text-sm leading-6 text-muted">{subtitle}</p> : null}
     </div>
-  );
-}
-
-const raised = 'rounded-3xl border border-edge bg-surface/80 p-5 shadow-elevation-0';
-/** A secondary way through a step, below its primary action. */
-const alternative = 'h-auto max-w-full whitespace-normal px-0 text-sm text-foreground underline';
-
-/** The raised tile that heads a sign-in step. */
-function PageMark({ children, warn = false }: { children: ReactNode; warn?: boolean }) {
-  return (
-    <span
-      className={cn(
-        'mb-5 grid size-16 place-items-center rounded-3xl border bg-surface/80 shadow-elevation-0',
-        warn ? 'border-gold/40' : 'border-edge',
-      )}
-    >
-      {children}
-    </span>
   );
 }
 
@@ -532,24 +275,11 @@ function RecoveryCard({
 }
 
 /**
- * Welcome: email is the one primary action; Google, GitHub and Apple follow below avibe.bot's
- * 「或」 as one row of marks (ui/design: mobile-app/welcome/providers-row). A provider sign-in
- * that failed says so above them.
+ * Welcome: the App's first page around the sign-in flow's ways in (ui/design:
+ * mobile-app/welcome/providers-row). Email is the one primary action; Google, GitHub and Apple
+ * follow below avibe.bot's 「或」 as one row of marks.
  */
-export function WelcomeScreen({
-  locked,
-  errorKey = null,
-  providers = [],
-  onContinue,
-  onProvider,
-}: {
-  locked: boolean;
-  errorKey?: MobileErrorKey | ProviderErrorKey | null;
-  /** The sign-ins avibe.bot offers the App now; none shows email alone. */
-  providers?: readonly SignInProvider[];
-  onContinue: () => void;
-  onProvider?: (provider: SignInProvider) => void;
-}) {
+function WelcomeHero({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
   return (
     <CloudScreen>
@@ -582,20 +312,7 @@ export function WelcomeScreen({
         </p>
       </div>
       <div className="flex flex-col gap-4 pb-3">
-        {errorKey ? (
-          <p role="alert" className="text-center text-xs leading-6 text-destructive-ink">
-            {t(errorKey)}
-          </p>
-        ) : null}
-        <Primary disabled={locked} onClick={onContinue}>
-          {t('mobileApp.welcome.continueWithEmail')}
-        </Primary>
-        {onProvider && providers.length > 0 ? (
-          <>
-            <SignInDivider />
-            <SignInProviderRow providers={providers} disabled={locked} onProvider={onProvider} />
-          </>
-        ) : null}
+        {children}
         <p className="text-center text-xs leading-relaxed text-muted">
           {t('mobileApp.welcome.footerLine1')}
           <br />
@@ -606,835 +323,50 @@ export function WelcomeScreen({
   );
 }
 
-const Welcome = WelcomeScreen;
+/** Welcome as a view (props only); design frames draw it. */
+export function WelcomeScreen({
+  locked,
+  errorKey = null,
+  providers = [],
+  onContinue,
+  onProvider,
+  onPasskey,
+}: {
+  locked: boolean;
+  errorKey?: MobileErrorKey | null;
+  /** The sign-ins avibe.bot offers the App now; none shows email alone. */
+  providers?: readonly SignInProvider[];
+  onContinue: () => void;
+  onProvider?: (provider: SignInProvider) => void;
+  /** Passkey sign-in with no email first, below the marks (ui/design: mobile-app/passkey/passkey-link). */
+  onPasskey?: () => void;
+}) {
+  return (
+    <WelcomeHero>
+      <SignInStart
+        locked={locked}
+        errorKey={errorKey}
+        methods={{ providers, passkey: Boolean(onPasskey) }}
+        onContinue={onContinue}
+        onProvider={onProvider}
+        onPasskey={onPasskey}
+      />
+    </WelcomeHero>
+  );
+}
+
+/** The passkey sign-in step in the App's frame, as a view (props only); design frames draw it. */
+export function PasskeySignInScreen(props: Parameters<typeof PasskeySignIn>[0]) {
+  return (
+    <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
+      <PasskeySignIn {...props} />
+    </SignInChrome>
+  );
+}
 
 /** The empty-instances page as a view (props only); design frames draw it. */
 export function EmptyInstancesScreen(props: Parameters<typeof EmptyInstances>[0]) {
   return <EmptyInstances {...props} />;
-}
-
-type EmailMode = 'code' | 'password';
-
-// ui/design: mobile-app/welcome, mobile-app/password
-/**
- * The email step. Code mode sends a verification code; password mode turns the
- * same form into email + password at once (the email is the saved login's
- * username). The password lives only in this step's field state: switching back
- * to code mode clears it, and leaving the step unmounts it.
- */
-function EmailEntry({
-  mode,
-  email,
-  busy,
-  locked,
-  cooldown,
-  errorKey,
-  retryIn,
-  onBack,
-  onEmailChange,
-  onSubmit,
-  onMode,
-  onSignIn,
-  onPasswordEdit,
-  onForgot,
-  onUseCode,
-}: {
-  mode: EmailMode;
-  email: string;
-  busy: BusyAction | null;
-  locked: boolean;
-  cooldown: number;
-  errorKey: MobileErrorKey | null;
-  retryIn: number;
-  onBack: () => void;
-  onEmailChange: (value: string) => void;
-  onSubmit: () => void;
-  onMode: (mode: EmailMode) => void;
-  onSignIn: (password: string) => void;
-  onPasswordEdit: () => void;
-  onForgot: () => void;
-  onUseCode: () => void;
-}) {
-  const { t } = useTranslation();
-  const passwordMode = mode === 'password';
-  const emailField = useRef<HTMLInputElement>(null);
-  const passwordField = useRef<HTMLInputElement>(null);
-  const [password, setPassword] = useState('');
-  const [shown, setShown] = useState(false);
-  const { codeActionRegion: actionRegion, revealCodeActions: revealActions } =
-    useCodeActionReveal<HTMLFormElement>('mobile-login-password');
-  const emailInvalid = errorKey === 'mobileApp.email.invalid';
-  // In password mode the email slot shows only the email's own error.
-  const emailError = passwordMode ? (emailInvalid ? errorKey : null) : errorKey;
-  const passwordError = passwordMode && !emailInvalid ? errorKey : null;
-  const wrong = errorKey === 'mobileApp.password.invalid';
-  // The email code is the fix for these, so a way to send one appears; it stays
-  // while its request runs.
-  const codeFixes = wrong || errorKey === 'mobileApp.password.unconfirmed' || busy === 'send';
-  const signingIn = busy === 'signIn';
-
-  // Entering password mode focuses the field the person needs next.
-  useEffect(() => {
-    if (mode !== 'password') return;
-    const target = emailField.current?.value.trim() ? passwordField.current : emailField.current;
-    target?.focus();
-  }, [mode]);
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (passwordMode) onSignIn(password);
-    else onSubmit();
-  };
-  const switchMode = (next: EmailMode) => {
-    if (locked) return;
-    // Code mode keeps no password: it is cleared on the way out.
-    setPassword('');
-    setShown(false);
-    onMode(next);
-  };
-
-  return (
-    <CloudScreen>
-      <Brand back disabled={locked} onBack={passwordMode ? () => switchMode('code') : onBack} />
-      <div className="flex flex-col items-center pt-8 pb-6">
-        <img src={mailMascot} alt="" className="mb-5 size-28 object-contain" />
-        <h1 className="text-center text-3xl font-semibold leading-tight">
-          {t('mobileApp.email.title')}
-        </h1>
-        <p className="mt-3 text-center text-sm leading-6 text-muted">
-          {t('mobileApp.email.subtitle')}
-        </p>
-      </div>
-      {/* The page checks the email itself and shows its own copy, not WebKit's bubble. */}
-      <form
-        ref={actionRegion}
-        noValidate
-        onSubmit={submit}
-        className="scroll-mb-4 rounded-3xl border border-edge bg-surface/70 p-6 shadow-elevation-0"
-      >
-        <div className="flex flex-col gap-6">
-          <div className="flex flex-col gap-3">
-            <Label htmlFor="mobile-login-email">{t('mobileApp.email.label')}</Label>
-            <Input
-              ref={emailField}
-              id="mobile-login-email"
-              name={passwordMode ? 'username' : 'email'}
-              type="email"
-              inputMode="email"
-              autoComplete={passwordMode ? 'username' : 'email'}
-              autoCapitalize="none"
-              spellCheck={false}
-              enterKeyHint={passwordMode ? 'next' : undefined}
-              value={email}
-              placeholder={t('mobileApp.email.placeholder')}
-              disabled={locked}
-              aria-invalid={Boolean(emailError) || undefined}
-              aria-describedby={passwordMode
-                ? 'mobile-login-email-feedback'
-                : 'mobile-login-email-hint mobile-login-email-feedback'}
-              className={cn(
-                'h-14 rounded-2xl px-4 text-base',
-                passwordMode && emailInvalid && 'border-destructive',
-              )}
-              onChange={(event) => onEmailChange(event.target.value)}
-              onKeyDown={(event) => {
-                // Return moves on to the password instead of submitting.
-                if (!passwordMode || event.key !== 'Enter' || event.nativeEvent.isComposing) return;
-                event.preventDefault();
-                passwordField.current?.focus();
-              }}
-            />
-            {passwordMode ? null : (
-              <p id="mobile-login-email-hint" className="text-xs leading-6 text-muted">
-                {t('mobileApp.email.hint')}
-              </p>
-            )}
-            {/* Password mode reserves no space for the email's error until it has one. */}
-            <div
-              id="mobile-login-email-feedback"
-              className={cn(passwordMode ? !emailError && 'hidden' : 'min-h-6')}
-            >
-              {emailError ? (
-                <p role="alert" className="text-xs leading-6 text-destructive-ink">
-                  {t(emailError as TranslationKey)}
-                </p>
-              ) : null}
-            </div>
-          </div>
-          {passwordMode ? (
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between gap-3">
-                <Label htmlFor="mobile-login-password">{t('mobileApp.password.label')}</Label>
-                <Button
-                  type="button"
-                  variant="link"
-                  size="compact"
-                  disabled={locked}
-                  className="h-auto px-0 text-sm text-muted underline"
-                  onClick={onForgot}
-                >
-                  {t('mobileApp.password.forgot')}
-                </Button>
-              </div>
-              <div className="relative">
-                <Input
-                  ref={passwordField}
-                  id="mobile-login-password"
-                  name="password"
-                  type={shown ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  enterKeyHint="go"
-                  value={password}
-                  disabled={locked}
-                  aria-invalid={wrong || undefined}
-                  aria-describedby="mobile-login-password-feedback"
-                  className={cn(
-                    'h-14 rounded-2xl pr-14 pl-4 text-base',
-                    wrong && 'border-destructive',
-                  )}
-                  onFocus={revealActions}
-                  onChange={(event) => {
-                    setPassword(event.target.value);
-                    onPasswordEdit();
-                  }}
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  disabled={locked}
-                  aria-pressed={shown}
-                  aria-label={t('mobileApp.password.show')}
-                  className="absolute top-1/2 right-1.5 size-11 -translate-y-1/2 rounded-xl text-muted"
-                  onClick={() => setShown((value) => !value)}
-                >
-                  {shown ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
-                </Button>
-              </div>
-              <div id="mobile-login-password-feedback" className="min-h-6">
-                {passwordError ? (
-                  <p role="alert" className="text-xs leading-6 text-destructive-ink">
-                    {t(passwordError as TranslationKey)}
-                  </p>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-          <div className="flex flex-col gap-3">
-            {passwordMode ? (
-              <div aria-busy={signingIn}>
-                <Primary type="submit" disabled={locked || password.length === 0 || retryIn > 0}>
-                  {signingIn
-                    ? t('mobileApp.password.signingIn')
-                    : retryIn > 0
-                      ? t('mobileApp.password.retryIn', { count: retryIn })
-                      : t('mobileApp.password.signIn')}
-                </Primary>
-              </div>
-            ) : (
-              <div aria-busy={busy === 'send'}>
-                <Primary type="submit" disabled={locked || cooldown > 0}>
-                  {busy === 'send'
-                    ? t('mobileApp.email.sending')
-                    : cooldown > 0
-                      ? t('mobileApp.email.sendIn', { count: cooldown })
-                      : t('mobileApp.email.send')}
-                </Primary>
-              </div>
-            )}
-            <Button
-              type="button"
-              variant="link"
-              size="compact"
-              disabled={locked}
-              className={cn(alternative, 'gap-2 self-center')}
-              onClick={() => switchMode(passwordMode ? 'code' : 'password')}
-            >
-              {passwordMode ? <Mail className="size-4" /> : <KeyRound className="size-4" />}
-              {t(passwordMode ? 'mobileApp.password.codeEntry' : 'mobileApp.password.entry')}
-            </Button>
-          </div>
-        </div>
-      </form>
-      {passwordMode && codeFixes ? (
-        <div className="mt-6" aria-busy={busy === 'send'}>
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            disabled={locked || cooldown > 0}
-            className="w-full gap-2 whitespace-normal rounded-full"
-            onClick={onUseCode}
-          >
-            <Mail className="size-4 shrink-0" />
-            {busy === 'send' ? t('mobileApp.email.sending') : t('mobileApp.password.useCode')}
-          </Button>
-        </div>
-      ) : null}
-      <p className="mt-auto pt-8 pb-4 text-center text-xs leading-6 text-muted">
-        {t(passwordMode ? 'mobileApp.password.footer' : 'mobileApp.email.footer')}
-      </p>
-    </CloudScreen>
-  );
-}
-
-function OtpCells({
-  code,
-  label,
-  invalid,
-  busy,
-  onChange,
-  onFocus,
-}: {
-  code: string;
-  label: string;
-  invalid: boolean;
-  busy: boolean;
-  onChange: (value: string) => void;
-  onFocus: () => void;
-}) {
-  const input = useRef<HTMLInputElement>(null);
-  return (
-    <div className="relative">
-      <Label htmlFor="mobile-login-code" className="sr-only">
-        {label}
-      </Label>
-      <Input
-        ref={input}
-        id="mobile-login-code"
-        className="absolute inset-0 z-10 h-full w-full cursor-text opacity-0 disabled:opacity-0"
-        type="text"
-        inputMode="numeric"
-        autoComplete="one-time-code"
-        pattern="[0-9]{6}"
-        maxLength={6}
-        value={code}
-        disabled={busy}
-        aria-invalid={invalid || undefined}
-        aria-describedby="mobile-login-code-hint mobile-login-code-feedback"
-        onFocus={onFocus}
-        onChange={(event) => onChange(event.target.value.replace(/\D/g, '').slice(0, 6))}
-      />
-      <div aria-hidden="true" className="grid grid-cols-6 gap-2">
-        {Array.from({ length: 6 }, (_, index) => (
-          <span
-            key={index}
-            className={cn(
-              'grid aspect-square min-w-0 place-items-center rounded-2xl border bg-surface text-2xl font-medium tabular-nums shadow-elevation-0 transition-colors duration-(--motion-duration-fast)',
-              invalid ? 'border-destructive text-destructive-ink' : 'border-edge',
-              !invalid && !busy && index === code.length && 'border-mint ring-2 ring-mint/30',
-            )}
-          >
-            {code[index] || (!busy && index === code.length ? (
-              <span className="h-6 w-px bg-mint-ink" />
-            ) : null)}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/** Keeps a field's actions above the software keyboard while the field has focus. */
-function useCodeActionReveal<Region extends HTMLElement>(fieldId = 'mobile-login-code') {
-  const codeActionRegion = useRef<Region>(null);
-  const revealCodeActions = useCallback(() => {
-    window.requestAnimationFrame(() => {
-      const region = codeActionRegion.current;
-      if (typeof region?.scrollIntoView === 'function') {
-        region.scrollIntoView({ block: 'end' });
-      }
-    });
-  }, []);
-
-  useEffect(() => {
-    const revealWhenFocused = () => {
-      if (document.activeElement?.id === fieldId) revealCodeActions();
-    };
-    window.addEventListener('resize', revealWhenFocused);
-    window.visualViewport?.addEventListener('resize', revealWhenFocused);
-    return () => {
-      window.removeEventListener('resize', revealWhenFocused);
-      window.visualViewport?.removeEventListener('resize', revealWhenFocused);
-    };
-  }, [fieldId, revealCodeActions]);
-
-  return { codeActionRegion, revealCodeActions };
-}
-
-function CodeEntry({
-  email,
-  code,
-  busy,
-  locked,
-  errorKey,
-  cooldown,
-  providerCooldownActive,
-  resent,
-  onBack,
-  onCodeChange,
-  onVerify,
-  onResend,
-}: {
-  email: string;
-  code: string;
-  busy: BusyAction | null;
-  locked: boolean;
-  errorKey: MobileErrorKey | null;
-  cooldown: number;
-  providerCooldownActive: boolean;
-  resent: boolean;
-  onBack: () => void;
-  onCodeChange: (value: string) => void;
-  onVerify: () => void;
-  onResend: () => void;
-}) {
-  const { t } = useTranslation();
-  const { codeActionRegion, revealCodeActions } = useCodeActionReveal<HTMLDivElement>();
-
-  return (
-    <CloudScreen>
-      <Brand back disabled={locked} onBack={onBack} />
-      <div className="flex flex-col items-center pt-8 pb-6">
-        <img src={mailMascot} alt="" className="mb-5 size-28 object-contain" />
-        <h1 className="text-center text-3xl font-semibold leading-tight">
-          {t('mobileApp.code.title')}
-        </h1>
-      </div>
-      <div className="pb-7 text-center">
-        <p className="text-sm leading-7 text-muted">{t('mobileApp.code.sentTo')}</p>
-        <p className="break-all text-sm font-medium leading-6">{email}</p>
-        <Button
-          type="button"
-          variant="link"
-          size="compact"
-          disabled={locked}
-          className="mt-1 px-0 text-muted underline"
-          onClick={onBack}
-        >
-          {t('mobileApp.code.changeEmail')}
-        </Button>
-      </div>
-      <div ref={codeActionRegion} data-mobile-code-actions className="scroll-mb-4">
-        <OtpCells
-          code={code}
-          label={t('mobileApp.code.label')}
-          invalid={errorKey === 'mobileApp.code.invalid'}
-          busy={locked}
-          onChange={onCodeChange}
-          onFocus={revealCodeActions}
-        />
-        <p id="mobile-login-code-hint" className="mt-5 text-center text-sm leading-6 text-muted">
-          {t('mobileApp.code.hint')}
-        </p>
-        <div
-          id="mobile-login-code-feedback"
-          className="mt-3 min-h-6 text-center text-xs leading-6"
-        >
-          {errorKey ? (
-            <p role="alert" className="text-destructive-ink">
-              {t(errorKey as TranslationKey)}
-            </p>
-          ) : resent ? (
-            <p role="status" className="text-mint-ink">{t('mobileApp.code.resent')}</p>
-          ) : null}
-        </div>
-        <div className="mt-5" aria-busy={busy === 'verify'}>
-          <Primary
-            disabled={locked || providerCooldownActive || code.length !== 6}
-            onClick={onVerify}
-          >
-            {busy === 'verify'
-              ? t('mobileApp.code.verifying')
-              : providerCooldownActive
-                ? t('mobileApp.email.sendIn', { count: cooldown })
-                : t('mobileApp.code.verify')}
-          </Primary>
-        </div>
-      </div>
-      <div className="mt-6 text-center text-sm leading-7">
-        <p className="text-muted">{t('mobileApp.code.resendPrompt')}</p>
-        <Button
-          type="button"
-          variant="link"
-          size="compact"
-          disabled={locked || cooldown > 0}
-          className={alternative}
-          onClick={onResend}
-        >
-          {busy === 'resend'
-            ? t('mobileApp.code.resending')
-            : cooldown > 0
-              ? t('mobileApp.code.resendIn', { count: cooldown })
-              : t('mobileApp.code.resend')}
-        </Button>
-      </div>
-      <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">
-        {t('mobileApp.code.footer')}
-      </p>
-    </CloudScreen>
-  );
-}
-
-// ui/design: mobile-app/two-factor
-function SecondFactor({
-  session,
-  step,
-  code,
-  busy,
-  locked,
-  errorKey,
-  retryMinutes,
-  onStep,
-  onCodeChange,
-  onVerify,
-  onPasskey,
-  onOpenSecurity,
-  onSetupDone,
-  onDifferentAccount,
-}: {
-  session: SecondFactorSession;
-  step: SecondFactorStep;
-  code: string;
-  busy: BusyAction | null;
-  locked: boolean;
-  errorKey: MobileErrorKey | null;
-  retryMinutes: number;
-  onStep: (step: SecondFactorStep) => void;
-  onCodeChange: (value: string) => void;
-  onVerify: () => void;
-  onPasskey: () => void;
-  onOpenSecurity: () => void;
-  onSetupDone: () => void;
-  onDifferentAccount: () => void;
-}) {
-  const { t } = useTranslation();
-  const { codeActionRegion, revealCodeActions } = useCodeActionReveal<HTMLFormElement>();
-  const hasPasskey = session.methods.includes('passkey');
-  const hasTotp = session.methods.includes('totp');
-  const setup = step === 'setup';
-  const usePasskeyInstead = { step: 'passkey', label: t('mobileApp.twoFactor.usePasskeyInstead') } as const;
-  const useTotp = { step: 'totp', label: t('mobileApp.twoFactor.useTotp') } as const;
-  const useRecovery = { step: 'recovery', label: t('mobileApp.twoFactor.useRecovery') } as const;
-  const alternatives = step === 'passkey'
-    ? [...(hasTotp ? [useTotp] : []), useRecovery]
-    : step === 'totp'
-      ? [...(hasPasskey ? [usePasskeyInstead] : []), useRecovery]
-      : step === 'recovery'
-        ? hasPasskey ? [usePasskeyInstead] : hasTotp ? [useTotp] : []
-        : [];
-  const notice = errorKey === 'mobileApp.twoFactor.rateLimited'
-    ? t('mobileApp.twoFactor.rateLimited', { count: retryMinutes })
-    : errorKey
-      ? t(errorKey as TranslationKey)
-      : null;
-  const feedback = (
-    <div id="mobile-login-code-feedback" className="mt-3 min-h-6 text-center text-xs leading-6">
-      {notice ? <p role="alert" className="text-destructive-ink">{notice}</p> : null}
-    </div>
-  );
-  const verify = (ready: boolean) => (
-    <div className="mt-5" aria-busy={busy === 'verify'}>
-      <Primary type="submit" disabled={locked || !ready}>
-        {busy === 'verify' ? t('mobileApp.twoFactor.verifying') : t('mobileApp.twoFactor.verify')}
-      </Primary>
-    </div>
-  );
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    onVerify();
-  };
-
-  return (
-    <CloudScreen>
-      <Brand />
-      <div className="flex flex-col items-center pt-8 pb-6">
-        <PageMark>
-          <ShieldCheck className="size-7 text-mint-ink" />
-        </PageMark>
-        <h1 className="text-center text-3xl font-semibold leading-tight tracking-tight">
-          {t(setup ? 'mobileApp.twoFactor.setupTitle' : 'mobileApp.twoFactor.title')}
-        </h1>
-      </div>
-      <div className="pb-7 text-center">
-        <p className="text-sm leading-7 text-muted">
-          {setup
-            ? t('mobileApp.twoFactor.requiredFor')
-            : t(session.email ? 'mobileApp.twoFactor.onFor' : 'mobileApp.twoFactor.onThisAccount')}
-        </p>
-        {session.email ? (
-          <p className="break-all text-sm font-medium leading-6">{session.email}</p>
-        ) : null}
-      </div>
-      {step === 'passkey' ? (
-        <>
-          <div aria-busy={busy === 'passkey'}>
-            <Primary disabled={locked} onClick={onPasskey}>
-              <KeyRound className="size-4" />
-              {busy === 'passkey'
-                ? t('mobileApp.twoFactor.waitingForPasskey')
-                : t('mobileApp.twoFactor.usePasskey')}
-            </Primary>
-          </div>
-          <p id="mobile-login-code-hint" className="mt-5 text-center text-sm leading-6 text-muted">
-            {t('mobileApp.twoFactor.passkeyHint')}
-          </p>
-          {feedback}
-        </>
-      ) : null}
-      {step === 'totp' ? (
-        <form
-          ref={codeActionRegion}
-          data-mobile-code-actions
-          className="scroll-mb-4"
-          onSubmit={submit}
-        >
-          <OtpCells
-            code={code}
-            label={t('mobileApp.twoFactor.totpLabel')}
-            invalid={errorKey === 'mobileApp.twoFactor.codeInvalid'}
-            busy={locked}
-            onChange={onCodeChange}
-            onFocus={revealCodeActions}
-          />
-          <p id="mobile-login-code-hint" className="mt-5 text-center text-sm leading-6 text-muted">
-            {t('mobileApp.twoFactor.totpHint')}
-          </p>
-          {feedback}
-          {verify(code.length === 6)}
-        </form>
-      ) : null}
-      {step === 'recovery' ? (
-        <form onSubmit={submit}>
-          <div className={cn(raised, 'flex flex-col gap-3')}>
-            <Label htmlFor="mobile-recovery-code">{t('mobileApp.twoFactor.recoveryLabel')}</Label>
-            <Input
-              id="mobile-recovery-code"
-              type="text"
-              autoComplete="one-time-code"
-              autoCapitalize="none"
-              spellCheck={false}
-              value={code}
-              placeholder={t('mobileApp.twoFactor.recoveryPlaceholder')}
-              disabled={locked}
-              aria-invalid={errorKey === 'mobileApp.twoFactor.recoveryInvalid' || undefined}
-              aria-describedby="mobile-login-code-hint mobile-login-code-feedback"
-              className="h-14 rounded-2xl px-4 text-base tracking-wide"
-              onChange={(event) => onCodeChange(event.target.value)}
-            />
-            <p id="mobile-login-code-hint" className="text-xs leading-6 text-muted">
-              {t('mobileApp.twoFactor.recoveryHint')}
-            </p>
-          </div>
-          {feedback}
-          {verify(code.trim().length > 0)}
-        </form>
-      ) : null}
-      {setup ? (
-        <>
-          <div className={cn(raised, 'text-sm leading-7 text-muted')}>
-            {t('mobileApp.twoFactor.setupBody')}
-          </div>
-          <div className="mt-5 flex flex-col gap-3">
-            <Button
-              type="button"
-              variant="brand"
-              size="lg"
-              disabled={locked}
-              className="w-full gap-2 rounded-full"
-              onClick={onOpenSecurity}
-            >
-              <ExternalLink className="size-4" />
-              {t('mobileApp.twoFactor.openSecurity')}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="lg"
-              disabled={locked}
-              className="w-full gap-2 whitespace-normal rounded-full"
-              onClick={onSetupDone}
-            >
-              <RotateCw className={cn('size-4 shrink-0', busy === 'refresh' && 'animate-spin')} />
-              {t('mobileApp.twoFactor.setupDone')}
-            </Button>
-          </div>
-          {notice ? feedback : null}
-        </>
-      ) : null}
-      {alternatives.length > 0 ? (
-        <div className="mt-6 flex flex-col items-center gap-1">
-          {alternatives.map((option) => (
-            <Button
-              key={option.step}
-              type="button"
-              variant="link"
-              size="compact"
-              disabled={locked}
-              className={alternative}
-              onClick={() => onStep(option.step)}
-            >
-              {option.label}
-            </Button>
-          ))}
-        </div>
-      ) : null}
-      <div className="mt-auto pt-7 pb-3 text-center">
-        <Button
-          type="button"
-          variant="link"
-          size="compact"
-          disabled={locked}
-          className="h-auto px-0 text-xs text-muted underline"
-          onClick={onDifferentAccount}
-        >
-          {t('mobileApp.twoFactor.differentAccount')}
-        </Button>
-      </div>
-    </CloudScreen>
-  );
-}
-
-// ui/design: mobile-app/password/forgot
-/**
- * Forgot password. Email sign-in always works, so the code comes first; a new
- * password is set on avibe.bot's Account security page, opened in Safari.
- */
-function ForgotPassword({
-  email,
-  busy,
-  locked,
-  cooldown,
-  errorKey,
-  onBack,
-  onSendCode,
-  onOpenSecurity,
-}: {
-  email: string;
-  busy: boolean;
-  locked: boolean;
-  cooldown: number;
-  errorKey: MobileErrorKey | null;
-  onBack: () => void;
-  onSendCode: () => void;
-  onOpenSecurity: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <CloudScreen>
-      <Brand back disabled={locked} onBack={onBack} />
-      <div className="flex flex-col items-center pt-8 pb-6">
-        <PageMark>
-          <KeyRound className="size-7 text-mint-ink" />
-        </PageMark>
-        <h1 className="text-center text-3xl font-semibold leading-tight tracking-tight">
-          {t('mobileApp.password.forgotTitle')}
-        </h1>
-        <p className="mt-3 text-center text-sm leading-6 text-muted">
-          {t('mobileApp.password.forgotSubtitle')}
-        </p>
-      </div>
-      <div className="pb-7 text-center">
-        <p className="text-sm leading-7 text-muted">{t('mobileApp.password.account')}</p>
-        <p className="break-all text-sm font-medium leading-6">{email}</p>
-      </div>
-      <section className={cn(raised, 'flex flex-col gap-4')}>
-        <div>
-          <h2 className="text-base font-semibold">{t('mobileApp.password.signInNowTitle')}</h2>
-          <p className="mt-2 text-sm leading-6 text-muted">{t('mobileApp.password.signInNowBody')}</p>
-        </div>
-        <div aria-busy={busy}>
-          <Primary disabled={locked || cooldown > 0} onClick={onSendCode}>
-            {busy
-              ? t('mobileApp.email.sending')
-              : cooldown > 0
-                ? t('mobileApp.email.sendIn', { count: cooldown })
-                : t('mobileApp.email.send')}
-          </Primary>
-        </div>
-        {errorKey ? (
-          <p role="alert" className="text-xs leading-6 text-destructive-ink">
-            {t(errorKey as TranslationKey)}
-          </p>
-        ) : null}
-      </section>
-      <section className={cn(raised, 'mt-4 flex flex-col gap-4')}>
-        <div>
-          <h2 className="text-base font-semibold">{t('mobileApp.password.newPasswordTitle')}</h2>
-          <p className="mt-2 text-sm leading-6 text-muted">{t('mobileApp.password.newPasswordBody')}</p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="lg"
-          disabled={locked}
-          className="w-full gap-2 whitespace-normal rounded-full"
-          onClick={onOpenSecurity}
-        >
-          <ExternalLink className="size-4 shrink-0" />
-          {t('mobileApp.password.openInSafari')}
-        </Button>
-      </section>
-    </CloudScreen>
-  );
-}
-
-// ui/design: mobile-app/password/weak
-/**
- * Signed in, but avibe.bot reported the password as weak. Shown once, after any
- * second factor and before the instances; Continue never blocks.
- */
-function WeakPasswordNotice({
-  email,
-  reasons,
-  locked,
-  onContinue,
-  onOpenSecurity,
-}: {
-  email: string;
-  reasons: MobileWeakPasswordReason[];
-  locked: boolean;
-  onContinue: () => void;
-  onOpenSecurity: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <CloudScreen>
-      <Brand />
-      <div className="flex flex-1 flex-col items-center justify-center py-10 text-center">
-        <PageMark warn>
-          <AlertTriangle className="size-7 text-gold-ink" />
-        </PageMark>
-        <h1 className="text-3xl font-semibold leading-tight tracking-tight">
-          {t('mobileApp.password.weakTitle')}
-        </h1>
-        <p className="mt-4 text-sm leading-7 text-muted">{t('mobileApp.password.signedInAs')}</p>
-        <p className="break-all text-sm font-medium leading-6">{email}</p>
-        <div className={cn(raised, 'mt-7 w-full text-left text-sm leading-7 text-muted')}>
-          {t(reasons.includes('pwned') ? 'mobileApp.password.weakPwned' : 'mobileApp.password.weakRules')}
-        </div>
-        <div className="mt-8 flex w-full flex-col gap-3">
-          <Primary disabled={locked} onClick={onContinue}>
-            {t('common.continue')}
-          </Primary>
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            disabled={locked}
-            className="w-full gap-2 whitespace-normal rounded-full"
-            onClick={onOpenSecurity}
-          >
-            <ExternalLink className="size-4 shrink-0" />
-            {t('mobileApp.password.changeInSafari')}
-          </Button>
-        </div>
-      </div>
-    </CloudScreen>
-  );
 }
 
 function InstanceRow({
@@ -1653,7 +585,7 @@ function Instances({
   onReopen,
 }: {
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
-  busy: BusyAction | null;
+  busy: BusyAction | SignInBusyAction | null;
   locked: boolean;
   /** The last refresh failed: a banner over the list, or the recovery card when there is no list. */
   errorKey: MobileErrorKey | null;
@@ -2213,12 +1145,26 @@ function BootRecovery({
   );
 }
 
+/** The App's frame around a shared sign-in step: the cloud page and its brand header. */
+function MobileSignInFrame({ children, back }: SignInFrameProps) {
+  return (
+    <CloudScreen>
+      {back ? <Brand back disabled={back.disabled} onBack={back.onBack} /> : <Brand />}
+      {children}
+    </CloudScreen>
+  );
+}
+
+const MOBILE_SIGN_IN_CHROME: SignInChromeValue = { Frame: MobileSignInFrame, platform: 'ios' };
+
 export function MobileOnboarding() {
   // Native opens `#sheet` as a sheet over the selected instance, which scrolls its document.
   const [sheet] = useState(() => isSheetHash(window.location.hash));
   return (
     <DocumentScroll.Provider value={sheet}>
-      <MobileOnboardingScreens />
+      <SignInChrome value={MOBILE_SIGN_IN_CHROME}>
+        <MobileOnboardingScreens />
+      </SignInChrome>
     </DocumentScroll.Provider>
   );
 }
@@ -2233,27 +1179,11 @@ function MobileOnboardingScreens() {
   const [coversInstance, setCoversInstance] = useState(
     () => window.location.hash === RUNTIME_ACCOUNT_HASH,
   );
-  // avibe.bot's second-factor throttle window; a completed code waits for the button.
-  const secondFactorRetryAt = useRef(0);
   const [screen, setScreen] = useState<Screen>('boot');
   // Bundled with the App; absent while it carries no native notices.
   const [licenses, setLicenses] = useState<AppLicenses | null>(null);
-  const [session, setSessionState] = useState<MobileSessionState>({ status: 'signedOut' });
-  // The sign-ins avibe.bot offers the App now, from the latest signed-out answer that names
-  // them; none until one does, so Welcome shows email alone.
-  const [providers, setProviders] = useState<readonly SignInProvider[]>([]);
-  const setSession = useCallback((next: MobileSessionState) => {
-    if (next.status === 'signedOut' && next.providers) setProviders(next.providers);
-    setSessionState(next);
-  }, []);
-  const [email, setEmail] = useState('');
-  const [emailMode, setEmailMode] = useState<EmailMode>('code');
-  const [code, setCode] = useState('');
+  const [session, setSession] = useState<MobileSessionState>({ status: 'signedOut' });
   const [errorKey, setErrorKey] = useState<MobileErrorKey | null>(null);
-  const [cooldown, setCooldown] = useState(0);
-  const [cooldownSource, setCooldownSource] = useState<CooldownSource>(null);
-  const [cooldownScope, setCooldownScope] = useState<CooldownScope>(null);
-  const [resent, setResent] = useState(false);
   // The page native opens as a sheet over the selected instance: a ref for the first read, the
   // state for rendering. Both end only if no instance is behind the sheet any more.
   const sheetPresentation = useRef(isSheetHash(window.location.hash));
@@ -2276,15 +1206,11 @@ function MobileOnboardingScreens() {
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [rowFailure, setRowFailure] = useState<RowFailure | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [factorStep, setFactorStep] = useState<SecondFactorStep>('passkey');
-  const [factorCode, setFactorCode] = useState('');
-  const [factorRetryMinutes, setFactorRetryMinutes] = useState(SECOND_FACTOR_RETRY_MINUTES);
-  // Seconds before Sign in is offered again after a password rate limit.
-  const [passwordRetry, setPasswordRetry] = useState(0);
   // A password sign-in avibe.bot reported as weak, kept through any second
   // factor until its one notice.
-  const pendingWeakPassword = useRef<MobileWeakPasswordReason[] | null>(null);
-  const [weakPasswordReasons, setWeakPasswordReasons] = useState<MobileWeakPasswordReason[]>([]);
+  const pendingWeakPassword = useRef<WeakPasswordReason[] | null>(null);
+  const [weakPasswordReasons, setWeakPasswordReasons] = useState<WeakPasswordReason[]>([]);
+  const owner = useOperationOwner<BusyAction | SignInBusyAction>();
   const {
     beginOperation,
     busy,
@@ -2292,24 +1218,43 @@ function MobileOnboardingScreens() {
     isOperationLocked,
     locked,
     ownsOperation,
-  } = useOperationOwner();
+  } = owner;
 
   const signedIn = session.status === 'signedIn' ? session : null;
-  const owedSecondFactor = session.status === 'twoFactorRequired' ? session : null;
-  const providerCooldownActive = cooldownScope === 'all' && cooldown > 0;
+  const offered = mobileSignInMethods(session);
+  // The sign-in steps are the shared flow's (#3946); this page keeps the session and what follows.
+  const signIn = useSignInFlow<MobileSessionState, BusyAction>({
+    adapter: mobileSignInAdapter,
+    // Only the ways the latest signed-out answer names (#3945's `providers`, and `passkey`);
+    // passkey sign-in below the marks (ui/design: mobile-app/passkey/passkey-link).
+    methods: offered,
+    owner,
+    onSession: (next, origin) => {
+      // The selection native restored at launch, once the same account passed its second factor.
+      const resume = origin.kind === 'secondFactor' ? restoredSelection(next) : null;
+      if (origin.weakPassword) pendingWeakPassword.current = origin.weakPassword;
+      setSession(next);
+      setScreen(next.status === 'signedIn' && sheetPresentation.current ? 'sheet' : screenAfterSession(next));
+      setErrorKey(null);
+      setOpeningId(null);
+      setRowFailure(null);
+      setExpandedId(null);
+      return resume ? () => void select(resume) : undefined;
+    },
+    onBeginSignIn: () => {
+      pendingWeakPassword.current = null;
+      launchSecondFactor.current = null;
+    },
+    onDifferentAccount: () => void logout(),
+    onOpenSecurity: () => openAccountSecurity(),
+  });
+  const { follow: followSignIn, reset: resetSignIn } = signIn;
   const accountReturnScreen = useMemo(
     () => (inSheet
       ? 'sheet'
       : signedIn?.instances.length ? 'instances' : 'empty') as Screen,
     [inSheet, signedIn],
   );
-
-  // Setters only, so the bootstrap callback can use it without a dependency.
-  function showSecondFactorStart(next: MobileSessionState) {
-    if (next.status !== 'twoFactorRequired') return;
-    setFactorStep(firstSecondFactorStep(next));
-    setFactorCode('');
-  }
 
   const bootstrap = useCallback(async () => {
     const token = beginOperation('boot');
@@ -2319,7 +1264,7 @@ function MobileOnboardingScreens() {
     try {
       const next = await bootstrapMobileSession();
       if (!ownsOperation(token)) return;
-      showSecondFactorStart(next);
+      followSignIn(mobileSignInStep(next));
       launchSecondFactor.current = next.status === 'twoFactorRequired' ? { email: next.email } : null;
       setSession(next);
       setScreen(
@@ -2332,12 +1277,12 @@ function MobileOnboardingScreens() {
       startsOnAccount.current = false;
     } catch (rawError) {
       if (!ownsOperation(token)) return;
-      setErrorKey(pageErrorKey(normalizeMobileBridgeError(rawError), 'bootstrap'));
+      setErrorKey(pageErrorKey(normalizeMobileBridgeError(rawError), 'other'));
       setScreen('bootError');
     } finally {
       finishOperation(token);
     }
-  }, [accountRoot, beginOperation, finishOperation, ownsOperation]);
+  }, [accountRoot, beginOperation, finishOperation, followSignIn, ownsOperation]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -2355,21 +1300,6 @@ function MobileOnboardingScreens() {
       active = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const timer = window.setTimeout(() => setCooldown((value) => Math.max(0, value - 1)), 1000);
-    return () => window.clearTimeout(timer);
-  }, [cooldown]);
-
-  useEffect(() => {
-    if (passwordRetry <= 0) return;
-    const timer = window.setTimeout(
-      () => setPasswordRetry((value) => Math.max(0, value - 1)),
-      1000,
-    );
-    return () => window.clearTimeout(timer);
-  }, [passwordRetry]);
 
   /** Where a session lands: a pending weak-password notice comes before the instances. */
   const screenAfterSession = (next: MobileSessionState): Screen => {
@@ -2390,11 +1320,10 @@ function MobileOnboardingScreens() {
   ) => {
     if (!ownsOperation(token)) return;
     if (next.status === 'signedOut' && !allowSignedOut) {
-      setCode('');
       setErrorKey('mobileApp.errors.network');
       return;
     }
-    showSecondFactorStart(next);
+    followSignIn(mobileSignInStep(next));
     setSession(next);
     // A refresh from a page pushed inside the sheet returns to the sheet's list.
     setScreen(next.status === 'signedIn' && sheetPresentation.current ? 'sheet' : screenAfterSession(next));
@@ -2402,148 +1331,6 @@ function MobileOnboardingScreens() {
     setOpeningId(null);
     setRowFailure(null);
     setExpandedId(null);
-  };
-
-  const requestOtp = async (resend: boolean) => {
-    if (cooldown > 0) return;
-    const normalizedEmail = email.trim();
-    if (!EMAIL_PATTERN.test(normalizedEmail)) {
-      setErrorKey('mobileApp.email.invalid');
-      return;
-    }
-    const token = beginOperation(resend ? 'resend' : 'send');
-    if (token === null) return;
-    setEmail(normalizedEmail);
-    setErrorKey(null);
-    setResent(false);
-    pendingWeakPassword.current = null;
-    launchSecondFactor.current = null;
-    try {
-      const result = await requestMobileOtp(normalizedEmail);
-      if (!ownsOperation(token)) return;
-      const providerCooldown = Math.max(0, result.cooldown_seconds ?? 0);
-      if (providerCooldown > 0) {
-        setCooldown(providerCooldown);
-        setCooldownSource('provider');
-        setCooldownScope('send');
-      } else if (resend) {
-        setCooldown(DEFAULT_COOLDOWN_SECONDS);
-        setCooldownSource('client');
-        setCooldownScope('send');
-      } else {
-        setCooldown(0);
-        setCooldownSource(null);
-        setCooldownScope(null);
-      }
-      setResent(resend);
-      // A new email sign-in owes its own second factor.
-      secondFactorRetryAt.current = 0;
-      setScreen('code');
-    } catch (rawError) {
-      if (!ownsOperation(token)) return;
-      const error = normalizeMobileBridgeError(rawError);
-      setErrorKey(pageErrorKey(error, 'request'));
-      const providerCooldown = providerCooldownSeconds(error);
-      if (providerCooldown > 0) {
-        setCooldown(providerCooldown);
-        setCooldownSource('provider');
-        setCooldownScope('all');
-      } else if (resend) {
-        setCooldown(FAILED_COOLDOWN_SECONDS);
-        setCooldownSource('client');
-        setCooldownScope('send');
-      }
-    } finally {
-      finishOperation(token);
-    }
-  };
-
-  const verifyOtp = async (candidate: string = code) => {
-    if (providerCooldownActive || !CODE_PATTERN.test(candidate)) return;
-    const token = beginOperation('verify');
-    if (token === null) return;
-    setErrorKey(null);
-    try {
-      const next = await verifyMobileOtp(email, candidate);
-      applySession(token, next, false);
-    } catch (rawError) {
-      if (!ownsOperation(token)) return;
-      const error = normalizeMobileBridgeError(rawError);
-      const nextErrorKey = pageErrorKey(error, 'verify');
-      setErrorKey(nextErrorKey);
-      if (nextErrorKey === 'mobileApp.errors.network') setCode('');
-      const providerCooldown = providerCooldownSeconds(error);
-      if (providerCooldown > 0) {
-        setCooldown(providerCooldown);
-        setCooldownSource('provider');
-        setCooldownScope('all');
-      }
-    } finally {
-      finishOperation(token);
-    }
-  };
-
-  const signInWithPassword = async (password: string) => {
-    if (isOperationLocked() || passwordRetry > 0 || password.length === 0) return;
-    // Switching to password mode never asks for the email; Sign in checks it.
-    const normalizedEmail = email.trim();
-    if (!EMAIL_PATTERN.test(normalizedEmail)) {
-      setErrorKey('mobileApp.email.invalid');
-      return;
-    }
-    const token = beginOperation('signIn');
-    if (token === null) return;
-    setEmail(normalizedEmail);
-    setErrorKey(null);
-    pendingWeakPassword.current = null;
-    launchSecondFactor.current = null;
-    try {
-      const { weak_password: weakPassword, ...next } = await signInMobileWithPassword(
-        normalizedEmail,
-        password,
-      );
-      if (!ownsOperation(token)) return;
-      if (next.status !== 'signedOut') {
-        // A new password sign-in owes its own second factor.
-        secondFactorRetryAt.current = 0;
-        if (weakPassword) pendingWeakPassword.current = weakPassword.reasons;
-      }
-      applySession(token, next as MobileSessionState, false);
-    } catch (rawError) {
-      if (!ownsOperation(token)) return;
-      const error = normalizeMobileBridgeError(rawError);
-      setErrorKey(pageErrorKey(error, 'password'));
-      if (error.code === 'rate_limited') {
-        setPasswordRetry(
-          typeof error.retry_after_seconds === 'number' && error.retry_after_seconds > 0
-            ? Math.ceil(error.retry_after_seconds)
-            : PASSWORD_RETRY_SECONDS,
-        );
-      }
-    } finally {
-      finishOperation(token);
-    }
-  };
-
-  /** Google, GitHub or Apple, natively; closing their window or sheet says nothing. */
-  const signInWithProvider = async (provider: SignInProvider) => {
-    const token = beginOperation('provider');
-    if (token === null) return;
-    setErrorKey(null);
-    pendingWeakPassword.current = null;
-    launchSecondFactor.current = null;
-    try {
-      const next = await signInMobileWithProvider(provider);
-      if (!ownsOperation(token)) return;
-      // A new sign-in owes its own second factor.
-      if (next.status !== 'signedOut') secondFactorRetryAt.current = 0;
-      applySession(token, next, false);
-    } catch (rawError) {
-      if (!ownsOperation(token)) return;
-      setErrorKey(providerErrorKey(normalizeMobileBridgeError(rawError), provider));
-    } finally {
-      finishOperation(token);
-    }
   };
 
   const refresh = async () => {
@@ -2557,17 +1344,10 @@ function MobileOnboardingScreens() {
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      setErrorKey(pageErrorKey(error, 'refresh'));
+      setErrorKey(pageErrorKey(error, 'other'));
     } finally {
       finishOperation(token);
     }
-  };
-
-  const recordSecondFactorFailure = (error: MobileBridgeError) => {
-    if (error.code === 'rate_limited') {
-      secondFactorRetryAt.current = Date.now() + secondFactorRetrySeconds(error) * 1000;
-    }
-    setFactorRetryMinutes(secondFactorRetryMinutes(error));
   };
 
   /** The selection native restored at launch, once the same account has passed its second factor. */
@@ -2579,51 +1359,6 @@ function MobileOnboardingScreens() {
     return next.instances.find(
       (instance) => instance.id === next.selected_instance_id && instance.available,
     ) ?? null;
-  };
-
-  const verifySecondFactorCode = async (candidate: string = factorCode) => {
-    if (factorStep !== 'totp' && factorStep !== 'recovery') return;
-    const method = factorStep;
-    if (method === 'totp' ? !CODE_PATTERN.test(candidate) : candidate.trim().length === 0) {
-      return;
-    }
-    const token = beginOperation('verify');
-    if (token === null) return;
-    setErrorKey(null);
-    let resume: MobileInstance | null = null;
-    try {
-      const next = await verifyMobileSecondFactor(method, candidate);
-      if (ownsOperation(token)) resume = restoredSelection(next);
-      applySession(token, next, true);
-    } catch (rawError) {
-      if (!ownsOperation(token)) return;
-      const error = normalizeMobileBridgeError(rawError);
-      recordSecondFactorFailure(error);
-      setErrorKey(pageErrorKey(error, method));
-    } finally {
-      finishOperation(token);
-    }
-    if (resume) void select(resume);
-  };
-
-  const verifyPasskey = async () => {
-    const token = beginOperation('passkey');
-    if (token === null) return;
-    setErrorKey(null);
-    let resume: MobileInstance | null = null;
-    try {
-      const next = await verifyMobilePasskey();
-      if (ownsOperation(token)) resume = restoredSelection(next);
-      applySession(token, next, true);
-    } catch (rawError) {
-      if (!ownsOperation(token)) return;
-      const error = normalizeMobileBridgeError(rawError);
-      recordSecondFactorFailure(error);
-      setErrorKey(pageErrorKey(error, 'passkey'));
-    } finally {
-      finishOperation(token);
-    }
-    if (resume) void select(resume);
   };
 
   const select = async (instance: MobileInstance) => {
@@ -2679,14 +1414,17 @@ function MobileOnboardingScreens() {
       setSheetRefresh('idle');
       setSession(next);
       // A sign-out or an account change leaves the sheet; native shows the full-screen flow.
-      if (next.status !== 'signedIn') setScreen(screenForSession(next));
+      if (next.status !== 'signedIn') {
+        followSignIn(mobileSignInStep(next));
+        setScreen(screenForSession(next));
+      }
     } catch {
       if (sheetRefreshToken.current !== token) return;
       setSheetRefresh('failed');
     } finally {
       settle();
     }
-  }, []);
+  }, [followSignIn]);
 
   const sheetRefreshInFlight = useRef<Promise<void> | null>(null);
   /** One refresh at a time: a second request joins the one in flight (native would refuse it as busy). */
@@ -2710,12 +1448,14 @@ function MobileOnboardingScreens() {
   const showSignedOut = (next: MobileSessionState) => {
     setSession(next);
     pendingWeakPassword.current = null;
-    setEmail('');
-    setCode('');
-    setCooldown(0);
-    setCooldownSource(null);
-    setCooldownScope(null);
-    setScreen('welcome');
+    resetSignIn();
+    setScreen('signIn');
+  };
+
+  /** A page-level failure, on the sign-in step when that is what the page shows. */
+  const showError = (key: MobileErrorKey) => {
+    if (screen === 'signIn') signIn.setErrorKey(key);
+    else setErrorKey(key);
   };
 
   const logout = async () => {
@@ -2727,14 +1467,14 @@ function MobileOnboardingScreens() {
       const next = await logoutMobileSession();
       if (!ownsOperation(token)) return;
       if (next.status !== 'signedOut') {
-        setErrorKey('mobileApp.errors.network');
+        showError('mobileApp.errors.network');
         return;
       }
       showSignedOut(next);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      setErrorKey(pageErrorKey(error, 'logout'));
+      showError(pageErrorKey(error, 'other'));
     } finally {
       finishOperation(token);
     }
@@ -2806,33 +1546,6 @@ function MobileOnboardingScreens() {
     }
   };
 
-  const showEmail = () => {
-    if (isOperationLocked()) return;
-    setCode('');
-    setErrorKey(null);
-    setResent(false);
-    if (cooldownSource === 'client') {
-      setCooldown(0);
-      setCooldownSource(null);
-      setCooldownScope(null);
-    }
-    setEmailMode('code');
-    setScreen('email');
-  };
-
-  /** The forgot page names the account and sends its code, so it needs a valid email. */
-  const showForgot = () => {
-    if (isOperationLocked()) return;
-    const normalizedEmail = email.trim();
-    if (!EMAIL_PATTERN.test(normalizedEmail)) {
-      setErrorKey('mobileApp.email.invalid');
-      return;
-    }
-    setEmail(normalizedEmail);
-    setErrorKey(null);
-    setScreen('forgot');
-  };
-
   const openGuide = () => {
     if (isOperationLocked()) return;
     void openMobileExternal(installGuideUrl(i18n.language));
@@ -2864,129 +1577,8 @@ function MobileOnboardingScreens() {
       />
     );
   }
-  if (screen === 'welcome') {
-    return (
-      <Welcome
-        locked={locked}
-        errorKey={errorKey}
-        onContinue={showEmail}
-        providers={providers}
-        onProvider={(provider) => void signInWithProvider(provider)}
-      />
-    );
-  }
-  if (screen === 'email') {
-    return (
-      <EmailEntry
-        mode={emailMode}
-        email={email}
-        busy={busy}
-        locked={locked}
-        cooldown={cooldown}
-        errorKey={errorKey}
-        retryIn={passwordRetry}
-        onBack={() => {
-          if (!isOperationLocked()) {
-            setErrorKey(null);
-            setScreen('welcome');
-          }
-        }}
-        onEmailChange={(value) => {
-          if (isOperationLocked()) return;
-          setEmail(value);
-          setErrorKey(null);
-        }}
-        onSubmit={() => void requestOtp(false)}
-        onMode={(next) => {
-          if (isOperationLocked()) return;
-          setErrorKey(null);
-          setEmailMode(next);
-        }}
-        onSignIn={(password) => void signInWithPassword(password)}
-        onPasswordEdit={() => setErrorKey(null)}
-        onForgot={showForgot}
-        onUseCode={() => void requestOtp(false)}
-      />
-    );
-  }
-  if (screen === 'forgot') {
-    return (
-      <ForgotPassword
-        email={email}
-        busy={busy === 'send'}
-        locked={locked}
-        cooldown={cooldown}
-        errorKey={errorKey}
-        onBack={() => {
-          if (isOperationLocked()) return;
-          setErrorKey(null);
-          setScreen('email');
-        }}
-        onSendCode={() => void requestOtp(false)}
-        onOpenSecurity={openAccountSecurity}
-      />
-    );
-  }
-  if (screen === 'code') {
-    return (
-      <CodeEntry
-        email={email}
-        code={code}
-        busy={busy}
-        locked={locked}
-        errorKey={errorKey}
-        cooldown={cooldown}
-        providerCooldownActive={providerCooldownActive}
-        resent={resent}
-        onBack={showEmail}
-        onCodeChange={(value) => {
-          if (isOperationLocked()) return;
-          const complete = completesCode(value, code);
-          setCode(value);
-          setErrorKey(null);
-          if (complete) void verifyOtp(value);
-        }}
-        onVerify={() => void verifyOtp()}
-        onResend={() => void requestOtp(true)}
-      />
-    );
-  }
-  if (screen === 'secondFactor' && owedSecondFactor) {
-    return (
-      <SecondFactor
-        session={owedSecondFactor}
-        step={factorStep}
-        code={factorCode}
-        busy={busy}
-        locked={locked}
-        errorKey={errorKey}
-        retryMinutes={factorRetryMinutes}
-        onStep={(step) => {
-          if (isOperationLocked()) return;
-          setFactorStep(step);
-          setFactorCode('');
-          setErrorKey(null);
-        }}
-        onCodeChange={(value) => {
-          if (isOperationLocked()) return;
-          // A recovery code is free text and waits for the button.
-          const complete = factorStep === 'totp'
-            && completesCode(value, factorCode)
-            && Date.now() >= secondFactorRetryAt.current;
-          setFactorCode(value);
-          setErrorKey(null);
-          if (complete) void verifySecondFactorCode(value);
-        }}
-        onVerify={() => void verifySecondFactorCode()}
-        onPasskey={() => void verifyPasskey()}
-        onOpenSecurity={openAccountSecurity}
-        onSetupDone={() => void refresh()}
-        onDifferentAccount={() => void logout()}
-      />
-    );
-  }
-  if (!signedIn) {
-    return <Welcome locked={locked} onContinue={showEmail} />;
+  if (screen === 'signIn' || !signedIn) {
+    return signIn.render((actions) => <WelcomeHero>{actions}</WelcomeHero>);
   }
   if (screen === 'weakPassword') {
     return (
