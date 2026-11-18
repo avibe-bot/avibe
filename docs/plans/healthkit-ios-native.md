@@ -48,3 +48,16 @@ and signed archive validation remain explicit integration checks after approval.
 
 Physical-device HealthKit permissions, real background delivery, signed archive
 validation, Apple App ID/profile changes, and TestFlight remain unperformed.
+
+
+## Review follow-up
+
+The first Codex review identified an observer event that could reuse a query
+started before the event. Each sync invocation now waits for the active task and
+then runs its own fresh query; task identity prevents an older waiter from
+clearing a newer task. A held-reader XCTest proves a second observer completion
+waits for a second durable payload. All 19 sync tests passed after this change.
+
+The exact entitlement-set CI test now includes both new boolean HealthKit grants
+without weakening its comparison. Its full 79-case pipeline test file and all
+113 archive-validator cases passed locally.

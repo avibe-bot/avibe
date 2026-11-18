@@ -510,6 +510,33 @@ final class HealthSyncTests: XCTestCase {
     }
 
     @MainActor
+    func testObserverChangesDuringAnActiveQueryWaitForAFreshDurablePayload() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        await fixture.coordinator.resume(foreground: false)
+        let observer = try XCTUnwrap(fixture.reader.observer)
+        fixture.reader.holdQueries = true
+        let first = Task { await observer() }
+        try await eventually { fixture.reader.days.count == 1 }
+        var secondCompleted = false
+        let second = Task { await observer(); secondCompleted = true }
+        await Task.yield()
+        XCTAssertEqual(fixture.reader.days.count, 1)
+        XCTAssertFalse(secondCompleted)
+        fixture.reader.releaseQuery()
+        try await eventually { fixture.reader.days.count == 2 }
+        XCTAssertFalse(secondCompleted)
+        let firstSnapshot = try HealthDeviceStore(directory: fixture.directory)
+        XCTAssertEqual(firstSnapshot.state.uploads.count, 1)
+        fixture.reader.releaseQuery()
+        await first.value
+        await second.value
+        let final = try HealthDeviceStore(directory: fixture.directory)
+        XCTAssertEqual(final.state.uploads.count, 2)
+        XCTAssertEqual(final.state.sequence, 2)
+        XCTAssertTrue(secondCompleted)
+    }
+
+    @MainActor
     func testRestoreQueriesAnInterruptedReservationAndWaitsForTheNewPayloadAck() async throws {
         let directory = try temporaryDirectory()
         let store = try HealthDeviceStore(directory: directory)
@@ -672,9 +699,17 @@ private final class HealthFakeReader: HealthDataReading {
     private(set) var authorizations = 0
     private(set) var days: [Int] = []
     private(set) var observer: (() async -> Void)?
+    var holdQueries = false
+    private var queryContinuation: CheckedContinuation<Void, Never>?
+    func releaseQuery() {
+        let continuation = queryContinuation
+        queryContinuation = nil
+        continuation?.resume()
+    }
     func authorize() async throws { authorizations += 1 }
     func query(days: Int, now: Date) async throws -> HealthQueryWindow {
         self.days.append(days)
+        if holdQueries { await withCheckedContinuation { queryContinuation = $0 } }
         return HealthQueryWindow(
             computedAt: now, from: "2026-11-18", to: "2026-11-18",
             items: [], failures: [],

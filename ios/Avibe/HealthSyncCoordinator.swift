@@ -35,6 +35,7 @@ final class HealthSyncCoordinator: ObservableObject {
     private var backgroundDelivery = false
     private var pollTask: Task<Void, Never>?
     private var syncTask: Task<[String: String], Error>?
+    private var syncID: UUID?
     private var retryTask: Task<Void, Never>?
     private var uploadWaiters: [String: [CheckedContinuation<Void, Error>]] = [:]
     private var retryAfter: Date?
@@ -270,12 +271,16 @@ final class HealthSyncCoordinator: ObservableObject {
     }
 
     private func synchronize(requestID: String? = nil, waitForUpload: Bool = true) async throws -> [String: String] {
-        if let syncTask {
-            let states = try await syncTask.value
-            // A newly claimed request still needs its own durable dependency.
-            if requestID == nil { return states }
-        }
         let token = epoch
+        // Every invocation represents work requested after the active query began.
+        // Keep it waiting, then query again; an older snapshot cannot satisfy it.
+        while let active = syncTask {
+            let activeID = syncID
+            _ = try? await active.value
+            try requireCurrent(token)
+            if syncID == activeID { syncTask = nil; syncID = nil }
+        }
+        let taskID = UUID()
         let task = Task { @MainActor () throws -> [String: String] in
             guard let store = self.store, !store.state.suspended, self.identity != nil else { throw HealthSyncError.code("not_connected") }
             let window = try await self.reader.query(days: store.state.initialBackfillPending ? 30 : 8, now: self.now())
@@ -297,8 +302,11 @@ final class HealthSyncCoordinator: ObservableObject {
             try self.requireCurrent(token)
             return window.metricStates
         }
+        syncID = taskID
         syncTask = task
-        defer { if epoch == token { syncTask = nil } }
+        defer {
+            if syncID == taskID { syncTask = nil; syncID = nil }
+        }
         return try await task.value
     }
 
@@ -449,6 +457,7 @@ final class HealthSyncCoordinator: ObservableObject {
         setBackground()
         syncTask?.cancel()
         syncTask = nil
+        syncID = nil
         retryTask?.cancel()
         retryTask = nil
         for id in Array(uploadWaiters.keys) { finishWaiters(id, result: .failure(HealthSyncError.code("connection_changed"))) }
