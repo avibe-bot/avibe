@@ -1040,7 +1040,7 @@ final class MobileOnboardingTests: XCTestCase {
         web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
         let requirement = MobileSecondFactorRequirement(email: "alex@example.com", gate: .challenge, methods: [.totp])
         // The store that receives the first-factor cookies is the one in use at the exchange.
-        var exchangedIn: String?
+        var exchangedIn: UUID?
         transport.providerExchangeHandler = { _, _, _ in
             exchangedIn = store.identifier
             return MobileProviderExchange(discovery: .secondFactorRequired(requirement), accountCreated: true)
