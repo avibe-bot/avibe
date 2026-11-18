@@ -49,7 +49,7 @@ export function HealthRequestCardView({ state, operation = 'health.connect', met
 export function HealthRequestCard({ request, readOnly }: { request: HealthRequest; readOnly?: boolean }) {
   const live = useHealthRequest(request.id, request);
   return <HealthRequestCardView state={live.state ?? 'waiting'} operation={request.operation}
-    readOnly={readOnly} metrics={live.request?.metrics ?? request.metrics} busy={live.busy} loadError={live.loadError} onAuthorize={readOnly ? undefined : live.authorize} />;
+    readOnly={readOnly || !live.canAuthorize} metrics={live.request?.metrics ?? request.metrics} busy={live.busy} loadError={live.loadError} onAuthorize={readOnly ? undefined : live.authorize} />;
 }
 
 /** ui/design: health/landing — a notification trampoline; no health values or settings. */
@@ -81,7 +81,7 @@ function HealthLandingRequest({ id }: { id: string }) {
     <p role="status">{t(live.loadError ? 'health.loadError' : 'health.loading')}</p>
     <Button asChild variant="outline"><Link to="/inbox">{t('health.landing.openConversations')}</Link></Button>
   </div>;
-  return <HealthLandingView {...live} state={live.state} operation={live.request.operation} onAuthorize={live.authorize} />;
+  return <HealthLandingView {...live} readOnly={!live.canAuthorize} state={live.state} operation={live.request.operation} onAuthorize={live.authorize} />;
 }
 
 export default function HealthLandingPage() {

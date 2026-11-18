@@ -87,7 +87,7 @@ describe('Health request production consumers (synthetic server and native peer)
     const call = installBridge();
     fetchMock.mockImplementation(async (url: string) => url.includes('/pairings') ? Response.json({ code: 'request_expired' }, { status: 409 }) : Response.json(request));
     mount(<HealthRequestCard request={request} />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Authorize on iPhone' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' }));
     await screen.findByText(en.health.note.failed);
     expect(call).not.toHaveBeenCalled();

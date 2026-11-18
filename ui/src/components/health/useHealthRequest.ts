@@ -1,53 +1,100 @@
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { connectHealthRequest, getHealthRequest, healthRequestView, type HealthRequest, type HealthViewState } from '@/lib/healthRequests';
+
+type LiveState = {
+  id: string;
+  request?: HealthRequest;
+  known: boolean;
+  loadError: boolean;
+  busy: boolean;
+  connection: HealthViewState | null;
+};
+const unknownState = (id: string): LiveState => ({ id, known: false, loadError: false, busy: false, connection: null });
+const terminal = (request?: HealthRequest) => request && !['queued', 'claimed'].includes(request.state);
 
 export function useHealthRequest(id: string, initial?: HealthRequest) {
   const active = useRouteSurfaceActive();
-  const [request, setRequest] = useState(initial);
-  const [loadError, setLoadError] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [connection, setConnection] = useState<HealthViewState | null>(null);
-  const mounted = useRef(true);
-  const inFlight = useRef(false);
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const next = await getHealthRequest(id, signal);
-      if (!signal?.aborted && mounted.current) { setRequest(next); setLoadError(false); }
-      return next;
-    } catch {
-      if (!signal?.aborted && mounted.current) setLoadError(true);
-    }
-  }, [id]);
+  const [live, setLive] = useState<LiveState>(() => unknownState(id));
+  const owner = useRef<{ id: string; authorize: () => Promise<void> } | null>(null);
+
   useEffect(() => {
-    mounted.current = true;
-    if (!active) return () => { mounted.current = false; };
-    const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      const next = await refresh(abort.signal);
-      if (!abort.signal.aborted && (!next || ['queued', 'claimed'].includes(next.state))) timer = setTimeout(poll, 3000);
+    // One lifetime owns both reads and the pairing attempt. A route change retires all of them.
+    const lifetime = new AbortController();
+    let snapshot = unknownState(id);
+    let read: AbortController | undefined;
+    let sequence = 0;
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const publish = () => { if (!lifetime.signal.aborted) setLive({ ...snapshot }); };
+    publish();
+
+    const refresh = async () => {
+      if (lifetime.signal.aborted || terminal(snapshot.request)) return;
+      clearTimeout(timer);
+      read?.abort();
+      const attempt = new AbortController();
+      read = attempt;
+      const current = ++sequence;
+      const ownsRead = () => !lifetime.signal.aborted && !attempt.signal.aborted && current === sequence;
+      try {
+        const next = await getHealthRequest(id, attempt.signal);
+        if (!ownsRead()) return;
+        snapshot = { ...snapshot, request: next, known: true, loadError: false };
+        failures = 0;
+        publish();
+      } catch {
+        if (!ownsRead()) return;
+        snapshot = { ...snapshot, known: false, loadError: true };
+        failures++;
+        publish();
+      } finally {
+        // Both poll and post-authorization reads schedule here; a superseded read cannot re-arm.
+        // After three failed reads, reopening the page starts a fresh bounded attempt window.
+        if (ownsRead() && !terminal(snapshot.request) && failures < 3) {
+          timer = setTimeout(() => { void refresh(); }, 3000);
+        }
+      }
     };
-    void poll();
-    return () => { mounted.current = false; abort.abort(); clearTimeout(timer); };
-  }, [refresh, active]);
-  const authorize = async () => {
-    if (!request || inFlight.current || loadError) return;
-    inFlight.current = true;
-    setBusy(true);
-    try {
-      const result = await connectHealthRequest(request);
-      if (mounted.current) setConnection(result.state);
-    } catch {
-      if (mounted.current) setConnection('failed');
-    } finally {
-      inFlight.current = false;
-      if (mounted.current) { setBusy(false); void refresh(); }
-    }
-  };
+
+    const authorize = async () => {
+      const request = snapshot.request;
+      if (lifetime.signal.aborted || snapshot.busy || !snapshot.known || snapshot.loadError
+        || !request || healthRequestView(request) !== 'authorize') return;
+      snapshot = { ...snapshot, busy: true };
+      publish();
+      try {
+        const result = await connectHealthRequest(request, lifetime.signal);
+        if (!lifetime.signal.aborted) snapshot = { ...snapshot, connection: result.state };
+      } catch {
+        if (!lifetime.signal.aborted) snapshot = { ...snapshot, connection: 'failed' };
+      } finally {
+        if (!lifetime.signal.aborted) {
+          snapshot = { ...snapshot, busy: false };
+          publish();
+          void refresh();
+        }
+      }
+    };
+
+    owner.current = active ? { id, authorize } : null;
+    if (active) void refresh();
+    return () => {
+      owner.current = null;
+      lifetime.abort();
+      read?.abort();
+      clearTimeout(timer);
+    };
+  }, [id, active]);
+
+  // Creation metadata may draw a card, but only this route's successful live read opens its action.
+  const current = live.id === id ? live : unknownState(id);
+  const request = current.request ?? initial;
   const serverView = request ? healthRequestView(request) : null;
-  // A bridge result never changes the request. Only queued/claimed may show the connection receipt.
-  const state = request && (request.state === 'queued' || request.state === 'claimed') && connection
-    ? connection : serverView;
-  return { request, state, busy, loadError, authorize };
+  const state = request && !terminal(request) && current.connection ? current.connection : serverView;
+  const authorize = async () => {
+    if (active && owner.current?.id === id) await owner.current.authorize();
+  };
+  return { request, state, busy: current.busy, loadError: current.loadError,
+    canAuthorize: active && current.known && !current.loadError, authorize };
 }

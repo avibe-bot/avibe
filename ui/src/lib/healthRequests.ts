@@ -1,4 +1,4 @@
-import { apiFetch } from './apiFetch';
+import { apiFetch, withApiDeadline } from './apiFetch';
 import { hasNativeCapability, isNativeShell, nativeHealthConnect } from './native';
 
 export type HealthRequest = {
@@ -40,25 +40,37 @@ export function healthRequestView(request: HealthRequest): HealthViewState {
   return 'waiting';
 }
 
+// Metadata and pairing are short requests. Cover CSRF, fetch and body decoding with one deadline.
+const HEALTH_HTTP_DEADLINE_MS = 10_000;
+
 export async function getHealthRequest(id: string, signal?: AbortSignal): Promise<HealthRequest> {
-  const response = await apiFetch(`/api/mobile/requests/${encodeURIComponent(id)}`, { signal, cache: 'no-store' });
-  if (!response.ok) throw new Error('health_status_unavailable');
-  const request = readHealthRequest(await response.json());
-  if (!request || request.id !== id) throw new Error('health_status_invalid');
-  return request;
+  return withApiDeadline(HEALTH_HTTP_DEADLINE_MS, signal, async (requestSignal) => {
+    const response = await apiFetch(`/api/mobile/requests/${encodeURIComponent(id)}`, { signal: requestSignal, cache: 'no-store' });
+    if (!response.ok) throw new Error('health_status_unavailable');
+    const request = readHealthRequest(await response.json());
+    requestSignal.throwIfAborted();
+    if (!request || request.id !== id) throw new Error('health_status_invalid');
+    return request;
+  });
 }
 
-export async function connectHealthRequest(request: HealthRequest) {
+export async function connectHealthRequest(request: HealthRequest, signal?: AbortSignal) {
   if (healthRequestView(request) !== 'authorize') throw new Error('health_unavailable');
-  const response = await apiFetch('/api/mobile/pairings', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ request_id: request.id }),
+  const pairingCode = await withApiDeadline(HEALTH_HTTP_DEADLINE_MS, signal, async (requestSignal) => {
+    const response = await apiFetch('/api/mobile/pairings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: request.id }), signal: requestSignal,
+    });
+    if (!response.ok) throw new Error('health_pairing_failed');
+    const pairing = await response.json() as { pairing_code?: unknown };
+    requestSignal.throwIfAborted();
+    if (typeof pairing.pairing_code !== 'string' || !pairing.pairing_code) throw new Error('health_pairing_invalid');
+    return pairing.pairing_code;
   });
-  if (!response.ok) throw new Error('health_pairing_failed');
-  const pairing = await response.json() as { pairing_code?: unknown };
-  if (typeof pairing.pairing_code !== 'string' || !pairing.pairing_code) throw new Error('health_pairing_invalid');
   // This one-time code stays in this call, never in UI state, URLs or storage.
-  const result = await nativeHealthConnect({ requestId: request.id, pairingCode: pairing.pairing_code });
+  // Retired routes may not forward a late code. Native authorization itself is user-paced.
+  signal?.throwIfAborted();
+  const result = await nativeHealthConnect({ requestId: request.id, pairingCode });
   if (!result || !['connected', 'declined', 'failed'].includes(result.state)) throw new Error('health_connect_failed');
   return result;
 }
