@@ -12,9 +12,11 @@ replace complete windows monotonically; empty and missing components remain
 explicit. Local Agents read only the four approved data groups from independent
 private storage. No browser API returns health values. Request results, cards,
 callbacks, access records, and logs contain metadata only.
-The private mobile storage tree is also excluded from generic file reads,
-recursive copy/move/export, registered media, and Show serving. The general
-same-origin Show/file-browser authority model is outside this change.
+The private mobile storage tree is also excluded from generic file reads/copies,
+registered media, and Show paths. Recursive copy and cross-filesystem move
+fallback validate descendants before publishing. Ordinary delete and
+same-filesystem move retain their existing semantics. The general same-origin
+Show/file-browser authority model is outside this change.
 
 The existing instance host fence stays in force. Device routes bypass cookie
 and CSRF authentication only after exact method/path and raw-path matching;
@@ -29,6 +31,9 @@ and access records after 90 days; revoke, sharing, ownership change, sign-out,
 and unused credentials purge device health data. Controller maintenance runs off
 its event loop. OS waiter locks and transactional continuation claims give the
 synchronous waiter or a stable callback Run sole continuation ownership.
+These retention rules concern active mobile storage; they do not erase
+conversation transcripts, model contexts/caches, historical backups or
+provider-side copies. No system backup configuration is changed.
 
 ## Verification
 
@@ -115,6 +120,67 @@ Review follow-up on `a2fd5038a5f669792ecec5eba5e9ece9dd904359`:
   storage correction. Current CLI process identity alone does not establish
   human ownership, and same-user arbitrary shell access is not isolated from the
   database. This policy is an outstanding delivery gate.
+
+## Current-instance repair scope (November 18, 13:18)
+
+Max's 13:10:41 decision selects the existing instance and supersedes the
+separate-instance deployment route. The supported configuration inspection found
+no enabled external IM, no bindings on all five platforms, no additional live
+allowlist grants and a loopback UI listener. This current owner-only configuration
+is the acceptance target; future sharing/IM changes require another assessment.
+It is not proof of a hard execution boundary or acceptance of all residual risks.
+
+The recursive-copy finding on `a0f3eb51d72cae86561084362f697372fd49132b`
+and the independently reproduced descriptor-alias exposure are still open before
+this repair. Three findings-bearing heads in this root class stopped lane
+patching. Main diagnosed the complete inventory and authorized this finite
+repair, with one commit/push and another main-owned security delta review:
+
+- Deny original, symlink-intermediate and resolved descriptor namespaces through
+  the existing file/media/Show gates. Preserve private-root identity, absent-root
+  anchors and target-local failure behavior.
+- At file download and copy input opens, check `fstat` against the operation's
+  private identity snapshot, then consume that same descriptor. No destructive
+  open or output precedes this decision.
+- Reuse checked measurement/traversal for recursive copy and EXDEV fallback.
+  Recheck during actual consumption, including symlink targets. A protected
+  descendant rejects the operation without publishing a partial destination or
+  removing the source; clean only this operation's stage and record its path if
+  cleanup fails. This is not an atomic transaction against concurrent processes.
+- Keep the copy endpoint's size budget, without adding it to EXDEV moves.
+  Snapshot construction is O(private entries); subsequent identity membership is
+  O(1) per visited source entry, with O(private entries) snapshot memory. There is
+  no configured upper bound on the number of private entries scanned.
+- Consumer regressions use real POSIX descriptors and nested private hard links,
+  symlinks, late insertion after measurement, unchanged overwrite destinations and
+  source preservation. A normal 400-file tree must still copy/move. Linux fd and
+  map_files checks require actual Linux CI; macOS skips do not satisfy that gate.
+
+Trusted original-owner provenance across delegation remains **unimplemented**.
+CLI environment caller/session labels are audit data, and live instance
+eligibility is not human-source authentication. This repair does not implement
+source infrastructure or isolation deployment. It does not block arbitrary
+same-OS code, terminals, author-controlled Show code, preexisting copies, or new
+private inodes hard-linked outside the tree after the snapshot. These limits
+must stay visible in delivery reporting; option C is not claimed complete.
+Another uncovered counterexample in this boundary class stops further patches
+and returns the full inventory to main.
+
+Local repair evidence:
+
+- Loading the three original consumer modules from `a0f3eb51` with the new
+  synthetic tests reproduced 25 failures, including HTTP 200 descriptor reads,
+  media registration/serving, Show serving and recursive private-link export.
+  The current consumers pass all 29 focused repair cases on macOS; two real
+  Linux procfs cases remain for CI.
+- All 1,095 health, file-browser, media, Show and ACL consumer cases pass on
+  macOS, including prior firmlink, `/.vol`, percent-root, missing-root and
+  target-error cases. `AUTH-SETUP-180` also passes independently with the real
+  MobileStore, SQLite, CLI parser/executor and ASGI device routes; only the
+  phone, control plane and push transport are synthetic.
+- Main's bridge decision (a) is reflected in `health-data.md`: connected means
+  committed connection; synchronization success still requires upload ACK and
+  server-accepted receipt. No device protocol or lease change.
 
 Authorized: implementation and a non-draft English PR through Merge-ready.
 Not authorized: merge, install an S1 package locally, modify Apple App ID or

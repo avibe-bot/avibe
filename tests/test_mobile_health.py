@@ -598,6 +598,276 @@ def test_private_identity_covers_hard_links_and_literal_percent_roots(store, tmp
     assert files.file_content(str(ordinary)).data == b"ordinary"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor aliases")
+@pytest.mark.parametrize("surface", ["file", "register", "media", "show", "runtime"])
+@pytest.mark.parametrize("alias_kind", ["fd", "symlink"])
+def test_fd_aliases_cannot_publish_private_bytes(
+    store, mobile_http, tmp_path, surface, alias_kind,
+):
+    """All path consumers refuse descriptor aliases, including previously minted media."""
+    from urllib.parse import quote
+    from core import file_browser_service as files
+    from storage import media_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import media_objects
+
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_text("synthetic-private-marker")
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_text("ordinary")
+    client, _ = mobile_http
+    if surface in {"register", "media"}:
+        from storage.importer import ensure_sqlite_state
+
+        ensure_sqlite_state()
+    with secret.open("rb") as handle:
+        alias = Path(f"/dev/fd/{handle.fileno()}")
+        if alias_kind == "symlink":
+            link = tmp_path / "descriptor-alias.txt"
+            link.symlink_to(alias)
+            alias = link
+        if surface == "file":
+            response = client.get("/api/files/content?path=" + quote(str(alias), safe=""))
+            assert response.status_code == 403
+            assert "synthetic-private-marker" not in response.text
+        elif surface == "register":
+            with get_cached_sqlite_engine().begin() as conn:
+                with pytest.raises(ValueError, match="Private mobile storage"):
+                    media_service.register(conn, scope_id=None, session_id=None, kind="file",
+                                           source="test", local_path=str(alias))
+        elif surface == "media":
+            with get_cached_sqlite_engine().begin() as conn:
+                token = media_service.register(conn, scope_id=None, session_id=None, kind="file",
+                                               source="test", local_path=str(ordinary))
+                # A token minted before the new guard must not retain the old capability.
+                conn.execute(media_objects.update().where(media_objects.c.token == token).values(
+                    local_path=str(alias),
+                ))
+            response = client.get(f"/api/media/{token}")
+            assert response.status_code == 404
+            assert "synthetic-private-marker" not in response.text
+        elif surface == "show":
+            with ui_server.app.test_request_context("/"):
+                response = ui_server._show_page_file_response(Path("/"), str(alias).lstrip("/"))
+                assert response.status_code == 404
+        else:
+            assert ui_server._is_show_page_runtime_denied_path(f"@fs{alias}", session_id="ses_fake")
+    assert files.file_content(str(ordinary)).data == b"ordinary"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Requires real Linux procfs")
+@pytest.mark.parametrize("namespace", ["fd", "map_files"])
+def test_linux_proc_descriptor_namespaces_are_denied_before_output(store, tmp_path, namespace):
+    """Use actual procfs links; an ordinary target must not erase namespace policy."""
+    import mmap
+    from core import file_browser_service as files
+    from core.mobile_storage_boundary import MobileStorageBoundary
+
+    ordinary = tmp_path / "mapped.txt"
+    ordinary.write_bytes(b"ordinary mapped bytes")
+    with ordinary.open("rb") as handle, mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ):
+        if namespace == "fd":
+            alias = Path(f"/proc/self/fd/{handle.fileno()}")
+        else:
+            alias = next(
+                path for path in Path("/proc/self/map_files").iterdir()
+                if os.readlink(path) == str(ordinary)
+            )
+        assert alias.is_symlink() and os.readlink(alias) == str(ordinary)
+        assert MobileStorageBoundary().is_private_path(alias)
+        with pytest.raises(files.FileBrowserError) as failure:
+            files.file_content(str(alias))
+        assert failure.value.status_code == 403
+    assert files.file_content(str(ordinary)).data == b"ordinary mapped bytes"
+
+
+@pytest.mark.parametrize("replacement_time", ["before_open", "after_open"])
+def test_file_content_validates_and_consumes_the_same_open_object(
+    store, tmp_path, monkeypatch, replacement_time,
+):
+    """A private object substituted at open is denied; a later path swap is never reopened."""
+    from core import file_browser_service as files
+
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_bytes(b"synthetic-private-marker")
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_bytes(b"ordinary")
+    original_open = os.open
+    opened = []
+
+    def swap_at_open(path, flags, *args, **kwargs):
+        if Path(path) != ordinary:
+            return original_open(path, flags, *args, **kwargs)
+        opened.append(path)
+        if replacement_time == "before_open":
+            return original_open(secret, flags, *args, **kwargs)
+        fd = original_open(path, flags, *args, **kwargs)
+        ordinary.unlink()
+        ordinary.symlink_to(secret)
+        return fd
+
+    monkeypatch.setattr(os, "open", swap_at_open)
+    if replacement_time == "before_open":
+        with pytest.raises(files.FileBrowserError) as failure:
+            files.file_content(str(ordinary))
+        assert failure.value.status_code == 403
+    else:
+        assert files.file_content(str(ordinary)).data == b"ordinary"
+    assert len(opened) == 1
+
+
+def test_copy_rejects_private_object_substituted_at_open_before_creating_output(store, tmp_path, monkeypatch):
+    from core import file_browser_service as files
+
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_bytes(b"synthetic-private-marker")
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_bytes(b"ordinary")
+    destination = tmp_path / "export.txt"
+    original_open = os.open
+
+    def substitute_private_object(path, flags, *args, **kwargs):
+        return original_open(secret if Path(path) == ordinary else path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", substitute_private_object)
+    with pytest.raises(files.FileBrowserError) as failure:
+        files.copy_path(str(ordinary), str(destination))
+    assert failure.value.status_code == 403
+    assert not destination.exists()
+    assert not list(tmp_path.glob(f"{files._COPY_TEMP_PREFIX}*"))
+    assert ordinary.read_bytes() == b"ordinary"
+
+
+@pytest.mark.parametrize("operation", ["copy", "exdev"])
+def test_ordinary_large_directory_copy_and_cross_device_move_keep_working(store, tmp_path, monkeypatch, operation):
+    from core import file_browser_service as files
+
+    source = tmp_path / "ordinary-tree"
+    for index in range(40):
+        directory = source / str(index) / "nested"
+        directory.mkdir(parents=True)
+        for child in range(10):
+            (directory / f"{child}.txt").write_bytes(b"ordinary")
+    destination = tmp_path / "export"
+    original_rename = files._os_rename_noreplace
+
+    def cross_device(src, dst):
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "Synthetic cross-device move")
+        return original_rename(src, dst)
+
+    if operation == "exdev":
+        monkeypatch.setattr(files, "_os_rename_noreplace", cross_device)
+        # A move does not inherit the copy endpoint's optional size limit.
+        monkeypatch.setenv(files._COPY_TOTAL_SIZE_CAP_ENV, "0")
+    action = files.copy_path if operation == "copy" else files.move_path
+    assert action(str(source), str(destination))["ok"]
+    assert len(list(destination.rglob("*.txt"))) == 400
+    assert all(path.read_bytes() == b"ordinary" for path in destination.rglob("*.txt"))
+    assert source.exists() == (operation == "copy")
+    assert not list(tmp_path.glob(f"{files._COPY_TEMP_PREFIX}*"))
+
+
+@pytest.mark.parametrize("operation", ["copy", "exdev"])
+@pytest.mark.parametrize("overwrite", [False, True])
+@pytest.mark.parametrize("link_kind", ["hardlink", "symlink-file", "symlink-directory"])
+def test_recursive_export_refuses_private_descendants_without_publishing_or_removing_source(
+    store, tmp_path, monkeypatch, operation, overwrite, link_kind,
+):
+    """Even small deeply nested aliases cannot be laundered into a new public inode."""
+    from core import file_browser_service as files
+
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_bytes(b"synthetic-private-marker")
+    source = tmp_path / "public"
+    nested = source / "one" / "two"
+    nested.mkdir(parents=True)
+    (source / "ordinary.txt").write_bytes(b"ordinary")
+    alias = nested / "private-alias"
+    if link_kind == "hardlink":
+        os.link(secret, alias)
+    else:
+        target = secret if link_kind == "symlink-file" else secret.parent
+        alias.symlink_to(target, target_is_directory=link_kind == "symlink-directory")
+    destination = tmp_path / "export"
+    if overwrite:
+        destination.mkdir()
+        (destination / "original.txt").write_bytes(b"original")
+    monkeypatch.setenv(files._COPY_TOTAL_SIZE_CAP_ENV, "1024")
+    original_rename = files._os_rename_noreplace
+
+    def cross_device(src, dst):
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "Synthetic cross-device move")
+        return original_rename(src, dst)
+
+    if operation == "exdev":
+        monkeypatch.setattr(files, "_os_rename_noreplace", cross_device)
+    action = files.copy_path if operation == "copy" else files.move_path
+    with pytest.raises(files.FileBrowserError) as failure:
+        action(str(source), str(destination), overwrite=overwrite)
+    assert failure.value.status_code == 403
+    assert secret.read_bytes() == b"synthetic-private-marker"
+    assert source.is_dir() and alias.exists()
+    assert (source / "ordinary.txt").read_bytes() == b"ordinary"
+    if overwrite:
+        assert [entry.name for entry in destination.iterdir()] == ["original.txt"]
+        assert (destination / "original.txt").read_bytes() == b"original"
+    else:
+        assert not destination.exists()
+    assert not list(tmp_path.glob(f"{files._COPY_TEMP_PREFIX}*"))
+    assert not list(tmp_path.glob(".avibe-overwrite-*"))
+
+
+@pytest.mark.parametrize("operation", ["copy", "exdev"])
+def test_copy_checks_again_after_measurement_and_discards_partial_stage(
+    store, tmp_path, monkeypatch, operation,
+):
+    """A measured tree is not authority to consume subsequently replaced descendants."""
+    from core import file_browser_service as files
+
+    secret = store.path.parent / "synthetic.txt"
+    secret.write_bytes(b"synthetic-private-marker")
+    source = tmp_path / "public"
+    source.mkdir()
+    (source / "ordinary.txt").write_bytes(b"ordinary")
+    destination = tmp_path / "export"
+    destination.mkdir()
+    (destination / "original.txt").write_bytes(b"original")
+    source_identity = source.stat()
+    measure_name = "_measure_copy_directory_fd" if os.name == "posix" else "_measure_copy_directory_path"
+    original_measure = getattr(files, measure_name)
+    added = []
+
+    def inject_after_measurement(path, *args, **kwargs):
+        size = original_measure(path, *args, **kwargs)
+        info = os.fstat(path) if isinstance(path, int) else Path(path).stat()
+        if os.path.samestat(info, source_identity) and not added:
+            os.link(secret, source / "late-private.txt")
+            added.append(True)
+        return size
+
+    monkeypatch.setattr(files, measure_name, inject_after_measurement)
+    original_rename = files._os_rename_noreplace
+
+    def cross_device(src, dst):
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "Synthetic cross-device move")
+        return original_rename(src, dst)
+
+    if operation == "exdev":
+        monkeypatch.setattr(files, "_os_rename_noreplace", cross_device)
+    action = files.copy_path if operation == "copy" else files.move_path
+    with pytest.raises(files.FileBrowserError) as failure:
+        action(str(source), str(destination), overwrite=True)
+    assert failure.value.status_code == 403 and added
+    assert (source / "ordinary.txt").read_bytes() == b"ordinary"
+    assert (source / "late-private.txt").read_bytes() == secret.read_bytes()
+    assert [entry.name for entry in destination.iterdir()] == ["original.txt"]
+    assert not list(tmp_path.glob(f"{files._COPY_TEMP_PREFIX}*"))
+    assert not list(tmp_path.glob(".avibe-overwrite-*"))
+
+
 @pytest.mark.parametrize("error_number", [errno.EACCES, errno.EPERM])
 def test_inaccessible_public_link_does_not_hide_other_listing_or_search_results(
     store, tmp_path, monkeypatch, error_number,

@@ -16465,11 +16465,12 @@ def _show_page_file_response(root: Path, asset_path: str):
         _is_show_runtime_sensitive_file_segment(segment) for segment in segments
     ):
         return _show_page_file_not_found_response()
-    candidate = (root / decoded).resolve()
     from core.mobile_storage_boundary import is_mobile_private_path
 
-    if is_mobile_private_path(candidate):
+    raw_candidate = root / decoded
+    if is_mobile_private_path(raw_candidate):
         return _show_page_file_not_found_response()
+    candidate = raw_candidate.resolve()
     root_resolved = root.resolve()
     if candidate != root_resolved and root_resolved not in candidate.parents:
         return _show_page_file_not_found_response()

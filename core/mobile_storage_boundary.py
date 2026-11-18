@@ -5,10 +5,51 @@ from __future__ import annotations
 import errno
 import os
 from pathlib import Path
+import re
 import stat
 from urllib.parse import unquote
 
 from config import paths
+
+
+_PROC_DESCRIPTOR = re.compile(
+    r"^/proc/(?:self|thread-self|[0-9]+)/(?:task/[0-9]+/)?(?:fd|map_files)(?:/|$)"
+)
+
+
+def _descriptor_namespace(path: str) -> bool:
+    path = os.path.normpath(path)
+    return (
+        path == "/dev/fd" or path.startswith("/dev/fd/")
+        or path in {"/dev/stdin", "/dev/stdout", "/dev/stderr"}
+        or bool(_PROC_DESCRIPTOR.match(path))
+    )
+
+
+def _descriptor_alias(raw: str) -> bool:
+    """Check namespace spellings before realpath can erase a procfs alias."""
+    pending = Path(os.path.abspath(os.path.expanduser(raw)))
+    seen: set[Path] = set()
+    for _ in range(40):
+        if _descriptor_namespace(str(pending)):
+            return True
+        if pending in seen:
+            return False  # Ordinary cyclic links retain their existing entry semantics.
+        seen.add(pending)
+        parts = pending.parts
+        prefix = Path(parts[0])
+        for index, part in enumerate(parts[1:], start=1):
+            prefix /= part
+            if prefix.is_symlink():
+                destination = Path(os.readlink(prefix))
+                if not destination.is_absolute():
+                    destination = prefix.parent / destination
+                pending = Path(os.path.abspath(destination.joinpath(*parts[index + 1:])))
+                break
+        else:
+            return False
+    # An unresolvable chain cannot establish a safe namespace.
+    return True
 
 
 def _identity(path: Path) -> tuple[int, int] | None:
@@ -104,9 +145,13 @@ class MobileStorageBoundary:
         return self._ancestors
 
     def _matches(self, raw: str, include_ancestors: bool) -> bool:
+        if _descriptor_alias(raw):
+            return True
         # Unlike Path.resolve on older Python, realpath preserves an unreachable
         # cyclic entry so metadata/removal can still operate on the link itself.
         target = Path(os.path.realpath(os.path.expanduser(raw)))
+        if _descriptor_namespace(str(target)):
+            return True
         name = str(target).rstrip("/\\").casefold()
         for private in self._root_names:
             if name == private or name.startswith(private + os.sep):
@@ -129,6 +174,15 @@ class MobileStorageBoundary:
                     return True
             suffix = (candidate.name.casefold(), *suffix)
         return False
+
+    def is_private_stat(self, info: os.stat_result) -> bool:
+        """Validate an already-open object against this operation's snapshot."""
+        if self._unavailable:
+            return True
+        try:
+            return (info.st_dev, info.st_ino) in self._private_nodes()
+        except (OSError, RuntimeError, ValueError):
+            return True
 
     def is_private_path(self, value: str | Path, *, include_ancestors: bool = False) -> bool:
         if self._unavailable:

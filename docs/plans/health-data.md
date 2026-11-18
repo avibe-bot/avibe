@@ -46,7 +46,10 @@ Instance web page (conversation card) --2 native bridge health.connect--> App
 
 ### First connection: the entry point is the conversation
 
-1. In any conversation (Mac, IM, or phone), ask Vibey to read health data.
+1. In a verified owner Mac, Web, or phone conversation, or an IM direct
+   conversation verifiably belonging to the owner, ask any agent to read health
+   data. Group conversations, other people's conversations, and unverifiable
+   sources must not read.
 2. Vibey runs `vibe mobile health read`, receives `not_connected`, and then runs
    `vibe mobile health connect` to create a connection request.
 3. The request appears in two places; either can handle it:
@@ -88,7 +91,7 @@ foreground can present system health authorization; the Mac cannot do it.
 | --- | --- | --- | --- |
 | iOS health authorization | You, in the system UI | Data types the app can read; no writes | iOS Settings. The app cannot distinguish denial from no data |
 | Avibe device authorization | You, once in Avibe native confirmation | This iPhone → this instance; selected data groups | `vibe mobile health revoke`, sign-out, or automatic expiry after 60 days without credential use |
-| Reading within the instance | Max (confirmed November 18) | Every agent in the instance can run `vibe mobile health read`, not just Vibey | Every read records who, when, metrics and dates, without values. Use revoke to stop reading |
+| Reading within the instance | Max (November 18, 08:47; option C at 10:44) | Any agent may serve the owner, not just Vibey; each read requires a verified owner private source; group, other-person, unknown and mixed sources are denied | Record allowed and denied access metadata, without values. Use revoke to stop sync and delete instance data |
 | AI service | Max (confirmed November 18) | The model currently used by the instance's agent may read; values enter that agent's model context and conversation record | Content already sent to a model provider cannot be recalled. Use internal TestFlight first; resolve review issues before external release |
 
 Additional rules:
@@ -96,6 +99,16 @@ Additional rules:
 - Connect only to your own, unshared instance. Sync automatically pauses when
   the instance becomes shared.
 - An iPhone syncs to only one instance at a time.
+- Option C constrains the request source, not the agent roster. Delegation,
+  bots, turns with multiple initiators, and Task/Watch execution must preserve
+  verifiable original provenance. Forwarding a group request into a local
+  session does not make it an owner request. Missing or mixed provenance is
+  denied; joining a group does not by itself disable all synchronization.
+- **Implementation gap:** current IM bindings have no Cloud-owner mapping.
+  Admin status, binding, local CLI execution, environment variables, or the
+  target session's creator do not authenticate the initiator. Trusted mapping
+  and provenance propagation require a separate scoped decision. Same-OS
+  arbitrary shell execution can bypass a CLI guard; it is not a sandbox.
 
 ## 4. Interface integration
 
@@ -158,7 +171,7 @@ instance health data. `read` returns:
 | No background sync in the initial release | Background sync included from the start |
 | Agent reads only manually shared snapshots | Agent reads automatically synced data and can request best-effort refresh |
 | Health-purpose AI services only | Allow the model currently used by the instance agent; resolve review issues before external release |
-| (Undecided in H0) Reading scope | All agents in the instance can read |
+| (Undecided in H0) Reading scope | All agents may serve the verified owner; option C restricts the initiating source |
 | Native bridge `app.showHealth()` | Native bridge `health.connect()`, authorization only |
 
 Unchanged:
@@ -181,11 +194,32 @@ Unchanged:
    resolve Apple's two rules:
    - Third parties receiving health data must provide health / fitness services.
    - App Review 5.1.2(i) requires disclosure of third-party AI and permission.
-4. **Every agent in the instance can read**, not just Vibey. Continue recording
-   who, when, metrics and dates, without values.
+4. **Every agent in the instance may read for the owner**, not just Vibey.
+   No agent allowlist. Record who, when, metrics and dates, without values.
+5. **November 18, 10:44:06: option C.** Allow owner App/Web conversations and
+   verifiably owner-bound IM direct conversations. Deny groups (including an
+   owner asking in a group), other people's direct conversations, and unknown
+   or mixed sources. Delegation, background work, and session reuse cannot
+   convert the original source into owner authority. Unverified environment
+   variables may aid diagnostics, never authentication.
+6. **November 18, 13:10:41: use the existing instance.** This supersedes the
+   earlier separate-instance route. Do not create an instance, OS user,
+   sandbox, VM, host, VPN, phone-only entrance, or data migration.
 
-Caller identity comes from environment variables; this is a known boundary.
-Given instance-wide reading access, no agent allowlist is needed.
+The supported read-only configuration check at 13:13 found no enabled external
+IM platforms, no bindings on all five platforms, no extra live-allowlist grants,
+and a UI listener on 127.0.0.1. This owner-only configuration is the acceptance
+target. These facts do not establish whole-machine or browser isolation, accept
+all residual risks, or remove option C. Future sharing or IM changes require
+another assessment.
+
+**Current implementation status:** CLI caller/session environment values are
+audit labels. The CLI checks live personal-owner/unshared instance eligibility;
+it does not yet enforce trusted original-owner provenance across delegation.
+That gap remains explicit. The bounded file-service repair does not require a
+cross-repository filesystem rewrite or whole-platform isolation project.
+Merge, installation, Apple profiles, TestFlight, and real-data acceptance remain
+subject to their separate authorizations.
 
 ## 8. Implementation plan
 
@@ -441,9 +475,17 @@ vibe mobile requests await <request-id> [--timeout S]
 | Item | Description |
 | --- | --- |
 | `capabilities.health = 1` | Capability declaration |
-| `health.connect({requestId, pairingCode})` | Returns `{state: "connected" \| "declined" \| "failed"}`. Native code first displays confirmation, then system authorization, then uses the code to pair and backfill |
+| `health.connect({requestId, pairingCode})` | Returns `{state: "connected" \| "declined" \| "failed"}`. `connected` means confirmation, pairing, manifest, exact request claim validation and durable local connection commit have succeeded; initial synchronization continues through the persisted reservation/outbox |
 
 - Instance main frame only.
+- `connected` confirms the connection, not completed health synchronization.
+  The request becomes `succeeded` only after an actual upload acknowledgement
+  and the server accepts the result receipt. Ordinary network delay after the
+  local commit does not revoke the connection or imply successful sync. The
+  existing three-claim lease contract and bounded network attempts stay intact.
+- `last_contact_at` is historical contact, not real-time device availability.
+  App sign-out revokes local access immediately and attempts remote deletion;
+  it does not promise that offline remote history has already been deleted.
 - **Returns no health data.**
 - All other `health.*` operations return `unsupported`.
 
@@ -464,6 +506,21 @@ vibe mobile requests await <request-id> [--timeout S]
 - **Logs:** IDs, operation, state, error codes only; no values.
 - **Known exposure:** after an agent reads, values enter its conversation
   record and model context.
+- Retention and revoke cleanup apply to active mobile storage, not all copies
+  in transcripts, model contexts/caches, historical backups, or model-provider
+  systems. This change does not configure system backup exclusions.
+- File-service protection uses one operation's private inode snapshot.
+  Descriptor namespaces are denied before path resolution; file downloads and
+  copy input are checked with `fstat` and read through that same descriptor.
+  Recursive measurement and copying check descendants; cross-filesystem move
+  uses the same checked staging and does not publish a rejected tree or delete
+  its source. A failed stage cleanup records its path. Ordinary delete and
+  same-filesystem move retain their existing semantics; there is no
+  cross-process atomic tree transaction.
+- This finite boundary does not isolate same-OS arbitrary code, terminals,
+  author-controlled Show code, existing copies, or new private inodes linked
+  outside the tree after its snapshot. Media/Show path guards are not a general
+  replacement for opened-object authorization throughout the platform.
 
 ### D. Metric definitions (read only)
 
