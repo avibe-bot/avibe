@@ -6,7 +6,7 @@ use handshake_limit::{HandshakeLimit, HandshakePermit};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use iroh::{
-    Endpoint, EndpointAddr, NetReportConfig, RelayConfig, RelayMode, RelayUrl, Watcher,
+    Endpoint, EndpointAddr, NetReportConfig, RelayMap, RelayMode, RelayUrl, Watcher,
     endpoint::{Incoming, IncomingAddr, PortmapperConfig, QuicTransportConfig, VarInt, presets},
 };
 use serde::{Deserialize, Serialize};
@@ -75,27 +75,25 @@ enum Command {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RelayOffer {
-    version: u32,
-    url: String,
+    policy: TrialPolicy,
+}
+
+#[derive(Deserialize)]
+enum TrialPolicy {
+    #[serde(rename = "public-trial-v1")]
+    PublicTrialV1,
 }
 
 impl RelayOffer {
-    fn validate(self) -> Result<RelayUrl> {
-        let invalid = SidecarError("invalid_relay");
-        let url: RelayUrl = self.url.parse().map_err(|_| invalid)?;
-        if self.version != 1
-            || url.scheme() != "https"
-            || url.host_str().is_none()
-            || url.origin().ascii_serialization() != self.url
-        {
-            return Err(invalid);
+    fn map(self) -> RelayMap {
+        match self.policy {
+            TrialPolicy::PublicTrialV1 => iroh::defaults::prod::default_relay_map(),
         }
-        Ok(url)
     }
 }
 
 struct StartConfig {
-    relay: Option<RelayUrl>,
+    relay: Option<RelayMap>,
     stream_addr: SocketAddr,
     token: String,
     max_connections: u32,
@@ -114,7 +112,7 @@ enum Message<'a> {
     #[serde(rename = "addresses")]
     Addresses { addresses: Vec<String> },
     #[serde(rename = "relay_status")]
-    RelayStatus { connected: bool },
+    RelayStatus { url: Option<&'a str> },
     #[serde(rename = "peer_closed")]
     PeerClosed {
         endpoint_id: &'a str,
@@ -224,7 +222,7 @@ fn parse_start(command: Command) -> Result<StartConfig> {
         return Err(SidecarError("invalid_limits"));
     }
     Ok(StartConfig {
-        relay: relay.map(RelayOffer::validate).transpose()?,
+        relay: relay.map(RelayOffer::map),
         stream_addr,
         token: token.to_ascii_lowercase(),
         max_connections,
@@ -455,9 +453,7 @@ async fn run(control: &Control) -> Result<()> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(match &config.relay {
             None => RelayMode::Disabled,
-            Some(url) => {
-                RelayMode::Custom([RelayConfig::new(url.clone(), None)].into_iter().collect())
-            }
+            Some(map) => RelayMode::Custom(map.clone()),
         })
         .net_report_config(NetReportConfig::minimal())
         .portmapper_config(PortmapperConfig::Disabled)
@@ -481,24 +477,30 @@ async fn run(control: &Control) -> Result<()> {
         let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
         return Err(error);
     }
-    // Publish the endpoint key before waiting for relay admission: its owner
-    // needs this key to obtain the backend lease. Never infer ready from URL.
-    let relay_task = config.relay.clone().map(|url| {
+    // Endpoint readiness does not imply a connected home relay.
+    let relay_task = config.relay.clone().map(|map| {
         let mut status = endpoint.home_relay_status();
         let control = control.clone();
         tokio::spawn(async move {
-            let mut previous = false;
+            let mut previous: Option<RelayUrl> = None;
             loop {
-                let connected = status
+                let observed = status
                     .get()
                     .iter()
-                    .any(|r| r.url() == &url && r.is_connected());
-                if connected != previous {
-                    if let Err(error) = control.emit(&Message::RelayStatus { connected }).await {
+                    .filter(|r| r.is_connected() && map.contains(r.url()))
+                    .map(|r| r.url().clone())
+                    .min();
+                if observed != previous {
+                    if let Err(error) = control
+                        .emit(&Message::RelayStatus {
+                            url: observed.as_ref().map(|url| url.as_str()),
+                        })
+                        .await
+                    {
                         control.fail(error).await;
                         return;
                     }
-                    previous = connected;
+                    previous = observed;
                 }
                 tokio::select! {
                     _ = control.stop.wait() => return,
@@ -543,7 +545,7 @@ async fn run(control: &Control) -> Result<()> {
                 let Ok(permit) = connection_limit.clone().try_acquire_owned() else { incoming.ignore(); continue; };
                 let source = match incoming.remote_addr() {
                     IncomingAddr::Ip(source) => Some(source.ip()),
-                    IncomingAddr::Relay { url, endpoint_id } if config.relay.as_ref() == Some(&url)
+                    IncomingAddr::Relay { url, endpoint_id } if config.relay.as_ref().is_some_and(|map| map.contains(&url))
                         && control.admissions.contains(&endpoint_id.to_string()) => None,
                     _ => { incoming.ignore(); continue; }
                 };
@@ -583,46 +585,23 @@ mod relay_tests {
     use super::*;
 
     #[test]
-    fn relay_control_accepts_only_canonical_https_origin() {
-        for origin in [
-            "https://relay.example.invalid",
-            "https://relay.example.invalid:8443",
-        ] {
+    fn only_the_pinned_trial_policy_selects_relays() {
+        let offer: RelayOffer = serde_json::from_str(r#"{"policy":"public-trial-v1"}"#).unwrap();
+        let urls: Vec<RelayUrl> = offer.map().urls();
+        assert_eq!(urls.len(), 4);
+        for region in ["use1", "usw1", "euc1", "aps1"] {
             assert!(
-                RelayOffer {
-                    version: 1,
-                    url: origin.into()
-                }
-                .validate()
-                .is_ok()
+                urls.iter()
+                    .any(|url| url.as_str() == format!("https://{region}-1.relay.n0.iroh.link./"))
             );
         }
-        for origin in [
-            "http://relay.example.invalid",
-            "https://relay.example.invalid/redirect",
-            "https://u@relay.example.invalid",
-            "https://relay.example.invalid?token=x",
-            "https://relay.example.invalid#f",
-            "https://relay.example.invalid/../",
-            " https://relay.example.invalid",
+        for invalid in [
+            r#"{"policy":"unknown"}"#,
+            r#"{"url":"https://other.invalid"}"#,
+            r#"{"policy":"public-trial-v1","url":"https://other.invalid"}"#,
         ] {
-            assert!(
-                RelayOffer {
-                    version: 1,
-                    url: origin.into()
-                }
-                .validate()
-                .is_err()
-            );
+            assert!(serde_json::from_str::<RelayOffer>(invalid).is_err());
         }
-        assert!(
-            RelayOffer {
-                version: 2,
-                url: "https://relay.example.invalid".into()
-            }
-            .validate()
-            .is_err()
-        );
     }
 }
 
