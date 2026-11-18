@@ -299,6 +299,25 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(shown?.errorCode, 561145187)
     }
 
+    /// `record()` returning false is Avibe's own error: no number that
+    /// would look like a system code.
+    func testARecorderThatWouldNotRecordShowsNoMadeUpCode() async {
+        let world = World()
+        world.recorderStartError = VoiceCaptureRecorder.Failure.start
+        _ = await world.controller().toggle()
+        XCTAssertEqual(world.activities.first?.ended?.reason, .recordingFailed)
+        XCTAssertNil(world.activities.first?.ended?.errorCode)
+    }
+
+    func testADoubledRunAfterAnyFailureNoticeShowsOneNotice() async {
+        let world = World()
+        world.instance.statusResult = .failure(VoiceCaptureInstanceClient.Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        _ = await controller.toggle()
+        XCTAssertEqual(world.activities.count, 1)
+    }
+
     func testATakeFileThatCannotBeMadeIsNotAPermissionProblemEither() async {
         let world = World()
         world.takeFileFails = true

@@ -145,6 +145,16 @@ final class VoiceCaptureController {
 
     /// The longest take; it is then sent as if the user stopped it.
     static let maximumDuration: Duration = .seconds(5 * 60)
+    /// The code the system answered (an OSStatus such as
+    /// `cannotStartRecording`, or a Cocoa file error); nil for Avibe's own
+    /// errors, whose numbers would mean nothing (`record()` returning false).
+    static func systemCode(_ error: Error) -> Int? {
+        if error is VoiceCaptureRecorder.Failure { return nil }
+        let ns = error as NSError
+        return ns.domain == NSOSStatusErrorDomain || ns.domain == NSCocoaErrorDomain
+            || ns.domain == AVFoundationErrorDomain ? ns.code : nil
+    }
+
     /// A run this soon after a failed start is the same press again.
     static let repeatWindow: TimeInterval = 1
     /// When a start last failed with a notice (see `repeatWindow`).
@@ -431,7 +441,7 @@ final class VoiceCaptureController {
             record("start: take file failed \(error)")
             instance.close()
             state = .idle
-            showNotice(phase: .failed, reason: .recordingFailed, errorCode: (error as NSError).code)
+            showNotice(phase: .failed, reason: .recordingFailed, errorCode: Self.systemCode(error))
             return .stopped
         }
 
@@ -454,7 +464,7 @@ final class VoiceCaptureController {
         do {
             try audio.start()
         } catch {
-            record("start: recorder failed \(error)")
+            record("start: recorder failed \((error as NSError).domain) \((error as NSError).code) \(error)")
             instance.close()
             state = .idle
             // Permission was checked above: this is the system refusing to
@@ -463,7 +473,7 @@ final class VoiceCaptureController {
             var failed = VoiceCaptureAttributes.ContentState(
                 phase: .failed, startedAt: startedAt, endedAt: startedAt, reason: .recordingFailed
             )
-            failed.errorCode = (error as NSError).code
+            failed.errorCode = Self.systemCode(error)
             await activity.end(
                 failed,
                 dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal))

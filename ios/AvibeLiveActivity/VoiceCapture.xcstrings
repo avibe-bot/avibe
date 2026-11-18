@@ -305,6 +305,22 @@
         }
       }
     },
+    "voiceCapture.reason.recordingFailedCode %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recording couldn't start (error %lld)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "录音没能开始（错误 %lld）。"
+          }
+        }
+      }
+    },
     "voiceCapture.reason.sendFailed" : {
       "localizations" : {
         "en" : {
