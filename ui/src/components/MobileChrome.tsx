@@ -6,7 +6,7 @@ import { ChevronDown, Loader2, Mic } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
-import { DirectPathLine } from './DirectPathLine';
+import { DirectTag } from './DirectTag';
 import { accountHeaderAvatarClassName, accountInitialFor } from './AccountAvatar';
 import { BotFace } from './workbench/bots/BotFace';
 import type { BotAvatar as BotAvatarSpec } from '../lib/bots';
@@ -274,9 +274,7 @@ export const MobileBrandHeader: React.FC<{
   return (
     <header className="sticky top-0 z-40 flex h-[calc(2.75rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
       {title && <h1 className="sr-only">{title}</h1>}
-      {/* The phone app with the `direct` capability adds one quiet line under the name, aligned
-          with it (ui/design: mobile-app/direct-path); everywhere else the column is the name alone. */}
-      <div className="flex min-w-0 flex-col">
+      <div className="flex min-w-0 items-center gap-2">
       {nativeAccountAction && instanceName ? <NativeInstanceName name={instanceName} /> : <Link
         to="/"
         className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -288,7 +286,7 @@ export const MobileBrandHeader: React.FC<{
         />
         <span className="truncate text-[13px] font-semibold">{t('appShell.title')}</span>
       </Link>}
-        <DirectPathLine className="pl-8" />
+        <DirectTag />
       </div>
       {/* Right side: the Add-to-Home-Screen nudge (renders only on iOS Safari
           when not yet installed; null everywhere else). Version / language /

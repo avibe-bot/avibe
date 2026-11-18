@@ -33,6 +33,7 @@ import {
   WORKBENCH_EVENT_RETRY_INITIAL_MS,
   workbenchEventStaleAfterMs,
 } from '../lib/workbenchEventConnection';
+import { liveStreamDirect, setLiveStreamDirect } from '../lib/liveStreamVia';
 import { ApiProvider, useApi } from './ApiContext';
 
 const STALE_AFTER_MS = workbenchEventStaleAfterMs(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
@@ -398,6 +399,36 @@ describe('ApiProvider workbench stream liveness', () => {
     networkBack();
     expect(onConnected).toHaveBeenCalledTimes(2);
     expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('says direct only while the stream that reported it lives, and asks each new stream again', () => {
+    setLiveStreamDirect(false);
+    render(<ApiProvider><Subscriber /></ApiProvider>);
+    // No tag before any stream has answered for itself.
+    expect(liveStreamDirect()).toBe(false);
+    FakeEventSource.latest().emit('connected', {
+      sub_id: 1,
+      interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+      via: 'direct',
+    });
+    emitControllerLeg(true);
+    expect(liveStreamDirect()).toBe(true);
+
+    const first = FakeEventSource.latest();
+    awayAndBack({ awayMs: STALE_AFTER_MS });
+    expect(first.closed).toBe(true);
+    expect(liveStreamDirect()).toBe(false);
+
+    // The replacement came in another way: the main listener is only "other".
+    FakeEventSource.latest().emit('connected', {
+      sub_id: 2,
+      interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+      via: 'other',
+    });
+    expect(liveStreamDirect()).toBe(false);
+    // A server too old to say is not direct either.
+    emitHandshake(3);
+    expect(liveStreamDirect()).toBe(false);
   });
 
   it('does not let a replacement stream inherit the old one as proof of life', () => {

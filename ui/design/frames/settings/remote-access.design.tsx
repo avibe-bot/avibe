@@ -49,12 +49,26 @@ const automaticWait = settingsFixtures({
   },
 });
 
+// Proposed 2026-11-18: direct, as current facts only. Shown while direct is turned on.
+const directOn = (pageVia: 'direct' | 'other') => settingsFixtures({
+  ...paired.api,
+  '/api/remote-access/status': {
+    ...(paired.api?.['/api/remote-access/status'] as RemoteAccessStatus),
+    direct: {
+      enabled: true, state: 'running', reason: 'published', certificate_not_after: '2027-02-14T08:00:00Z',
+      transport_running: true, direct_access_allowed: true,
+    },
+  },
+}, { stream: [{ after: 0, event: 'connected', raw: true, data: { sub_id: 1, via: pageVia } }] });
+
 const designFrames = frames([
   { name: 'unpaired', title: '设置 · 远程访问 · 未配对', width: 1440, height: 900, status: 'shipped', route, fixtures: unpaired, render: page },
   { name: 'running', title: '设置 · 远程访问 · 已配对、运行中', width: 1440, height: 900, status: 'shipped', route, fixtures: paired, render: page },
   { name: 'automatic-wait', title: 'Remote access · automatic retry, manual available', width: 1440, height: 900, status: 'shipped', route, fixtures: automaticWait, render: page },
   { name: 'automatic-wait-phone', title: 'Remote access · automatic retry on mobile', width: 390, height: 1100, status: 'shipped', route, fixtures: automaticWait, render: page },
   { name: 'phone', title: '设置 · 远程访问 · 手机', width: 390, height: 844, status: 'shipped', route, fixtures: unpaired, render: page },
+  { name: 'direct-page-direct', title: '设置 · 远程访问 · 直连已就绪，本页经直连', width: 390, height: 1000, status: 'proposed', route, fixtures: directOn('direct'), render: page, wait: 300 },
+  { name: 'direct-page-other', title: '设置 · 远程访问 · 直连已就绪，本页未走直连', width: 390, height: 1000, status: 'proposed', route, fixtures: directOn('other'), render: page, wait: 300 },
 ]);
 
 export default designFrames;

@@ -1,5 +1,5 @@
 import type { TranslationKey } from '@/i18n/types';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -28,6 +28,7 @@ import {
 import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
+import { liveStreamDirect, subscribeLiveStreamDirect } from '../lib/liveStreamVia';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
@@ -538,6 +539,8 @@ export const RemoteAccess: React.FC = () => {
         </div>
       </div>
 
+      <RemoteAccessDirectLines direct={status?.direct} />
+
       {running && networkPath && (
         <div className="border-b border-border px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -952,5 +955,39 @@ export const RemoteAccess: React.FC = () => {
         </div>
       )}
     </section>
+  );
+};
+
+const DIRECT_STATE_KEYS = {
+  running: 'remoteAccess.direct.stateReady',
+  starting: 'remoteAccess.direct.stateStarting',
+  'waiting-certificate': 'remoteAccess.direct.stateStarting',
+  'waiting-permission': 'remoteAccess.direct.stateStarting',
+  'transport-not-installed': 'remoteAccess.direct.stateNotInstalled',
+  stopping: 'remoteAccess.direct.stateStopping',
+  error: 'remoteAccess.direct.stateError',
+} as const satisfies Record<string, TranslationKey>;
+
+// The direct ingress, as current facts only: the instance's own state and certificate, and whether
+// this page's live stream came in through it (that stream's own handshake). No drop count and no
+// fallback reason: neither the instance nor the page can know them truthfully today. Shown only
+// while direct is turned on (ui/design: settings/remote-access/direct-*).
+const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }> = ({ direct }) => {
+  const { t } = useTranslation();
+  const pageDirect = useSyncExternalStore(subscribeLiveStreamDirect, liveStreamDirect, () => false);
+  if (!direct?.enabled) return null;
+  const stateKey = DIRECT_STATE_KEYS[direct.state as keyof typeof DIRECT_STATE_KEYS];
+  const state = t(stateKey ?? 'remoteAccess.direct.stateUnknown');
+  const notAfter = direct.certificate_not_after ? new Date(direct.certificate_not_after) : null;
+  const date = notAfter && !Number.isNaN(notAfter.getTime()) ? notAfter.toLocaleDateString() : null;
+  return (
+    <div className="space-y-1 border-b border-border px-5 py-3.5 text-[12px] text-muted">
+      <div>
+        {date
+          ? t('remoteAccess.direct.stateWithCertificate', { state, date })
+          : t('remoteAccess.direct.state', { state })}
+      </div>
+      <div>{t(pageDirect ? 'remoteAccess.direct.pageDirect' : 'remoteAccess.direct.pageOther')}</div>
+    </div>
   );
 };

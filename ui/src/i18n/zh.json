@@ -3121,7 +3121,19 @@
     "diagnosticUnknown": "尚未观测",
     "diagnosticQuicInactive": "未验证 · 当前 {{protocol}}",
     "diagnosticQuicInactiveHelp": "Avibe 只会在当前 Connector 实际使用 QUIC 后确认该路径；当前 Connector 正在使用 {{protocol}}。",
-    "diagnosticVersion": "{{version}}"
+    "diagnosticVersion": "{{version}}",
+    "direct": {
+      "state": "直连：{{state}}",
+      "stateWithCertificate": "直连：{{state}} · 证书有效期至 {{date}}",
+      "stateReady": "已就绪",
+      "stateStarting": "准备中",
+      "stateNotInstalled": "组件未安装",
+      "stateStopping": "正在停止",
+      "stateError": "出错",
+      "stateUnknown": "未知",
+      "pageDirect": "本页当前连接：直连",
+      "pageOther": "本页当前连接：未走直连"
+    }
   },
   "models": {
     "eligibility": {
@@ -3622,14 +3634,7 @@
     "signOut": "退出登录",
     "signingOut": "正在退出…",
     "resizeSidebar": "调整侧栏宽度",
-    "directPath": {
-      "preferred": "新连接优先走：{{route}}",
-      "withClosures": "{{line}} · {{closures}}",
-      "direct": "直连",
-      "tunnel": "Cloudflare",
-      "closures_one": "路径中断 {{count}} 次",
-      "closures_other": "路径中断 {{count}} 次"
-    }
+    "directTag": "直连"
   },
   "workbench": {
     "eyebrow": "Agent OS",

@@ -3121,7 +3121,19 @@
     "diagnosticUnknown": "Not observed",
     "diagnosticQuicInactive": "Unverified · {{protocol}} active",
     "diagnosticQuicInactiveHelp": "Avibe confirms QUIC only after the active Connector demonstrates it. The Connector is currently using {{protocol}}.",
-    "diagnosticVersion": "{{version}}"
+    "diagnosticVersion": "{{version}}",
+    "direct": {
+      "state": "Direct: {{state}}",
+      "stateWithCertificate": "Direct: {{state}} · certificate valid until {{date}}",
+      "stateReady": "ready",
+      "stateStarting": "starting",
+      "stateNotInstalled": "component not installed",
+      "stateStopping": "stopping",
+      "stateError": "error",
+      "stateUnknown": "unknown",
+      "pageDirect": "This page's live connection: direct",
+      "pageOther": "This page's live connection: not direct"
+    }
   },
   "models": {
     "eligibility": {
@@ -3622,14 +3634,7 @@
     "signOut": "Sign out",
     "signingOut": "Signing out…",
     "resizeSidebar": "Resize sidebar",
-    "directPath": {
-      "preferred": "New connections try: {{route}}",
-      "withClosures": "{{line}} · {{closures}}",
-      "direct": "direct",
-      "tunnel": "Cloudflare",
-      "closures_one": "{{count}} drop",
-      "closures_other": "{{count}} drops"
-    }
+    "directTag": "Direct"
   },
   "workbench": {
     "eyebrow": "Agent OS",
