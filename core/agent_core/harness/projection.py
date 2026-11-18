@@ -325,8 +325,8 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
 def _borrowed_context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] = None) -> ContextView:
     """Validate and build without mutating or detaching the input graph.
 
-    Only append validation may discard this borrowed view directly. Public
-    projection must detach its units and state before exposing them to callers.
+    Internal readers may borrow this view for validation, budgeting and selecting a runtime window.
+    Never expose its nested objects to a hook, provider or public projection caller.
     """
     rows = _ordered(entries, fork_point)
     results, _ = _index_results(rows)

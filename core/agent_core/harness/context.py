@@ -19,6 +19,7 @@ import math
 import re
 import time
 import unicodedata
+from copy import deepcopy
 from itertools import accumulate
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Collection, Literal, Mapping, Optional, Protocol, Sequence
@@ -27,7 +28,7 @@ from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
 from core.agent_core.ai.hosted import portable_sizes
 from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT
 from core.agent_core.ai.provider import HostedToolRoute, ModelCapabilities, ModelEndpoint, ModelRequest
-from core.agent_core.harness.projection import ContextView, Unit, context_view
+from core.agent_core.harness.projection import ContextView, Unit, _borrowed_context_view, context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
     AssistantMessage,
@@ -521,13 +522,32 @@ def request_facts(request: ModelRequest) -> dict[str, int]:
 
 def last_anchor(rows: Sequence[ContextEntry], view: ContextView) -> Optional[Anchor]:
     """The anchor the rows hold: their latest response in the context with valid usage and request facts."""
+    return _anchor(rows, view, context_view)
+
+
+def borrowed_last_anchor(rows: Sequence[ContextEntry], view: ContextView) -> Optional[Anchor]:
+    """The same anchor for read-only budget estimates within the Session's single writer."""
+    return _anchor(rows, view, _borrowed_context_view)
+
+
+def conversation_history(
+    rows: Sequence[ContextEntry], anchored: bool,
+) -> tuple[ContextView, tuple[Message, ...], Optional[Anchor]]:
+    """Borrow the single writer's rows for budgeting. Detach only messages crossing into a request."""
+    view = _borrowed_context_view(rows)
+    return view, deepcopy(view.messages), borrowed_last_anchor(rows, view) if anchored else None
+
+
+def _anchor(
+    rows: Sequence[ContextEntry], view: ContextView, project_before: Callable[[Sequence[ContextEntry]], ContextView],
+) -> Optional[Anchor]:
     for unit in reversed(view.units):
         lead = unit.lead
         facts = lead.payload.get("request") if lead.kind == "response" else None
         if facts is None or not _valid_usage(lead.message):
             continue
         # Projection is pure: the rows before the response give exactly the transcript its request carried.
-        before = context_view([row for row in rows if row.context_seq < lead.context_seq]).messages
+        before = project_before([row for row in rows if row.context_seq < lead.context_seq]).messages
         return Anchor(before, lead.message, facts["tokens"])
     return None
 

@@ -279,6 +279,54 @@ async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_err
     ]
 
 
+async def test_settled_attempt_does_not_keep_its_request_history_alive():
+    from weakref import ref
+
+    requests = []
+
+    async def first(request, cancel):
+        requests.append(ref(request))
+        yield Done(assistant(calls=[ToolCallBlock("c", "echo", {})]))
+
+    async def second(request, cancel):
+        assert requests[0]() is None  # During the same Turn, not just after final cleanup.
+        requests.append(ref(request))
+        yield Done(assistant("done"))
+
+    agent = make_agent(ScriptedProvider([first, second]), tools=[FakeTool()], context=ContextConfig())
+    events = await collect(agent)
+    assert events[-1].reason == "completed"
+    assert agent.last_attempt_response == assistant("done")
+    assert len(requests) == 2 and all(item() is None for item in requests)
+
+
+async def test_conversation_history_copy_does_not_run_on_the_loop_or_leak_hook_mutations():
+    import threading
+    from core.agent_core.harness.store import ContextEntry
+    from tests.agent_core.fakes import SELECTION
+
+    loop_thread = threading.get_ident()
+
+    class HistoryList(list):
+        def __deepcopy__(self, memo):
+            assert threading.get_ident() != loop_thread, "copying history on the event loop"
+            return list(self)
+
+    class Edit(Hooks):
+        async def before_model(self, request, ctx):
+            assert threading.get_ident() == loop_thread
+            request.messages[0].tool_calls[0].arguments["items"].append("hook only")
+
+    agent = make_agent(ScriptedProvider([]), hooks=[Edit()])
+    message = assistant(calls=[ToolCallBlock("past", "read", {})])
+    message.tool_calls[0].arguments["items"] = HistoryList(["stored"])
+    agent._rows = [ContextEntry("session", 1, "response", "past", message)]
+    for _ in range(2):
+        prepared = await agent._prepare_conversation("system", SELECTION)
+        assert prepared.request.messages[0].tool_calls[0].arguments["items"] == ["stored", "hook only"]
+        assert message.tool_calls[0].arguments["items"] == ["stored"]
+
+
 async def test_C2_rewrites_compose_on_detached_requests_and_select_rewritten_transport():
     class Rewrite(Hooks):
         async def before_run(self, input, ctx):
