@@ -575,7 +575,7 @@ final class DirectPathAppTests: XCTestCase {
                 if failing && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
             },
             systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             if case .loading = app.route { return false }
             return true
         }
@@ -620,7 +620,7 @@ final class DirectPathAppTests: XCTestCase {
             beforeTheAppExists: {
                 self.appDefaults?.removeObject(forKey: Self.selectionKey)
             })
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             next.mobileSessionCoordinator.currentAccount?.id == "account-2"
         }
         let reopened = try XCTUnwrap(appScheduleStore)
@@ -681,7 +681,7 @@ final class DirectPathAppTests: XCTestCase {
         }
         controller.loadViewIfNeeded()
         let webView = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             (try? await webView.evaluateJavaScript(
                 "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Account and data' && !b.disabled)"
             ) as? Bool) == true
@@ -695,7 +695,7 @@ final class DirectPathAppTests: XCTestCase {
             })()
             """) as? Bool
         XCTAssertEqual(openedAccountData, true)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             (try? await webView.evaluateJavaScript(
                 "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Delete account' && !b.disabled)"
             ) as? Bool) == true
@@ -722,7 +722,7 @@ final class DirectPathAppTests: XCTestCase {
             url: app.mobileSessionCoordinator.controlPlaneURL
                 .appendingPathComponent("account/delete/done")
         ))
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             failedWrites > 0 && controller.presentedViewController == nil
         }
         try await eventually {
@@ -794,7 +794,7 @@ final class DirectPathAppTests: XCTestCase {
                     systemScheduleCheckpoint: {
                         if !durable && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
                     }, systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
-                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                     if case .loading = departing.route { return false }
                     return true
                 }
@@ -828,7 +828,7 @@ final class DirectPathAppTests: XCTestCase {
                     launchesWithInstanceOneSelected: true, beforeTheAppExists: {
                         self.appDefaults?.removeObject(forKey: Self.selectionKey)
                     })
-                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                     if case .loading = reopened.route { return false }
                     return true
                 }
@@ -883,7 +883,7 @@ final class DirectPathAppTests: XCTestCase {
             defer { window.isHidden = true; window.rootViewController = nil }
             app.showAccountRoot()
             var account: WKWebView?
-            try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                 for page in self.bundledWebViews(in: window) {
                     if (try? await page.evaluateJavaScript(
                         "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Sign out on this device' && !b.disabled)"
@@ -899,7 +899,7 @@ final class DirectPathAppTests: XCTestCase {
                 Array.from(document.querySelectorAll('button'))
                   .find(b => b.textContent.trim() === 'Sign out on this device').click()
                 """)
-            try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                 for page in self.bundledWebViews(in: window) {
                     if (try? await page.evaluateJavaScript(
                         "document.body.textContent.includes('Continue with email')"
@@ -934,7 +934,7 @@ final class DirectPathAppTests: XCTestCase {
         let app = try await makeApp(directTransport: nil, systemScheduleCheckpoint: {
             if failing && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
         }, systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             if case .loading = app.route { return false }
             return true
         }
@@ -951,17 +951,17 @@ final class DirectPathAppTests: XCTestCase {
                 "return document.body.textContent.includes(message);",
                 arguments: ["message": message], in: nil, contentWorld: .page) as? Bool) == true
         }
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) { await showsLocalError() }
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) { await showsLocalError() }
         let retry = """
             Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Retry').click()
             """
         _ = try await webView.evaluateJavaScript(retry)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) { await showsLocalError() }
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) { await showsLocalError() }
         XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
         XCTAssertNil(app.captureSystemScheduleAdmission(origin: instance))
         failing = false
         _ = try await webView.evaluateJavaScript(retry)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             let hasInstance = (try? await webView.evaluateJavaScript(
                 "document.body.textContent.includes('One')") as? Bool) == true
             return app.mobileSessionCoordinator.currentAccount?.id == "account-1" && hasInstance
@@ -1028,7 +1028,7 @@ final class DirectPathAppTests: XCTestCase {
                 store = seeded
             }
         )
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             if case .loading = app.route { return false }
             return true
         }
@@ -4037,7 +4037,7 @@ final class DirectPathAppTests: XCTestCase {
         // the reopen message alone.
         let before = notifications.providerPatches.arrivals
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
         }
         try await eventually { app.route != .loading }
@@ -4096,7 +4096,7 @@ final class DirectPathAppTests: XCTestCase {
         try open()
         // A launch reads the session first (a restore opens only then).
         try await waitForTheBootstrap(of: app)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
         }
         try await eventually { app.route != .loading }
@@ -4294,7 +4294,7 @@ final class DirectPathAppTests: XCTestCase {
         // Released until the sign-out ends: its cleanup may send one more
         // provider update, which the gate would otherwise hold.
         // Sign-out logs out through an account transport it may launch.
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.releaseAll()
             return signedOut.value
         }
@@ -4403,7 +4403,7 @@ final class DirectPathAppTests: XCTestCase {
             XCTFail("The open of \(instanceID) ended at \(app.route).")
             throw DirectTestTimeout()
         }
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
         }
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
@@ -4452,7 +4452,7 @@ final class DirectPathAppTests: XCTestCase {
         defer { notifications.providerPatches.releaseAll() }
         let registered = registrationsBefore ?? root.registrations.count
         try open()
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > arrivals
                 && root.registrations.count > registered
         }
@@ -4653,7 +4653,7 @@ final class DirectPathAppTests: XCTestCase {
         // The refresh launches its own account transport first.
         await fulfillment(
             of: [fetched.expectation],
-            timeout: WebKitReadiness.standardTransportOperationSeconds
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
         )
         XCTAssertTrue(app.returnToRuntime())
         XCTAssertEqual(app.route, .browser(runtime))
@@ -4709,7 +4709,7 @@ final class DirectPathAppTests: XCTestCase {
         // The operation launches its own account transport first.
         await fulfillment(
             of: [hold.inFlight.expectation],
-            timeout: WebKitReadiness.standardTransportOperationSeconds
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
         )
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
         XCTAssertFalse(app.mobileSessionCoordinator.keepsSelectedRuntime(runtime))
@@ -5927,27 +5927,6 @@ final class DirectPathAppTests: XCTestCase {
 
         try beforeTheAppExists()
 
-        // The App's account page has the product's 30 s readiness deadline.
-        // On CI a web content launch alone can take 11-31 s, so launch one in
-        // the App's own store first, outside that deadline, and keep it until
-        // the test ends (released before the stores are removed).
-        let storeKey = "avibe.mobile.websiteDataStoreIdentifier"
-        let storeID = defaults.string(forKey: storeKey).flatMap(UUID.init(uuidString:)) ?? {
-            let identifier = UUID()
-            defaults.set(identifier.uuidString, forKey: storeKey)
-            return identifier
-        }()
-        let warm = try await WebKitReadiness.warmWebContent(
-            in: WKWebsiteDataStore(forIdentifier: storeID),
-            baseURL: baseURL
-        )
-        print("[iOS fixture] stage=web content warmed, launch=\(warm.launch), store=\(storeID.uuidString.prefix(8))")
-        var warmWebView: WKWebView? = warm.webView
-        addTeardownBlock { @MainActor in
-            warmWebView?.stopLoading()
-            warmWebView = nil
-        }
-
         let controlPlane = MobileControlPlaneConfiguration(testBaseURL: baseURL)
         let app: AppModel
         if let directFaultMarker {
@@ -5966,7 +5945,7 @@ final class DirectPathAppTests: XCTestCase {
                 systemSchedulePlatform: systemSchedulePlatform,
                 systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
@@ -5985,7 +5964,7 @@ final class DirectPathAppTests: XCTestCase {
                 systemSchedulePlatform: systemSchedulePlatform,
                 systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
@@ -6003,7 +5982,7 @@ final class DirectPathAppTests: XCTestCase {
                 systemSchedulePlatform: systemSchedulePlatform,
                 systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
@@ -6025,11 +6004,9 @@ final class DirectPathAppTests: XCTestCase {
             app,
             accountID: "account-1",
             instanceIDs: ["instance-1", "instance-2"],
-            requests: server.requests
+            requests: server.requests,
+            budget: WebKitReadiness.launchedTransportOperation
         )
-        // The App has launched its own: the warm page leaves the store.
-        warmWebView?.stopLoading()
-        warmWebView = nil
         return app
     }
 
@@ -6077,7 +6054,7 @@ final class DirectPathAppTests: XCTestCase {
         // itself allows that the readiness and request deadlines together.
         await fulfillment(
             of: [hold.inFlight.expectation],
-            timeout: WebKitReadiness.standardTransportOperationSeconds
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
         )
         return request
     }
@@ -6191,7 +6168,7 @@ final class DirectPathAppTests: XCTestCase {
     /// gives one WebKit transport launch.
     @MainActor
     private func waitForTheBootstrap(of app: AppModel) async throws {
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             app.mobileSessionCoordinator.currentAccount?.id == "account-1"
         }
     }
@@ -6353,7 +6330,33 @@ private func nativeAccessibilityElements(
     return found
 }
 
+/// The App's own clock, with account transports whose control-plane page
+/// may take a web content launch's time on the CI simulator
+/// (`WebKitReadiness.afterWebContentLaunch`). This rides on the App's
+/// existing timing injection rather than a test-only App parameter.
+@MainActor
+private final class LaunchTolerantRuntimeOpenTiming: RuntimeOpenTiming {
+    private let clock = ContinuousRuntimeOpenTiming()
+
+    var now: Duration { clock.now }
+
+    var accountTransportDeadlines: MobileAuthTransportDeadlines {
+        WebKitReadiness.afterWebContentLaunch
+    }
+
+    func schedule(
+        after delay: Duration,
+        _ action: @escaping @MainActor () -> Void
+    ) -> any RuntimeOpenTimer {
+        clock.schedule(after: delay, action)
+    }
+}
+
 private final class RuntimeOpenManualTiming: RuntimeOpenTiming {
+    var accountTransportDeadlines: MobileAuthTransportDeadlines {
+        WebKitReadiness.afterWebContentLaunch
+    }
+
     private final class Timer: RuntimeOpenTimer {
         let id: UUID
         weak var owner: RuntimeOpenManualTiming?
@@ -7395,7 +7398,7 @@ private final class RootViewStandIn {
             case .afterTheProviderUpdate:
                 Task { @MainActor [weak self, weak app] in
                     let deadline = ContinuousClock.now.advanced(
-                        by: WebKitReadiness.standardTransportOperation
+                        by: WebKitReadiness.launchedTransportOperation
                     )
                     while notifications.providerPatches.arrivals <= arrivals {
                         guard ContinuousClock.now < deadline else {
