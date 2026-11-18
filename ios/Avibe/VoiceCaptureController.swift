@@ -173,7 +173,10 @@ final class VoiceCaptureController {
             return String(ns.code)
         }
         // "ActivityKit.ActivityAuthorizationError.visibility" → its type and case.
-        let name = String(reflecting: error).split(separator: ".").suffix(2).joined(separator: ".")
+        let reflected = String(reflecting: error)
+        let name = reflected.hasPrefix("Error Domain=")
+            ? String(ns.domain.split(separator: ".").last ?? Substring(ns.domain))
+            : reflected.split(separator: ".").suffix(2).joined(separator: ".")
         return String("\(name) \(ns.code)".prefix(80))
     }
 
