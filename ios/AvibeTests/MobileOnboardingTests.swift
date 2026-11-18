@@ -1738,11 +1738,16 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(pushLogouts, 0)
     }
 
-    /// A launch whose session check fails (network, timeout, a 5xx: the
-    /// transport's `network`), and a refresh that fails the same way, are no
-    /// answer at all: push stays, and the account with it.
-    func testAFailedSessionCheckKeepsPush() async throws {
+    /// A launch whose session check fails (no network, a timeout, a 503 or
+    /// any 5xx: the transport's `network`), and the sheet's refresh failing
+    /// the same way over a live runtime, are no answer at all. The App stays
+    /// signed in: the account store is not replaced, the saved selection and
+    /// the open runtime stay, no account transition runs, and push stays.
+    /// Only a 401, another account or an explicit sign-out end the account.
+    func testAFailedSessionCheckKeepsTheAccountItsDataAndPush() async throws {
         let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let storeIdentifier = store.identifier
         let first = FakeMobileAuthTransport()
         first.session = snapshot(accountID: "account-1")
         let previous = makeCoordinator(defaults: defaults, transports: [first])
@@ -1753,9 +1758,17 @@ final class MobileOnboardingTests: XCTestCase {
         let failing = FakeMobileAuthTransport()
         failing.fetchSessionError = MobileAccountError.network
         var pushLogouts = 0
+        var transitions = 0
+        var runtime: MobileRuntimeContext?
         let relaunched = makeCoordinator(
             defaults: defaults,
+            websiteDataStore: store,
             transports: [failing] + (0..<3).map { _ in FakeMobileAuthTransport() },
+            onOpen: { runtime = $0 },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return []
+            },
             onPreparePushLogout: { pushLogouts += 1 }
         )
         relaunched.activateAccountSurface()
@@ -1772,11 +1785,35 @@ final class MobileOnboardingTests: XCTestCase {
             XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.network.code)
         }
         XCTAssertEqual(pushLogouts, 0)
+        XCTAssertEqual(transitions, 0)
+        XCTAssertEqual(store.identifier, storeIdentifier)
 
-        // The check answers again for the same account: still nothing revoked.
+        // The check answers again for the same account: the saved selection
+        // is still there, nothing was revoked.
         failing.fetchSessionError = nil
         failing.session = snapshot(accountID: "account-1")
-        _ = try await relaunched.refresh()
+        let recovered = try await relaunched.refresh()
+        XCTAssertEqual(
+            recovered,
+            .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: instance.id)
+        )
+        XCTAssertEqual(pushLogouts, 0)
+
+        // Over a live runtime, the sheet's refresh fails the same way.
+        _ = try relaunched.selectInstance(id: instance.id)
+        let opened = try XCTUnwrap(runtime)
+        relaunched.activateAccountSurface()
+        failing.fetchSessionError = MobileAccountError.network
+        do {
+            _ = try await relaunched.refresh()
+            XCTFail("A failed session check must be reported")
+        } catch {
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.network.code)
+        }
+        XCTAssertTrue(relaunched.isCurrentRuntime(opened))
+        XCTAssertEqual(relaunched.currentAccount?.id, "account-1")
+        XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertEqual(transitions, 0)
         XCTAssertEqual(pushLogouts, 0)
     }
 

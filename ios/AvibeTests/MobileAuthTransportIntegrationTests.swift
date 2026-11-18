@@ -158,6 +158,18 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 expectedCode: "network",
                 expectedRetryAfter: nil
             ),
+            // avibe.bot answers 503 for a transient auth failure: unknown,
+            // never the signed-out answer (only 401 is).
+            MappingCase(
+                name: "session temporarily unavailable",
+                operation: .fetchSession,
+                response: [
+                    "stage": MobileAuthTransportStage.session.rawValue,
+                    "status": 503,
+                ],
+                expectedCode: "network",
+                expectedRetryAfter: nil
+            ),
             MappingCase(
                 name: "logout failure",
                 operation: .logout,
