@@ -92,11 +92,17 @@ class MobileStore:
         self.path.parent.chmod(0o700)
         with MigrationFileLock(self.path.with_suffix(".migration.lock")):
             try:
+                if self.path.is_symlink():
+                    raise MobileError("private_storage_unavailable", 503)
                 fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 try:
                     if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
                         raise MobileError("private_storage_unavailable", 503)
-                    os.fchmod(fd, 0o600)
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(fd, 0o600)
+                    else:
+                        # Windows Python before 3.13 lacks descriptor chmod.
+                        self.path.chmod(0o600)
                 finally:
                     os.close(fd)
             except OSError:
@@ -228,6 +234,20 @@ class MobileStore:
                 (_hash(code), request_id, identity["id"], identity["owner"], expiry),
             )
             return {"pairing_code": code, "expires_at": expiry}
+
+    def precheck_pairing(self, payload: dict) -> None:
+        """Reject unknown/expired codes locally; pair still consumes atomically."""
+        code = text(payload.get("pairing_code"), limit=100)
+        now = _now()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT p.code_hash FROM pairings p JOIN requests r ON r.id=p.request_id "
+                "WHERE p.code_hash=? AND p.expires_at>? AND r.expires_at>? "
+                "AND r.state IN ('queued','claimed') AND r.device_id IS NULL",
+                (_hash(code), now, now),
+            ).fetchone()
+            if row is None:
+                raise MobileError("device_unauthorized", 401)
 
     def pair(self, payload: dict, identity: dict) -> dict:
         object_fields(payload, {"pairing_code", "device_name", "platform", "app_version", "metrics"},
@@ -461,12 +481,18 @@ class MobileStore:
                 raise MobileError("request_not_found", 404)
             return self._request(row)
 
-    def cancel_request(self, request_id: str) -> None:
+    def cancel_request(self, request_id: str, *, consume_callback: bool = False) -> None:
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE requests SET state='canceled',ended_at=? WHERE id=? AND state IN ('queued','claimed')",
                 (_now(), request_id),
             )
+            if consume_callback:
+                conn.execute(
+                    "UPDATE requests SET callback_state='consumed',waiter_id=NULL,waiter_until=NULL "
+                    "WHERE id=? AND state='canceled' AND callback_state='pending'",
+                    (request_id,),
+                )
             conn.execute("DELETE FROM pairings WHERE request_id=?", (request_id,))
 
     def finish_wait(self, request_id: str, waiter_id: str, *, consumed: bool) -> bool:

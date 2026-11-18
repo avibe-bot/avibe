@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -349,6 +351,31 @@ def test_live_permissions_unavailability_pauses_and_device_signout_revokes(store
     assert response.status_code == 403 and response.get_json()["code"] == "device_revoked"
 
 
+@pytest.mark.parametrize("endpoint", ["/health", "/"])
+@pytest.mark.parametrize("content_type", [None, "application/json"])
+def test_empty_device_delete_revokes_with_explicit_zero_length(
+    store, mobile_http, endpoint, content_type,
+):
+    client, _ = mobile_http
+    paired, _ = pair_device(store)
+    store.upload(device_for(store, paired), upload_payload())
+    auth = {"Authorization": f"Bearer {paired['credential']}", "Content-Length": "0"}
+    if content_type:
+        auth["Content-Type"] = content_type
+    # Nonempty bodies still require an empty JSON object, without changing state.
+    path = "/api/mobile/device/v1" + endpoint
+    assert client.delete(path, json={"unexpected": True}, headers=auth).status_code == 422
+    assert store.status()["connected"]
+    response = client.delete(path, content=b"", headers=auth)
+    assert response.status_code == 200
+    assert not store.status()["connected"]
+    with store.transaction() as conn:
+        assert conn.execute("SELECT count(*) FROM health_days").fetchone()[0] == 0
+    rejected = client.post("/api/mobile/device/v1/requests/claim",
+                           json={"wait_seconds": 0, "max": 1}, headers=auth)
+    assert rejected.status_code == 403 and rejected.get_json()["code"] == "device_revoked"
+
+
 def test_mobile_health_cannot_enter_general_data_query(store, tmp_path):
     """Separate file ownership, not a table filter, protects generic exports."""
     from storage.pagination import PageRequest
@@ -438,6 +465,22 @@ def test_private_storage_rejects_linked_files_and_directories(tmp_path):
         MobileStore(alias / "other.sqlite3")
 
 
+def test_private_storage_without_descriptor_chmod_still_rejects_links(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    private = tmp_path / "mobile"
+    store = MobileStore(private / "mobile.sqlite3")
+    assert store.path.stat().st_mode & 0o777 == 0o600
+    assert private.stat().st_mode & 0o777 == 0o700
+    ordinary = tmp_path / "ordinary.db"
+    ordinary.write_bytes(b"synthetic")
+    link = private / "linked.sqlite3"
+    link.symlink_to(ordinary)
+    with pytest.raises(MobileError, match="private_storage_unavailable"):
+        MobileStore(link)
+    assert ordinary.read_bytes() == b"synthetic"
+
+
 def test_relative_cli_windows_use_phone_calendar_and_freshness_uses_instants(store):
     paired, _ = pair_device(store)
     device = device_for(store, paired)
@@ -515,6 +558,127 @@ def test_browser_file_media_and_show_surfaces_cannot_export_mobile_storage(store
     assert response.status_code == 404
 
 
+def test_private_identity_covers_hard_links_and_literal_percent_roots(store, tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from config import paths
+    from core import file_browser_service as files
+    from core.mobile_storage_boundary import MobileStorageBoundary
+    private = tmp_path / "home%41" / "state" / "mobile"
+    private.mkdir(parents=True)
+    secret = private / "synthetic.txt"
+    secret.write_text("synthetic health value")
+    alias = tmp_path / "ordinary-name.txt"
+    os.link(secret, alias)
+    monkeypatch.setattr(paths, "get_state_dir", lambda: private.parent)
+    original_scandir = os.scandir
+    @contextmanager
+    def zero_identity_entries(path):
+        with original_scandir(path) as entries:
+            # Windows DirEntry identities are zero, unlike os.stat(path).
+            yield (SimpleNamespace(path=entry.path, stat=lambda **_kwargs: os.stat_result((0,) * 10))
+                   for entry in entries)
+    def windows_directory_entries(path):
+        if not isinstance(path, int) and os.path.realpath(path) == os.path.realpath(private):
+            return zero_identity_entries(path)
+        return original_scandir(path)
+    monkeypatch.setattr(os, "scandir", windows_directory_entries)
+    boundary = MobileStorageBoundary()
+    assert boundary.is_private_path(secret)
+    assert boundary.is_private_path(alias)
+    assert boundary.is_private_path(private / "new-directory" / "new-file")
+    assert boundary.is_private_path(private.parent, include_ancestors=True)
+    with pytest.raises(files.FileBrowserError, match="Permission denied"):
+        files.file_content(str(alias))
+    listing = files.list_directory(str(tmp_path), show_hidden=True)
+    assert "ordinary-name.txt" not in {entry["name"] for entry in listing["entries"]}
+    ordinary = tmp_path / "ordinary.txt"
+    ordinary.write_text("ordinary")
+    assert not boundary.is_private_path(ordinary)
+    assert files.file_content(str(ordinary)).data == b"ordinary"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS filesystem identity aliases")
+@pytest.mark.parametrize("kind", ["firmlink", "inode"])
+def test_macos_identity_aliases_cannot_read_export_or_mutate_private_health(
+    store, mobile_http, tmp_path, kind,
+):
+    from urllib.parse import quote
+    from core import file_browser_service as files
+    from core.mobile_storage_boundary import is_mobile_private_path
+    from storage import media_service
+    from storage.db import get_cached_sqlite_engine
+
+    paired, _ = pair_device(store)
+    store.upload(device_for(store, paired), upload_payload())
+    client, _ = mobile_http
+
+    def alias(path):
+        canonical = Path(os.path.realpath(path))
+        if kind == "firmlink":
+            result = Path("/System/Volumes/Data" + str(canonical))
+        else:
+            info = canonical.stat()
+            result = Path(f"/.vol/{info.st_dev}/{info.st_ino}")
+        assert result.exists() and os.path.samefile(canonical, result)
+        return result
+
+    db, directory, ancestor = alias(store.path), alias(store.path.parent), alias(store.path.parent.parent)
+    assert is_mobile_private_path(db)
+    assert is_mobile_private_path(directory)
+    assert is_mobile_private_path(ancestor, include_ancestors=True)
+    response = client.get("/api/files/content?path=" + quote(str(db), safe=""))
+    assert response.status_code == 403 and "987654321" not in response.text
+    for operation in (
+        lambda: files.list_directory(str(directory), show_hidden=True),
+        lambda: files.copy_path(str(db), str(tmp_path / "exported.db")),
+        lambda: files.copy_path(str(ancestor), str(tmp_path / "exported-state")),
+        lambda: files.move_path(str(directory), str(tmp_path / "moved-mobile")),
+        lambda: files.write_file(str(directory / "new.txt"), "synthetic"),
+        lambda: files.write_file(str(db), "replacement"),
+        lambda: files.delete_path(str(directory), recursive=True),
+    ):
+        with pytest.raises(files.FileBrowserError):
+            operation()
+    if kind == "firmlink":
+        listing = files.list_directory(str(ancestor), show_hidden=True)
+        assert "mobile" not in {entry["name"] for entry in listing["entries"]}
+    with get_cached_sqlite_engine().begin() as conn:
+        with pytest.raises(ValueError, match="Private mobile storage"):
+            media_service.register(conn, scope_id=None, session_id=None, kind="file",
+                                   source="test", local_path=str(db))
+    assert ui_server._is_show_page_runtime_denied_path(f"@fs{db}", session_id="ses_fake")
+    assert store.path.exists() and not (tmp_path / "exported.db").exists()
+
+
+def test_unknown_expired_and_used_pairing_codes_do_not_query_live_permissions(
+    store, mobile_http, monkeypatch, clock,
+):
+    client, _ = mobile_http
+    checks = []
+    def current(_store):
+        checks.append(True)
+        return IDENTITY
+    monkeypatch.setattr("vibe.ui_mobile_routes.current_identity", current)
+    request, _ = store.create_request("health.connect", IDENTITY, names=["steps"])
+    pairing = store.issue_pairing(request["id"], IDENTITY)
+    payload = {"pairing_code": "unknown", "device_name": "假设备", "platform": "ios",
+               "app_version": "1", "metrics": ["steps"]}
+    route = "/api/mobile/device/v1/pair"
+    assert client.post(route, json=payload).status_code == 401
+    assert checks == []
+    payload["pairing_code"] = pairing["pairing_code"]
+    assert client.post(route, json=payload).status_code == 200
+    assert len(checks) == 1
+    assert client.post(route, json=payload).status_code == 401
+    assert len(checks) == 1
+    other, _ = store.create_request("health.connect", IDENTITY, names=["steps"])
+    expiry = store.issue_pairing(other["id"], IDENTITY)
+    clock[0] += timedelta(minutes=5)
+    payload["pairing_code"] = expiry["pairing_code"]
+    assert client.post(route, json=payload).status_code == 401
+    assert len(checks) == 1
+
+
 def test_invalid_callback_and_notification_failure_release_waiter(store, monkeypatch, capsys):
     """Failure before polling must leave a future callback free to continue."""
     monkeypatch.setattr(cli_mobile, "current_identity", lambda _store: IDENTITY)
@@ -530,6 +694,64 @@ def test_invalid_callback_and_notification_failure_release_waiter(store, monkeyp
     assert cli_mobile.cmd_mobile(args) == 1
     with store.transaction() as conn:
         assert conn.execute("SELECT waiter_id FROM requests").fetchone()[0] is None
+
+
+@pytest.mark.parametrize("operation", ["health.connect", "health.refresh"])
+@pytest.mark.parametrize("failed_step", ["publish_request_card", "notify_phone"])
+def test_initial_delivery_failure_cancels_only_new_request_and_retry_can_deliver(
+    store, monkeypatch, operation, failed_step,
+):
+    """A concurrent coalesced caller cannot cancel or strand the creator's request."""
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    if operation == "health.refresh":
+        pair_device(store)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    failed_request = []
+
+    def card(request, _session):
+        calls.append(("publish_request_card", request["id"]))
+        fail_if_selected("publish_request_card", request)
+
+    def phone(_store, request, _identity, **_kwargs):
+        calls.append(("notify_phone", request["id"]))
+        fail_if_selected("notify_phone", request)
+
+    def fail_if_selected(step, request):
+        if step == failed_step and not failed_request:
+            failed_request.append(request["id"])
+            entered.set()
+            assert release.wait(5)
+            raise MobileError("request_notification_unavailable", 503)
+
+    monkeypatch.setattr(cli_mobile, "publish_request_card", card)
+    monkeypatch.setattr(cli_mobile, "notify_phone", phone)
+    monkeypatch.setattr(cli_mobile, "_callback", lambda _args: "ses_synthetic")
+    initial_args = SimpleNamespace(wait=1)
+    retry_args = SimpleNamespace(wait=0)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(cli_mobile._request, store, operation, IDENTITY, initial_args)
+        try:
+            assert entered.wait(5)
+            coalesced = cli_mobile._request(store, operation, IDENTITY, retry_args)
+            assert coalesced["id"] == failed_request[0] and coalesced["state"] == "queued"
+            # Coalescing never reruns delivery or changes continuation ownership.
+            assert sum(step == failed_step for step, _ in calls) == 1
+        finally:
+            release.set()
+        with pytest.raises(MobileError, match="request_notification_unavailable"):
+            future.result(timeout=5)
+    assert store.show_request(failed_request[0])["state"] == "canceled"
+    assert store.pending_callbacks() == []
+    with store.transaction() as conn:
+        row = conn.execute("SELECT * FROM requests WHERE id=?", (failed_request[0],)).fetchone()
+        assert row["waiter_id"] is None and row["callback_state"] == "consumed"
+    retry = cli_mobile._request(store, operation, IDENTITY, retry_args)
+    assert retry["id"] != failed_request[0] and retry["state"] == "queued"
+    assert ("publish_request_card", retry["id"]) in calls
+    assert ("notify_phone", retry["id"]) in calls
 
 
 def test_native_health_push_filters_owner_and_keeps_budget_across_endpoint_rotation(

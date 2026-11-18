@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
 from core.media_types import is_inline_safe_type
-from core.mobile_storage_boundary import is_mobile_private_path
+from core.mobile_storage_boundary import MobileStorageBoundary, is_mobile_private_path
 
 logger = logging.getLogger(__name__)
 
@@ -619,6 +619,7 @@ def _entry_payload(entry: os.DirEntry[str]) -> dict[str, Any] | None:
 
 def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any]:
     target = _require_directory(raw_path)
+    mobile_boundary = MobileStorageBoundary()
     entries: list[dict[str, Any]] = []
     scanned_entries = 0
     truncated = False
@@ -626,7 +627,7 @@ def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any
         with os.scandir(target) as iterator:
             for entry in iterator:
                 scanned_entries += 1
-                if is_mobile_private_path(Path(entry.path)):
+                if mobile_boundary.is_private_path(Path(entry.path)):
                     continue
                 if not show_hidden and entry.name.startswith("."):
                     if scanned_entries > MAX_LIST_ENTRIES:
@@ -2488,15 +2489,16 @@ def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | Non
 def _iter_search_files(root: Path, include: list[str], exclude: list[str]):
     """Yield (path, rel_posix) for every candidate file under ``root``."""
     exclude_names = [pat for pat in exclude if "/" not in pat]
+    mobile_boundary = MobileStorageBoundary()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         base = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames if d not in SEARCH_SKIP_DIRS and not _match_globs(d, exclude_names)
-            and not is_mobile_private_path(base / d)
+            and not mobile_boundary.is_private_path(base / d)
         )
         for name in sorted(filenames):
             fpath = base / name
-            if is_mobile_private_path(fpath):
+            if mobile_boundary.is_private_path(fpath):
                 continue
             rel = fpath.relative_to(root).as_posix()
             if include and not _match_globs(rel, include):
@@ -2669,6 +2671,7 @@ def search_names(
 
     results: list[dict[str, Any]] = []
     truncated = False
+    mobile_boundary = MobileStorageBoundary()
     # os.walk swallows per-directory errors by default, so an unreadable subtree is silently skipped
     # (the search keeps going) rather than aborting the whole walk.
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -2677,11 +2680,11 @@ def search_names(
         base = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames if d not in SEARCH_SKIP_DIRS and (show_hidden or not d.startswith("."))
-            and not is_mobile_private_path(base / d)
+            and not mobile_boundary.is_private_path(base / d)
         )
         # Directories first, then files, each alphabetically — mirrors the listing's grouping.
         for name in list(dirnames) + sorted(filenames):
-            if is_mobile_private_path(base / name):
+            if mobile_boundary.is_private_path(base / name):
                 continue
             if not show_hidden and name.startswith("."):
                 continue

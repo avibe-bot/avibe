@@ -51,15 +51,15 @@ def mobile_error_response(error: MobileError) -> JSONResponse:
 
 
 async def _body(request: Request, *, optional=False) -> dict:
-    if optional and not request.headers.get("content-length") and not request.headers.get("transfer-encoding"):
-        return {}
-    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
-        raise MobileError("invalid_payload")
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
         if len(body) > MAX_BODY_BYTES:
             raise MobileError("invalid_payload", 413)
+    if optional and not body:
+        return {}
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+        raise MobileError("invalid_payload")
     try:
         payload = json.loads(body)
     except (ValueError, UnicodeError, RecursionError):
@@ -76,6 +76,7 @@ def register_mobile_routes(app) -> None:
                 if not canonical_device_route(request):
                     raise MobileError("device_unauthorized", 401)
                 store = await asyncio.to_thread(MobileStore)
+                payload = None
                 device = None
                 if request.url.path != f"{DEVICE_PREFIX}/pair":
                     authorization = request.headers.getlist("authorization")
@@ -85,10 +86,14 @@ def register_mobile_routes(app) -> None:
                         raise MobileError("device_unauthorized", 401)
                     # First reject unknown credentials without a control-plane call.
                     device = await asyncio.to_thread(store.lookup_credential, authorization[0][7:])
+                else:
+                    payload = await _body(request)
+                    await asyncio.to_thread(store.precheck_pairing, payload)
                 identity = await asyncio.to_thread(current_identity, store)
                 if device is not None:
                     device = await asyncio.to_thread(store.authenticate, authorization[0][7:], identity)
-                payload = await _body(request, optional=request.method == "DELETE")
+                if payload is None:
+                    payload = await _body(request, optional=request.method == "DELETE")
                 path = request.scope["path"]
                 if path == f"{DEVICE_PREFIX}/pair":
                     result = await asyncio.to_thread(store.pair, payload, identity)

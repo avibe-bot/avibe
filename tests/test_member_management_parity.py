@@ -130,6 +130,17 @@ _RETAINED_OWNER_ROUTES = {
     ("DELETE", "/api/bots/{handle}"),
     ("PUT", "/api/bots/{handle}/avatar"),
     ("GET", "/api/bots/{handle}/avatar"),
+    # Browser policy stays Owner-only. Exact device routes use the independent
+    # bearer/code boundary, covered by test_mobile_health.py.
+    ("POST", "/api/mobile/pairings"),
+    ("GET", "/api/mobile/requests/{request_id}"),
+    ("POST", "/api/mobile/device/v1/pair"),
+    ("PUT", "/api/mobile/device/v1/manifest"),
+    ("PUT", "/api/mobile/device/v1/health/days"),
+    ("POST", "/api/mobile/device/v1/requests/claim"),
+    ("POST", "/api/mobile/device/v1/requests/{request_id}/result"),
+    ("DELETE", "/api/mobile/device/v1/health"),
+    ("DELETE", "/api/mobile/device/v1/"),
 }
 
 
@@ -166,7 +177,8 @@ def test_complete_registered_api_management_inventory():
     # + 1 protected-HD exact reconciliation read (create's Editor floor plus saved-ID resource use).
     # + 1 voice consent answer (Editor, with the voice routes it gates).
     # + 2 system schedule device claim/receipt methods (Editor).
-    assert len(endpoints) == 340
+    # + 7 independent device routes and 2 Owner-only mobile metadata routes.
+    assert len(endpoints) == 349
     for path in ("/api/system-schedule/claim", "/api/system-schedule/receipt"):
         assert ("POST", path) in endpoints
         assert http_authorization_policy("POST", path).minimum_role == "editor"

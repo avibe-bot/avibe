@@ -18,7 +18,7 @@ from storage.mobile_store import MobileStore
 
 
 def add_mobile_parser(subparsers) -> None:
-    root = subparsers.add_parser("mobile", help="Read health data synced by your iPhone")
+    root = subparsers.add_parser("mobile", help="Read iPhone health data")
     groups = root.add_subparsers(dest="mobile_group", required=True)
     health = groups.add_parser("health", help="Connect, read and revoke health synchronization")
     commands = health.add_subparsers(dest="mobile_command", required=True)
@@ -111,8 +111,14 @@ def _request(store, operation, identity, args, *, names=METRICS, caller="local")
             waiter_id=waiter_id, wait_seconds=seconds,
         )
         if created:
-            publish_request_card(request, os.environ.get("AVIBE_SESSION_ID"))
-            notify_phone(store, request, identity, caller=caller)
+            try:
+                publish_request_card(request, os.environ.get("AVIBE_SESSION_ID"))
+                notify_phone(store, request, identity, caller=caller)
+            except Exception:
+                # A reported delivery failure must not strand future callers on
+                # an undelivered request or also resume its error callback.
+                store.cancel_request(request["id"], consume_callback=True)
+                raise
         if not seconds:
             return request
         if not created:

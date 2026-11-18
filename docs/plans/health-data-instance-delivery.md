@@ -56,6 +56,37 @@ Local evidence before PR:
   error code.
 - Changed Python files pass Ruff; Skill examples use the real CLI parser.
 
+Review follow-up on `63e1212e18a4fbc73f48aa784b9a1052d458c931`:
+
+- Codex identified initial-delivery compensation and optional empty DELETE
+  bodies. Main confirmed both fixes. Eight regression cases first reproduced
+  the failures, then passed with cancellation of only a newly created request
+  and parsing of actual body bytes. Connect and refresh both cover a concurrent
+  coalesced caller and a fresh retry; failed delivery consumes its continuation.
+- The route and built-in Skill inventories now include mobile. The private-path
+  canonicalizer preserves ordinary cyclic-link metadata/removal on Python 3.12
+  while content readers still require a resolvable path. A consuming test
+  simulates the older interpreter's cycle behavior.
+- Independent security review found a macOS filesystem-alias bypass in the
+  original string comparison. Private roots, descendants and ancestors now
+  compare device/inode identity as well. This covers firmlinks, direct `/.vol`
+  file aliases, hard links and literal percent characters. Directory listing and
+  search reuse one operation's root and descendant snapshot. Synthetic macOS
+  tests exercise read, list, copy, move, write, delete, media and Show refusal.
+- Unknown, used and expired pairing codes are rejected before a live control
+  plane query; the transaction still revalidates and consumes the code. File
+  creation also supports Python without descriptor chmod and rejects links
+  before opening.
+- 293 focused and adjacent cases pass, including private storage, file browser,
+  role inventory and Prompt Studio. Together with the fake-device closed loop
+  and controller maintenance lifecycle, 39 health-specific cases pass.
+- An explicit refspec fetch and rebase onto
+  `d5547843a0f156420461e67d19ca61320b6d8fcb` incorporates the independently
+  maintained root-help compaction in PR #3930. All 296 focused, adjacent and CLI
+  help checks pass after the rebase, including the unchanged 2.5 KiB help budget,
+  English-only CLI text and parser-backed examples. Only mobile's own
+  description is shortened here.
+
 Authorized: implementation and a non-draft English PR through Merge-ready.
 Not authorized: merge, install an S1 package locally, modify Apple App ID or
 profiles, TestFlight, release, production service / state / push or remote access.
