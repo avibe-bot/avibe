@@ -189,6 +189,9 @@ jobs:
 
   nat-disabled-experiment:
     name: NAT-disabled experiment (non-shipping, advisory)
+    # Advisory evidence, not a PR gate: run it on demand (and after merges to
+    # master) instead of on every pull request that touches the sidecar.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     continue-on-error: true
