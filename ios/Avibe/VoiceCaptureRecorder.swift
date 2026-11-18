@@ -1,7 +1,6 @@
 import AVFoundation
 import Foundation
 
-/// The audio session a take records in.
 /// The audio session a take records in, in the two steps a failure is
 /// reported by.
 protocol VoiceCaptureAudioSession {

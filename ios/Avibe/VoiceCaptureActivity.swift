@@ -76,6 +76,9 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         var errorCode: Int?
         /// Where the start stopped, for `recordingFailed`.
         var failedStep: Step?
+        /// The error as shown with `failedStep`: the system's number, or
+        /// an ActivityKit error's type and case.
+        var errorText: String?
 
         static let heardLimit = 160
     }

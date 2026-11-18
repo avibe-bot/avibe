@@ -99,13 +99,14 @@ enum VoiceCaptureCopy {
     static func reasonLine(
         _ reason: VoiceCaptureAttributes.Reason,
         errorCode: Int?,
-        step: VoiceCaptureAttributes.Step? = nil
+        step: VoiceCaptureAttributes.Step? = nil,
+        errorText: String? = nil
     ) -> LocalizedStringResource {
         if reason == .recordingFailed, let step {
             let stepName = String(localized: text("voiceCapture.step.\(step.rawValue)"))
-            if let errorCode {
+            if let shown = errorText ?? errorCode.map(String.init) {
                 return LocalizedStringResource(
-                    String.LocalizationValue("voiceCapture.reason.recordingFailedAt \(stepName) \(errorCode)"),
+                    String.LocalizationValue("voiceCapture.reason.recordingFailedAt \(stepName) \(shown)"),
                     table: "VoiceCapture"
                 )
             }
@@ -251,7 +252,7 @@ struct VoiceCaptureDetail: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else if let reason = state.reason {
-                Text(VoiceCaptureCopy.reasonLine(reason, errorCode: state.errorCode, step: state.failedStep))
+                Text(VoiceCaptureCopy.reasonLine(reason, errorCode: state.errorCode, step: state.failedStep, errorText: state.errorText))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)

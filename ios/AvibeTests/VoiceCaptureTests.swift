@@ -539,13 +539,48 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.failureNotices.first?.failedStep, .takeFile)
     }
 
+    /// The line as the island and the notification build it (the code that
+    /// makes the key), in the test host's language.
+    func testTheNotificationCarriesTheBuiltLine() throws {
+        var failure = VoiceCaptureController.failure(
+            step: .sessionActivate,
+            error: VoiceCaptureRecorder.StartFailure(
+                step: .sessionActivate, underlying: NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+            ),
+            at: Date()
+        )
+        XCTAssertEqual(failure.errorText, "561145187")
+        let content = VoiceCaptureFailureNotification.content(for: failure)
+        XCTAssertEqual(content.threadIdentifier, "voice-capture")
+        let language = Bundle.main.preferredLocalizations.first ?? "en"
+        if language.hasPrefix("zh") {
+            XCTAssertEqual(content.body, "录音没能开始（激活音频会话，错误 561145187）。")
+        } else {
+            XCTAssertEqual(content.body, "Recording couldn't start (activating the audio session, error 561145187).")
+        }
+        XCTAssertEqual(AvibeAppDelegate.foregroundPresentationOptions(for: content), [.list])
+
+        failure.errorText = nil
+        failure.errorCode = nil
+        XCTAssertFalse(VoiceCaptureFailureNotification.content(for: failure).body.contains("error"))
+    }
+
+    /// An ActivityKit-style Swift error shows its type and case, not only a
+    /// bridged position number.
+    func testANonSystemErrorShowsItsName() {
+        enum SampleActivityError: Error { case first, visibility }
+        let text = VoiceCaptureController.errorText(SampleActivityError.visibility)
+        XCTAssertTrue(text?.contains("visibility") == true, text ?? "nil")
+        XCTAssertNil(VoiceCaptureController.errorText(VoiceCaptureRecorder.Failure.start))
+    }
+
     func testTheFailureLineReadsPlainlyInBothLanguages() throws {
         func format(_ language: String, _ key: String) throws -> String {
             let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
             return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: "VoiceCapture")
         }
-        XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.recordingFailedAt %@ %lld"), "录音没能开始（%1$@，错误 %2$lld）。")
-        XCTAssertEqual(try format("en", "voiceCapture.reason.recordingFailedAt %@ %lld"), "Recording couldn't start (%1$@, error %2$lld).")
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.recordingFailedAt %@ %@"), "录音没能开始（%1$@，错误 %2$@）。")
+        XCTAssertEqual(try format("en", "voiceCapture.reason.recordingFailedAt %@ %@"), "Recording couldn't start (%1$@, error %2$@).")
         XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.recordingFailedAt %@"), "录音没能开始（%@）。")
         let steps: [(VoiceCaptureAttributes.Step, String)] = [
             (.takeFile, "准备录音文件"), (.sessionCategory, "设置音频会话"), (.sessionActivate, "激活音频会话"),

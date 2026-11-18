@@ -321,18 +321,18 @@
         }
       }
     },
-    "voiceCapture.reason.recordingFailedAt %@ %lld" : {
+    "voiceCapture.reason.recordingFailedAt %@ %@" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Recording couldn't start (%1$@, error %2$lld)."
+            "value" : "Recording couldn't start (%1$@, error %2$@)."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "录音没能开始（%1$@，错误 %2$lld）。"
+            "value" : "录音没能开始（%1$@，错误 %2$@）。"
           }
         }
       }

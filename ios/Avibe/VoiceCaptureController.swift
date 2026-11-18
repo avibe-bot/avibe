@@ -162,6 +162,21 @@ final class VoiceCaptureController {
         return (error as NSError).code
     }
 
+    /// The error as shown: an OSStatus, Cocoa or AVFoundation code as its
+    /// number; anything else (ActivityKit's errors are Swift enums, whose
+    /// bridged number is only the case's position) by its type and case.
+    static func errorText(_ error: Error) -> String? {
+        let error = (error as? VoiceCaptureRecorder.StartFailure)?.underlying ?? error
+        if error is VoiceCaptureRecorder.Failure { return nil }
+        let ns = error as NSError
+        if [NSOSStatusErrorDomain, NSCocoaErrorDomain, AVFoundationErrorDomain].contains(ns.domain) {
+            return String(ns.code)
+        }
+        // "ActivityKit.ActivityAuthorizationError.visibility" → its type and case.
+        let name = String(reflecting: error).split(separator: ".").suffix(2).joined(separator: ".")
+        return String("\(name) \(ns.code)".prefix(80))
+    }
+
     /// A run this soon after a failed start is the same press again.
     static let repeatWindow: TimeInterval = 1
     /// When a start last failed with a notice (see `repeatWindow`).
@@ -659,7 +674,6 @@ final class VoiceCaptureController {
         await take.activity.end(final, dismissal: dismissal)
     }
 
-    /// A short notice for a press that never recorded.
     /// The last start that failed, with its step and code. When the
     /// notification cannot be shown (notifications off), the alert Avibe
     /// shows on coming forward carries the same line.
@@ -678,6 +692,7 @@ final class VoiceCaptureController {
         )
         state.failedStep = step
         state.errorCode = systemCode(error)
+        state.errorText = errorText(error)
         return state
     }
 
@@ -686,14 +701,27 @@ final class VoiceCaptureController {
     private func showFailure(step: VoiceCaptureAttributes.Step, error: Error) {
         let failed = Self.failure(step: step, error: error, at: environment.now())
         postFailure(failed)
-        showNotice(phase: .failed, reason: .recordingFailed, errorCode: failed.errorCode, step: step)
+        showNotice(failed)
     }
 
+    /// The failure's own short island.
+    private func showNotice(_ failure: VoiceCaptureAttributes.ContentState) {
+        failedStartAt = environment.now()
+        do {
+            let activity = try environment.requestActivity(failure)
+            Task {
+                await activity.end(failure, dismissal: .after(failure.startedAt.addingTimeInterval(Self.noticeDismissal)))
+            }
+        } catch {
+            record("notice failed: \(error)")
+        }
+    }
+
+    /// A short notice for a press that never recorded.
     private func showNotice(
         phase: VoiceCaptureAttributes.Phase,
         reason: VoiceCaptureAttributes.Reason,
-        errorCode: Int? = nil,
-        step: VoiceCaptureAttributes.Step? = nil
+        errorCode: Int? = nil
     ) {
         let now = environment.now()
         failedStartAt = now
@@ -701,7 +729,6 @@ final class VoiceCaptureController {
             phase: phase, startedAt: now, endedAt: now, reason: reason
         )
         notice.errorCode = errorCode
-        notice.failedStep = step
         do {
             let activity = try environment.requestActivity(notice)
             Task {

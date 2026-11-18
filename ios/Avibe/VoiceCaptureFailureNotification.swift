@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import UserNotifications
 
 /// The notification a failed "Talk to Main Bot" start leaves in
@@ -12,14 +13,22 @@ enum VoiceCaptureFailureNotification {
         let content = UNMutableNotificationContent()
         content.title = String(localized: VoiceCaptureCopy.title(state))
         content.body = String(localized: VoiceCaptureCopy.reasonLine(
-            state.reason ?? .recordingFailed, errorCode: state.errorCode, step: state.failedStep
+            state.reason ?? .recordingFailed, errorCode: state.errorCode,
+            step: state.failedStep, errorText: state.errorText
         ))
         content.threadIdentifier = thread
         return content
     }
 
+    /// Needs notification permission (asked when the user turns on
+    /// notifications); without it the system drops the notice, and the
+    /// island or the alert carries the line instead.
+    private static let logger = Logger(subsystem: "bot.avibe.ios", category: "voice-capture")
+
     static func post(_ state: VoiceCaptureAttributes.ContentState) {
         let request = UNNotificationRequest(identifier: identifier, content: content(for: state), trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error { logger.error("failure notice not posted: \(error, privacy: .public)") }
+        }
     }
 }
