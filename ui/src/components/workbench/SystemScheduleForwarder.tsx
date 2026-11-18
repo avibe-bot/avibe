@@ -99,7 +99,8 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
       if (PERMANENT_RECEIPT_ERRORS.has(payload?.error)) return 'discard';
     }
   } catch {
-    // The lease and receipt remain in memory for the next reactivation.
+    // The lease and receipt remain in memory for the next claim (page open,
+    // reactivation, or an Agent turn end).
   } finally {
     window.clearTimeout(timeout);
   }
@@ -152,7 +153,7 @@ export const SystemScheduleForwarder: FC = () => {
           : await nativeSystemScheduleCancel(claim.request as NativeSystemScheduleCancel);
         if (receipt?.error && RETRY_NATIVE_RECEIPT_ERRORS.has(receipt.error.code)) {
           // Native cannot yet read or commit the item's management record.
-          // Keep the Runtime lease sticky so the next reactivation re-enters Native
+          // Keep the Runtime lease sticky so the next claim re-enters Native
           // recovery instead of treating an uncertain effect as terminal.
           reconcileImmediately = false;
           return;
@@ -167,7 +168,8 @@ export const SystemScheduleForwarder: FC = () => {
         }
       } catch {
         // Admission may stay unavailable while an account sheet covers Runtime.
-        // Retry the sticky lease on the next reactivation, without spinning.
+        // Retry the sticky lease on the next claim (page open, reactivation,
+        // or an Agent turn end), without spinning.
         reconcileImmediately = false;
       } finally {
         inFlightLeasesRef.current.delete(key);
