@@ -3640,6 +3640,508 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    // MARK: An open across the push update it starts
+
+    // Opening a runtime resumes push registration; on a device with
+    // notifications on, that sends a provider update through the account
+    // coordinator while the open is still settling and while the root view
+    // makes its WebView. The request keeps the selection, so the open
+    // stands: the browser shows the runtime, and its WebView is kept.
+
+    @MainActor
+    func testATappedInstanceOpensAcrossThePushUpdateItStartsWithATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: StandInDirectTransport(),
+            restoring: false
+        )
+    }
+
+    @MainActor
+    func testATappedInstanceOpensAcrossThePushUpdateItStartsWithoutATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: nil,
+            restoring: false
+        )
+    }
+
+    @MainActor
+    func testARestoredInstanceOpensAcrossThePushUpdateItStartsWithATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: StandInDirectTransport(),
+            restoring: true
+        )
+    }
+
+    @MainActor
+    func testARestoredInstanceOpensAcrossThePushUpdateItStartsWithoutATransport() async throws {
+        try await assertTheOpenStandsAcrossAPushRequest(
+            directTransport: nil,
+            restoring: true
+        )
+    }
+
+    // What does end an open while its route is prepared still does: the
+    // App returns to the instance list and never shows the runtime.
+
+    @MainActor
+    func testASignOutDuringTheOpenReturnsToTheList() async throws {
+        let app = try await makeApp(directTransport: StandInDirectTransport())
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.logout()
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await XCTUnwrap(atOpen.started).value
+        trackStore(of: app)
+        try await eventually { app.route != .loading }
+
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+    }
+
+    @MainActor
+    func testANewSignInDuringTheOpenReturnsToTheList() async throws {
+        let app = try await makeApp(directTransport: StandInDirectTransport())
+        // Starting another sign-in advances the account generation at once.
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                // The fixture has no code endpoint; the request fails
+                // after the generation has moved.
+                _ = try await app.mobileSessionCoordinator.requestOTP(
+                    email: "other@example.com"
+                )
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        _ = try await XCTUnwrap(atOpen.started).result
+        trackStore(of: app)
+        try await eventually { app.route != .loading }
+
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+    }
+
+    @MainActor
+    func testAChangedStoredSelectionDuringTheOpenReturnsToTheList() async throws {
+        let app = try await makeApp(directTransport: StandInDirectTransport())
+        let defaults = try XCTUnwrap(appDefaults)
+        let atOpen = AtTheOpen(app) { _ in
+            defaults.removeObject(forKey: Self.selectionKey)
+            return nil
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await eventually { app.route != .loading }
+
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+    }
+
+    /// A refresh keeps the runtime until its answer names another account;
+    /// then the account transition ends the runtime, whether the open has
+    /// settled or not, and releases its WebView.
+    @MainActor
+    func testAnAccountChangeDuringTheOpenReturnsToTheList() async throws {
+        let session = SessionAnswerOverride()
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(
+            directTransport: transport,
+            sessionResponse: { session.response }
+        )
+        let fetched = FixtureEvent(description: "refresh fetch held")
+        let releaseFetch = DispatchSemaphore(value: 0)
+        defer { releaseFetch.signal() }
+        session.hold(
+            .json(
+                """
+                {"account":{"id":"account-2","email":"other@example.com"},"instances":[
+                  {"id":"instance-1","name":"One","host":"instance-one.example",
+                   "url":"https://instance-one.example","relationship":"owner","available":true}
+                ]}
+                """
+            ),
+            started: fetched,
+            release: releaseFetch
+        )
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.refresh()
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        await fulfillment(of: [fetched.expectation], timeout: 30)
+        try await eventually { app.route != .loading }
+        var page: RuntimePage?
+        var controller: WebViewController?
+        if case .browser(let runtime) = app.route {
+            let made = try makeRuntimeController(app, runtime)
+            app.registerRuntimeController(made, for: runtime)
+            page = try RuntimePage(controller: made)
+            XCTAssertNotNil(made.livePrimaryWebView)
+            controller = made
+        }
+        defer { page?.close() }
+
+        releaseFetch.signal()
+        try await XCTUnwrap(atOpen.started).value
+        trackStore(of: app)
+        try await eventually { app.route == .onboarding(.instances) }
+        XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
+        if let controller {
+            XCTAssertNil(controller.livePrimaryWebView)
+        }
+        XCTAssertEqual(atOpen.routes.last, .onboarding(.instances))
+    }
+
+    /// A notification tap from the background: the routed instance opens
+    /// while its listener is closed, so the open is held, and the push
+    /// update the open started is still in flight when the return to the
+    /// foreground releases it. The request keeps the selection, so the
+    /// held open settles at its browser.
+    @MainActor
+    func testAHeldOpenSettlesAcrossThePushUpdateOnTheReturnToTheForeground() async throws {
+        let transport = StandInDirectTransport()
+        let hold = PushHold(path: "/api/push/apns/installations/hold/provider")
+        defer { hold.release.signal() }
+        let app = try await makeApp(directTransport: transport, pushHolds: [hold])
+        // Both hosts are routed; instance-2 is shown.
+        _ = try await select("instance-1", in: app)
+        _ = try await select("instance-2", in: app)
+
+        enterBackground()
+        let atOpen = AtTheOpen(app) { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.pushManagementRequest(
+                    PushManagementRequest(
+                        method: "POST",
+                        path: hold.path,
+                        headers: [:],
+                        body: nil
+                    )
+                )
+            }
+        }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 60)
+        try await settle()
+        // Held: the listener is closed for the background.
+        XCTAssertEqual(app.route, .loading)
+
+        enterForeground()
+        try await eventually { app.route != .loading }
+        guard case .browser(let runtime) = app.route else {
+            return XCTFail("The held open ended at \(app.route) while a push request ran.")
+        }
+        XCTAssertEqual(runtime.instance.id, "instance-1")
+        XCTAssertEqual(atOpen.routes, [.loading, .browser(runtime)])
+        // Still in flight when it settled.
+        XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+        if !app.directListenerFault {
+            XCTAssertEqual(transport.selections.last?.runtime, runtime)
+        }
+
+        hold.release.signal()
+        try await XCTUnwrap(atOpen.started).value
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertTrue(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
+    }
+
+    /// The same held open, released while an exclusive operation that does
+    /// not keep the selection runs: it returns to the list.
+    @MainActor
+    func testAHeldOpenReleasedDuringANonKeepingOperationReturnsToTheList() async throws {
+        let transport = StandInDirectTransport()
+        let hold = PushHold(path: "/api/two-factor/verify")
+        defer { hold.release.signal() }
+        let app = try await makeApp(directTransport: transport, pushHolds: [hold])
+        _ = try await select("instance-1", in: app)
+        _ = try await select("instance-2", in: app)
+
+        enterBackground()
+        let atOpen = AtTheOpen(app) { _ in nil }
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await settle()
+        XCTAssertEqual(app.route, .loading)
+
+        app.mobileSessionCoordinator.activateAccountSurface()
+        let operation = Task { @MainActor in
+            _ = try await app.mobileSessionCoordinator.verifySecondFactor(
+                method: .totp,
+                code: "123456"
+            )
+        }
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 60)
+
+        enterForeground()
+        try await eventually { app.route != .loading }
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(atOpen.routes, [.loading, .onboarding(.instances)])
+
+        hold.release.signal()
+        _ = await operation.result
+        app.mobileSessionCoordinator.deactivateAccountSurface()
+        XCTAssertEqual(app.route, .onboarding(.instances))
+    }
+
+    /// Opens instance-1 by a tap on the list, or by the restore of a launch
+    /// whose stored selection names it, and starts a push-management
+    /// request at the open's first route, as the App's own resume of push
+    /// registration does. The request is held in flight until the end.
+    @MainActor
+    private func assertTheOpenStandsAcrossAPushRequest(
+        directTransport: StandInDirectTransport?,
+        restoring: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let hold = PushHold(path: "/api/push/apns/installations/hold/provider")
+        // A second signal is harmless; a failure must not leave it held.
+        defer { hold.release.signal() }
+        let startRequest: @MainActor (AppModel) -> Task<Void, Error>? = { app in
+            Task { @MainActor in
+                _ = try await app.mobileSessionCoordinator.pushManagementRequest(
+                    PushManagementRequest(
+                        method: "POST",
+                        path: hold.path,
+                        headers: [:],
+                        body: nil
+                    )
+                )
+            }
+        }
+        var atOpen: AtTheOpen?
+        let app = try await makeApp(
+            directTransport: directTransport,
+            pushHolds: [hold],
+            launchesWithInstanceOneSelected: restoring,
+            whenTheAppExists: { app in
+                if restoring {
+                    atOpen = AtTheOpen(app, start: startRequest)
+                }
+            }
+        )
+        if !restoring {
+            atOpen = AtTheOpen(app, start: startRequest)
+            _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        }
+        let open = try XCTUnwrap(atOpen, file: file, line: line)
+        if restoring {
+            try await waitForTheBootstrap(of: app)
+        }
+        // The request launches its own account transport.
+        await fulfillment(of: [hold.inFlight.expectation], timeout: 60)
+        try await eventually { app.route != .loading }
+
+        guard case .browser(let runtime) = app.route else {
+            hold.release.signal()
+            _ = await open.started?.result
+            return XCTFail(
+                "The open ended at \(app.route) while a push request ran.",
+                file: file,
+                line: line
+            )
+        }
+        XCTAssertEqual(runtime.instance.id, "instance-1", file: file, line: line)
+        // Still in flight: the coordinator keeps the runtime but is not idle.
+        XCTAssertFalse(
+            app.mobileSessionCoordinator.isCurrentRuntime(runtime),
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            app.mobileSessionCoordinator.keepsSelectedRuntime(runtime),
+            file: file,
+            line: line
+        )
+
+        // The root view's WebView arrives while the request still runs.
+        let controller = try makeRuntimeController(app, runtime)
+        app.registerRuntimeController(controller, for: runtime)
+        let page = try RuntimePage(controller: controller)
+        defer { page.close() }
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+
+        hold.release.signal()
+        try await XCTUnwrap(open.started, file: file, line: line).value
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertTrue(
+            app.mobileSessionCoordinator.isCurrentRuntime(runtime),
+            file: file,
+            line: line
+        )
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+        if let directTransport {
+            XCTAssertEqual(open.routes, [.loading, .browser(runtime)], file: file, line: line)
+            let target = try XCTUnwrap(directTransport.selections.last, file: file, line: line)
+            XCTAssertEqual(target.runtime, runtime, file: file, line: line)
+            // The registered WebView is the runtime's, once the account is idle.
+            XCTAssertTrue(
+                app.directRendezvousWebView(for: DirectIrohSelection(target))
+                    === controller.livePrimaryWebView,
+                file: file,
+                line: line
+            )
+        } else {
+            XCTAssertEqual(open.routes, [.browser(runtime)], file: file, line: line)
+        }
+    }
+
+
+    // MARK: With a transport, with notifications on
+
+    /// The fault exists only with a transport; the launch after it has none.
+    @MainActor
+    func testListenerFaultFallsBackToPublicPathOnNextLaunchWithNotificationsOn() async throws {
+        try await requireAHostWithoutNotificationPermission()
+        try assertSocketScanSeesListeners()
+        let notifications = try NotificationsOn()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(
+            directTransport: StandInDirectTransport(),
+            notifications: notifications
+        ) {
+            listening = try listeningSockets()
+        }
+        let defaults = try XCTUnwrap(appDefaults)
+        let first = try await openWithNotificationsOn(
+            "instance-1",
+            in: app,
+            notifications: notifications
+        ) {
+            _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        }
+        defer { first.page.close() }
+        XCTAssertFalse(app.directFaultCovers(first.runtime))
+
+        // The App's port is taken while it is in the background: the return
+        // cannot bind it again, which is the listener fault.
+        let socket = try XCTUnwrap(try newListeners(since: listening).first)
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: socket.port,
+            reuseAddress: true
+        )
+        defer { squatter.close() }
+        enterForeground()
+        try await eventually { app.directListenerFault }
+        // The reopen message covers the runtime, and the next launch is marked.
+        XCTAssertTrue(app.directFaultCovers(first.runtime))
+        XCTAssertNotNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
+
+        // Opened again under the fault, with its provider update in flight:
+        // the reopen message alone.
+        let before = notifications.providerPatches.arrivals
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            notifications.providerPatches.arrivals > before
+        }
+        try await eventually { app.route != .loading }
+        guard case .browser(let reopened) = app.route else {
+            notifications.providerPatches.releaseAll()
+            return XCTFail("The reopen under the fault ended at \(app.route).")
+        }
+        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return app.mobileSessionCoordinator.isCurrentRuntime(reopened)
+        }
+        XCTAssertEqual(app.route, .browser(reopened))
+        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
+
+        // The next launch, with the same preferences and the same device:
+        // no transport, so the restored instance loads on the public path.
+        let nextTransport = StandInDirectTransport()
+        let arrivals = notifications.providerPatches.arrivals
+        let next = try await makeApp(
+            directTransport: nextTransport,
+            reusingDefaults: defaults,
+            notifications: notifications
+        )
+        XCTAssertNil(next.directStatusProvider)
+        XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
+        let restored = try await openWithNotificationsOn(
+            "instance-1",
+            in: next,
+            notifications: notifications,
+            afterArrivals: arrivals
+        ) {}
+        defer { restored.page.close() }
+        XCTAssertFalse(next.directListenerFault)
+        XCTAssertEqual(next.directLoadGate(for: restored.runtime), .open)
+        XCTAssertFalse(next.presentsDirectFaultOnly(restored.runtime))
+        XCTAssertEqual(nextTransport.selections.count, 0)
+    }
+
+
+    /// Runs `open` and checks that its provider update reaches the control
+    /// plane and stays in flight while the open of `instanceID` settles at
+    /// `.browser` and the root view's WebView registers and is kept; then
+    /// releases it and checks again once the account coordinator is idle.
+    @MainActor
+    private func openWithNotificationsOn(
+        _ instanceID: String,
+        in app: AppModel,
+        notifications: NotificationsOn,
+        afterArrivals arrivals: Int? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ open: () throws -> Void
+    ) async throws -> (runtime: MobileRuntimeContext, page: RuntimePage) {
+        let before = arrivals ?? notifications.providerPatches.arrivals
+        try open()
+        // A launch reads the session first (a restore opens only then).
+        try await waitForTheBootstrap(of: app)
+        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            notifications.providerPatches.arrivals > before
+        }
+        try await eventually { app.route != .loading }
+        guard
+            case .browser(let runtime) = app.route,
+            runtime.instance.id == instanceID
+        else {
+            notifications.providerPatches.releaseAll()
+            XCTFail(
+                "The open of \(instanceID) ended at \(app.route) while its provider update was in flight.",
+                file: file,
+                line: line
+            )
+            throw DirectTestTimeout()
+        }
+        XCTAssertFalse(
+            app.mobileSessionCoordinator.isCurrentRuntime(runtime),
+            "the provider update is in flight",
+            file: file,
+            line: line
+        )
+        let page: RuntimePage
+        let controller: WebViewController
+        do {
+            controller = try makeRuntimeController(app, runtime)
+            app.registerRuntimeController(controller, for: runtime)
+            page = try RuntimePage(controller: controller)
+        } catch {
+            notifications.providerPatches.releaseAll()
+            throw error
+        }
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+
+        // Released, including any follow-up update the coordinator sends.
+        try await eventually {
+            notifications.providerPatches.releaseAll()
+            return app.mobileSessionCoordinator.isCurrentRuntime(runtime)
+        }
+        XCTAssertEqual(app.route, .browser(runtime), file: file, line: line)
+        XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
+        return (runtime, page)
+    }
+
+
     // MARK: The App as shipped, with notifications on
 
     // Release checks for the App as it ships (no direct transport). Each
@@ -3667,6 +4169,22 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testColdStartRestoresLastInstanceWithNotificationsOnWithATransport() async throws {
+        try await assertColdStartRestoresInstanceOne(
+            registration: .nextUpdate,
+            directTransport: StandInDirectTransport()
+        )
+    }
+
+    @MainActor
+    func testTenConsecutiveSwitchesOpenWithNotificationsOnWithATransport() async throws {
+        try await assertTenSwitchesOpen(
+            registration: .nextUpdate,
+            directTransport: StandInDirectTransport()
+        )
+    }
+
+    @MainActor
     func testColdStartRestoresLastInstanceWhenItsProviderUpdateIsInFlightAtRegistration() async throws {
         try await assertColdStartRestoresInstanceOne(registration: .afterTheProviderUpdate)
     }
@@ -3678,13 +4196,14 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     private func assertColdStartRestoresInstanceOne(
-        registration: RootViewStandIn.Registration
+        registration: RootViewStandIn.Registration,
+        directTransport: StandInDirectTransport? = nil
     ) async throws {
         try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         var root: RootViewStandIn?
         let app = try await makeApp(
-            directTransport: nil,
+            directTransport: directTransport,
             launchesWithInstanceOneSelected: true,
             notifications: notifications,
             whenTheAppExists: { app in
@@ -3711,12 +4230,13 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     private func assertTenSwitchesOpen(
-        registration: RootViewStandIn.Registration
+        registration: RootViewStandIn.Registration,
+        directTransport: StandInDirectTransport? = nil
     ) async throws {
         try await requireAHostWithoutNotificationPermission()
         let notifications = try NotificationsOn()
         let app = try await makeApp(
-            directTransport: nil,
+            directTransport: directTransport,
             notifications: notifications
         )
         let root = RootViewStandIn(
@@ -5297,6 +5817,7 @@ final class DirectPathAppTests: XCTestCase {
         systemScheduleCheckpoint: ((FaultingSystemScheduleFileIO.Checkpoint) throws -> Void)? = nil,
         systemScheduleFileURL: URL? = nil,
         launchesWithInstanceOneSelected: Bool = false,
+        reusingDefaults: UserDefaults? = nil,
         notifications: NotificationsOn? = nil,
         // Before `beforeTheAppExists`: an unlabeled trailing closure at a
         // call site keeps meaning that last parameter.
@@ -5359,7 +5880,9 @@ final class DirectPathAppTests: XCTestCase {
             server.stop()
         }
         let suiteName = "DirectPathAppTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        // `reusingDefaults`: the next launch of the same App, with its
+        // preferences (the previous launch's teardown removes them).
+        let defaults = try reusingDefaults ?? XCTUnwrap(UserDefaults(suiteName: suiteName))
         let scheduleDirectory = systemScheduleFileURL?.deletingLastPathComponent()
             ?? FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -5379,8 +5902,10 @@ final class DirectPathAppTests: XCTestCase {
             try? FileManager.default.removeItem(at: scheduleDirectory)
         }
         appDefaults = defaults
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
+        if reusingDefaults == nil {
+            addTeardownBlock {
+                defaults.removePersistentDomain(forName: suiteName)
+            }
         }
         addTeardownBlock { @MainActor [self] in
             await self.removeTrackedStores()
@@ -5472,7 +5997,7 @@ final class DirectPathAppTests: XCTestCase {
         addTeardownBlock { @MainActor [self] in
             server.requests.attach(to: self, name: "direct App bootstrap requests")
         }
-        if launchesWithInstanceOneSelected {
+        if launchesWithInstanceOneSelected || reusingDefaults != nil {
             return app
         }
         try await WebKitReadiness.waitForSignedInFixture(
@@ -6567,10 +7092,49 @@ private final class SessionAnswerOverride: @unchecked Sendable {
     }
 
     func holdSignedOut(started: FixtureEvent, release: DispatchSemaphore) {
+        hold(.status(401), started: started, release: release)
+    }
+
+    /// The next session read signals `started` and answers `response` once
+    /// `release` is signaled; later reads answer `response` at once.
+    func hold(
+        _ response: LocalHTTPResponse,
+        started: FixtureEvent,
+        release: DispatchSemaphore
+    ) {
         lock.lock()
         defer { lock.unlock() }
-        storedResponse = .status(401)
+        storedResponse = response
         heldFetch = (started, release)
+    }
+}
+
+/// Runs `start` at the first route the App sets after this is made, in the
+/// same main-actor turn: for an open, that is where `openRuntime` has just
+/// resumed push registration, before it starts preparing the route. Records
+/// every route set from then on.
+@MainActor
+private final class AtTheOpen {
+    private(set) var routes: [AppRoute] = []
+    private(set) var started: Task<Void, Error>?
+    private var didStart = false
+    private var subscription: AnyCancellable?
+
+    init(
+        _ app: AppModel,
+        start: @escaping @MainActor (AppModel) -> Task<Void, Error>?
+    ) {
+        subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
+            guard let self, let app else {
+                return
+            }
+            self.routes.append(route)
+            guard !self.didStart else {
+                return
+            }
+            self.didStart = true
+            self.started = start(app)
+        }
     }
 }
 
