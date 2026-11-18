@@ -251,6 +251,7 @@ private struct SystemScheduleConfirmationOverlay: View {
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .foregroundStyle(AvibeStyle.onAccent)
                                 .accessibilityIdentifier(
                                     "system-schedule-confirm"
                                 )
@@ -488,6 +489,7 @@ private struct BrowserScreen: View {
                                     )
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .foregroundStyle(AvibeStyle.onAccent)
                             }
 
                             Button("browser.other_instances") {
@@ -535,6 +537,25 @@ private struct BrowserScreen: View {
     }
 }
 
+/// Avibe's colours in native chrome: the mint accent is the Web UI's
+/// `--primary` (#10b981 light, #5bffa0 dark), as the Live Activity uses;
+/// text on an accent fill is `--primary-foreground` (white light, #080812
+/// dark). White on #10b981 is the owner's accepted brand pair (2.54:1,
+/// ui/src/index.css); #080812 on #5bffa0 is 15:1.
+enum AvibeStyle {
+    static let accent = Color("AccentColor")
+    static let onAccent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x08 / 255, green: 0x08 / 255, blue: 0x12 / 255, alpha: 1)
+            : .white
+    })
+    /// The Workbench's top bar (instance name, account), below the status
+    /// bar: native chrome over a page stays below it.
+    static let topBarHeight: CGFloat = 52
+    /// The Workbench's bottom tab bar, above the Home indicator.
+    static let tabBarHeight: CGFloat = 56
+}
+
 /// How an open that is under way shows itself: a small capsule at the top
 /// with the current stage and Cancel. Only the capsule takes touches; the
 /// page (or its skeleton) stays visible around it.
@@ -565,6 +586,7 @@ struct RuntimeOpenStatusPill: View {
             Button("common.cancel", action: cancel)
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .tint(AvibeStyle.accent)
         }
         .padding(.leading, 14)
         .padding(.trailing, 8)
@@ -572,7 +594,8 @@ struct RuntimeOpenStatusPill: View {
         .background(.regularMaterial, in: Capsule())
         .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
         .padding(.horizontal, 16)
-        .padding(.top, 8)
+        // Below the page's top bar (instance name, account), never over it.
+        .padding(.top, AvibeStyle.topBarHeight + 8)
         .frame(maxWidth: .infinity, alignment: .top)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("runtime-open-progress")
@@ -591,8 +614,8 @@ struct RuntimeSkeleton: View {
                 Circle().frame(width: 28, height: 28)
             }
             .padding(.horizontal, 20)
-            .padding(.top, 64)
-            .padding(.bottom, 20)
+            .frame(height: AvibeStyle.topBarHeight)
+            .padding(.bottom, 52)
             ForEach(0..<7, id: \.self) { index in
                 HStack(alignment: .top, spacing: 12) {
                     Circle().frame(width: 40, height: 40)
@@ -621,8 +644,7 @@ struct RuntimeSkeleton: View {
         }
         .foregroundStyle(Color(uiColor: .tertiarySystemFill))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
-        .ignoresSafeArea()
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
         .allowsHitTesting(false)
         .accessibilityHidden(true)
         .accessibilityIdentifier("runtime-skeleton")
