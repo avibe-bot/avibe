@@ -451,6 +451,7 @@ final class VoiceCaptureController {
         }
         state = .idle
         guard let take else { return [] }
+        record("account transition: the take is given up")
         let barrier = take.instance.releaseBarrier
         take.audio.stop()
         take.instance.close()
