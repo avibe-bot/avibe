@@ -412,11 +412,11 @@ final class AppModel: ObservableObject {
         onHealthAccountEvent: { [weak self] event in
             self?.healthSync?.accountEvent(event)
         },
-        onPreparePushLogout: { [weak self] in
+        onPreparePushLogout: { [weak self] reason in
             // Signing out or another account: the badge counted this
             // account's Inbox. (A session refresh of the same account keeps it.)
             self?.nativeBadge.clear()
-            await self?.nativePushCoordinator.prepareForLogout()
+            await self?.nativePushCoordinator.prepareForLogout(reason: reason)
         },
         onReconcileInstancePush: { [weak self] liveOrigins, accountID in
             // Instances that left the account's list lose only their own

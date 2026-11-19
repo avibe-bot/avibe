@@ -17,6 +17,9 @@ struct PushInstallationState: Codable, Equatable {
     var provider: PushProviderState?
     var providerPatchPending: Bool
     var pendingBulkRevokeThroughGeneration: Int64?
+    /// Why the pending bulk revoke was staged (`PushRevokeReason` raw value),
+    /// sent with it and with its retries.
+    var pendingBulkRevokeReason: String?
 
     init(
         installationID: UUID,
@@ -26,7 +29,8 @@ struct PushInstallationState: Codable, Equatable {
         providerGeneration: Int64,
         provider: PushProviderState?,
         providerPatchPending: Bool = false,
-        pendingBulkRevokeThroughGeneration: Int64?
+        pendingBulkRevokeThroughGeneration: Int64?,
+        pendingBulkRevokeReason: String? = nil
     ) {
         self.installationID = installationID
         self.installationSecret = installationSecret
@@ -36,6 +40,7 @@ struct PushInstallationState: Codable, Equatable {
         self.provider = provider
         self.providerPatchPending = providerPatchPending
         self.pendingBulkRevokeThroughGeneration = pendingBulkRevokeThroughGeneration
+        self.pendingBulkRevokeReason = pendingBulkRevokeReason
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -47,6 +52,7 @@ struct PushInstallationState: Codable, Equatable {
         case provider
         case providerPatchPending
         case pendingBulkRevokeThroughGeneration
+        case pendingBulkRevokeReason
     }
 
     init(from decoder: Decoder) throws {
@@ -68,6 +74,10 @@ struct PushInstallationState: Codable, Equatable {
             Int64.self,
             forKey: .pendingBulkRevokeThroughGeneration
         )
+        pendingBulkRevokeReason = try container.decodeIfPresent(
+            String.self,
+            forKey: .pendingBulkRevokeReason
+        )
     }
 
     func encode(to encoder: Encoder) throws {
@@ -82,6 +92,10 @@ struct PushInstallationState: Codable, Equatable {
         try container.encodeIfPresent(
             pendingBulkRevokeThroughGeneration,
             forKey: .pendingBulkRevokeThroughGeneration
+        )
+        try container.encodeIfPresent(
+            pendingBulkRevokeReason,
+            forKey: .pendingBulkRevokeReason
         )
     }
 }
@@ -118,6 +132,10 @@ struct PushKeyRecord: Codable, Equatable {
     var pendingRevoke: Bool
     var replacementRegistrationIDs: [String]
     var retirementDeadline: Date? = nil
+    /// Why a pending revoke was staged (`PushRevokeReason` raw value), sent
+    /// with it and with its retries. A string, so a record written by a
+    /// newer App still decodes; nil for one staged before reasons existed.
+    var revokeReason: String? = nil
 
     var publicSubscription: [String: Any] {
         let privateKey = try? P256KeyAgreementPrivateKey(rawRepresentation: privateKey)

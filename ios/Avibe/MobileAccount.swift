@@ -491,6 +491,27 @@ final class AccountWebsiteDataStore {
     }
 }
 
+/// Why this device revokes its push registrations, sent to the relay with
+/// the revoke so a "my notifications stopped" report can be traced
+/// (docs/plans/ios-push-relay-contract.md, revoke reasons). A closed enum,
+/// never free text; the relay records an unknown value as `unspecified`.
+enum PushRevokeReason: String, CaseIterable {
+    /// The person signed out in the App.
+    case signedOut = "signed_out"
+    /// avibe.bot answered the session read `401`.
+    case sessionExpired = "session_expired"
+    /// A different account signed in.
+    case accountChanged = "account_changed"
+    /// The instance left the account's list.
+    case instanceRemoved = "instance_removed"
+    /// The instance page turned its notifications off (`push.unsubscribe`).
+    case notificationsOff = "notifications_off"
+    /// An installation left by an earlier install of the App.
+    case reinstalled
+    /// Not attributable: a revoke staged before reasons existed.
+    case unspecified
+}
+
 @MainActor
 protocol MobileAuthTransporting: AnyObject {
     func requestOTP(email: String) async throws -> Int
@@ -609,7 +630,9 @@ final class MobileSessionCoordinator {
         return snapshot?.account.id
     }
 
-    private let onPreparePushLogout: @MainActor () async -> Void
+    /// Revokes this device's push for the account, saying why
+    /// (docs/plans/ios-push-relay-contract.md, revoke reasons).
+    private let onPreparePushLogout: @MainActor (PushRevokeReason) async -> Void
     /// Revokes this device's registrations for the account's instance
     /// origins outside the given set (the instances it now lists), leaving
     /// the others bound. Called with the account that lists them.
@@ -720,7 +743,7 @@ final class MobileSessionCoordinator {
         onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
-        onPreparePushLogout: @escaping @MainActor () async -> Void = {},
+        onPreparePushLogout: @escaping @MainActor (PushRevokeReason) async -> Void = { _ in },
         onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in }
     ) {
         self.defaults = defaults
@@ -849,7 +872,8 @@ final class MobileSessionCoordinator {
                 self.healthAuthorizationAvailable = false
                 self.onHealthAccountEvent(.signedOut(explicit: false))
                 try await self.preparePushLogout(
-                    publishing: .signedOut, generation: requestGeneration
+                    publishing: .signedOut, generation: requestGeneration,
+                    reason: .sessionExpired
                 )
                 let transitionGeneration = self.beginAccountTransition(clearSelection: true)
                 try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
@@ -867,7 +891,8 @@ final class MobileSessionCoordinator {
                 )
                 try await self.preparePushLogout(
                     publishing: .signedOut,
-                    generation: transitionGeneration
+                    generation: transitionGeneration,
+                    reason: .accountChanged
                 )
                 try await self.replaceWithFreshSignedOutStore(
                     generation: transitionGeneration
@@ -1180,7 +1205,8 @@ final class MobileSessionCoordinator {
                 self.healthAuthorizationAvailable = false
                 self.onHealthAccountEvent(.signedOut(explicit: false))
                 try await self.preparePushLogout(
-                    publishing: .signedOut, generation: requestGeneration
+                    publishing: .signedOut, generation: requestGeneration,
+                    reason: .sessionExpired
                 )
                 let transitionGeneration = self.beginAccountTransition(clearSelection: true)
                 try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
@@ -1201,7 +1227,8 @@ final class MobileSessionCoordinator {
                     )
                     try await self.preparePushLogout(
                         publishing: .signedOut,
-                        generation: transitionGeneration
+                        generation: transitionGeneration,
+                        reason: .accountChanged
                     )
                     try await self.replaceWithFreshSignedOutStore(
                         generation: transitionGeneration
@@ -1447,6 +1474,7 @@ final class MobileSessionCoordinator {
         let resetGeneration = generation
         try await preparePushLogout(
             publishing: .signedOut, generation: resetGeneration,
+            reason: .signedOut,
             borrowingCleanup: borrowsCleanup
         )
         invalidateAccount(clearSelection: true, prepareRuntime: false)
@@ -1518,7 +1546,10 @@ final class MobileSessionCoordinator {
             try requireCurrentGeneration(requestGeneration)
             healthAuthorizationAvailable = false
             onHealthAccountEvent(.signedOut(explicit: false))
-            try await preparePushLogout(publishing: .signedOut, generation: requestGeneration)
+            try await preparePushLogout(
+                publishing: .signedOut, generation: requestGeneration,
+                reason: .sessionExpired
+            )
             let transitionGeneration = beginAccountTransition(clearSelection: true)
             try await replaceWithFreshSignedOutStore(generation: transitionGeneration)
             return .signedOut
@@ -1544,6 +1575,7 @@ final class MobileSessionCoordinator {
     private func preparePushLogout(
         publishing state: MobileSessionState,
         generation requestGeneration: Int,
+        reason: PushRevokeReason,
         borrowingCleanup: Bool = false
     ) async throws {
         try requireCurrentGeneration(requestGeneration)
@@ -1555,14 +1587,14 @@ final class MobileSessionCoordinator {
             }
         }
         if !borrowingCleanup {
-            await preparePushLogout()
+            await preparePushLogout(reason: reason)
         }
         // Push cleanup can be superseded by logout and even a new login.
         // Transport ownership alone does not authorize the old state write.
         try requireCurrentGeneration(requestGeneration)
     }
 
-    private func preparePushLogout() async {
+    private func preparePushLogout(reason: PushRevokeReason) async {
         await runPushCleanup {
             // Committed from here: the push coordinator keeps its own pending
             // revoke. Clearing first means a cleanup that finishes after a
@@ -1575,7 +1607,7 @@ final class MobileSessionCoordinator {
                     self.accountPushCleanup = nil
                 }
             }
-            await self.onPreparePushLogout()
+            await self.onPreparePushLogout(reason)
         }
     }
 
@@ -1639,7 +1671,8 @@ final class MobileSessionCoordinator {
                 snapshot: orderedByUse(fresh, current: nil),
                 selectedInstanceID: nil
             ),
-            generation: requestGeneration
+            generation: requestGeneration,
+            reason: .accountChanged
         )
     }
 
