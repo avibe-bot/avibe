@@ -364,7 +364,7 @@ async def test_admission_notices_follow_rendezvous_admissions(sidecar):
 
 
 @pytest.mark.asyncio
-async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar):
+async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar, caplog):
     """Protect the sole data door and the peer label passed to ingress."""
     path, events, env = sidecar
     env["DIRECT_TEST_MODE"] = "stream"
@@ -373,9 +373,14 @@ async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar):
     os.environ.update(env)
     supervisor = DirectTransportSupervisor(str(path), ingress, RecordingRendezvous())
     try:
+        caplog.set_level(logging.INFO, logger="vibe.direct_transport")
         await supervisor.start()
         await asyncio.wait_for(ingress.started.wait(), timeout=5)
         assert ingress.calls == [(PEER, b"payload")]
+        lines = [record.getMessage() for record in caplog.records if record.getMessage().startswith("direct stream ")]
+        assert len(lines) == 2 and lines[0] == "direct stream open stream=1"
+        import re
+        assert re.fullmatch(r"direct stream close stream=1 duration_ms=\d+ bytes_in=7 bytes_out=0", lines[1])
     finally:
         await supervisor.stop()
         os.environ.clear()

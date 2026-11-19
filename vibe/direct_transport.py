@@ -286,10 +286,18 @@ class DirectTransportSupervisor:
             peer = self._data_header_peer(line)
             accepted = True
             self._connections += 1
-            await self._ingress.handle_stream(
-                AsyncioByteStream(reader, writer),
-                peer=peer,
-            )
+            stream_id = self._connections
+            stream = AsyncioByteStream(reader, writer)
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            logger.info("direct stream open stream=%d", stream_id)
+            try:
+                await self._ingress.handle_stream(stream, peer=peer)
+            finally:
+                logger.info(
+                    "direct stream close stream=%d duration_ms=%d bytes_in=%d bytes_out=%d",
+                    stream_id, int((loop.time() - started) * 1000), stream.bytes_read, stream.bytes_written,
+                )
         except (ConnectionError, OSError):
             if not accepted:
                 self._refuse_stream()

@@ -12,12 +12,21 @@ ordinary remote authentication. Nothing here holds or returns a key.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import secrets
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+# Publication reasons may originate in sidecar messages. Never log an arbitrary string.
+_LOG_REFUSALS = frozenset({
+    "owner_required", "no_reachable_address", "not_running", "starting", "stopped",
+    "setting_off", "unpaired", "permission_expired", "certificate_not_ready",
+    "transport_not_installed", "transport_start_failed", "state_changed", "sidecar_exited",
+})
 
 RENDEZVOUS_VERSION = 1
 # Application protocol the instance endpoint accepts and the client must offer.
@@ -184,41 +193,43 @@ class DirectRendezvous:
         now = int(self._clock())
         base = {"version": RENDEZVOUS_VERSION, "instance_id": instance_id, "hostname": hostname}
         with self._lock:
-            endpoint = self._endpoint
             generation = f"{self._boot}:{self._revision}"
-            relay = None
-            if endpoint and endpoint.relay_policy == PUBLIC_TRIAL:
-                if not is_owner:
-                    return unavailable(instance_id=instance_id, hostname=hostname, reason="owner_required")
-                if endpoint.relay_origin is not None:
-                    relay = {"policy": PUBLIC_TRIAL, "url": endpoint.relay_origin}
-            if endpoint is None or (not self._candidates and relay is None):
-                reason = self._unavailable_reason if endpoint is None else "no_reachable_address"
-                return unavailable(instance_id=instance_id, hostname=hostname, reason=reason)
-            expires_at = now + RENDEZVOUS_TTL_SECONDS
-            notifications = self._admit(client_endpoint_id, subject, expires_at, now)
-            listener = self._admission_listener
-            response = {
-                **base,
-                "status": "ready",
-                "generation": generation,
-                "issued_at": now,
-                "expires_at": expires_at,
-                "alpn": DIRECT_ALPN,
-                "endpoint": {
-                    "id": endpoint.endpoint_id,
-                    "addresses": [dict(candidate) for candidate in self._candidates],
-                    "relay": relay,
-                },
-                "client": {"endpoint_id": client_endpoint_id, "admitted_until": expires_at},
-            }
-            if listener is not None:
-                # The supervisor listener only schedules onto its loop; keep it
-                # inside the mutation lock so concurrent offers cannot reorder
-                # the notices that define the sidecar's admission state.
-                for endpoint_id, ttl_seconds in notifications:
-                    listener(endpoint_id, ttl_seconds)
-            return response
+            response = self._offer_locked(base, generation, now, subject, client_endpoint_id, is_owner)
+        offered = response["status"] == "ready"
+        endpoint_info = response.get("endpoint", {})
+        addresses = endpoint_info.get("addresses", ())
+        reason = response.get("reason")
+        logger.info(
+            "direct rendezvous generation=%s public_trial_v1=%s lan=%d ipv6=%d outcome=%s reason=%s",
+            generation, "yes" if endpoint_info.get("relay") else "no",
+            sum(c["kind"] == "lan" for c in addresses), sum(c["kind"] == "ipv6" for c in addresses),
+            "offered" if offered else "refused", "none" if offered else reason if reason in _LOG_REFUSALS else "unavailable",
+        )
+        return response
+
+    def _offer_locked(self, base, generation, now, subject, client_endpoint_id, is_owner):
+        endpoint = self._endpoint
+        relay = None
+        if endpoint and endpoint.relay_policy == PUBLIC_TRIAL:
+            if not is_owner:
+                return unavailable(instance_id=base["instance_id"], hostname=base["hostname"], reason="owner_required")
+            if endpoint.relay_origin is not None:
+                relay = {"policy": PUBLIC_TRIAL, "url": endpoint.relay_origin}
+        if endpoint is None or (not self._candidates and relay is None):
+            reason = self._unavailable_reason if endpoint is None else "no_reachable_address"
+            return unavailable(instance_id=base["instance_id"], hostname=base["hostname"], reason=reason)
+        expires_at = now + RENDEZVOUS_TTL_SECONDS
+        notifications = self._admit(client_endpoint_id, subject, expires_at, now)
+        if self._admission_listener is not None:
+            # Schedule on the loop in mutation order while holding the lock.
+            for endpoint_id, ttl_seconds in notifications:
+                self._admission_listener(endpoint_id, ttl_seconds)
+        return {
+            **base, "status": "ready", "generation": generation, "issued_at": now, "expires_at": expires_at,
+            "alpn": DIRECT_ALPN,
+            "endpoint": {"id": endpoint.endpoint_id, "addresses": [dict(c) for c in self._candidates], "relay": relay},
+            "client": {"endpoint_id": client_endpoint_id, "admitted_until": expires_at},
+        }
 
     def is_admitted(self, client_endpoint_id: str) -> bool:
         """Whether a transport peer with this endpoint ID may open streams now."""

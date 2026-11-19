@@ -109,6 +109,26 @@ def test_public_trial_requires_owner_even_with_direct_addresses_and_fences_old_o
     assert owner_offer()["status"] == "unavailable"
 
 
+def test_offer_and_renewal_logs_only_offer_counts_and_safe_reason(caplog):
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    rv = DirectRendezvous()
+    relay = next(iter(direct_rendezvous.PUBLIC_TRIAL_RELAYS))
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.8:3210", "[2606:4700::1]:1234"), relay, "public-trial-v1"))
+    args = dict(instance_id="private-instance", hostname="private.example", subject="private-subject", client_endpoint_id=CLIENT_ENDPOINT)
+    result = rv.offer(**args, is_owner=True)
+    rv.offer(**args, is_owner=True)
+    rv.offer(**args, is_owner=False)
+    rv.publish(None, reason=CLIENT_ENDPOINT)
+    rv.offer(**args)
+    lines = [r.getMessage() for r in caplog.records if r.name == "vibe.direct_rendezvous"]
+    prefix = f"direct rendezvous generation={result['generation']} "
+    assert lines[:3] == [prefix + "public_trial_v1=yes lan=1 ipv6=1 outcome=offered reason=none"] * 2 + [
+        prefix + "public_trial_v1=no lan=0 ipv6=0 outcome=refused reason=owner_required"]
+    assert len(lines) == 4 and lines[-1].endswith("outcome=refused reason=unavailable")
+    for private in (*args.values(), INSTANCE_ENDPOINT, relay, "192.168", "2606:4700"):
+        assert private not in "\n".join(lines)
+
+
 def test_offer_describes_the_endpoint_and_admits_the_client():
     clock = _Clock()
     rendezvous = DirectRendezvous(clock)
