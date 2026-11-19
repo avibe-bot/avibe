@@ -3103,6 +3103,8 @@ class TaskExecutionStore:
                 continue
             if str(run.get("request_type") or run.get("run_type") or "") != "watch":
                 continue
+            if ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY)) == "retrying":
+                continue
             status = _normalize_requested_run_status(run.get("status"))
             if status in {"queued", "running"}:
                 return run

@@ -1904,8 +1904,12 @@ WATCH_HOOK_OUTCOME_WAITER_FAILURE = "waiter_failure"
 WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR = "circuit_repair"
 #: A Watch that has kept retrying for long says so once (``core.watches``).
 WATCH_HOOK_OUTCOME_RETRYING = "retrying"
-#: The activation a Watch's retrying notice was sent for: once per activation.
+#: The armed episode (``watch_lifetime_started_at``) a Watch's retrying notice was
+#: sent for: once per activation, across supervisor restarts and store retries.
 WATCH_RETRY_NOTICE_ACTIVATION_METADATA_KEY = "watch_retry_notice_activation"
+#: When the current run of consecutive retries began (the first retrying cycle's
+#: start); cleared by any other outcome and by a resume.
+WATCH_RETRYING_SINCE_METADATA_KEY = "watch_retrying_since"
 # Durable Watch admission state. These values move with the Agent Run outbox row,
 # so the definition owns them instead of the in-memory supervisor.
 WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY = "watch_follow_up_run_id"
@@ -1992,6 +1996,7 @@ def watch_metadata_after_resume(
         raise JobWatchResumeRefused()
     updated = dict(metadata)
     updated.pop(WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
+    updated.pop(WATCH_RETRYING_SINCE_METADATA_KEY, None)
     updated[WATCH_LIFETIME_STARTED_AT_METADATA_KEY] = resumed_at
     incident = updated.get(WATCH_CIRCUIT_BREAKER_METADATA_KEY)
     if isinstance(incident, dict) and incident.get("status") == "tripped":
@@ -5312,6 +5317,9 @@ class SQLiteBackgroundTaskStore:
                 select(agent_runs)
                 .where(agent_runs.c.definition_id == definition_id)
                 .where(agent_runs.c.run_type == "watch")
+                # A retrying notice informs; it is not a follow-up the next cycle waits on.
+                .where(func.coalesce(func.json_extract(agent_runs.c.metadata_json, "$.watch_hook_outcome"), "")
+                       != WATCH_HOOK_OUTCOME_RETRYING)
                 .where(
                     agent_runs.c.status.in_(
                         _status_query_values("queued")

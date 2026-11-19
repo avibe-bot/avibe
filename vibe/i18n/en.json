@@ -114,6 +114,9 @@
       "truncated": "… (truncated)"
     },
     "watch": {
+      "retryingNotice": "Watch {id} has been retrying for {elapsed} (last exit code: {code}). It is still running.",
+      "elapsedHours": "{hours} h {minutes} min",
+      "elapsedMinutes": "{minutes} min",
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
       "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup.",
       "unknownSupervisorFailure": "Unknown supervisor failure.",

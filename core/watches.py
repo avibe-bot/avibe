@@ -59,6 +59,7 @@ from storage.background import (
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     WATCH_LIFETIME_STARTED_AT_METADATA_KEY as LIFETIME_STARTED_AT_METADATA_KEY,
     WATCH_RETRY_NOTICE_ACTIVATION_METADATA_KEY as RETRY_NOTICE_ACTIVATION_METADATA_KEY,
+    WATCH_RETRYING_SINCE_METADATA_KEY as RETRYING_SINCE_METADATA_KEY,
     WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY as RECENT_EVENT_TIMESTAMPS_METADATA_KEY,
     WATCH_TARGET_KIND_JOB,
     WATCH_TARGET_METADATA_KEY,
@@ -2269,11 +2270,10 @@ class ManagedWatchService:
                 },
             )
 
-        metadata_updates = (
-            {RECENT_EVENT_TIMESTAMPS_METADATA_KEY: observed}
-            if watch.mode == "forever"
-            else None
-        )
+        metadata_updates = {
+            **({RECENT_EVENT_TIMESTAMPS_METADATA_KEY: observed} if watch.mode == "forever" else {}),
+            **(_end_retrying(watch) or {}),
+        } or None
         return self._commit_cycle_result(
             watch,
             exit_code=0,
@@ -2640,10 +2640,7 @@ class ManagedWatchService:
         from storage.resource_access_service import HARNESS_ACCESS_FORBIDDEN_CODE
 
         lifetime_started: float | None = None
-        # When this run of consecutive retries began (monotonic), or None.
-        retrying_since: float | None = None
-        activation = _utc_now_iso()
-        self._watch_started_at[watch_id] = activation
+        self._watch_started_at[watch_id] = _utc_now_iso()
         self._runtime_state_dirty = True
         self._write_runtime_state()
 
@@ -2731,6 +2728,7 @@ class ManagedWatchService:
                     error_text=cwd_error,
                 )
                 return
+            cycle_started_at = _utc_now_iso()
             try:
                 result = await self._run_cycle(watch, timeout_seconds=cycle_timeout)
             except asyncio.CancelledError:
@@ -2752,15 +2750,6 @@ class ManagedWatchService:
 
             if not self._owns_service_instance():
                 return
-
-            # Consecutive "still waiting" cycles: anything else ends the run of retries.
-            if result.exit_code in set(watch.retry_exit_codes) or (
-                (result.timed_out or result.exit_code == 124) and 124 in set(watch.retry_exit_codes)
-            ):
-                if retrying_since is None:
-                    retrying_since = asyncio.get_running_loop().time()
-            else:
-                retrying_since = None
 
             if result.exit_code == 0:
                 if not await self._commit_success_cycle_async(watch, result):
@@ -2803,6 +2792,7 @@ class ManagedWatchService:
                     exit_code=NO_EVENT_EXIT_CODE,
                     error=None,
                     disable=watch.mode == "once",
+                    metadata_updates=_end_retrying(watch),
                 ):
                     return
                 if watch.mode != "forever":
@@ -2826,7 +2816,7 @@ class ManagedWatchService:
                         exit_code=124,
                         error=None,
                         disable=False,
-                        **self._retrying_notice(watch, 124, retrying_since, activation),
+                        **self._retrying_notice(watch, 124, cycle_started_at),
                     ):
                         return
                     await self._sleep_before_retry(
@@ -2856,7 +2846,7 @@ class ManagedWatchService:
                     exit_code=result.exit_code,
                     error=None,
                     disable=False,
-                    **self._retrying_notice(watch, result.exit_code, retrying_since, activation),
+                    **self._retrying_notice(watch, result.exit_code, cycle_started_at),
                 ):
                     return
                 await self._sleep_before_retry(
@@ -2951,30 +2941,41 @@ class ManagedWatchService:
             timed_out=False,
         )
 
-    def _retrying_notice(
-        self, watch: ManagedWatch, exit_code: Optional[int], retrying_since: float | None, activation: str,
-    ) -> dict[str, Any]:
-        """One notice, once per activation, when a Watch has retried for an hour.
+    def _retrying_notice(self, watch: ManagedWatch, exit_code: Optional[int], cycle_started_at: str) -> dict[str, Any]:
+        """The retry commit's extras: the run of retries, and its notice once per activation.
 
         A waiter that keeps returning "still waiting" while its own check is wrong is
         silent for hours (11-18: five hours "waiting on Apple"). Carried by the retry
-        commit it already makes: no timer, and no extra run of the check.
+        commit it already makes: no timer, and no extra run of the check. Both facts
+        are durable, so a store retry or a supervisor restart neither loses the run of
+        retries nor says it twice; the run starts when its first retrying cycle did.
         """
-        if retrying_since is None:
-            return {}
-        elapsed = asyncio.get_running_loop().time() - retrying_since
-        if elapsed < WATCH_RETRY_NOTICE_SECONDS:
-            return {}
-        if (watch.metadata or {}).get(RETRY_NOTICE_ACTIVATION_METADATA_KEY) == activation:
-            return {}
-        return {
-            "hook_outcome": WATCH_HOOK_OUTCOME_RETRYING,
-            "prompt": (
-                f"Watch {watch.id} has been retrying for {_format_elapsed(elapsed)} "
-                f"(last exit code: {exit_code}). It is still running."
+        metadata = watch.metadata or {}
+        since = str(metadata.get(RETRYING_SINCE_METADATA_KEY) or "") or cycle_started_at
+        extras: dict[str, Any] = {"metadata_updates": {RETRYING_SINCE_METADATA_KEY: since}}
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
+        except ValueError:
+            return extras
+        activation = str(metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
+        if elapsed < WATCH_RETRY_NOTICE_SECONDS or metadata.get(RETRY_NOTICE_ACTIVATION_METADATA_KEY) == activation:
+            return extras
+        extras["metadata_updates"][RETRY_NOTICE_ACTIVATION_METADATA_KEY] = activation
+        extras.update(
+            hook_outcome=WATCH_HOOK_OUTCOME_RETRYING,
+            prompt=self._t(
+                "harness.watch.retryingNotice", id=watch.id, elapsed=self._elapsed_text(elapsed), code=exit_code,
             ),
-            "metadata_updates": {RETRY_NOTICE_ACTIVATION_METADATA_KEY: activation},
-        }
+            follow_up_fence=False,
+        )
+        return extras
+
+    def _elapsed_text(self, seconds: float) -> str:
+        minutes = int(seconds // 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return self._t("harness.watch.elapsedHours", hours=hours, minutes=minutes)
+        return self._t("harness.watch.elapsedMinutes", minutes=minutes)
 
     def _hook_request(
         self,
@@ -3029,9 +3030,10 @@ class ManagedWatchService:
         disable: bool,
         pause: bool,
         metadata_updates: Optional[dict[str, Any]],
+        follow_up_fence: bool = True,
     ) -> bool:
         updates = dict(metadata_updates or {})
-        if request is not None:
+        if request is not None and follow_up_fence:
             updates[FOLLOW_UP_RUN_ID_METADATA_KEY] = request.id
             request.metadata = {
                 **watch.metadata,
@@ -3082,6 +3084,7 @@ class ManagedWatchService:
         prompt: Optional[str] = None,
         prefix: Optional[str] = None,
         body: Optional[str] = None,
+        follow_up_fence: bool = True,
     ) -> bool:
         """Record a cycle's outcome and queue the hook it authorises, as ONE decision.
 
@@ -3130,6 +3133,7 @@ class ManagedWatchService:
             disable=disable,
             pause=pause,
             metadata_updates=metadata_updates,
+            follow_up_fence=follow_up_fence,
         )
 
     async def _commit_cycle_result_async(
@@ -3570,10 +3574,9 @@ def _failure_hook_body(watch: ManagedWatch, *, exit_code: int, error_text: str) 
 WATCH_RETRY_NOTICE_SECONDS = 3600
 
 
-def _format_elapsed(seconds: float) -> str:
-    minutes = int(seconds // 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} h {minutes} min" if hours else f"{minutes} min"
+def _end_retrying(watch: ManagedWatch) -> dict[str, Any] | None:
+    """Any outcome but a retry ends the run of consecutive retries."""
+    return {RETRYING_SINCE_METADATA_KEY: None} if (watch.metadata or {}).get(RETRYING_SINCE_METADATA_KEY) else None
 
 
 def _build_prompt(prefix: Optional[str], body: Optional[str]) -> str:

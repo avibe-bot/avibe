@@ -5698,10 +5698,9 @@ def test_a_watch_read_never_waits_for_a_writer_holding_sqlite_and_never_sees_its
 @pytest.mark.parametrize("retry_code", [75, 124])
 def test_a_watch_retrying_for_long_says_so_once_per_activation(tmp_path: Path, monkeypatch, retry_code: int) -> None:
     """11-18: a Watch sat "waiting on Apple" for five hours while its own check was
-    wrong. After an hour of consecutive retries it says so once, from the retry it
-    already commits; a new activation may say so again; any other outcome resets."""
+    wrong. After an hour of consecutive retries it says so once per activation, from
+    the retry it already commits, and keeps checking meanwhile."""
     import core.watches as watches_module
-    from core.watches import _FollowUpSlot
 
     store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
@@ -5715,33 +5714,78 @@ def test_a_watch_retrying_for_long_says_so_once_per_activation(tmp_path: Path, m
         request_store=request_store, runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     monkeypatch.setattr(watches_module, "WATCH_RETRY_NOTICE_SECONDS", 0.05)
-    outcomes = iter([retry_code] * 3 + [NO_EVENT_EXIT_CODE] + [retry_code] * 8)
+    cycles = []
+
+    def run(codes):
+        outcomes = iter(codes)
+
+        async def fake_run_cycle(*args, **kwargs):
+            code = next(outcomes, None)
+            if code is None:
+                service._running = False
+                code = retry_code
+            cycles.append(code)
+            await asyncio.sleep(0.03)
+            stderr = NO_EVENT_MARKER if code == NO_EVENT_EXIT_CODE else "not ready"
+            return _CycleResult(exit_code=code, stdout="", stderr=stderr, timed_out=code == 124)
+
+        monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+        service._running = True
+        service._requires_service_lease = False
+        asyncio.run(service._run_watch(watch.id))
+        return [request.prompt for request in request_store.list_pending()]
+
+    def retrying_notices(prompts):
+        return [p for p in prompts if p.startswith(f"Watch {watch.id} has been retrying for ")]
+
+    # Not before an hour; then once; the Watch keeps checking after its notice (no
+    # follow-up fence), and a quiet cycle ends the run of retries.
+    prompts = run([retry_code] * 6)
+    assert len(cycles) == 7  # every cycle ran: the notice did not hold the next one back
+    [notice] = retrying_notices(prompts)
+    assert notice.endswith(f"(last exit code: {retry_code}). It is still running.")
+    assert store.get_watch(watch.id).metadata.get("watch_follow_up_run_id") is None
+    # The same activation after a supervisor restart or a store retry: nothing more.
+    assert len(retrying_notices(run([retry_code] * 6))) == 1
+    # A quiet cycle ends the run of retries; a new run within the activation: still once.
+    assert len(retrying_notices(run([NO_EVENT_EXIT_CODE] + [retry_code] * 6))) == 1
+    assert store.get_watch(watch.id).metadata.get("watch_retrying_since") is not None
+    # A resume starts a new activation: it may say so again, once.
+    store.set_enabled(watch.id, False)
+    store.set_enabled(watch.id, True)
+    assert store.get_watch(watch.id).metadata.get("watch_retrying_since") is None
+    assert len(retrying_notices(run([retry_code] * 6))) == 2
+
+
+def test_a_marked_quiet_cycle_ends_the_run_of_retries_even_when_64_is_a_retry_code(tmp_path: Path, monkeypatch) -> None:
+    """Quiet and success outcomes are classified before retry codes (#4015 review)."""
+    import core.watches as watches_module
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    watch = store.add_watch(
+        name="Quiet", session_key="slack::channel::C123", command=[sys.executable, "wait.py"],
+        shell_command=None, prefix=None, cwd=None, mode="forever", timeout_seconds=5, lifetime_timeout_seconds=0,
+        retry_exit_codes=[75, NO_EVENT_EXIT_CODE], retry_delay_seconds=0, post_to=None, deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(config=SimpleNamespace(language="en")), store=store,
+        request_store=request_store, runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    monkeypatch.setattr(watches_module, "WATCH_RETRY_NOTICE_SECONDS", 0.2)
+    outcomes = iter([75, 75, NO_EVENT_EXIT_CODE, 75])
 
     async def fake_run_cycle(*args, **kwargs):
         code = next(outcomes, None)
         if code is None:
             service._running = False
-            code = retry_code
-        await asyncio.sleep(0.03)
-        stderr = NO_EVENT_MARKER if code == NO_EVENT_EXIT_CODE else "not ready"
-        return _CycleResult(exit_code=code, stdout="", stderr=stderr, timed_out=code == 124)
-
-    async def ready(*args, **kwargs):
-        return _FollowUpSlot(state="ready")
+            code = 75
+        await asyncio.sleep(0.06)
+        return _CycleResult(exit_code=code, stdout="", stderr=NO_EVENT_MARKER if code == NO_EVENT_EXIT_CODE else "",
+                            timed_out=False)
 
     monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
-    monkeypatch.setattr(service, "_wait_for_follow_up_slot", ready)
     service._running = True
     service._requires_service_lease = False
     asyncio.run(service._run_watch(watch.id))
-    first = [request.prompt for request in request_store.list_pending()]
-    # The first streak (3 retries) crosses the hour; the quiet cycle resets it; the
-    # second streak crosses it again, but this activation already said so: one notice.
-    assert len(first) == 1
-    assert first[0].startswith(f"Watch {watch.id} has been retrying for ")
-    assert first[0].endswith(f"(last exit code: {retry_code}). It is still running.")
-    # A new activation (a restart or a resume) may say so again, once.
-    outcomes = iter([retry_code] * 6)
-    service._running = True
-    asyncio.run(service._run_watch(watch.id))
-    assert len(request_store.list_pending()) == len(first) + 1
+    assert not [r for r in request_store.list_pending() if "has been retrying" in r.prompt]
