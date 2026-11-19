@@ -81,6 +81,36 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.c.widget
+  ProbeD:
+    templates: [ProbeApp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.d
+        INFOPLIST_KEY_CFBundleDisplayName: "Probe D"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) VARIANT_D"
+        INFOPLIST_FILE: Probe/Info-audio.plist
+    dependencies:
+      - target: ProbeDWidget
+  ProbeDWidget:
+    templates: [ProbeWidget]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.d.widget
+  ProbeE:
+    templates: [ProbeApp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.e
+        INFOPLIST_KEY_CFBundleDisplayName: "Probe E"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) VARIANT_E"
+        INFOPLIST_FILE: Probe/Info-audio.plist
+    dependencies:
+      - target: ProbeEWidget
+  ProbeEWidget:
+    templates: [ProbeWidget]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.e.widget
   Helper:
     type: application
     platform: iOS
@@ -122,6 +152,8 @@ schemes:
         ProbeA: all
         ProbeB: all
         ProbeC: all
+        ProbeD: all
+        ProbeE: all
         SampleUITests: [test]
     test:
       targets:

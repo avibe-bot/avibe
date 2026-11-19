@@ -19,7 +19,7 @@ final class ProbeUITests: XCTestCase {
                 XCUIDevice.shared.press(.home)
                 sleep(2)
             }
-            for variant in ["A", "B", "C"] {
+            for variant in ["A", "B", "C", "D", "E"] {
                 let probe = XCUIApplication(bundleIdentifier: "bot.avibe.sample.\(variant.lowercased())")
                 for launch in ["warm", "cold"] {
                     if launch == "warm" {

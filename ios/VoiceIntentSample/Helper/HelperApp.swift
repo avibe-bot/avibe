@@ -2,8 +2,9 @@ import ActivityKit
 import AVFoundation
 import SwiftUI
 
-/// Navigation-like: a voice-prompt audio session playing in the background,
-/// and a Live Activity of its own occupying the island.
+/// Navigation-like: a voice-prompt audio session that keeps playing in the
+/// background (a looping tone file), and a Live Activity of its own. Logs
+/// every 2 s whether it is still playing.
 @main
 struct HelperApp: App {
     init() {
@@ -19,8 +20,8 @@ struct HelperApp: App {
 
 final class Navigator {
     static let shared = Navigator()
-    private let engine = AVAudioEngine()
-    private var phase = 0.0
+    private var player: AVAudioPlayer?
+    private var timer: Timer?
 
     func start() {
         let session = AVAudioSession.sharedInstance()
@@ -29,25 +30,18 @@ final class Navigator {
                 .playback, mode: .voicePrompt, options: [.duckOthers, .interruptSpokenAudioAndMixWithOthers]
             )
             try session.setActive(true)
-            let format = engine.outputNode.inputFormat(forBus: 0)
-            let rate = format.sampleRate
-            let source = AVAudioSourceNode { [unowned self] _, _, frameCount, buffers -> OSStatus in
-                let list = UnsafeMutableAudioBufferListPointer(buffers)
-                for frame in 0..<Int(frameCount) {
-                    let value = Float(sin(self.phase) * 0.05)
-                    self.phase += 2 * .pi * 440 / rate
-                    for buffer in list {
-                        buffer.mData?.assumingMemoryBound(to: Float.self)[frame] = value
-                    }
-                }
-                return noErr
-            }
-            engine.attach(source)
-            engine.connect(source, to: engine.mainMixerNode, format: AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1))
-            try engine.start()
-            ProbeLog.record("helper playing")
+            let url = try Self.toneFile()
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.numberOfLoops = -1
+            player.volume = 0.3
+            player.play()
+            self.player = player
+            ProbeLog.record("helper playing \(player.isPlaying)")
         } catch {
             ProbeLog.record("helper audio failed \(ProbeLog.describe(error))")
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            ProbeLog.record("helper tick playing=\(self?.player?.isPlaying ?? false) otherAudio=\(AVAudioSession.sharedInstance().isOtherAudioPlaying)")
         }
         do {
             _ = try Activity.request(
@@ -58,5 +52,23 @@ final class Navigator {
         } catch {
             ProbeLog.record("helper liveActivity failed \(ProbeLog.describe(error))")
         }
+    }
+
+    /// Two seconds of a 440 Hz tone as 16-bit mono WAV.
+    static func toneFile() throws -> URL {
+        let rate = 44_100, seconds = 2
+        var samples = Data()
+        for n in 0..<(rate * seconds) {
+            var value = Int16(sin(2 * Double.pi * 440 * Double(n) / Double(rate)) * 8000).littleEndian
+            samples.append(Data(bytes: &value, count: 2))
+        }
+        func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+        func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+        var wav = Data("RIFF".utf8) + le32(UInt32(36 + samples.count)) + Data("WAVEfmt ".utf8)
+        wav += le32(16) + le16(1) + le16(1) + le32(UInt32(rate)) + le32(UInt32(rate * 2)) + le16(2) + le16(16)
+        wav += Data("data".utf8) + le32(UInt32(samples.count)) + samples
+        let url = FileManager.default.temporaryDirectory.appending(path: "tone.wav")
+        try wav.write(to: url)
+        return url
     }
 }

@@ -8,6 +8,10 @@ import UIKit
 let probeVariant = "A"
 #elseif VARIANT_B
 let probeVariant = "B"
+#elseif VARIANT_D
+let probeVariant = "D"
+#elseif VARIANT_E
+let probeVariant = "E"
 #else
 let probeVariant = "C"
 #endif
@@ -29,10 +33,17 @@ struct ProbeApp: App {
 }
 
 /// A: AudioRecordingIntent only. B: the same, the App has the audio
-/// background mode. C: also a LiveActivityIntent.
-#if VARIANT_C
+/// background mode. C: also a LiveActivityIntent. D: C after a 1.5 s wait
+/// (Avibe's consent request). E: C with the session before the island.
+#if VARIANT_C || VARIANT_D || VARIANT_E
 struct ProbeIntent: AudioRecordingIntent, LiveActivityIntent {
+    #if VARIANT_D
+    static let title: LocalizedStringResource = "Record D"
+    #elseif VARIANT_E
+    static let title: LocalizedStringResource = "Record E"
+    #else
     static let title: LocalizedStringResource = "Record C"
+    #endif
     @available(iOS 26.0, *)
     static var supportedModes: IntentModes { [.background] }
 
@@ -72,6 +83,16 @@ struct ProbeShortcuts: AppShortcutsProvider {
             intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
             shortTitle: "Record B", systemImageName: "mic"
         )
+        #elseif VARIANT_D
+        AppShortcut(
+            intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
+            shortTitle: "Record D", systemImageName: "mic"
+        )
+        #elseif VARIANT_E
+        AppShortcut(
+            intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
+            shortTitle: "Record E", systemImageName: "mic"
+        )
         #else
         AppShortcut(
             intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
@@ -83,6 +104,41 @@ struct ProbeShortcuts: AppShortcutsProvider {
 
 @MainActor
 enum ProbeRun {
+    static func requestIsland() -> Activity<ProbeAttributes>? {
+        do {
+            let activity = try Activity.request(
+                attributes: ProbeAttributes(app: "Probe \(probeVariant)"),
+                content: ActivityContent(state: .init(label: "Recording"), staleDate: nil)
+            )
+            ProbeLog.record("liveActivity ok")
+            return activity
+        } catch {
+            ProbeLog.record("liveActivity failed \(ProbeLog.describe(error))")
+            return nil
+        }
+    }
+
+    /// `.record`, else mixable `.playAndRecord` that ducks others.
+    static func activateSession(_ session: AVAudioSession) -> Bool {
+        do {
+            try session.setCategory(.record, mode: .default, options: [])
+            try session.setActive(true)
+            ProbeLog.record("session record ok")
+            return true
+        } catch {
+            ProbeLog.record("session record failed \(ProbeLog.describe(error))")
+        }
+        do {
+            try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .duckOthers])
+            try session.setActive(true)
+            ProbeLog.record("session playAndRecord+mix+duck ok")
+            return true
+        } catch {
+            ProbeLog.record("session playAndRecord+mix+duck failed \(ProbeLog.describe(error))")
+            return false
+        }
+    }
+
     static func appState() -> String {
         switch UIApplication.shared.applicationState {
         case .active: "active"
@@ -103,35 +159,17 @@ enum ProbeRun {
                 + "in=\(route.inputs.map(\.portType.rawValue)) out=\(route.outputs.map(\.portType.rawValue)) "
                 + "permission=\(AVAudioApplication.shared.recordPermission.rawValue)"
         )
-        var activity: Activity<ProbeAttributes>?
-        do {
-            activity = try Activity.request(
-                attributes: ProbeAttributes(app: "Probe \(probeVariant)"),
-                content: ActivityContent(state: .init(label: "Recording"), staleDate: nil)
-            )
-            ProbeLog.record("liveActivity ok")
-        } catch {
-            ProbeLog.record("liveActivity failed \(ProbeLog.describe(error))")
-        }
-        var active = false
-        do {
-            try session.setCategory(.record, mode: .default, options: [])
-            try session.setActive(true)
-            active = true
-            ProbeLog.record("session record ok")
-        } catch {
-            ProbeLog.record("session record failed \(ProbeLog.describe(error))")
-        }
-        if !active {
-            do {
-                try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .duckOthers])
-                try session.setActive(true)
-                active = true
-                ProbeLog.record("session playAndRecord+mix ok")
-            } catch {
-                ProbeLog.record("session playAndRecord+mix failed \(ProbeLog.describe(error))")
-            }
-        }
+        #if VARIANT_D
+        try? await Task.sleep(for: .milliseconds(1500))
+        ProbeLog.record("waited 1.5s")
+        #endif
+        #if VARIANT_E
+        let active = activateSession(session)
+        let activity = requestIsland()
+        #else
+        let activity = requestIsland()
+        let active = activateSession(session)
+        #endif
         if active {
             let url = FileManager.default.temporaryDirectory.appending(path: "take-\(UUID().uuidString).m4a")
             do {
