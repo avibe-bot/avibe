@@ -17,6 +17,7 @@ import re
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Publication reasons may originate in sidecar messages. Never log an arbitrary string.
 _LOG_REFUSALS = frozenset({
     "owner_required", "no_reachable_address", "not_running", "starting", "stopped",
-    "setting_off", "unpaired", "permission_expired", "certificate_not_ready",
+    "setting_off", "unpaired", "permission_denied", "permission_required", "permission_expired", "certificate_not_ready",
     "transport_not_installed", "transport_start_failed", "state_changed", "sidecar_exited",
 })
 
@@ -115,6 +116,8 @@ class DirectRendezvous:
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._lock = threading.Lock()
+        # Key by authenticated caller, never by its freely replaceable endpoint key.
+        self._log_callers: OrderedDict[str, tuple[tuple, float, int]] = OrderedDict()
         # Distinguishes this process's generations from any earlier process's.
         self._boot = secrets.token_hex(8)
         self._revision = 0
@@ -195,17 +198,32 @@ class DirectRendezvous:
         with self._lock:
             generation = f"{self._boot}:{self._revision}"
             response = self._offer_locked(base, generation, now, subject, client_endpoint_id, is_owner)
+            summary = self._log_summary(response, generation)
+            tick = time.monotonic()
+            previous = self._log_callers.pop(subject, None)
+            suppressed = previous[2] if previous else 0
+            emit = previous is None or previous[0] != summary or tick - previous[1] >= 60
+            self._log_callers[subject] = (summary, tick, 0) if emit else (summary, previous[1], suppressed + 1)
+            if len(self._log_callers) > _MAX_ADMISSIONS:
+                self._log_callers.popitem(last=False)
+        if emit:
+            logger.info(
+                "direct rendezvous generation=%s public_trial_v1=%s lan=%d ipv6=%d outcome=%s reason=%s suppressed=%d",
+                *summary, suppressed,
+            )
+        return response
+
+    @staticmethod
+    def _log_summary(response, generation):
         offered = response["status"] == "ready"
         endpoint_info = response.get("endpoint", {})
         addresses = endpoint_info.get("addresses", ())
         reason = response.get("reason")
-        logger.info(
-            "direct rendezvous generation=%s public_trial_v1=%s lan=%d ipv6=%d outcome=%s reason=%s",
+        return (
             generation, "yes" if endpoint_info.get("relay") else "no",
             sum(c["kind"] == "lan" for c in addresses), sum(c["kind"] == "ipv6" for c in addresses),
             "offered" if offered else "refused", "none" if offered else reason if reason in _LOG_REFUSALS else "unavailable",
         )
-        return response
 
     def _offer_locked(self, base, generation, now, subject, client_endpoint_id, is_owner):
         endpoint = self._endpoint
