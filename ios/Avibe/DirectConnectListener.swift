@@ -706,33 +706,63 @@ actor DirectConnectListener {
 
     /// A page asked to move to the direct path (`direct.handover`): closes
     /// the committed `backend` relays for `host` that have carried no bytes
-    /// either way for at least `quietSeconds`, and keeps the busy ones. Not
-    /// an event's close: no closure is counted. A relay not yet committed,
-    /// and one this listener did not accept, is never touched.
+    /// either way for at least `quietSeconds`, and keeps the busy ones. The
+    /// page has just closed its stream, and WebKit's cancel of that stream
+    /// crosses the relay right then; so it waits, at most `waitSeconds`, for
+    /// every such relay to have been quiet that long, then closes the quiet
+    /// ones. Not an event's close: no closure is counted. A relay not yet
+    /// committed, and one this listener did not accept, is never touched.
     func closeQuietRelays(
         host: String,
         backend: DirectRelayBackend,
         quietSeconds: TimeInterval,
-        now: TimeInterval = ProcessInfo.processInfo.systemUptime
-    ) -> (closed: Int, kept: Int) {
-        var closed = 0
-        var kept = 0
+        waitSeconds: TimeInterval = 0,
+        clock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) async -> (closed: Int, kept: Int) {
+        let deadline = clock() + waitSeconds
+        while true {
+            let now = clock()
+            let (quiet, busy) = handoverCandidates(host: host, backend: backend, quietSeconds: quietSeconds, now: now)
+            if busy == 0 || now >= deadline || Task.isCancelled {
+                var closed = 0
+                for id in quiet {
+                    guard let relay = relays[id], !relay.isDraining else {
+                        continue
+                    }
+                    if relay.claim.closeByEvent() {
+                        closed += 1
+                    }
+                    lifecycle.end(id)
+                    drain(id)
+                }
+                return (closed, busy)
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    /// The committed `backend` relays for `host`: those quiet for
+    /// `quietSeconds` at `now`, and how many are not.
+    private func handoverCandidates(
+        host: String,
+        backend: DirectRelayBackend,
+        quietSeconds: TimeInterval,
+        now: TimeInterval
+    ) -> (quiet: [UUID], busy: Int) {
+        var quiet: [UUID] = []
+        var busy = 0
         let grants = lifecycle.grants
         for (id, relay) in relays where !relay.isDraining {
             guard let grant = grants[id], grant.host == host, grant.backend == backend else {
                 continue
             }
-            guard now - relay.activity.lastActivity >= quietSeconds else {
-                kept += 1
-                continue
+            if now - relay.activity.lastActivity >= quietSeconds {
+                quiet.append(id)
+            } else {
+                busy += 1
             }
-            if relay.claim.closeByEvent() {
-                closed += 1
-            }
-            lifecycle.end(id)
-            drain(id)
         }
-        return (closed, kept)
+        return (quiet, busy)
     }
 
     /// Retires uncommitted work made before an event: a relay whose plan's

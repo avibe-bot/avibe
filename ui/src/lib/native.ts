@@ -879,12 +879,13 @@ export function nativeDirectHandoverAvailable(): boolean {
 
 export type NativeDirectHandoverResult = { closed: number; kept: number; skipped?: string };
 
-const DIRECT_HANDOVER_WAIT_MS = 5000;
+// The shell may wait up to 3 s for the connections to go quiet.
+const DIRECT_HANDOVER_WAIT_MS = 6000;
 
 /**
  * Asks the shell to close the quiet public connections for this host, so the
  * next connection takes the direct path (`direct.handover`). Null when
- * unsupported, failed, or unanswered within a few seconds.
+ * unsupported, failed, or unanswered within DIRECT_HANDOVER_WAIT_MS.
  */
 export async function nativeDirectHandover(): Promise<NativeDirectHandoverResult | null> {
   const native = directBridge();

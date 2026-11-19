@@ -503,6 +503,62 @@ final class DirectConnectListenerTests: XCTestCase {
         busy.close()
     }
 
+    func testAHandOverWaitsOutTheCancelOfTheClosedStreamAndThenClosesTheRelay() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(direct: false)
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establishPublic(client, fixture)
+
+        // The page closes its stream and asks at once; WebKit's cancel of
+        // that stream crosses the relay just after.
+        let started = ProcessInfo.processInfo.systemUptime
+        let host = self.host
+        let listener = fixture.listener
+        let handover = Task {
+            await listener.closeQuietRelays(
+                host: host,
+                backend: .publicOrigin,
+                quietSeconds: 1,
+                waitSeconds: 3
+            )
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        try await client.send("rst")
+        try await eventually { String(decoding: stream.written, as: UTF8.self) == "rst" }
+
+        let result = await handover.value
+        XCTAssertEqual(result.closed, 1)
+        XCTAssertEqual(result.kept, 0)
+        XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - started, 1.1)
+        try await eventually { stream.isCancelled }
+    }
+
+    func testAHandOverKeepsARelayStillBusyWhenItsWaitEnds() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(direct: false)
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establishPublic(client, fixture)
+        let host = self.host
+        let listener = fixture.listener
+        let handover = Task {
+            await listener.closeQuietRelays(
+                host: host,
+                backend: .publicOrigin,
+                quietSeconds: 1,
+                waitSeconds: 1
+            )
+        }
+        for _ in 0..<6 {
+            try await client.send("x")
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let result = await handover.value
+        XCTAssertEqual(result.closed, 0)
+        XCTAssertEqual(result.kept, 1)
+        XCTAssertFalse(stream.isCancelled)
+        client.close()
+    }
+
     func testARelayCommittedAfterAnEventIsNotClosedByThatEventsLateClose() async throws {
         let fixture = try await makeListener()
         fixture.plans.set(generation: 5)

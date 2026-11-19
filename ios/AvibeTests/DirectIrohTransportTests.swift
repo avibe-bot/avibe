@@ -568,6 +568,10 @@ final class DirectIrohTransportTests: XCTestCase {
 
         // Only the last few are kept.
         XCTAssertLessThanOrEqual(harness.transport.pathDiagnostics.attempts.count, DirectPathDiagnostics.attemptLimit)
+
+        // The history speaks for one selection: a new one, or none, starts empty.
+        harness.transport.deselect()
+        XCTAssertEqual(harness.transport.pathDiagnostics, .empty)
     }
 
     func testAnAnswerWithoutAKnownRelayBindsNoRelayAtAll() async throws {

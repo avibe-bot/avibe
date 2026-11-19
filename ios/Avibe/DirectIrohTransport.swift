@@ -405,6 +405,8 @@ final class DirectIrohTransport {
         stopWork()
         self.selection = selection
         self.report = report
+        // The history speaks for one selection (one instance, one account).
+        attempts.removeAll()
         failures = 0
         pageRetries = 0
         // Path generations are compared within one selection only: nothing
@@ -425,6 +427,7 @@ final class DirectIrohTransport {
         stopWork()
         selection = nil
         report = nil
+        attempts.removeAll()
         network.stop()
     }
 

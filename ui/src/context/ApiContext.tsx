@@ -37,11 +37,12 @@ import {
   nativeDirectBaselineState,
   nativeDirectHandover,
   nativeDirectHandoverAvailable,
+  nativeDirectPreference,
   onNativeDirectClosure,
   onNativeDirectPreference,
   subscribeNativeDirectBaseline,
 } from '../lib/native';
-import { pageConnectionsQuiet } from '../lib/pageConnections';
+import { installPageFetchCounting, pageConnectionsQuiet } from '../lib/pageConnections';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
@@ -68,7 +69,7 @@ import {
   type WorkbenchControllerLegState,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
-import { setLiveStreamVia } from '../lib/liveStreamVia';
+import { liveStreamVia, setLiveStreamVia } from '../lib/liveStreamVia';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 import {
@@ -3803,6 +3804,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!state.armed || state.running || !nativeDirectHandoverAvailable()) return;
     if (Date.now() - state.lastAt < DIRECT_HANDOVER_SPACING_MS) return;
     if (nativeDirectBaselineState() !== 'ready' || eventHandlersRef.current.size === 0) return;
+    // Already there: the live stream said it came in through the direct
+    // ingress.
+    if (liveStreamVia() === 'direct') return;
     state.running = true;
     try {
       const quiet = await waitForQuietPage(DIRECT_HANDOVER_QUIET_WAIT_MS);
@@ -3811,10 +3815,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       state.lastAt = Date.now();
       closeActiveWorkbenchEventSource();
       setWorkbenchEventConnectionState('reconnecting');
-      await nativeDirectHandover();
+      const result = await nativeDirectHandover();
       // Opened again at once, and its handshake announces the gap, as after a
       // closure.
       rebuildWorkbenchEventsAfterClosure();
+      // The shell could not move everything (it skipped, kept a busy
+      // connection, or did not answer): the stream may have landed on a public
+      // connection again. Armed for the next resume or change, still no sooner
+      // than the spacing allows.
+      if (!result || result.skipped !== undefined || result.kept > 0) state.armed = true;
     } finally {
       state.running = false;
     }
@@ -3837,6 +3846,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
     const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
+    // Every same-origin request is counted where a hand-over can happen, so
+    // it never closes a connection one of them is waiting on.
+    if (nativeDirectHandoverAvailable()) installPageFetchCounting();
     const stopDirectPreference = onNativeDirectPreference((preferred) => {
       if (preferred === 'tunnel') {
         directHandoverRef.current.armed = true;
@@ -3844,7 +3856,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       void attemptDirectHandoverRef.current();
     });
-    const stopDirectBaseline = subscribeNativeDirectBaseline(() => openWorkbenchEventsRef.current());
+    const stopDirectBaseline = subscribeNativeDirectBaseline(() => {
+      openWorkbenchEventsRef.current();
+      // A preference of `direct` that came with the baseline could not act
+      // before it: the stream it would move did not exist yet.
+      if (nativeDirectBaselineState() === 'ready' && nativeDirectPreference() === 'direct') {
+        void attemptDirectHandoverRef.current();
+      }
+    });
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();

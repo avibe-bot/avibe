@@ -497,11 +497,14 @@ final class DirectPathController {
 
     /// Quiet time after which a public relay counts as idle for a hand-over.
     static let handoverQuietSeconds: TimeInterval = 1
+    /// How long a hand-over waits for the host's public relays to go quiet.
+    static let handoverWaitSeconds: TimeInterval = 3
 
     /// A page asks to move its new connections to the direct path
     /// (`direct.handover`): while the path is usable for `origin`'s host, the
     /// committed public relays for that host that carried nothing for
-    /// `handoverQuietSeconds` are closed, so WebKit's next connection takes
+    /// `handoverQuietSeconds` (waiting up to `handoverWaitSeconds` for them to
+    /// get there) are closed, so WebKit's next connection takes
     /// the route to the direct backend. Busy relays are kept; nothing is
     /// replayed. Only when the caller is the sole live document of the store
     /// with that host loaded (`soleDocument == true`): a relay of another
@@ -532,7 +535,8 @@ final class DirectPathController {
             let result = await listener.closeQuietRelays(
                 host: host,
                 backend: .publicOrigin,
-                quietSeconds: Self.handoverQuietSeconds
+                quietSeconds: Self.handoverQuietSeconds,
+                waitSeconds: Self.handoverWaitSeconds
             )
             Self.logger.info(
                 "Direct hand-over: closed \(result.closed, privacy: .public), kept \(result.kept, privacy: .public) public relays"

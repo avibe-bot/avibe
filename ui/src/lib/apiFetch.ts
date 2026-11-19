@@ -1,4 +1,3 @@
-import { beginPageRequest } from './pageConnections';
 import { reportRemoteAuthorizationState } from './remoteAuth';
 
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
@@ -226,19 +225,6 @@ export async function withApiDeadline<T>(
 export async function apiFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
-): Promise<Response> {
-  // Counted until it answers or fails: a direct hand-over waits for none.
-  const done = beginPageRequest();
-  try {
-    return await sendApiFetch(input, init);
-  } finally {
-    done();
-  }
-}
-
-async function sendApiFetch(
-  input: RequestInfo | URL,
-  init: RequestInit,
 ): Promise<Response> {
   const method = (init.method || 'GET').toUpperCase();
   const nextInit: RequestInit = { ...init };
