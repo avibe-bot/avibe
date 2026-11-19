@@ -28,9 +28,16 @@ export function beginPageRequest(): () => void {
   };
 }
 
-/** Counts `socket` while it is connecting or open. */
+/**
+ * Counts `socket` while it is connecting or open. Only where a hand-over can
+ * happen (`installPageFetchCounting` ran); elsewhere nothing is kept.
+ */
 export function trackPageSocket(socket: WebSocket): void {
+  if (!installed) return;
   sockets.add(socket);
+  if (typeof socket.addEventListener === 'function') {
+    socket.addEventListener('close', () => sockets.delete(socket), { once: true });
+  }
 }
 
 function sameOrigin(input: RequestInfo | URL): boolean {
