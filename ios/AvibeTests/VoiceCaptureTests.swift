@@ -72,24 +72,88 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.instance.closed, true)
     }
 
-    func testNothingIsRecordedWithoutTheAccountsYes() async {
+    /// Recording starts before the instance answers, so no word is lost;
+    /// without the account's yes the take is discarded unsent (5.1.2(i)).
+    func testWithoutTheAccountsYesTheTakeIsDiscardedUnsent() async {
         for consent in [VoiceCaptureInstanceClient.Status.Consent.notAsked, .declined] {
             let world = World()
             world.instance.statusResult = .success(.init(available: true, consent: consent))
-            let outcome = await world.controller().toggle()
-            XCTAssertEqual(outcome, .needsApp(.consent))
-            XCTAssertNil(world.audio, "the microphone must not open")
-            XCTAssertTrue(world.activities.isEmpty)
+            let controller = world.controller()
+            let outcome = await controller.toggle()
+            XCTAssertEqual(outcome, .started)
+            await controller.consentWatch?.value
+            XCTAssertEqual(controller.phase, .idle)
+            XCTAssertEqual(world.audio?.discarded, true)
+            XCTAssertEqual(world.instance.transcribed, 0, "nothing leaves the phone")
+            XCTAssertEqual(world.instance.posts, 0)
+            XCTAssertTrue(world.activities.first?.endedImmediately == true)
+            XCTAssertEqual(world.activities.last?.states.first?.phase, .needsApp)
+            XCTAssertEqual(world.activities.last?.states.first?.reason, .consent)
         }
+    }
+
+    /// A stop before the answer waits for it: a no sends nothing.
+    func testAStopBeforeANoSendsNothing() async {
+        let world = World()
+        world.instance.statusResult = .success(.init(available: true, consent: .declined))
+        world.instance.holdStatus = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        while !world.instance.isHolding { await Task.yield() }
+        let stop = Task { await controller.toggle() }
+        while controller.phase != .sending { await Task.yield() }
+        world.instance.release()
+        _ = await stop.value
+        await controller.consentWatch?.value
+        XCTAssertEqual(world.instance.transcribed, 0)
+        XCTAssertEqual(world.instance.posts, 0)
+        XCTAssertEqual(world.audio?.discarded, true)
+        XCTAssertEqual(controller.phase, .idle)
+    }
+
+    /// A stop before a yes waits for it, then sends.
+    func testAStopBeforeTheAnswerWaitsForItThenSends() async {
+        let world = World()
+        world.instance.holdStatus = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        while !world.instance.isHolding { await Task.yield() }
+        let stop = Task { await controller.toggle() }
+        while controller.phase != .sending { await Task.yield() }
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(world.instance.transcribed, 0, "not before the yes")
+        world.instance.release()
+        _ = await stop.value
+        XCTAssertEqual(world.instance.sent, ["hello"])
+    }
+
+    /// In front, a no is said in the App (the chat asks), not on the island.
+    func testANoInFrontIsSaidInTheApp() async {
+        let world = World()
+        world.inFront = true
+        world.instance.statusResult = .success(.init(available: true, consent: .notAsked))
+        let controller = world.controller()
+        let reserved = await controller.beginPress()
+        XCTAssertNil(reserved)
+        _ = await controller.startTake(inFront: true)
+        await controller.consentWatch?.value
+        XCTAssertEqual(world.presented.map(\.0), [.consent])
+        XCTAssertEqual(world.presented.map(\.1), [true])
+        XCTAssertEqual(world.activities.count, 1, "no notice island in front")
+        XCTAssertEqual(world.audio?.discarded, true)
     }
 
     func testAnOlderAvibeIsRefusedWithTheUpdateNotice() async {
         let world = World()
         world.instance.statusResult = .failure(Failure.olderAvibe)
-        let outcome = await world.controller().toggle()
-        XCTAssertEqual(outcome, .stopped)
-        XCTAssertNil(world.audio)
-        XCTAssertEqual(world.activities.first?.states.first?.reason, .updateAvibe)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        await controller.consentWatch?.value
+        XCTAssertEqual(world.audio?.discarded, true)
+        XCTAssertEqual(world.instance.transcribed, 0)
+        XCTAssertEqual(world.activities.last?.states.first?.reason, .updateAvibe)
     }
 
     func testMissingPrerequisitesSendTheUserToTheApp() async {
@@ -172,19 +236,29 @@ final class VoiceCaptureTests: XCTestCase {
         await controller.retry()
         XCTAssertTrue(world.instance.sent.isEmpty)
 
-        // A start still waiting on the instance gives up.
+        // A take still waiting on the instance's answer is given up too,
+        // and the answer, when it comes, does nothing.
         let waiting = World()
         waiting.instance.holdStatus = true
         let other = waiting.controller()
-        let start = Task { await other.toggle() }
-        while other.phase != .preparing { await Task.yield() }
-        for _ in 0..<5 { await Task.yield() }
+        _ = await other.toggle()
+        while !waiting.instance.isHolding { await Task.yield() }
         _ = other.cancelForAccountTransition()
         waiting.instance.release()
-        let outcome = await start.value
-        XCTAssertEqual(outcome, .stopped)
-        XCTAssertNil(waiting.audio, "nothing recorded for the old account")
+        await other.consentWatch?.value
+        XCTAssertEqual(waiting.audio?.discarded, true, "nothing kept for the old account")
+        XCTAssertEqual(waiting.instance.transcribed, 0)
         XCTAssertEqual(other.phase, .idle)
+
+        // A press reserved while Avibe came forward gives up as well.
+        let coming = World()
+        let third = coming.controller()
+        let reserved = await third.beginPress()
+        XCTAssertNil(reserved)
+        _ = third.cancelForAccountTransition()
+        let late = await third.startTake(inFront: true)
+        XCTAssertEqual(late, .stopped)
+        XCTAssertNil(coming.audio)
     }
 
     // MARK: A take whose process is gone (the owner's 11-17 device test)
@@ -312,11 +386,109 @@ final class VoiceCaptureTests: XCTestCase {
 
     func testADoubledRunAfterAnyFailureNoticeShowsOneNotice() async {
         let world = World()
-        world.instance.statusResult = .failure(VoiceCaptureInstanceClient.Failure.offline)
+        world.instance.statusResult = .failure(Failure.olderAvibe)
         let controller = world.controller()
         _ = await controller.toggle()
+        await controller.consentWatch?.value
+        let again = await controller.toggle()
+        XCTAssertEqual(again, .stopped)
+        XCTAssertEqual(world.activities.filter { $0.states.first?.reason == .updateAvibe }.count, 1)
+    }
+
+    /// An unreachable instance is not a no: the take records on, is kept on
+    /// the phone unsent, and Retry asks again before anything is sent.
+    func testAnUnreachableInstanceKeepsTheTakeForRetryUnsent() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
         _ = await controller.toggle()
-        XCTAssertEqual(world.activities.count, 1)
+        await controller.consentWatch?.value
+        XCTAssertEqual(controller.phase, .listening, "still recording")
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(controller.phase, .failed)
+        XCTAssertEqual(world.instance.transcribed, 0, "nothing sent before a yes")
+        XCTAssertEqual(world.audio?.discarded, false, "kept for Retry")
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
+        // Let any answer asked early settle while still unreachable.
+        for _ in 0..<20 { await Task.yield() }
+
+        // Retry asks again then, not with an answer taken during the outage.
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        await controller.retry()
+        XCTAssertEqual(world.instance.sent, ["hello"])
+    }
+
+    /// An account change while a stop waits for the answer: nothing is asked
+    /// again on the closed client.
+    func testAnAccountChangeWhileSendingWaitsNeverAsksAgain() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        world.instance.holdStatus = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        while !world.instance.isHolding { await Task.yield() }
+        world.audio?.duration = 3
+        let stop = Task { await controller.toggle() }
+        while controller.phase != .sending { await Task.yield() }
+        _ = controller.cancelForAccountTransition()
+        world.instance.release()
+        _ = await stop.value
+        XCTAssertEqual(world.instance.statusCalls, 1, "not asked again after the change")
+        XCTAssertEqual(world.instance.transcribed, 0)
+    }
+
+    /// A take cancelled before its answer: the pending ask is cancelled too.
+    func testACancelledTakeCancelsItsPendingAsk() async {
+        let world = World()
+        world.instance.holdStatus = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        while !world.instance.isHolding { await Task.yield() }
+        await controller.finish(send: false)
+        XCTAssertTrue(world.instance.closed)
+        world.instance.release()
+        await controller.consentWatch?.value
+        XCTAssertEqual(world.instance.statusCalls, 1)
+        XCTAssertEqual(world.instance.transcribed, 0)
+    }
+
+    /// Unreachable when recording began, reachable at the stop: it sends then.
+    func testAnInstanceUnreachableAtTheStartButReachableAtTheStopSends() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        await controller.consentWatch?.value
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.sent, ["hello"])
+    }
+
+    /// A no deletes the take's file; the launch sweep clears leftovers.
+    func testANoDeletesTheTakesFileAndTheLaunchSweepClearsLeftovers() throws {
+        // Its own directory, never the host App's Caches.
+        let base = FileManager.default.temporaryDirectory.appending(path: "takes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
+        try Data([1, 2, 3]).write(to: url)
+        let recorder = VoiceCaptureRecorder(url: url, session: FakeSession(), permission: { true }, makeEngine: { _ in FakeEngine() })
+        recorder.discard()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+
+        let leftover = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
+        try Data([4, 5, 6]).write(to: leftover)
+        VoiceCaptureRecorder.discardAll(in: base)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
+    }
+
+    func testTakesAreExcludedFromBackup() throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "takes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
+        let values = try url.deletingLastPathComponent().resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(values.isExcludedFromBackup, true)
     }
 
     func testATakeFileThatCannotBeMadeIsNotAPermissionProblemEither() async {
@@ -459,79 +631,330 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(denied.activations, 0)
     }
 
-    // MARK: Tries (the sample, 11-19: with LiveActivityIntent the island
-    // starts from the background, warm and cold; without it, `visibility`)
+    // MARK: One mixable background try, then in front (11-20: two projects
+    // record from the background with a mixable first activation in a
+    // process the press launched; 38.1 was refused in a warm process)
 
-    /// The island first, then a `.record` session, then the recorder.
-    func testTryZeroStartsTheIslandFirstThenTheSessionThenTheRecorder() async {
+    /// No word is lost to the instance's round trip: recording starts
+    /// before the instance is asked (on master it was asked first). In the
+    /// background exactly one try: the island, the mixable session, the
+    /// recorder.
+    func testAPressRecordsBeforeAskingTheInstanceWithOneMixableTry() async {
         let world = World()
         let controller = world.controller()
         let outcome = await controller.toggle()
         XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["activity", "prepare1", "record"])
+        await controller.consentWatch?.value
+        XCTAssertEqual(world.events, ["activity", "prepare2", "record", "announce", "status"])
         world.audio?.duration = 2
         _ = await controller.toggle()
-        XCTAssertEqual(world.instance.captures.first ?? nil, "0 [background warm]", "the press's App state rides along")
+        XCTAssertEqual(world.instance.captures.first ?? nil, "0 [background warm bgTries=0]")
     }
 
-    /// Another App holding audio can refuse a non-mixable activation
-    /// (cannotInterruptOthers): try 1 is mixable, under the same island.
-    func testARefusedSessionUnderTryZeroFallsBackToTheMixableOneUnderTheSameIsland() async {
+    /// The background try refused: its island goes at once, nothing stays
+    /// active, and the press goes on in front, where it records; the message
+    /// names the refusal.
+    func testARefusedBackgroundTryGoesOnInFrontAndRecords() async {
         let world = World()
-        world.prepareErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 560557684)]
+        world.prepareErrors = [.mixableBackground: VoiceCaptureRecorder.StartFailure(
+            step: .sessionActivate, underlying: NSError(domain: NSOSStatusErrorDomain, code: 561015905)
+        )]
         let controller = world.controller()
-        let outcome = await controller.toggle()
-        XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["activity", "prepare1", "prepare2", "record"])
-        XCTAssertTrue(world.failureNotices.isEmpty, "it records: no failure notice")
-        XCTAssertEqual(world.activities.count, 1)
-        world.audio?.duration = 2
-        _ = await controller.toggle()
-        XCTAssertEqual(world.instance.captures.first ?? nil, "1 [background warm] (0 sessionActivate 560557684)")
-    }
-
-    func testARecorderRefusedOnTheExclusiveSessionTriesTheMixableOneUnderTheSameIsland() async {
-        let world = World()
-        world.startErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
-        let outcome = await world.controller().toggle()
-        XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["activity", "prepare1", "record", "stop", "prepare2", "record"])
-        XCTAssertEqual(world.activities.count, 1)
-    }
-
-    /// A cold press: the island cannot start from the background, so the
-    /// press goes on in the App (try 3) and records there.
-    func testAColdPressWhoseIslandIsRefusedRecordsInTheApp() async {
-        let world = World()
-        world.activityRequestFails = true
-        world.pressContext = "background cold"
-        let controller = world.controller()
-        let outcome = await controller.toggle(foregroundFallback: true)
-        XCTAssertEqual(outcome, .needsForeground)
+        let reserved = await controller.beginPress()
+        XCTAssertNil(reserved)
+        let background = await controller.startTake(inFront: false, foregroundFallback: true)
+        XCTAssertEqual(background, .needsForeground)
+        XCTAssertEqual(controller.phase, .preparing, "still reserved")
+        XCTAssertEqual(world.activities.first?.endedImmediately, true)
+        XCTAssertTrue(world.announced.isEmpty)
         XCTAssertTrue(world.failureNotices.isEmpty)
-        XCTAssertEqual(world.audio?.started, false)
-        world.activityRequestFails = false  // in front it may start
-        let inApp = await controller.startInForeground()
-        XCTAssertEqual(inApp, .started)
+        let front = await controller.startTake(inFront: true)
+        XCTAssertEqual(front, .started)
+        XCTAssertEqual(world.announced, [true])
         world.audio?.duration = 2
         _ = await controller.toggle()
-        XCTAssertEqual(world.instance.captures.first ?? nil, "3 [background cold] (0 liveActivity ActivityAuthorizationError 7)")
+        XCTAssertEqual(
+            world.instance.captures.first ?? nil,
+            "3 [background warm bgTries=0] (0 sessionActivate 561015905)"
+        )
     }
 
+    /// The real recorder's watch: a late first audio is caught, and a take
+    /// that stops with none says so.
+    func testTheRecorderWatchesForItsFirstAudio() async throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "takes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
+        let recorder = VoiceCaptureRecorder(url: url, session: FakeSession(), permission: { true }, makeEngine: { _ in FakeEngine() })
+        let late = FakeEngine()
+        late.silentPolls = 250
+        recorder.watchFirstAudio(late, poll: .microseconds(10))
+        for _ in 0..<2_000 where recorder.firstAudioAt == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(recorder.firstAudioAt, "found after the fast second")
 
+        let never = FakeEngine()
+        never.silentPolls = .max
+        recorder.watchFirstAudio(never, poll: .microseconds(10))
+        try await Task.sleep(for: .milliseconds(20))
+        never.recording = false
+        for _ in 0..<500 where !recorder.firstAudioLate { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertTrue(recorder.firstAudioLate)
+        XCTAssertNil(recorder.firstAudioAt)
+    }
 
-    /// Without a way forward, every try refused still leaves one notice.
-    func testEveryTryRefusedWithoutAWayForwardLeavesOneNotice() async {
+    /// Each step's time from the press rides along for device numbers.
+    func testTheMessageCarriesEachStepsTimeFromThePress() async {
         let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        _ = await world.controller().toggle()
-        XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1])
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        let timing = world.instance.timings.first ?? nil
+        for step in ["island=", "session=", "record=", "audio="] {
+            XCTAssertTrue(timing?.contains(step) == true, "\(step) in \(timing ?? "nil")")
+        }
+
+        let refused = World()
+        refused.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        let other = refused.controller()
+        _ = await other.beginPress()
+        _ = await other.startTake(inFront: false, foregroundFallback: true)
+        other.markInFront()
+        _ = await other.startTake(inFront: true)
+        refused.audio?.duration = 2
+        _ = await other.toggle()
+        let fallback = refused.instance.timings.first ?? nil
+        for step in ["refused=", "front=", "frontIsland=", "frontSession=", "frontRecord=", "audio="] {
+            XCTAssertTrue(fallback?.contains(step) == true, "\(step) in \(fallback ?? "nil")")
+        }
     }
 
-    /// The audio around the press rides along in the message: whether
-    /// another App holds audio (navigation), and the route.
+    /// The process counts its background activations (iOS allows one).
+    func testTheMessageCountsThisProcesssEarlierBackgroundTries() async {
+        let world = World()
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.captures.last ?? nil, "0 [background warm bgTries=1]")
+    }
+
+    /// Avibe could not come forward: one notice names the refused try.
+    func testWhenAvibeCannotComeForwardTheNoticeNamesTheRefusal() async {
+        let world = World()
+        world.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        let controller = world.controller()
+        _ = await controller.beginPress()
+        _ = await controller.startTake(inFront: false, foregroundFallback: true)
+        controller.foregroundUnavailable()
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.failureNotices.count, 1)
+        XCTAssertEqual(world.failureNotices.first?.errorText, "561015905")
+    }
+
+    // MARK: Variant (a): end the process after a background capture
+
+    func testTheProcessEndsAfterASentBackgroundCaptureOnlyBehindTheSwitch() async {
+        let off = World()
+        let first = off.controller()
+        _ = await first.toggle()
+        off.audio?.duration = 2
+        _ = await first.toggle()
+        await first.endingTask?.value
+        XCTAssertEqual(off.ended, 0, "the switch is off by default")
+        XCTAssertEqual(off.endDecisions, ["off"])
+
+        let on = World()
+        on.endSwitch = true
+        let second = on.controller()
+        _ = await second.toggle()
+        on.audio?.duration = 2
+        _ = await second.toggle()
+        await second.endingTask?.value
+        XCTAssertEqual(on.instance.sent, ["hello"], "only after the message was accepted")
+        XCTAssertEqual(on.audio?.discarded, true)
+        XCTAssertEqual(on.ended, 1)
+        XCTAssertEqual(on.endDecisions, ["ended"])
+        XCTAssertEqual(on.held, 1, "kept running while it waits")
+        XCTAssertEqual(on.released, 1)
+    }
+
+    /// A wait that ran late (the process was suspended; the next wake may be
+    /// the next press) does not end the process.
+    func testALateWaitNeverEndsTheProcess() async {
+        let world = World()
+        world.endSwitch = true
+        var clock = Date()
+        world.now = { clock }
+        world.beforeEnding = { clock = clock.addingTimeInterval(VoiceCaptureController.endingWindow + 1) }
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        await controller.endingTask?.value
+        XCTAssertEqual(world.ended, 0)
+        XCTAssertEqual(world.endDecisions, ["skip:late"])
+        XCTAssertEqual(world.released, 1)
+    }
+
+    /// An older intent resuming after a newer press reserved cannot take it.
+    func testAnOlderIntentCannotTakeANewerPress() async {
+        let world = World()
+        world.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.beginPress()
+        let old = controller.reservation
+        _ = await controller.startTake(inFront: false, foregroundFallback: true, reservation: old)
+        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
+        _ = await controller.beginPress()
+        XCTAssertNotEqual(controller.reservation, old)
+        let late = await controller.startTake(inFront: true, reservation: old)
+        XCTAssertEqual(late, .stopped)
+        XCTAssertEqual(controller.phase, .preparing, "the newer press keeps its reservation")
+    }
+
+    func testTheProcessNeverEndsWhenShownInFrontOrBusy() async {
+        for setup in [{ (w: World) in w.shown = true }, { (w: World) in w.otherWork = "push" }] {
+            let world = World()
+            world.endSwitch = true
+            setup(world)
+            let controller = world.controller()
+            _ = await controller.toggle()
+            world.audio?.duration = 2
+            _ = await controller.toggle()
+            await controller.endingTask?.value
+            XCTAssertEqual(world.ended, 0)
+            XCTAssertTrue(world.endDecisions.first?.hasPrefix("skip:") == true)
+        }
+
+        // A take recorded in front never ends the process.
+        let front = World()
+        front.endSwitch = true
+        let controller = front.controller()
+        _ = await controller.beginPress()
+        _ = await controller.startTake(inFront: true)
+        front.audio?.duration = 2
+        _ = await controller.toggle()
+        await controller.endingTask?.value
+        XCTAssertEqual(front.ended, 0)
+        XCTAssertTrue(front.endDecisions.isEmpty)
+
+        // Nor a take that failed (it is kept for Retry).
+        let failed = World()
+        failed.endSwitch = true
+        failed.instance.pathFailures = 1
+        let other = failed.controller()
+        _ = await other.toggle()
+        failed.audio?.duration = 2
+        _ = await other.toggle()
+        XCTAssertEqual(failed.ended, 0)
+    }
+
+    func testTheSwitchIsAHiddenURLOnly() throws {
+        // Its own preferences, never the host App's.
+        let suite = "voice-capture-switch-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        func handle(_ string: String, allowed: Bool = true) -> Bool {
+            VoiceCaptureEndSwitch.handle(URL(string: string)!, allowed: allowed, defaults: defaults)
+        }
+        XCTAssertFalse(handle("https://avibe.bot/voice/end-after-background?on=1"))
+        XCTAssertFalse(handle("avibe-diagnostics://voice/other?on=1"))
+        XCTAssertFalse(handle("avibe-diagnostics://voice/end-after-background?on=1", allowed: false), "an App Store build ignores it")
+        XCTAssertFalse(VoiceCaptureEndSwitch.isOn(in: defaults))
+        XCTAssertTrue(handle("avibe-diagnostics://voice/end-after-background?on=1"))
+        XCTAssertTrue(VoiceCaptureEndSwitch.isOn(in: defaults))
+        XCTAssertTrue(handle("avibe-diagnostics://voice/end-after-background?on=0"))
+        XCTAssertFalse(VoiceCaptureEndSwitch.isOn(in: defaults))
+    }
+
+    /// A reservation whose intent ended without coming forward (never
+    /// `startTake(inFront:)` nor `foregroundUnavailable()`) expires on the
+    /// next press after the wait.
+    func testAnAbandonedReservationExpiresOnTheNextPress() async {
+        let world = World()
+        world.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.beginPress()
+        _ = await controller.startTake(inFront: false, foregroundFallback: true)
+        let soon = await controller.beginPress()
+        XCTAssertEqual(soon, .busy)
+        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
+        world.prepareErrors = [:]
+        let later = await controller.toggle()
+        XCTAssertEqual(later, .started)
+    }
+
+    /// A press that waited too long to come forward never records.
+    func testAPressWaitingTooLongForTheAppNeverRecords() async {
+        let world = World()
+        world.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.beginPress()
+        _ = await controller.startTake(inFront: false, foregroundFallback: true)
+        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
+        let late = await controller.startTake(inFront: true)
+        XCTAssertEqual(late, .stopped)
+        XCTAssertTrue(world.announced.isEmpty)
+        XCTAssertEqual(world.failureNotices.count, 1)
+    }
+
+    /// In front: once Avibe is active, at once the island, the session and
+    /// the recorder; only then the haptic and the line, then the instance.
+    func testInFrontItRecordsAsSoonAsActiveAndSaysSoOnlyThen() async {
+        let world = World()
+        let controller = world.controller()
+        let reserved = await controller.beginPress()
+        XCTAssertNil(reserved)
+        XCTAssertEqual(controller.phase, .preparing)
+        let outcome = await controller.startTake(inFront: true)
+        XCTAssertEqual(outcome, .started)
+        await controller.consentWatch?.value
+        XCTAssertEqual(world.events, ["active", "activity", "prepare1", "record", "announce", "status"])
+        XCTAssertEqual(world.announced, [true])
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.captures.first ?? nil, "3 [background warm bgTries=0]")
+    }
+
+    /// The recording line and haptic never come before capture really
+    /// starts, and never for a start that fails.
+    func testNoRecordingSignalWithoutCapture() async {
+        let refused = World()
+        refused.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        _ = await refused.controller().toggle()
+        XCTAssertTrue(refused.announced.isEmpty)
+
+        let noIsland = World()
+        noIsland.activityRequestFails = true
+        _ = await noIsland.controller().toggle()
+        XCTAssertTrue(noIsland.announced.isEmpty)
+    }
+
+    /// A reserved press is busy to a second run; a stop is never reserved.
+    func testAStartingPressIsReservedAndAStopIsNot() async {
+        let world = World()
+        let controller = world.controller()
+        let reserved = await controller.beginPress()
+        XCTAssertNil(reserved)
+        let second = await controller.beginPress()
+        XCTAssertEqual(second, .busy)
+        _ = await controller.startTake(inFront: true)
+        world.audio?.duration = 2
+        let stop = await controller.beginPress()
+        XCTAssertEqual(stop, .stopped, "the second press sends, without coming forward")
+        XCTAssertEqual(world.instance.sent, ["hello"])
+    }
+
     func testThePressContextNamesOtherAudioAndTheOutput() {
         XCTAssertEqual(
             VoiceCaptureLaunch.audioContext(otherAudio: true, silenceHint: true, outputs: ["CarAudio"]),
@@ -548,193 +971,19 @@ final class VoiceCaptureTests: XCTestCase {
             let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
             return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: "voiceCapture.startedInApp", value: nil, table: "VoiceCapture")
         }
-        XCTAssertEqual(try value("zh-Hans"), "正在录音，再长按一次侧边键发送")
-        XCTAssertEqual(try value("en"), "Recording. Long-press the Action Button again to send.")
+        XCTAssertEqual(try value("zh-Hans"), "正在录音，再长按一次操作按钮发送")
+        XCTAssertEqual(try value("en"), "Recording. Press and hold the Action Button again to send.")
     }
 
-    /// Every try refused: one notice names each, in order.
-    func testWhenEveryCandidateIsRefusedOneNoticeNamesEach() async {
-        let world = World()
-        world.prepareErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 560557684)]
-        world.startErrors = [.mixablePlayAndRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
-        let outcome = await world.controller().toggle()
-        XCTAssertEqual(outcome, .stopped)
-        XCTAssertEqual(world.failureNotices.count, 1)
-        let attempts = world.failureNotices.first?.attempts ?? []
-        XCTAssertEqual(attempts.map(\.candidate), [0, 1])
-        XCTAssertEqual(attempts.map(\.step), [.sessionActivate, .recorder])
-        XCTAssertEqual(attempts.map(\.error), ["560557684", "561145187"])
-        XCTAssertEqual(world.activities.last?.ended?.attempts, attempts)
-        XCTAssertNil(world.audio?.prepared, "no session left active")
-    }
-
-    // MARK: Try 3: in the App (Product, 11-19 09:40)
-
-    /// Both background tries refused, and the intent can bring Avibe
-    /// forward: no notice yet, nothing left active, and the press goes on in
-    /// the App, where it records at once and the message names every try.
-    func testBothBackgroundTriesRefusedGoOnInTheAppAndRecord() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        let controller = world.controller()
-        let outcome = await controller.toggle(foregroundFallback: true)
-        XCTAssertEqual(outcome, .needsForeground)
-        XCTAssertTrue(world.failureNotices.isEmpty)
-        XCTAssertNil(world.audio?.prepared)
-
-        let busy = await controller.toggle(foregroundFallback: true)
-        XCTAssertEqual(busy, .busy, "a doubled run waits for the App")
-
-        world.prepareErrors = [:]  // in front, activation is allowed
-        let inApp = await controller.startInForeground()
-        XCTAssertEqual(inApp, .started)
-        XCTAssertEqual(controller.phase, .listening)
-        world.audio?.duration = 2
-        _ = await controller.toggle()  // the second press sends as usual
-        XCTAssertEqual(
-            world.instance.captures.first ?? nil,
-            "3 [background warm] (0 sessionActivate 560557684; 1 sessionActivate 560557684)"
-        )
-    }
-
-    func testWhenTheAppCannotComeForwardTheNoticeNamesBothTries() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        let controller = world.controller()
-        _ = await controller.toggle(foregroundFallback: true)
-        controller.foregroundUnavailable()
-        XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1])
-        let next = await controller.toggle(foregroundFallback: true)
-        XCTAssertNotEqual(next, .busy)
-    }
-
-    func testATryInTheAppThatIsRefusedTooNamesAllThree() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        let controller = world.controller()
-        _ = await controller.toggle(foregroundFallback: true)
-        let inApp = await controller.startInForeground()
-        XCTAssertEqual(inApp, .stopped)
-        XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1, 3])
-    }
-
-    /// A press left waiting (a locked phone unlocked much later) never
-    /// records: it says what was refused instead.
-    func testAPressWaitingTooLongForTheAppNeverRecords() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        var clock = Date()
-        world.now = { clock }
-        let controller = world.controller()
-        _ = await controller.toggle(foregroundFallback: true)
-        world.prepareErrors = [:]
-        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
-        let late = await controller.startInForeground()
-        XCTAssertEqual(late, .stopped)
-        XCTAssertNotEqual(controller.phase, .listening)
-        XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1])
-    }
-
-    func testAnAbandonedWaitDoesNotBlockTheNextPress() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        var clock = Date()
-        world.now = { clock }
-        let controller = world.controller()
-        _ = await controller.toggle(foregroundFallback: true)
-        world.prepareErrors = [:]
-        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
-        let next = await controller.toggle(foregroundFallback: true)
-        XCTAssertEqual(next, .started)
-    }
-
-    func testAnAccountChangeDropsAWaitingPress() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        let controller = world.controller()
-        _ = await controller.toggle(foregroundFallback: true)
-        _ = controller.cancelForAccountTransition()
-        world.prepareErrors = [:]
-        let after = await controller.startInForeground()
-        XCTAssertEqual(after, .stopped)
-        XCTAssertNotEqual(controller.phase, .listening)
-    }
-
-    /// In front with try 3 refused, the alert carries every try.
-    func testTheAlertCarriesTheTriesWhenTryThreeIsRefused() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        let controller = world.controller()
-        _ = await controller.toggle(foregroundFallback: true)
-        _ = await controller.startInForeground()
-        let message = VoiceCaptureAlert.message(.recordingFailed, failure: controller.lastFailure)
-        XCTAssertNotEqual(message, VoiceCaptureAlert.message(.recordingFailed, failure: nil))
-        XCTAssertTrue(message.contains("560557684"), message)
-    }
-
-    /// Try 3's own status check can fail (offline while the phone waited to
-    /// be unlocked): the controller says so, for the alert in front.
-    func testTryThreesStatusRefusalIsReportedForTheAlert() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        let controller = world.controller()
-        _ = await controller.toggle(foregroundFallback: true)
-        let notices = controller.noticeCount
-        world.instance.statusResult = .failure(VoiceCaptureInstanceClient.Failure.offline)
-        _ = await controller.startInForeground()
-        XCTAssertEqual(controller.noticeCount, notices + 1)
-        XCTAssertEqual(controller.lastNoticeReason, .offline)
-    }
-
-    /// An account change while a refused try's island is being ended
-    /// cancels the press: it never goes on in the App.
-    func testAnAccountChangeWhileTheIslandEndsCancelsTheWaitingPress() async {
-        let world = World()
-        world.startErrors = [
-            .exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187),
-            .mixablePlayAndRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187),
-        ]
-        let controller = world.controller()
-        var cancelled = false
-        let original = world.events.count
-        _ = original
-        world.onActivityRequested = { activity in
-            activity.onEnd = {
-                guard !cancelled else { return }
-                cancelled = true
-                _ = controller.cancelForAccountTransition()
-            }
-        }
-        _ = await controller.toggle(foregroundFallback: true)
-        XCTAssertTrue(cancelled)
-        world.startErrors = [:]
-        let after = await controller.startInForeground()
-        XCTAssertEqual(after, .stopped)
-        XCTAssertNotEqual(controller.phase, .listening)
-    }
-
-
-
-    /// The real recorder sets each candidate's category on the session.
-    func testTheRecorderPreparesEachCandidatesSession() throws {
+    /// The real recorder sets the candidate's category on the session.
+    func testTheRecorderPreparesTheCandidatesSession() throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "take-\(UUID().uuidString).m4a")
         let session = FakeSession()
         let recorder = VoiceCaptureRecorder(url: url, session: session, permission: { true }, makeEngine: { _ in FakeEngine() })
-        try recorder.prepare(.mixablePlayAndRecord)
+        try recorder.prepare(.exclusiveRecord)
         XCTAssertTrue(session.active)
         try recorder.start()
-        XCTAssertEqual(session.configured, [.mixablePlayAndRecord], "start keeps the prepared session")
+        XCTAssertEqual(session.configured, [.exclusiveRecord], "start keeps the prepared session")
         recorder.stop()
         XCTAssertFalse(session.active)
 
@@ -968,7 +1217,8 @@ private final class World {
     var recorderStartError: Error?
     var prepareErrors: [VoiceCaptureSessionCandidate: Error] = [:]
     var startErrors: [VoiceCaptureSessionCandidate: Error] = [:]
-    /// The order things happened in: prepareN, activity, record.
+    /// The order things happened in: active, activity, prepare1, record,
+    /// announce, status.
     var events: [String] = []
     var onActivityRequested: ((FakeActivity) -> Void)?
     /// The App's state at the press, as the message metadata gives it.
@@ -978,9 +1228,26 @@ private final class World {
     var now: () -> Date = Date.init
     /// The failure notifications posted (each stays in Notification Center).
     var failureNotices: [VoiceCaptureAttributes.ContentState] = []
+    /// Whether Avibe is in front (refusals are then said in the App).
+    var inFront = false
+    /// What was said in front: the reason, and whether the chat opened.
+    var presented: [(VoiceCaptureAttributes.Reason, Bool)] = []
+    /// `captureStarted` calls: whether in front.
+    var announced: [Bool] = []
+    /// Variant (a): the switch, whether the process was shown, other work,
+    /// and what happened.
+    var endSwitch = false
+    var shown = false
+    var otherWork: String?
+    var ended = 0
+    var endDecisions: [String] = []
+    var beforeEnding: () -> Void = {}
+    var held = 0
+    var released = 0
 
     func controller() -> VoiceCaptureController {
-        VoiceCaptureController(environment: VoiceCaptureEnvironment(
+        instance.log = { self.events.append($0) }
+        return VoiceCaptureController(environment: VoiceCaptureEnvironment(
             target: { self.target },
             makeInstance: { _ in self.instance },
             makeAudio: { _ in
@@ -1010,6 +1277,23 @@ private final class World {
             discardLeftoverAudio: { self.leftoverAudioDiscarded += 1 },
             postFailureNotice: { self.failureNotices.append($0) },
             pressContext: { self.pressContext },
+            isInFront: { self.inFront },
+            untilActive: { self.events.append("active") },
+            captureStarted: { inFront in
+                self.announced.append(inFront)
+                self.events.append("announce")
+            },
+            presentInFront: { reason, needsApp in self.presented.append((reason, needsApp)) },
+            endProcessAfterBackgroundCapture: { self.endSwitch },
+            processEverShown: { self.shown },
+            otherWorkInFlight: { self.otherWork },
+            waitBeforeEnding: { self.beforeEnding() },
+            holdWhileEnding: {
+                self.held += 1
+                return { self.released += 1 }
+            },
+            endProcess: { self.ended += 1 },
+            noteEndDecision: { self.endDecisions.append($0) },
             now: { self.now() },
             sleep: { _ in await Task.yield(); try? await Task.sleep(for: .seconds(3600)) }
         ))
@@ -1030,9 +1314,14 @@ private final class FakeInstance: VoiceCaptureInstance {
     var sent: [String] = []
     var captures: [String?] = []
     var closed = false
+    var log: (String) -> Void = { _ in }
     private var held: CheckedContinuation<Void, Never>?
 
+    var statusCalls = 0
+
     func status() async throws -> VoiceCaptureInstanceClient.Status {
+        statusCalls += 1
+        log("status")
         if holdStatus {
             await withCheckedContinuation { held = $0 }
         }
@@ -1052,6 +1341,9 @@ private final class FakeInstance: VoiceCaptureInstance {
         held = nil
     }
 
+    /// Whether a request is suspended, waiting for `release()`.
+    var isHolding: Bool { held != nil }
+
     func mainBotMessagesPath() async throws -> String {
         if pathFailures > 0 {
             pathFailures -= 1
@@ -1060,8 +1352,11 @@ private final class FakeInstance: VoiceCaptureInstance {
         return "/api/sessions/ses_main"
     }
 
-    func postMessage(_ text: String, to sessionPath: String, capture: String?) async throws {
+    var timings: [String?] = []
+
+    func postMessage(_ text: String, to sessionPath: String, capture: String?, timing: String?) async throws {
         captures.append(capture)
+        timings.append(timing)
         posts += 1
         if postFailures > 0 {
             postFailures -= 1
@@ -1100,11 +1395,15 @@ private final class FakeAudio: VoiceCaptureAudio {
         prepared = candidate
     }
 
+    var firstAudioAt: Date?
+    var firstAudioLate = false
+
     func start() throws {
         log("record")
         if let startError { throw startError }
         if let prepared, let error = startErrors[prepared] { throw error }
         started = true
+        firstAudioAt = Date()
     }
     func stop() -> TimeInterval { stops += 1; prepared = nil; log("stop"); return duration }
     func discard() { discarded = true }
@@ -1159,8 +1458,14 @@ private final class FakeSession: VoiceCaptureAudioSession {
 
 private final class FakeEngine: VoiceCaptureRecordingEngine {
     var records = true
-    var currentTime: TimeInterval { 1 }
-    var isRecording: Bool { records }
+    /// Polls of `currentTime` before it turns positive (0: at once).
+    var silentPolls = 0
+    var recording: Bool?
+    var currentTime: TimeInterval {
+        if silentPolls > 0 { silentPolls -= 1; return 0 }
+        return 1
+    }
+    var isRecording: Bool { recording ?? records }
     func record() -> Bool { records }
     func stop() {}
 }

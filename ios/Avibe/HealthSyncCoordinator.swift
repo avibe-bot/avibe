@@ -39,6 +39,16 @@ final class HealthSyncCoordinator: ObservableObject {
     var protectedDataAvailable: () -> Bool = { UIApplication.shared.isProtectedDataAvailable }
     private var foreground = false
     private var restoring = false
+
+    /// Cleanups still running (`cleanupTask` stays set once one has run).
+    private var cleanupsRunning = 0
+
+    /// A connection, restoration, sync, convergence or cleanup under way
+    /// (not the idle poll or retry timers), for voice capture's check before
+    /// it ends a background process.
+    var hasWorkInFlight: Bool {
+        connecting != nil || restoring || syncTask != nil || convergeTask != nil || cleanupsRunning > 0
+    }
     private var uploadingIDs: Set<String> = []
     private var backgroundDelivery = false
     private var pollTask: Task<Void, Never>?
@@ -198,7 +208,9 @@ final class HealthSyncCoordinator: ObservableObject {
             finishWaiters(id, result: .failure(HealthSyncError.code("connection_changed")))
         }
         let previous = cleanupTask
+        cleanupsRunning += 1
         cleanupTask = Task { @MainActor in
+            defer { self.cleanupsRunning -= 1 }
             await previous?.value
             await self.uploader.cancelAll()
             _ = await self.reader.disableBackgroundDelivery()
@@ -858,7 +870,9 @@ final class HealthSyncCoordinator: ObservableObject {
         uploadingIDs.removeAll()
         retryAfter = nil
         let previous = cleanupTask
+        cleanupsRunning += 1
         cleanupTask = Task { @MainActor in
+            defer { self.cleanupsRunning -= 1 }
             await previous?.value
             await self.uploader.cancelAll()
             let disabled = await self.reader.disableBackgroundDelivery()

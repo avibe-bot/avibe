@@ -129,6 +129,38 @@
         }
       }
     },
+    "voiceCapture.diagnostics.endOff" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostics: end after a background capture is off."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "诊断：后台录音后结束进程，已关闭。"
+          }
+        }
+      }
+    },
+    "voiceCapture.diagnostics.endOn" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostics: end after a background capture is on."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "诊断：后台录音后结束进程，已开启。"
+          }
+        }
+      }
+    },
     "voiceCapture.phase.failed" : {
       "localizations" : {
         "en" : {
@@ -502,13 +534,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Recording. Long-press the Action Button again to send."
+            "value" : "Recording. Press and hold the Action Button again to send."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在录音，再长按一次侧边键发送"
+            "value" : "正在录音，再长按一次操作按钮发送"
           }
         }
       }

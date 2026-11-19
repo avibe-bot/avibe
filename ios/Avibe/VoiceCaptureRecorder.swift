@@ -1,17 +1,17 @@
 import AVFoundation
 import Foundation
 
-/// The ways a take's audio session is set up, tried in order. A background
-/// start of a non-mixable session can be refused with cannotInterruptOthers
-/// (560557684, the owner's 33.1 press); the mixable one does not interrupt
-/// anyone, though a mixable background recording can be refused with
-/// cannotStartRecording (561145187) instead. Only a device can tell.
+/// How a take's audio session is set up.
 enum VoiceCaptureSessionCandidate: Int, CaseIterable, Hashable {
-    /// `.record`, mode `.default`, no options (non-mixable).
+    /// In front: `.record`, mode `.default`, no options (non-mixable).
     case exclusiveRecord = 1
-    /// `.playAndRecord`, mode `.default`, `.mixWithOthers` + `.duckOthers`
-    /// (mixable, other audio ducked; neither is allowed with `.record`).
-    case mixablePlayAndRecord = 2
+    /// In the background: `.playAndRecord`, mode `.default`, `.mixWithOthers`
+    /// and `.duckOthers`, as the first and only activation. Two projects
+    /// record from the background on an iPhone 17 this way, each press a
+    /// process the press launched (legato spikes/ios-keyboard/FINDINGS.md;
+    /// oliv ios/docs/TESTING.md); a non-mixable session there is refused
+    /// with cannotInterruptOthers.
+    case mixableBackground = 2
 }
 
 /// The audio session a take records in, in the two steps a failure is
@@ -34,23 +34,30 @@ protocol VoiceCaptureRecordingEngine: AnyObject {
 
 extension AVAudioRecorder: VoiceCaptureRecordingEngine {}
 
+/// Whether our audio session is active, for the press's diagnostics.
+enum VoiceCaptureAudioState {
+    nonisolated(unsafe) static var active = false
+}
+
 struct SystemAudioSession: VoiceCaptureAudioSession {
     func configure(for candidate: VoiceCaptureSessionCandidate) throws {
         let session = AVAudioSession.sharedInstance()
         switch candidate {
         case .exclusiveRecord:
             try session.setCategory(.record, mode: .default, options: [])
-        case .mixablePlayAndRecord:
+        case .mixableBackground:
             try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .duckOthers])
         }
     }
 
     func activate() throws {
         try AVAudioSession.sharedInstance().setActive(true)
+        VoiceCaptureAudioState.active = true
     }
 
     func deactivate() {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        VoiceCaptureAudioState.active = false
     }
 }
 
@@ -97,24 +104,35 @@ final class VoiceCaptureRecorder {
     }
 
     /// Deletes every take on disk; only called while none is recording.
-    static func discardAll() {
-        guard let directory = try? FileManager.default.url(
-            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false
-        ).appending(path: "VoiceCapture", directoryHint: .isDirectory) else { return }
+    static func discardAll(in base: URL? = nil) {
+        guard let directory = try? takesDirectory(in: base, create: false) else { return }
         try? FileManager.default.removeItem(at: directory)
     }
 
-    static func takeURL(id: UUID) throws -> URL {
-        let directory = try FileManager.default.url(
-            for: .cachesDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ).appending(path: "VoiceCapture", directoryHint: .isDirectory)
+    /// Where takes live: `Caches/VoiceCapture` (tests pass their own base).
+    static func takesDirectory(in base: URL? = nil, create: Bool) throws -> URL {
+        let root = try base ?? FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: create
+        )
+        return root.appending(path: "VoiceCapture", directoryHint: .isDirectory)
+    }
+
+    static func takeURL(id: UUID, in base: URL? = nil) throws -> URL {
+        let directory = try takesDirectory(in: base, create: true)
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true
         )
+        // A take stays on the phone only until it is sent or discarded; it
+        // is never backed up (Caches is not, and this says so explicitly).
+        // Its protection stays the default class (complete until the first
+        // unlock): a take may be written while the phone locks mid-take, and
+        // `completeUnlessOpen` could not be verified for the recorder's
+        // writes after a lock (the Simulator enforces no data protection).
+        var directoryURL = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? directoryURL.setResourceValues(values)
         return directory.appending(path: "\(id.uuidString.lowercased()).m4a")
     }
 
@@ -144,6 +162,7 @@ final class VoiceCaptureRecorder {
             let recorder = try makeEngine(url)
             guard recorder.record() else { throw Failure.start }
             self.recorder = recorder
+            watchFirstAudio(recorder)
         } catch {
             deactivateSession()
             throw StartFailure(step: .recorder, underlying: error)
@@ -166,6 +185,33 @@ final class VoiceCaptureRecorder {
             sessionActive = true
         } catch {
             throw StartFailure(step: step, underlying: error)
+        }
+    }
+
+    /// When the recorder first had audio, for the press's timing; until
+    /// then, whether the watch gave up (`firstAudioLate`).
+    private(set) var firstAudioAt: Date?
+    private(set) var firstAudioLate = false
+
+    /// Watches for the recorder's first audio: every 5 ms for the first
+    /// second, then every 100 ms until the take stops.
+    func watchFirstAudio(_ recorder: VoiceCaptureRecordingEngine, poll: Duration = .milliseconds(5)) {
+        firstAudioAt = nil
+        firstAudioLate = false
+        Task { @MainActor [weak self, weak recorder] in
+            var polls = 0
+            while true {
+                guard let self, let recorder, recorder.isRecording else {
+                    self?.firstAudioLate = self?.firstAudioAt == nil
+                    return
+                }
+                if recorder.currentTime > 0 {
+                    self.firstAudioAt = Date()
+                    return
+                }
+                polls += 1
+                try? await Task.sleep(for: polls < 200 ? poll : poll * 20)
+            }
         }
     }
 

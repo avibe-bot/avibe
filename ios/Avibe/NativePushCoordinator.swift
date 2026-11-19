@@ -178,6 +178,16 @@ final class NativePushCoordinator {
     private var mutationTask: Task<Void, Never>?
     private var providerPatchTask: Task<Void, Error>?
     private var recoveryTask: Task<Void, Never>?
+    private var mutationsInFlight = 0
+
+    /// The live coordinator, so voice capture can tell whether push work is
+    /// in flight before it ends a background process.
+    static weak var current: NativePushCoordinator?
+
+    /// Registration, a provider patch, a recovery or a mutation under way.
+    var hasWorkInFlight: Bool {
+        mutationsInFlight > 0 || providerPatchTask != nil || recoveryTask != nil || !tokenWaiters.isEmpty
+    }
 
     init(
         keychain: PushKeychainStoring = PushKeychainStore(),
@@ -246,6 +256,7 @@ final class NativePushCoordinator {
             object: nil
         )
         refreshAPNsRegistration()
+        Self.current = self
     }
 
     deinit {
@@ -1441,6 +1452,8 @@ final class NativePushCoordinator {
     private func enqueueMutation<Value>(
         _ operation: @escaping @MainActor () async throws -> Value
     ) async throws -> Value {
+        mutationsInFlight += 1
+        defer { mutationsInFlight -= 1 }
         let previous = mutationTask
         let current: Task<Value, Error> = Task { @MainActor in
             await previous?.value
