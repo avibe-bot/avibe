@@ -295,6 +295,7 @@ def test_a_bot_session_is_reserved_from_archive_only_while_its_agent_exists(serv
     from storage.agent_session_rows import hidden_bot_session_ids
     from storage.db import create_sqlite_engine
     from storage.workbench_sessions_service import ReservedSessionError, archive_session
+    from vibe.authorization import AuthorizationContext
 
     gone = service.create_bot(display_name="Gone")
     kept = service.create_bot(display_name="Kept")
@@ -304,6 +305,13 @@ def test_a_bot_session_is_reserved_from_archive_only_while_its_agent_exists(serv
 
     with create_sqlite_engine().begin() as conn, pytest.raises(ReservedSessionError):
         archive_session(conn, kept.session_id)
+    # It is still the owner's: another member is refused before any write, even if the refusal is caught.
+    editor = AuthorizationContext(instance_role="member", is_remote=True, subject="m1")
+    assert editor.has_role("editor") and not editor.is_instance_owner
+    with create_sqlite_engine().begin() as conn:
+        with pytest.raises(LookupError):
+            archive_session(conn, gone.session_id, authorization_context=editor)
+    assert _session(gone.session_id)["status"] == "active"
     with create_sqlite_engine().begin() as conn:
         archive_session(conn, gone.session_id)
         assert gone.session_id in hidden_bot_session_ids(conn, owner=True)

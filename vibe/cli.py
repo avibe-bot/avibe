@@ -6114,7 +6114,8 @@ def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskC
 def _archive_deleted_bot_session(agent) -> dict:
     """Archive the Session a deleted Agent's removed Bot left, through the service's own archive lifecycle.
 
-    No Bot can reconnect to it any more. Returns the payload fields that say what happened to it, if anything.
+    No Bot can reconnect to it any more. The Agent is already deleted, so nothing here fails the command: the
+    returned payload fields say what happened to the Session, and how to finish when it is not confirmed.
     """
     from storage.resource_access_service import resolve_resource_access_context
     from vibe import api, internal_client
@@ -6123,24 +6124,38 @@ def _archive_deleted_bot_session(agent) -> dict:
     # A Bot's Session is its owner's (``docs/plans/bots.md`` D1): only the owner's deletion archives it.
     if not session_id or not resolve_resource_access_context(None).is_instance_owner:
         return {}
+    retry = f"`DELETE /api/sessions/{session_id}` on the Web API archives it while the service runs."
     try:
         result = asyncio.run(internal_client.archive_session(session_id))
-    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
-        result = {}
-    body = result.get("body") if isinstance(result.get("body"), dict) else {}
-    session = body.get("session") if isinstance(body.get("session"), dict) else {}
-    if result.get("status_code") != 200 or session.get("status") != "archived":
+    except internal_client.InternalServerUnavailable:
         return {
             "bot_session": {"id": session_id, "archived": False},
-            "hint": (
-                f"Its Bot's Session {session_id} was kept because the service did not archive it; with the service "
-                f"running, `DELETE /api/sessions/{session_id}` on the Web API archives it."
-            ),
+            "hint": f"Its Bot's Session {session_id} was kept: the service is not running. {retry}",
         }
+    except Exception as exc:  # noqa: BLE001 - the request may have committed; say it is unconfirmed
+        logger.warning("Archiving the Session %s of a deleted Agent is unconfirmed: %s", session_id, exc)
+        result = None
+    body = result.get("body") if isinstance(result, dict) and isinstance(result.get("body"), dict) else {}
+    session = body.get("session") if isinstance(body.get("session"), dict) else {}
+    if not isinstance(result, dict) or result.get("status_code") != 200 or session.get("status") != "archived":
+        return {
+            "bot_session": {"id": session_id, "archived": None},
+            "hint": f"Archiving its Bot's Session {session_id} is unconfirmed. {retry}",
+        }
+    fields: dict = {"bot_session": {"id": session_id, "archived": True}}
     scopes = session.get("revoked_vault_grant_scopes") or []
-    if scopes:
-        api.release_vault_agent_scopes(scopes, reason=f"archive_session:{session_id}")
-    return {"bot_session": {"id": session_id, "archived": True}}
+    try:
+        if scopes:
+            api.release_vault_agent_scopes(scopes, reason=f"archive_session:{session_id}")
+    except Exception as exc:  # noqa: BLE001 - the archive committed; the release is cleanup
+        logger.warning("Releasing the Vault grants of the archived Session %s failed: %s", session_id, exc)
+        fields["warnings"] = [f"The Vault grants of {session_id} were revoked but not released from the running agent."]
+    try:
+        # As the Web archive does: a Turn still running in it stops (best effort).
+        asyncio.run(internal_client.cancel_dispatch(session_id))
+    except Exception:  # noqa: BLE001 - best effort, as on the Web
+        logger.debug("Cancelling a running Turn of %s failed", session_id, exc_info=True)
+    return fields
 
 
 def cmd_agent_remove(args):

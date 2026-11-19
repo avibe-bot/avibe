@@ -2298,6 +2298,9 @@ def archive_session(
     if str(session_id) == WORKSPACE_NOTICE_SESSION_ID or is_reserved_bot_session(conn, session_id):
         raise ReservedSessionError(str(session_id))
     context = require_instance_role(authorization_context, "editor")
+    if not context.is_instance_owner and is_bot_session(conn, session_id):
+        # Bots are the Owner's (``bots.md`` D1), a deleted Agent's Bot Session too: refused before any write.
+        raise LookupError(f"Session not found: {session_id}")
     existing = conn.execute(
         select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
     ).scalar_one_or_none()

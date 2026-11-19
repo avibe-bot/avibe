@@ -130,6 +130,7 @@ def test_deleting_a_removed_bots_agent_archives_its_session_over_http(client, mo
     deleted = client.delete("/api/agents/gone", headers=csrf_headers(client))
     assert deleted.status_code == 200, deleted.get_json()
     assert "bot_session_id" not in deleted.get_json()
+    assert deleted.get_json()["bot_session"] == {"id": "ses_gone", "archived": True}
     assert archived == ["ses_gone"]
     with create_sqlite_engine().connect() as conn:
         assert get_session(conn, "ses_gone")["status"] == "archived"

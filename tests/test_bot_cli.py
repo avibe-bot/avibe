@@ -260,9 +260,16 @@ def test_agent_remove_archives_a_removed_bots_session_through_the_service(home, 
                                              "revoked_vault_grant_scopes": [{"grant_id": "g1"}]}},
         }
 
+    cancelled = []
+
+    async def cancel_dispatch(session_id):
+        cancelled.append(session_id)
+        return {}
+
     monkeypatch.setattr(internal_client, "archive_session", archive_via_controller)
+    monkeypatch.setattr(internal_client, "cancel_dispatch", cancel_dispatch)
     monkeypatch.setattr(api, "release_vault_agent_scopes", lambda scopes, reason: released.append((scopes, reason)))
-    for handle in ("gone", "later"):
+    for handle in ("gone", "later", "lost"):
         assert _run(monkeypatch, capsys, "bot", "create", "--name", handle.title(), "--handle", handle)[0] == 0
         assert _run(monkeypatch, capsys, "bot", "remove", handle)[0] == 0
 
@@ -270,6 +277,7 @@ def test_agent_remove_archives_a_removed_bots_session_through_the_service(home, 
     assert (code, payload["bot_session"]) == (0, {"id": "ses_gone", "archived": True})
     assert archived == ["ses_gone"]
     assert released == [([{"grant_id": "g1"}], "archive_session:ses_gone")]
+    assert cancelled == ["ses_gone"]
 
     async def unavailable(session_id):
         raise internal_client.InternalServerUnavailable("down")
@@ -278,3 +286,11 @@ def test_agent_remove_archives_a_removed_bots_session_through_the_service(home, 
     code, payload = _run(monkeypatch, capsys, "agent", "remove", "later")
     assert (code, payload["bot_session"]) == (0, {"id": "ses_later", "archived": False})
     assert "ses_later" in payload["hint"]
+
+    async def dropped(session_id):
+        raise RuntimeError("connection dropped after the request was sent")
+
+    monkeypatch.setattr(internal_client, "archive_session", dropped)
+    code, payload = _run(monkeypatch, capsys, "agent", "remove", "lost")
+    # The Agent is deleted; a Session archive that may have committed is unconfirmed, never "kept".
+    assert (code, payload["removed_agent"], payload["bot_session"]) == (0, "lost", {"id": "ses_lost", "archived": None})

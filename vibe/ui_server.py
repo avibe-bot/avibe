@@ -6104,6 +6104,9 @@ async def vibe_agent_delete(name):
         # (a Bot's Session is the owner's, bots.md D1); another member's deletion leaves it as it was.
         archived = await sessions_archive(bot_session_id)
         status = archived[1] if isinstance(archived, tuple) and len(archived) > 1 else 200
+        # The Agent is deleted either way; when the Session is not, the reply names it so DELETE /api/sessions/{id}
+        # can finish, since deleting the Agent again cannot.
+        result["bot_session"] = {"id": bot_session_id, "archived": status == 200}
         if status != 200:
             logger.info("Kept the Session %s of the deleted Agent %s (archive answered %s)", bot_session_id, name, status)
     return _vibe_agent_result_response(result)
