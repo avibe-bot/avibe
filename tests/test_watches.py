@@ -5880,3 +5880,67 @@ def test_a_pause_while_the_check_ran_refuses_its_retrying_notice_on_sqlite(tmp_p
     assert not [run for run in request_store.list_pending() if "has been retrying" in run.prompt]
     store.maybe_reload()
     assert store.get_watch(watch.id).enabled is False
+
+
+def _sqlite_retrying_watch(tmp_path: Path, anchor: str):
+    store = ManagedWatchStore()
+    request_store = TaskExecutionStore()
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor=anchor)
+    watch = store.add_watch(
+        name=anchor, session_key="", session_id=session_id, session_policy="existing",
+        command=[sys.executable, "wait.py"], shell_command=None, prefix=None, cwd=None, mode="forever",
+        timeout_seconds=5, lifetime_timeout_seconds=0, retry_exit_codes=[75], retry_delay_seconds=0,
+        post_to=None, deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(config=SimpleNamespace(language="en")), store=store,
+        request_store=request_store, runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    return store, request_store, service, watch
+
+
+def test_a_same_store_pause_and_resume_during_the_check_gets_no_notice(tmp_path: Path, monkeypatch) -> None:
+    """The published Watch object changes in place; the token taken before the check
+    does not (#4015 review)."""
+    import core.watches as watches_module
+
+    store, request_store, service, watch = _sqlite_retrying_watch(tmp_path, "same_store_rearm")
+    monkeypatch.setattr(watches_module, "WATCH_RETRY_NOTICE_SECONDS", 0)
+    live = store.get_watch(watch.id)
+    token = str(live.metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
+    store.set_enabled(watch.id, False)
+    time.sleep(0.01)
+    store.set_enabled(watch.id, True)
+    assert live.metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) != token  # updated in place
+    assert service._commit_cycle_result(
+        live, exit_code=75, error=None, retrying_started_at="2026-01-01T00:00:00+00:00", retrying_activation=token,
+    ) is False
+    assert not [run for run in request_store.list_pending() if "has been retrying" in run.prompt]
+
+
+def test_a_rearm_between_reload_and_write_is_refused_by_the_update_itself(tmp_path: Path, monkeypatch) -> None:
+    """A pause and resume from another store can land between this store's reload and
+    its write; the UPDATE's own predicate refuses the old activation (#4015 review)."""
+    import core.watches as watches_module
+
+    store, request_store, service, watch = _sqlite_retrying_watch(tmp_path, "rearm_before_write")
+    other = ManagedWatchStore()
+    monkeypatch.setattr(watches_module, "WATCH_RETRY_NOTICE_SECONDS", 0)
+    snapshot = store.get_watch(watch.id)
+    token = str(snapshot.metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
+    original = store._sqlite.upsert_watch_with_queued_run
+
+    def rearm_then_write(*args, **kwargs):
+        other.maybe_reload()
+        other.set_enabled(watch.id, False)
+        time.sleep(0.01)
+        other.set_enabled(watch.id, True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store._sqlite, "upsert_watch_with_queued_run", rearm_then_write)
+    assert service._commit_cycle_result(
+        snapshot, exit_code=75, error=None, retrying_started_at="2026-01-01T00:00:00+00:00", retrying_activation=token,
+    ) is False
+    assert not [run for run in request_store.list_pending() if "has been retrying" in run.prompt]
+    other.maybe_reload()
+    assert other.get_watch(watch.id).metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) != token

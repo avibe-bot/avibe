@@ -1981,6 +1981,13 @@ def _job_watch_id(conn: Any, job_id: Any) -> Optional[str]:
     return str(existing) if existing is not None else None
 
 
+def watch_activation_unchanged(activation: str):
+    """``run_definitions`` predicate: still the armed episode a cycle ran in."""
+    return func.coalesce(
+        func.json_extract(run_definitions.c.metadata_json, "$.watch_lifetime_started_at"), ""
+    ) == activation
+
+
 def _not_a_retrying_notice():
     """A Watch's retrying notice informs; it fences neither its next cycle nor its
     next report, read side or write side (#4015 review)."""
@@ -3877,6 +3884,7 @@ class SQLiteBackgroundTaskStore:
         expect: DefinitionWriteExpectation | None = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        extra_predicates: Sequence[Any] = (),
     ) -> bool:
         """Write a whole watch row. ``False`` means the write was REFUSED.
 
@@ -3891,6 +3899,7 @@ class SQLiteBackgroundTaskStore:
             definition_type="watch",
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            extra_predicates=extra_predicates,
         )
 
     def adopt_or_create_job_watch(self, payload: dict[str, Any]) -> str:
@@ -4049,6 +4058,7 @@ class SQLiteBackgroundTaskStore:
         *,
         expect: DefinitionWriteExpectation | None,
         run_payload: dict[str, Any],
+        extra_predicates: Sequence[Any] = (),
     ) -> bool:
         """A guarded watch stamp and the outbox row it authorises, ONE transaction.
 
@@ -4096,7 +4106,7 @@ class SQLiteBackgroundTaskStore:
             if unsettled is not None:
                 return False
             if not upsert_definition_in_connection(
-                conn, values, expect=expect, definition_type="watch"
+                conn, values, expect=expect, definition_type="watch", extra_predicates=extra_predicates,
             ):
                 return False
             _pin_run_to_definition_agent(

@@ -68,6 +68,7 @@ from storage.background import (
     DefinitionWriteExpectation,
     SQLiteBackgroundTaskStore,
     definition_resume_clear_columns,
+    watch_activation_unchanged,
     watch_job_target,
     watch_metadata_after_resume,
 )
@@ -584,6 +585,7 @@ class ManagedWatchStore:
         queued_run: Optional[dict[str, Any]] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        require_activation: Optional[str] = None,
     ) -> bool:
         """Persist a whole watch row; ``False`` means the guard refused the write.
 
@@ -617,6 +619,12 @@ class ManagedWatchStore:
             if self._sqlite is not None and watch.retired_at is not None:
                 self._unpublish(watch.id)
 
+        # The activation a retry stamp was decided in must still be the stored one in
+        # the UPDATE itself: a pause and resume can land between this store's reload
+        # and its write (#4015 review).
+        activation_guard = (
+            (watch_activation_unchanged(require_activation),) if require_activation is not None else ()
+        )
         with self._mirror_lock:
             try:
                 if self._sqlite is None:
@@ -632,10 +640,11 @@ class ManagedWatchStore:
                         expect=expect,
                         expected_enabled_agent_id=expected_enabled_agent_id,
                         expected_reference_agent_id=expected_reference_agent_id,
+                        extra_predicates=activation_guard,
                     )
                 else:
                     landed = self._sqlite.upsert_watch_with_queued_run(
-                        watch.to_dict(), expect=expect, run_payload=queued_run
+                        watch.to_dict(), expect=expect, run_payload=queued_run, extra_predicates=activation_guard,
                     )
             except Exception:
                 self._reload_after_lost_write(watch.id)
@@ -1230,7 +1239,9 @@ class ManagedWatchStore:
             # Guarded for the reason ``mark_task_result`` is: a cycle result landing after a
             # ``/new`` reclaim would otherwise re-enable the watch and restore the binding
             # the teardown cleared.
-            return self._write_watch(candidate, expect, queued_run=queued_run)
+            return self._write_watch(
+                candidate, expect, queued_run=queued_run, require_activation=require_activation,
+            )
 
 
 class WatchRuntimeStateStore:
@@ -2741,6 +2752,9 @@ class ManagedWatchService:
                 )
                 return
             cycle_started_at = _utc_now_iso()
+            # An immutable token: the published Watch object can be updated in place
+            # while the check runs (a pause and resume from this same store).
+            cycle_activation = str((watch.metadata or {}).get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
             try:
                 result = await self._run_cycle(watch, timeout_seconds=cycle_timeout)
             except asyncio.CancelledError:
@@ -2829,6 +2843,7 @@ class ManagedWatchService:
                         error=None,
                         disable=False,
                         retrying_started_at=cycle_started_at,
+                        retrying_activation=cycle_activation,
                     ):
                         return
                     await self._sleep_before_retry(
@@ -2859,6 +2874,7 @@ class ManagedWatchService:
                     error=None,
                     disable=False,
                     retrying_started_at=cycle_started_at,
+                    retrying_activation=cycle_activation,
                 ):
                     return
                 await self._sleep_before_retry(
@@ -2953,7 +2969,9 @@ class ManagedWatchService:
             timed_out=False,
         )
 
-    def _retrying_notice(self, watch: ManagedWatch, exit_code: Optional[int], cycle_started_at: str) -> dict[str, Any]:
+    def _retrying_notice(
+        self, watch: ManagedWatch, exit_code: Optional[int], cycle_started_at: str, *, activation: Optional[str] = None,
+    ) -> dict[str, Any]:
         """The retry commit's extras: the run of retries, and its notice once per activation.
 
         A waiter that keeps returning "still waiting" while its own check is wrong is
@@ -2971,7 +2989,8 @@ class ManagedWatchService:
         # (``mark_cycle_result(require_activation=...)``): a pause or a re-arm that
         # landed meanwhile refuses the stamp and its notice together (#4015 review).
         metadata = watch.metadata or {}
-        activation = str(metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
+        if activation is None:
+            activation = str(metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
         recorded = metadata.get(RETRYING_SINCE_METADATA_KEY)
         since = (
             str(recorded.get("since") or "")
@@ -3121,6 +3140,7 @@ class ManagedWatchService:
         follow_up_fence: bool = True,
         request_id: Optional[str] = None,
         retrying_started_at: Optional[str] = None,
+        retrying_activation: Optional[str] = None,
     ) -> bool:
         """Record a cycle's outcome and queue the hook it authorises, as ONE decision.
 
@@ -3153,7 +3173,7 @@ class ManagedWatchService:
 
         if retrying_started_at is not None:
             # Decided here, on the store worker that commits it, from the stored Watch.
-            extras = self._retrying_notice(watch, exit_code, retrying_started_at)
+            extras = self._retrying_notice(watch, exit_code, retrying_started_at, activation=retrying_activation)
             metadata_updates = {**(metadata_updates or {}), **extras.pop("metadata_updates", {})}
             hook_outcome = extras.get("hook_outcome", hook_outcome)
             prompt = extras.get("prompt", prompt)
