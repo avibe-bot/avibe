@@ -42,7 +42,7 @@ import {
   onNativeDirectPreference,
   subscribeNativeDirectBaseline,
 } from '../lib/native';
-import { installPageFetchCounting, pageConnectionsQuiet } from '../lib/pageConnections';
+import { holdPageRequests, installPageFetchCounting, pageConnectionsQuiet } from '../lib/pageConnections';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
@@ -3422,6 +3422,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // How this very stream reached the instance (ui/design: mobile-app/direct-tag).
         if (sourceKind === 'browser') {
           setLiveStreamVia(parsed.via === 'direct' || parsed.via === 'other' ? parsed.via : null);
+          // A stream that says it did not come in directly while the App
+          // prefers direct (it opened on a pooled public connection, as on a
+          // first load): hand it over, within the hand-over's own bounds.
+          if (parsed.via === 'other' && nativeDirectPreference() === 'direct') {
+            void attemptDirectHandoverRef.current();
+          }
         }
         eventConnectionRef.current = {
           sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1,
@@ -3815,7 +3821,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       state.lastAt = Date.now();
       closeActiveWorkbenchEventSource();
       setWorkbenchEventConnectionState('reconnecting');
-      const result = await nativeDirectHandover();
+      // No new request may reuse a public connection while the shell decides
+      // which ones are quiet; they are sent once it has answered.
+      const releaseRequests = holdPageRequests();
+      let result: Awaited<ReturnType<typeof nativeDirectHandover>>;
+      try {
+        result = await nativeDirectHandover();
+      } finally {
+        releaseRequests();
+      }
       // Opened again at once, and its handshake announces the gap, as after a
       // closure.
       rebuildWorkbenchEventsAfterClosure();
@@ -3856,14 +3870,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       void attemptDirectHandoverRef.current();
     });
-    const stopDirectBaseline = subscribeNativeDirectBaseline(() => {
-      openWorkbenchEventsRef.current();
-      // A preference of `direct` that came with the baseline could not act
-      // before it: the stream it would move did not exist yet.
-      if (nativeDirectBaselineState() === 'ready' && nativeDirectPreference() === 'direct') {
-        void attemptDirectHandoverRef.current();
-      }
-    });
+    const stopDirectBaseline = subscribeNativeDirectBaseline(() => openWorkbenchEventsRef.current());
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();

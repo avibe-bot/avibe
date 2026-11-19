@@ -9,6 +9,8 @@
 let inFlight = 0;
 const sockets = new Set<WebSocket>();
 let installed = false;
+/** While a hand-over closes quiet connections, new requests wait here. */
+let hold: Promise<void> | null = null;
 
 /** A body that has not moved for this long no longer keeps the page busy. */
 const BODY_IDLE_RELEASE_MS = 10_000;
@@ -97,6 +99,9 @@ export function installPageFetchCounting(): void {
   const original = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     if (!sameOrigin(input)) return original(input, init);
+    // Sent only after a hand-over in progress has finished, so it cannot
+    // reuse a connection the hand-over is about to close.
+    while (hold) await hold;
     const done = beginPageRequest();
     let response: Response;
     try {
@@ -106,6 +111,23 @@ export function installPageFetchCounting(): void {
       throw error;
     }
     return countedUntilBodyEnds(response, done);
+  };
+}
+
+/**
+ * Holds this document's new same-origin requests until the returned function
+ * is called. New WebSockets are not held: each opens a connection of its own,
+ * which takes the path new connections prefer.
+ */
+export function holdPageRequests(): () => void {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  hold = held;
+  return () => {
+    if (hold === held) hold = null;
+    release();
   };
 }
 

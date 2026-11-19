@@ -802,16 +802,33 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(2);
   });
 
-  it('hands over when the baseline itself says direct', async () => {
+  it('hands over a first stream that says it came in another way while direct is preferred', async () => {
     const shell = installDirectShell({ direct: 2 });
     await mountDirectPage();
-    expect(FakeEventSource.instances).toHaveLength(0);
     await shell.answer(0, 0, 1, 'direct');
+    // The stream opened with the baseline; nothing happens before it says how
+    // it came in.
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(shell.handovers()).toBe(0);
+    FakeEventSource.latest().emit('connected', {
+      sub_id: 1, interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS, via: 'other',
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(1);
-    // The stream opened with the baseline, then once more after the hand-over.
     expect(FakeEventSource.instances).toHaveLength(2);
     expect(FakeEventSource.instances[0].closed).toBe(true);
+  });
+
+  it('leaves a first stream alone that already came in directly', async () => {
+    const shell = installDirectShell({ direct: 2 });
+    await mountDirectPage();
+    await shell.answer(0, 0, 1, 'direct');
+    FakeEventSource.latest().emit('connected', {
+      sub_id: 1, interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS, via: 'direct',
+    });
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(shell.handovers()).toBe(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
   });
 
   it('does not hand over a stream that already came in directly, or while a same-origin frame is open', async () => {
@@ -850,6 +867,34 @@ describe('ApiProvider workbench stream liveness', () => {
     // Another origin is not this page's connection.
     void window.fetch('https://elsewhere.example/x');
     expect(pageConnectionsQuiet()).toBe(true);
+  });
+
+  it('holds new requests while the shell closes quiet connections', async () => {
+    const original = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', original);
+    const shell = installDirectShell({ direct: 2 });
+    let answer: (value: unknown) => void = () => {};
+    const status = shell.call.getMockImplementation();
+    shell.call.mockImplementation((method: string) =>
+      method === 'direct.handover'
+        ? new Promise((resolve) => { answer = resolve; })
+        : status!(method),
+    );
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+
+    // A request started during the hand-over waits for its answer.
+    const request = window.fetch('/api/refresh');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(original).not.toHaveBeenCalled();
+    answer({ closed: 1, kept: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(original).toHaveBeenCalledTimes(1);
+    await request;
   });
 
   it('never hands over without direct version 2', async () => {
