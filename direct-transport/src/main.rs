@@ -749,8 +749,9 @@ async fn main() {
     {
         Ok(()) => 0,
         Err(error) => {
+            // Fatal is already reported on stdout. Stderr may be a full,
+            // undrained diagnostics pipe; do not write to it on the exit path.
             control.fatal(error).await;
-            eprintln!("fatal: {}", error.0);
             1
         }
     };
