@@ -1984,22 +1984,34 @@ class RequestNotYoursError(VaultServiceError):
 
 
 def withdraw_request(conn: Connection, request_id: str, *, session_id: str | None) -> dict[str, Any]:
-    """End a pending Vault request the calling Session made, as if it had expired.
+    """End a pending Vault request of the calling Session, as if it had expired.
 
-    Any kind (provide, use, sign, delete) and either tier: only the request row ends, so its
-    card leaves the pending list and a later Approve fails closed as on an expired request. A
-    request that is not pending (being signed, decided or expired) stays as it is. The Agent
-    withdrew it itself, so it is not woken with the outcome.
+    A request belongs to the Session it records (``requester.session_id``): the one it was made in,
+    or the one a ``--session-id`` made it for, whose conversation shows its card and gets its outcome.
+    Any kind (provide, access, sign, delete) and either tier: only the request row ends, so its card
+    leaves the pending list and a later approval is refused as on an expired request. A request that
+    is not pending (being signed, decided or expired) stays as it is. The Session withdrew it itself,
+    so it is not woken with the outcome. Only the row's small columns are read, never its payload.
     """
-    row = _load_request_row(conn, request_id)
-    requester, _delivery = _request_json_payloads(row)
-    # The maker, recorded from its caller context at creation; not the Session the outcome is sent
-    # to (``--session-id``). A request without that record has no maker to match, so it stays.
-    creator = requester.get("created_by_session_id") if isinstance(requester, dict) else None
-    if not session_id or not creator or str(creator) != str(session_id):
+    row = conn.execute(
+        select(
+            vault_requests.c.id, vault_requests.c.status, vault_requests.c.expires_at,
+            vault_requests.c.request_type, vault_requests.c.secret_name, vault_requests.c.requester,
+        ).where(vault_requests.c.id == request_id)
+    ).mappings().first()
+    if row is None:
+        raise RequestNotFoundError(request_id)
+    row = dict(row)
+    requester = _loads(row.get("requester"))
+    owner = requester.get("session_id") if isinstance(requester, dict) else None
+    if not session_id or not owner or str(owner) != str(session_id):
         raise RequestNotYoursError(request_id)
     if row.get("status") != "pending":
         raise InvalidRequestError(f"request is {row.get('status')}, not pending")
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        _expire_pending_request_rows(conn, [row])
+        raise InvalidRequestError("request has expired")
     withdrawn = _expire_pending_request_rows(
         conn, [row], reason="request-withdrawn", delivery_extra={"session_id": str(session_id)},
         callback_status="skipped",

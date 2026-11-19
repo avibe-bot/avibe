@@ -9477,11 +9477,6 @@ def _vault_cli_session_id(args, *, caller_env=None) -> str | None:
 def _vault_cli_requester(args) -> dict:
     requester = {"source": "agent-cli", "pid": os.getpid()}
     requester.update(_vault_caller_metadata())
-    # The Session that made the request, from its caller context alone: ``--session-id`` below names
-    # where the outcome goes, and only the maker may withdraw it (``vibe vault withdraw``).
-    creator = _default_session_id_from_caller(caller_context_from_env())
-    if creator:
-        requester["created_by_session_id"] = creator
     session_id = _vault_cli_session_id(args)
     if session_id:
         requester["session_id"] = session_id
@@ -11959,10 +11954,10 @@ def cmd_vault_await(args):
 
 
 def cmd_vault_withdraw(args):
-    """Withdraw a pending Vault request this Session made by mistake.
+    """Withdraw a pending Vault request of this Session, made by mistake.
 
-    The caller is the Session running the command, never a ``--session-id`` it names: an Agent
-    withdraws only its own requests, and the user can still deny any card.
+    The caller is the Session running the command, never a ``--session-id`` it names, and it
+    withdraws only requests recorded under it; the user can still deny any card.
     """
     from vibe import api
     from storage import vault_service
@@ -11985,9 +11980,9 @@ def cmd_vault_withdraw(args):
         return 1
     except vault_service.RequestNotYoursError:
         _print_task_error(TaskCliError(
-            f"request '{request_id}' was not made by this Session",
+            f"request '{request_id}' does not belong to this Session",
             code="request_not_yours",
-            hint="An Agent withdraws only requests its own Session made; the user can deny any request on its card.",
+            hint="A Session withdraws only its own requests; the user can deny any request on its card.",
             help_command=help_command,
         ))
         return 1
@@ -20360,9 +20355,9 @@ def build_parser():
 
     vault_withdraw_parser = vault_subparsers.add_parser(
         "withdraw",
-        help="Withdraw a pending Vault request this Session made by mistake",
+        help="Withdraw a pending Vault request of this Session, made by mistake",
         description=(
-            "End a still-pending request this Session made (provide, access, sign or delete), in either tier. "
+            "End a still-pending request of this Session (provide, access, sign or delete), in either tier. "
             "Its card leaves the pending list and a later approval is refused. A request being signed, "
             "decided or expired is left as it is."
         ),

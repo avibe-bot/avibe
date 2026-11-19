@@ -880,25 +880,22 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
 
 @pytest.mark.parametrize("tier", ["protected", "standard"])
 def test_an_agent_withdraws_only_its_own_pending_request(tier, capfd, monkeypatch):
-    """3.2.8: an Agent withdraws a pending request its own Session made, in either tier; another Session
+    """3.2.8: an Agent withdraws a pending request of its own Session, in either tier; another Session
     cannot, a request no longer pending stays, and an approval pressed after the withdrawal fails closed."""
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="OOPS_KEY", protection=tier, sealed=_sealed(tier))
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
-    # Its outcome goes to another Session, which neither makes it that Session's to withdraw nor
-    # takes it from its maker.
-    assert cli.cmd_vault_remove(_ns(name="OOPS_KEY", session_id="ses_target")) == 0
-    created = json.loads(capfd.readouterr().out)["request"]
-    request_id = created["id"]
-    assert created["requester"]["session_id"] == "ses_target"
+    assert cli.cmd_vault_remove(cli.build_parser().parse_args(["vault", "remove", "OOPS_KEY"])) == 0
+    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
 
-    for other in ("ses_other", "ses_target"):
-        monkeypatch.setenv("AVIBE_SESSION_ID", other)
-        assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 1
-        assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+    def withdraw(session_id):
+        monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+        return cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))
 
-    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
-    assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 0
+    assert withdraw("ses_other") == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+
+    assert withdraw("ses_cli") == 0
     assert json.loads(capfd.readouterr().out)["status"] == "expired"
     with cli._open_vault_engine().begin() as conn:
         row = conn.execute(
@@ -911,8 +908,32 @@ def test_an_agent_withdraws_only_its_own_pending_request(tier, capfd, monkeypatc
             vault_service.approve_delete_request(conn, request_id)
         assert vault_service.get_secret_meta(conn, "OOPS_KEY")["name"] == "OOPS_KEY"
 
-    assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 1
+    assert withdraw("ses_cli") == 1
     assert json.loads(capfd.readouterr().err)["code"] == "request_not_pending"
+
+
+def test_a_request_made_for_another_session_is_that_sessions_to_withdraw(capfd, monkeypatch):
+    """A request made with --session-id belongs to that Session (its card and outcome are there); the
+    Session that typed the command and every other one is refused, as is a request with no Session."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("p"))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+    args = cli.build_parser().parse_args(["vault", "access", "PROTECTED_KEY", "--session-id", "ses_target", "--no-callback"])
+    assert cli.cmd_vault_access(args) == 0
+    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
+
+    def withdraw(session_id):
+        if session_id is None:
+            monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+        else:
+            monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+        return cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))
+
+    for other in ("ses_cli", "ses_other", None):
+        assert withdraw(other) == 1
+        assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+    assert withdraw("ses_target") == 0
+    assert json.loads(capfd.readouterr().out)["status"] == "expired"
 
 
 def test_access_non_requestable_standard_secret_keeps_not_grantable_code(capfd):
