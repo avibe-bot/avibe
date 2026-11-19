@@ -1196,7 +1196,8 @@ final class WebViewController: UIViewController {
             """,
             contentWorld: Self.pageCacheWorld
         ) as? Bool
-        return declared == true
+        _ = declared
+        return true // mutation: the Web UI's declaration is ignored
     }
 
     /// One question to the instance from the cached page. 1: it answered
