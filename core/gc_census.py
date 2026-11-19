@@ -6,6 +6,7 @@ import gc
 import json
 import logging
 import os
+import sys
 import time
 import types
 from collections import Counter, deque
@@ -49,6 +50,11 @@ _PATHS = (
     ("model_hub", "model_hub_service"),
     ("turns", "session_turns"),
     ("config", "config"),
+    ("agent_registry", "agent_service.agents"),
+    ("vibey_runtimes", "agent_service.agents.@vibey._runtimes"),
+    ("transcript_indexes", "agent_service.agents.@vibey.store"),
+    ("transcript_locks", "agent_service.agents.@vibey.store._store._locks"),
+    ("builtin_catalog", "model_hub_service._builtin_snapshot_cache"),
 )
 
 
@@ -61,9 +67,35 @@ def _counts(controller):
     # Never follow a controller backlink, a class, a module, or a function closure.
     owners = {}
     truncated = False
-    fields = vars(controller)
+    # Expose the active Session -> run -> agent -> rows chain only. Do not walk
+    # arbitrary instance dictionaries (notably host/controller backlinks).
+    follow = {}
+    for mod, name, member in (
+        ("modules.agents.vibey.agent", "_SessionRuntime", "run"),
+        ("modules.agents.vibey.agent", "_Run", "agent"),
+        ("core.agent_core.agent.loop", "Agent", "_rows"),
+    ):
+        module = sys.modules.get(mod)
+        if type(module) is types.ModuleType:
+            cls = vars(module).get(name)
+            if cls is not None:
+                follow[id(cls)] = member
     for index, (_, field) in enumerate(_PATHS):
-        root = fields.get(field)
+        root = controller
+        for part in field.split("."):
+            if part == "@vibey":
+                root = root.get("vibey") if type(root) is dict else None
+            else:
+                try:
+                    attrs = object.__getattribute__(root, "__dict__")
+                except AttributeError:
+                    root = None
+                    break
+                root = attrs.get(part) if type(attrs) is dict else None
+            if root is None:
+                break
+        if root is controller:
+            continue
         if root is None:
             continue
         mask = 1 << index
@@ -87,6 +119,8 @@ def _counts(controller):
                     truncated = True
                     continue
                 children = gc.get_referents(obj)
+            elif id(type(obj)) in follow:
+                children = [object.__getattribute__(obj, "__dict__").get(follow[id(type(obj))])]
             elif obj is root:
                 # Fixed controller-owned root only; only traverse its already held
                 # container referents, never arbitrary user objects/descriptors.
