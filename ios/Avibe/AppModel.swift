@@ -1420,6 +1420,7 @@ final class AppModel: ObservableObject {
     /// and not skipped for this open. Whether its Web UI replays an outcome
     /// is known only once it has loaded.
     private func hasUsableCachedPage(for runtime: MobileRuntimeContext) -> Bool {
+        return true // mutation: the gate always answers yes
         guard
             runtimeLoadsLiveOnce != runtime,
             let origin = WebOrigin(url: runtime.instance.url)?.serialized
