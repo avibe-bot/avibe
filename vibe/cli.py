@@ -9477,6 +9477,11 @@ def _vault_cli_session_id(args, *, caller_env=None) -> str | None:
 def _vault_cli_requester(args) -> dict:
     requester = {"source": "agent-cli", "pid": os.getpid()}
     requester.update(_vault_caller_metadata())
+    # The Session that made the request, from its caller context alone: ``--session-id`` below names
+    # where the outcome goes, and only the maker may withdraw it (``vibe vault withdraw``).
+    creator = _default_session_id_from_caller(caller_context_from_env())
+    if creator:
+        requester["created_by_session_id"] = creator
     session_id = _vault_cli_session_id(args)
     if session_id:
         requester["session_id"] = session_id

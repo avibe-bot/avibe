@@ -885,12 +885,17 @@ def test_an_agent_withdraws_only_its_own_pending_request(tier, capfd, monkeypatc
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="OOPS_KEY", protection=tier, sealed=_sealed(tier))
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
-    assert cli.cmd_vault_remove(_ns(name="OOPS_KEY")) == 0
-    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
+    # Its outcome goes to another Session, which neither makes it that Session's to withdraw nor
+    # takes it from its maker.
+    assert cli.cmd_vault_remove(_ns(name="OOPS_KEY", session_id="ses_target")) == 0
+    created = json.loads(capfd.readouterr().out)["request"]
+    request_id = created["id"]
+    assert created["requester"]["session_id"] == "ses_target"
 
-    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_other")
-    assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 1
-    assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+    for other in ("ses_other", "ses_target"):
+        monkeypatch.setenv("AVIBE_SESSION_ID", other)
+        assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 1
+        assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
 
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
     assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 0

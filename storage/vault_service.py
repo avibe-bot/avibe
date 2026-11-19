@@ -1992,7 +1992,11 @@ def withdraw_request(conn: Connection, request_id: str, *, session_id: str | Non
     withdrew it itself, so it is not woken with the outcome.
     """
     row = _load_request_row(conn, request_id)
-    if not session_id or _request_session_id(row) != str(session_id):
+    requester, _delivery = _request_json_payloads(row)
+    # The maker, recorded from its caller context at creation; not the Session the outcome is sent
+    # to (``--session-id``). A request without that record has no maker to match, so it stays.
+    creator = requester.get("created_by_session_id") if isinstance(requester, dict) else None
+    if not session_id or not creator or str(creator) != str(session_id):
         raise RequestNotYoursError(request_id)
     if row.get("status") != "pending":
         raise InvalidRequestError(f"request is {row.get('status')}, not pending")
@@ -2002,8 +2006,10 @@ def withdraw_request(conn: Connection, request_id: str, *, session_id: str | Non
     )
     if withdrawn != 1:
         raise InvalidRequestError("request is not pending")
-    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
-    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
+    return {
+        "id": row["id"], "status": "expired",
+        "request_type": row.get("request_type"), "secret_name": row.get("secret_name"),
+    }
 
 
 def _expire_request_if_due(conn: Connection, row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
