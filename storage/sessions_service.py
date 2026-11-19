@@ -1178,22 +1178,24 @@ class SQLiteSessionsService:
         self,
         session_id: str,
         *,
-        stored_model: str | None,
+        expected_route: Mapping[str, Any],
         model: tuple[str, str] | None = None,
         reasoning_effort: tuple[str, str] | None = None,
     ) -> bool:
         """Move a Session's stored model and effort, each a (stored, successor) pair, to their successors.
 
-        Only a row that still stores ``stored_model`` (the model the successors were chosen
-        for) and every value this moves changes, so a Session the user switched meanwhile
-        keeps the choice. Returns True when the row changed.
+        ``expected_route`` is the route the successors were chosen for: its ``model`` and the
+        Agent identity (``agent_id``, ``agent_name``, ``agent_backend``) it names. Only a row
+        that still holds that route and every value this moves changes, so a Session the user
+        switched meanwhile keeps the choice. Returns True when the row changed.
         """
         values: dict[str, Any] = {}
-        statement = (
-            agent_sessions.update()
-            .where(agent_sessions.c.id == str(session_id))
-            .where(func.coalesce(agent_sessions.c.model, "") == str(stored_model or ""))
-        )
+        statement = agent_sessions.update().where(agent_sessions.c.id == str(session_id))
+        for column in ("model", "agent_id", "agent_name", "agent_backend"):
+            if column == "model" or column in expected_route:
+                statement = statement.where(
+                    func.coalesce(getattr(agent_sessions.c, column), "") == str(expected_route.get(column) or "")
+                )
         for column, pair in (("model", model), ("reasoning_effort", reasoning_effort)):
             if pair is None:
                 continue

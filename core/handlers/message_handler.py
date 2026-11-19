@@ -1925,7 +1925,10 @@ class MessageHandler(BaseHandler):
                 return None
             moved = succeed(
                 session_id,
-                stored_model=row.get("model"),
+                # The route the successors were chosen for: its model and its Agent.
+                expected_route={
+                    key: row.get(key) for key in ("model", "agent_id", "agent_name", "agent_backend") if key in row
+                },
                 model=succession.model,
                 reasoning_effort=succession.reasoning_effort,
             )

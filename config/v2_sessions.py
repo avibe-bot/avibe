@@ -522,13 +522,13 @@ class SessionsStore:
         self,
         agent_session_id: str,
         *,
-        stored_model: str | None,
+        expected_route: dict[str, Any],
         model: tuple[str, str] | None = None,
         reasoning_effort: tuple[str, str] | None = None,
     ) -> bool:
         self._ensure_service()
         return self._service.succeed_retired_session_route(
-            agent_session_id, stored_model=stored_model, model=model, reasoning_effort=reasoning_effort
+            agent_session_id, expected_route=expected_route, model=model, reasoning_effort=reasoning_effort
         )
 
     def get_agent_session_by_id(self, session_id: str) -> Optional[dict]:
