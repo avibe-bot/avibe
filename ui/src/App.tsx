@@ -307,11 +307,13 @@ const WebPushNotificationNavigator = () => {
     return null;
 };
 
+/** The App's first recheck after an unreachable instance, doubling up to
+ * the last value: each failed read can put up an error toast. */
+const UNREACHABLE_RECHECK_MS = [15_000, 30_000, 60_000, 120_000];
+
 /** A session read that could not reach the instance, as opposed to an
  * answer from it: a network failure, a timeout, or a 5xx (a down tunnel
  * answers 530). */
-const UNREACHABLE_RECHECK_MS = 15_000;
-
 function isUnreachable(failure: unknown): boolean {
     if (failure instanceof TypeError) return true;
     if (failure instanceof Error && (failure.name === 'AbortError' || failure.name === 'TimeoutError')) {
@@ -343,6 +345,8 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // The App's session check could not reach the instance: it runs again
     // when the network or the page comes back.
     const [awaitingReconnect, setAwaitingReconnect] = useState(false);
+    // Consecutive unreachable checks, for the recheck's backoff.
+    const unreachableChecksRef = useRef(0);
     const [provisional, setProvisional] = useState(bootSession !== null);
     // Bumped by every terminal authorization signal (revoked, login required).
     // A check that started before one can still answer ``ready``; it must not
@@ -458,6 +462,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (superseded()) return;
+            unreachableChecksRef.current = 0;
             provisionalRef.current = false;
             setProvisional(false);
             setAuthorizationSession(session);
@@ -612,7 +617,11 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         window.addEventListener('online', recheck);
         const stopReactivation = onPageReactivated(recheck);
         // A down tunnel never fires `online`: also once more after a while.
-        const timer = window.setTimeout(recheck, UNREACHABLE_RECHECK_MS);
+        const delay = UNREACHABLE_RECHECK_MS[
+            Math.min(unreachableChecksRef.current, UNREACHABLE_RECHECK_MS.length - 1)
+        ];
+        unreachableChecksRef.current += 1;
+        const timer = window.setTimeout(recheck, delay);
         return () => {
             window.removeEventListener('online', recheck);
             stopReactivation();
