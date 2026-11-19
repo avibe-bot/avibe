@@ -146,7 +146,7 @@ Ask the user to delete a Vault secret. Every agent-initiated delete needs one-cl
 `vibe vault remove OLD_TOKEN --reason 'Rotated credential'`
 This returns a pending request ID without deleting anything. With the normal callback, Avibe resumes this Session after the user decides; do not rerun `rm`. With `--no-callback`, or when the request has no resolvable Session, check explicitly with `vibe vault await <request_id>`; do not rerun `rm`. If a repeated `rm` reuses a pending request created by another Session, use the returned request ID with `vibe vault await <request_id>` rather than expecting a callback for the current Session.
 
-A request this Session made by mistake (wrong secret, wrong bytes, no longer needed) can be withdrawn while it is still pending: `vibe vault withdraw <request_id>`. Its card leaves the pending list and a later approval is refused. Only this Session's own requests can be withdrawn; one being signed or already decided stays.
+A request of this Session made by mistake (wrong secret, wrong bytes, no longer needed) can be withdrawn while it is still pending: `vibe vault withdraw <request_id>`. Its card leaves the pending list and a later approval is refused. A request belongs to the Session whose conversation shows its card: one raised with `--session-id OTHER` is that Session's to withdraw. One being signed or already decided stays.
 
 `vibe vault remove` always requests whole-secret deletion. It rejects `NAME.field`; remove a single field from the Vaults page instead.
 

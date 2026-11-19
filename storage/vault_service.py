@@ -1993,35 +1993,48 @@ def withdraw_request(conn: Connection, request_id: str, *, session_id: str | Non
     is not pending (being signed, decided or expired) stays as it is. The Session withdrew it itself,
     so it is not woken with the outcome. Only the row's small columns are read, never its payload.
     """
+    def scalar(column, path: str):
+        return func.json_extract(_safe_request_json(column), path)
+
     row = conn.execute(
         select(
             vault_requests.c.id, vault_requests.c.status, vault_requests.c.expires_at,
-            vault_requests.c.request_type, vault_requests.c.secret_name, vault_requests.c.requester,
+            vault_requests.c.request_type, vault_requests.c.secret_name,
+            # The Session the request belongs to, in ``_request_session_id``'s order, read as
+            # scalars so a signing payload in ``delivery`` is never loaded.
+            scalar(vault_requests.c.requester, "$.session_id").label("requester_session"),
+            scalar(vault_requests.c.delivery, "$.session_id").label("delivery_session"),
+            scalar(vault_requests.c.delivery, "$.card.session_id").label("card_session"),
         ).where(vault_requests.c.id == request_id)
     ).mappings().first()
     if row is None:
         raise RequestNotFoundError(request_id)
     row = dict(row)
-    requester = _loads(row.get("requester"))
-    owner = requester.get("session_id") if isinstance(requester, dict) else None
-    if not session_id or not owner or str(owner) != str(session_id):
+    owner = next(
+        (str(value) for value in (row["requester_session"], row["delivery_session"], row["card_session"]) if value),
+        None,
+    )
+    if not session_id or not owner or owner != str(session_id):
         raise RequestNotYoursError(request_id)
     if row.get("status") != "pending":
         raise InvalidRequestError(f"request is {row.get('status')}, not pending")
+    outcome = {
+        "id": row["id"], "status": "expired",
+        "request_type": row.get("request_type"), "secret_name": row.get("secret_name"),
+    }
     expires_at = _parse_iso_datetime(row.get("expires_at"))
     if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        # Already past its deadline: it expires as any overdue request does, and that is committed;
+        # the caller reports it was not withdrawn.
         _expire_pending_request_rows(conn, [row])
-        raise InvalidRequestError("request has expired")
+        return {**outcome, "withdrawn": False}
     withdrawn = _expire_pending_request_rows(
         conn, [row], reason="request-withdrawn", delivery_extra={"session_id": str(session_id)},
         callback_status="skipped",
     )
     if withdrawn != 1:
         raise InvalidRequestError("request is not pending")
-    return {
-        "id": row["id"], "status": "expired",
-        "request_type": row.get("request_type"), "secret_name": row.get("secret_name"),
-    }
+    return {**outcome, "withdrawn": True}
 
 
 def _expire_request_if_due(conn: Connection, row: dict[str, Any]) -> tuple[dict[str, Any], bool]:

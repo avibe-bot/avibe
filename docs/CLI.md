@@ -638,7 +638,8 @@ or a claim of expiry/validity. It is absent on resolved requests and other schem
 Wait for the existing callback; retrieve its result and submit the same saved
 bytes. With `--no-callback`, read `vibe vault await REQUEST_ID`. A request made by
 mistake can be withdrawn while still pending with `vibe vault withdraw REQUEST_ID`
-(only the Session that made it; its card leaves and a later approval is refused). Never rerun a pending
+(only by the Session it belongs to, the one whose conversation shows its card; its
+card leaves and a later approval is refused). Never rerun a pending
 `sign` or refresh a blockhash under old approval. Serialize operations per nonce
 account, recheck nonce/authority before submission, and reconcile signature status
 and nonce state after uncertain broadcast before preparing another payment. Even

@@ -11973,6 +11973,8 @@ def cmd_vault_withdraw(args):
             scope="request", request_id=request_id, request_status=request.get("status"),
             secret_name=request.get("secret_name"),
         )
+        if not request.get("withdrawn"):
+            raise vault_service.InvalidRequestError("request has expired")
         _print_cli_payload("vault_request_withdrawn", request_id=request_id, status=request.get("status"))
         return 0
     except vault_service.RequestNotFoundError:

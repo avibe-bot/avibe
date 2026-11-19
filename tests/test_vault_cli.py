@@ -936,6 +936,34 @@ def test_a_request_made_for_another_session_is_that_sessions_to_withdraw(capfd, 
     assert json.loads(capfd.readouterr().out)["status"] == "expired"
 
 
+def test_withdraw_reads_the_session_as_the_card_and_callback_do_and_commits_an_overdue_expiry(capfd, monkeypatch):
+    """A request the Web intake recorded only in its delivery belongs to that Session too; one already past its
+    deadline is not withdrawn, but its expiry is committed as any overdue request's is."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("p"))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_web")
+    ids = []
+    for _ in range(2):
+        assert cli.cmd_vault_access(cli.build_parser().parse_args(["vault", "access", "PROTECTED_KEY", "--no-callback"])) == 0
+        ids.append(json.loads(capfd.readouterr().out)["request"]["id"])
+    delivery_only, overdue = ids
+    table = vault_service.vault_requests
+    with cli._open_vault_engine().begin() as conn:
+        # The shape the Web intake writes when only ``delivery.session_id`` is given.
+        conn.execute(table.update().where(table.c.id == delivery_only).values(requester=json.dumps({"source": "web"})))
+        conn.execute(table.update().where(table.c.id == overdue).values(expires_at="2000-01-01T00:00:00+00:00"))
+
+    withdraw = lambda request_id: cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))  # noqa: E731
+    assert withdraw(delivery_only) == 0
+    capfd.readouterr()
+
+    assert withdraw(overdue) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_pending"
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(table.select().where(table.c.id == overdue)).mappings().one()
+        assert (row["status"], row["callback_status"]) == ("expired", "pending")
+
+
 def test_access_non_requestable_standard_secret_keeps_not_grantable_code(capfd):
     _create_standard_secret("STANDARD_KEY")
     assert cli.cmd_vault_access(_ns(name="STANDARD_KEY")) == 1
