@@ -218,8 +218,23 @@ def test_provider_failure_parks_after_three_successors_without_losing_sender_run
             assert store.can_start_carried_batch(conn, "ses_fsm", [carried]) == (attempt < 3)
             if attempt < 3:
                 turn_id = _start_next(conn)
+        # Put one waiting request on the queue before the final failure. It must
+        # still be able to start, but cannot pay for more retries of the report.
         store.enqueue_queued(conn, scope_id=None, session_id="ses_fsm", text="new work")
         assert store.can_start_carried_batch(conn, "ses_fsm", [carried])
+        # A normal queue would split these incompatible senders. Start the
+        # report's segment, leaving the external wake queued as in production.
+        nxt = store.new_turn_id()
+        store.claim_start_batch(conn, turn_id=nxt, session_id="ses_fsm", backend="codex",
+                                deliveries=[carried], dispatch_text="report")
+        turn = store.get_turn(conn, nxt)
+        store.bind_native_start(conn, nxt, expected_version=turn["version"], runtime_key="renew",
+                                runtime_turn_id="renew", native_turn_id="renew")
+        store.materialize_start_acceptance(conn, turn_id=nxt, evidence={})
+        _end(conn, nxt, kind=kind)
+        head = store.claimable_fifo_head(conn, "ses_fsm")
+        assert head and head["dispatch_text"] == "new work"
+        assert [r["dispatch_text"] for r in store.claimable_fifo_prefix(conn, "ses_fsm")] == ["new work"]
 
 
 @pytest.mark.parametrize("kind,carried", [("overloaded", {"run-report"}), ("auth", {"run-report"})])

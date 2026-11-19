@@ -432,7 +432,7 @@ def ordering_head(
             )
         )
 
-    return _one(
+    head = _one(
         conn,
         select(message_deliveries)
         .where(message_deliveries.c.session_id == session_id)
@@ -440,6 +440,16 @@ def ordering_head(
         .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
         .limit(1),
     )
+    if not head or not waiting_for_external_input(head):
+        return head
+    # A parked input may not block an older, independently runnable input.
+    for candidate in conn.execute(select(message_deliveries).where(
+        message_deliveries.c.session_id == session_id, or_(*predicates),
+    ).order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)).mappings():
+        row = dict(candidate)
+        if row["state"] != "queued" or can_start_carried_batch(conn, session_id, [row]):
+            return row
+    return None
 
 
 def claimable_fifo_head(conn: Connection, session_id: str) -> dict[str, Any] | None:
@@ -469,7 +479,8 @@ def claimable_fifo_prefix(conn: Connection, session_id: str) -> list[dict[str, A
         current = dict(row)
         if current["state"] != "queued":
             break
-        prefix.append(delivery_payload(current))
+        if can_start_carried_batch(conn, session_id, [current]):
+            prefix.append(delivery_payload(current))
     return prefix
 
 
@@ -2140,10 +2151,19 @@ def can_start_carried_batch(conn: Connection, session_id: str, rows: list[dict[s
     A fresh queued input authorizes FIFO dispatch. Keep the normal segment
     boundary: a held report must not inherit the new sender's permissions.
     """
-    if not any(waiting_for_external_input(row) for row in rows):
+    parked = [row["id"] for row in rows if waiting_for_external_input(row)]
+    if not parked:
         return True
+    # Compare both live rows in the same read, not wall times (second precision)
+    # or FIFO submission times (a carry deliberately keeps its original time).
+    # Re-parking inserts a new row, so the same queued wake cannot fund a loop.
+    insertion = literal_column("rowid")
+    boundary = select(func.max(insertion)).select_from(message_deliveries).where(
+        message_deliveries.c.id.in_(parked),
+    ).scalar_subquery().correlate(None)
     queued = conn.execute(select(message_deliveries.c.delivery_history_json).where(
         message_deliveries.c.session_id == session_id, message_deliveries.c.state == "queued",
+        insertion > boundary,
     )).scalars()
     return any(not turn_carry({"delivery_history_json": history}) for history in queued)
 
