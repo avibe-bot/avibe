@@ -143,8 +143,16 @@ def test_deleting_a_removed_bots_agent_archives_its_session_over_http(client, mo
         raise internal_client.InternalServerTimeout("reply lost")
 
     monkeypatch.setattr(internal_client, "archive_session", committed_then_lost)
+    cancelled = []
+
+    async def cancel_dispatch(session_id):
+        cancelled.append(session_id)
+
+    monkeypatch.setattr(internal_client, "cancel_dispatch", cancel_dispatch)
     deleted = client.delete("/api/agents/kept", headers=csrf_headers(client))
     assert deleted.get_json()["bot_session"] == {"id": "ses_kept", "archived": True}
+    assert "reply was lost" in deleted.get_json()["warnings"][0]
+    assert cancelled == ["ses_kept"]
 
     # One the controller never reached is reported kept.
     with BotService() as service:
@@ -287,3 +295,16 @@ def test_no_new_route_names_a_bots_agent_and_one_already_on_it_keeps_it(client, 
     # A removed Bot's Agent is an ordinary Agent again.
     assert client.delete("/api/bots/writer", headers=csrf_headers(client)).status_code == 200
     assert _route_to(client, surface, fresh, "writer").status_code == 200
+
+
+def test_an_unreadable_session_status_is_reported_unknown(client, monkeypatch):
+    """After an archive without a trusted reply, a status that cannot be read is unknown, never a failure of the
+    Agent deletion that already committed."""
+    import storage.db
+    from vibe import api
+
+    def unavailable():
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(storage.db, "create_sqlite_engine", unavailable)
+    assert api.session_is_archived("ses_gone") is None

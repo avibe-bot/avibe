@@ -6104,13 +6104,24 @@ async def vibe_agent_delete(name):
         # (a Bot's Session is the owner's, bots.md D1); another member's deletion leaves it as it was.
         archived = await sessions_archive(bot_session_id)
         status = archived[1] if isinstance(archived, tuple) and len(archived) > 1 else 200
-        # The Agent is deleted either way; when the Session is not, the reply names it so DELETE /api/sessions/{id}
-        # can finish, since deleting the Agent again cannot.
-        # A lost controller reply answers 503 even when the archive committed, so what is stored decides.
-        committed = status == 200 or await asyncio.to_thread(api.session_is_archived, bot_session_id)
+        # The Agent is deleted either way. A lost controller reply answers 503 even when the archive committed, so
+        # what is stored decides (None: unread); a kept Session is named so DELETE /api/sessions/{id} can finish it,
+        # since deleting the Agent again cannot.
+        committed = True if status == 200 else await asyncio.to_thread(api.session_is_archived, bot_session_id)
         result["bot_session"] = {"id": bot_session_id, "archived": committed}
+        if status != 200 and committed:
+            # The archive handler stopped at the lost reply: finish its best-effort follow-ups here.
+            _publish_session_archived(bot_session_id)
+            asyncio.get_running_loop().create_task(_archive_cancel_turn(bot_session_id))
+            result["warnings"] = [
+                f"{bot_session_id} is archived but its reply was lost, so Vault grants it revoked were not released "
+                "from the running agent."
+            ]
         if status != 200:
-            logger.info("Kept the Session %s of the deleted Agent %s (archive answered %s)", bot_session_id, name, status)
+            logger.info(
+                "Archiving the Session %s of the deleted Agent %s answered %s; stored as archived: %s",
+                bot_session_id, name, status, committed,
+            )
     return _vibe_agent_result_response(result)
 
 
@@ -12198,6 +12209,13 @@ def sessions_archive_preview(session_id: str):
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     return jsonify(counts)
+
+
+def _publish_session_archived(session_id: str) -> None:
+    """Tell mounted clients a Session is archived, as the archive handler does after its commit."""
+    from vibe.sse_broker import broker
+
+    broker.publish("session.activity", {"session_id": session_id, "scope_id": None, "event": "archived"})
 
 
 async def _archive_cancel_turn(session_id: str) -> None:

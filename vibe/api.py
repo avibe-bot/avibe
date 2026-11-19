@@ -2430,21 +2430,25 @@ def deleted_bot_session_id(agent: Any) -> Optional[str]:
     return f"{BOT_SESSION_ID_PREFIX}{handle}" if handle else None
 
 
-def session_is_archived(session_id: str) -> bool:
-    """Whether ``session_id`` is archived as stored: the answer after an archive whose reply was lost."""
+def session_is_archived(session_id: str) -> Optional[bool]:
+    """Whether ``session_id`` is archived as stored, the answer after an archive whose reply was lost; None if unread."""
     from sqlalchemy import select
 
     from storage.db import create_sqlite_engine
     from storage.models import agent_sessions
 
-    engine = create_sqlite_engine()
     try:
-        with engine.connect() as conn:
-            status = conn.execute(
-                select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
-            ).scalar_one_or_none()
-    finally:
-        engine.dispose()
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
+                ).scalar_one_or_none()
+        finally:
+            engine.dispose()
+    except Exception:  # noqa: BLE001 - the caller reports the outcome as unknown
+        logger.warning("Could not read whether Session %s is archived", session_id, exc_info=True)
+        return None
     return status == "archived"
 
 

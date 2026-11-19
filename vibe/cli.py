@@ -6132,12 +6132,13 @@ def _archive_deleted_bot_session(agent) -> dict:
     body = result.get("body") if isinstance(result, dict) and isinstance(result.get("body"), dict) else {}
     session = body.get("session") if isinstance(body.get("session"), dict) else {}
     confirmed = isinstance(result, dict) and result.get("status_code") == 200 and session.get("status") == "archived"
-    if not confirmed and not api.session_is_archived(session_id):
+    stored = True if confirmed else api.session_is_archived(session_id)
+    if not stored:
         return {
-            "bot_session": {"id": session_id, "archived": False},
+            "bot_session": {"id": session_id, "archived": stored},
             "hint": (
-                f"Its Bot's Session {session_id} was kept; `DELETE /api/sessions/{session_id}` on the Web API "
-                "archives it while the service runs."
+                f"Its Bot's Session {session_id} may have been kept; `DELETE /api/sessions/{session_id}` on the Web "
+                "API archives it while the service runs."
             ),
         }
     fields: dict = {"bot_session": {"id": session_id, "archived": True}}
