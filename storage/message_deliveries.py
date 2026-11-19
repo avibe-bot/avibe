@@ -1669,6 +1669,7 @@ def materialize_start_acceptance(
             history_event={
                 "kind": "start",
                 "attempt_id": turn.get("start_attempt_id"),
+                "handoff": [row["snapshot_json"], row["dispatch_text"]],
                 "turn_id": turn_id,
                 "outcome": "accepted",
                 "evidence": evidence,
@@ -1683,6 +1684,8 @@ def materialize_start_acceptance(
             .where(show_session_events.c.message_id.is_(None))
             .values(message_id=message_id)
         )
+    if turn.get("state") == "terminal":
+        _finish_accepted_inputs(conn, turn, accepted)
     return accepted
 
 
@@ -1749,6 +1752,7 @@ def materialize_acceptance(
         history_event={
             "kind": str(delivery.get("current_attempt_kind") or evidence.get("kind") or "start"),
             "attempt_id": delivery.get("current_attempt_id"),
+            "handoff": [delivery["snapshot_json"], delivery["dispatch_text"]],
             "turn_id": turn_id,
             "outcome": "accepted",
             "evidence": evidence,
@@ -1764,6 +1768,8 @@ def materialize_acceptance(
         .where(show_session_events.c.message_id.is_(None))
         .values(message_id=delivery_id)
     )
+    if target_turn.get("state") == "terminal":
+        _finish_accepted_inputs(conn, target_turn, [accepted])
     return accepted
 
 
@@ -1836,6 +1842,7 @@ def materialize_steer_acceptance(
             },
             history_event={
                 "kind": "steer",
+                "handoff": [row["snapshot_json"], row["dispatch_text"]],
                 "attempt_id": expected_attempt_id,
                 "turn_id": turn_id,
                 "outcome": "accepted",
@@ -1851,6 +1858,8 @@ def materialize_steer_acceptance(
             .where(show_session_events.c.message_id.is_(None))
             .values(message_id=message_id)
         )
+    if target_turn.get("state") == "terminal":
+        _finish_accepted_inputs(conn, target_turn, accepted)
     return accepted
 
 
@@ -2045,7 +2054,56 @@ def terminalize_turn(
         expected_states=(str(turn["state"]),),
         values=values,
     )
+    if settled is not None:
+        _finish_accepted_inputs(conn, settled, deliveries_for_turn(conn, turn_id))
     return {"changed": settled is not None, "turn": settled or turn}
+
+
+def _finish_accepted_inputs(conn: Connection, turn: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    """Consume the temporary per-input envelopes under the terminal writer lock.
+
+    The accepted rows retain their Message and Turn membership; only the queue
+    claim moves. A carry is never itself a new original input.
+    """
+    evidence = _json_object(turn.get("terminal_evidence_json"))
+    transient = (evidence.get("output_provenance") or {}).get("error_kind") in {"server", "network", "overloaded", "stalled"}
+    failed = turn["terminal_outcome"] == "failed"
+    stopped = turn.get("settled_by") == "stopped"
+    for row in rows:
+        if row["state"] != "accepted":
+            continue
+        history = _history(row["delivery_history_json"])
+        envelope = next((event.pop("handoff") for event in reversed(history["events"]) if "handoff" in event), None)
+        if envelope is None:
+            continue
+        original = row["id"]
+        carried = delivery_has_history_event(row, kind="terminal_carry")
+        collateral = original != turn["initial_delivery_id"]
+        candidate = not carried and ((failed and (collateral or transient)) or (stopped and collateral))
+        run_ids = agent_run_ids_for_delivery(conn, row) if candidate else []
+        canceled = bool(run_ids and conn.execute(select(agent_runs.c.id).where(
+            agent_runs.c.id.in_(run_ids), agent_runs.c.cancel_requested == 1,
+        ).limit(1)).first())
+        if candidate and not canceled:
+            # Same timestamp and sortable original identity keep the original
+            # FIFO position, including ties with already queued later inputs.
+            next_id = original + "~carry"
+            insert_delivery(
+                conn, delivery_id=next_id, session_id=row["session_id"], priority="p3", state="queued",
+                snapshot=_json_object(envelope[0]), dispatch_text=envelope[1] or "",
+                history_event={"kind": "terminal_carry", "source_turn_id": turn["id"],
+                               "original_id": original, "stopped": stopped}, now=row["submitted_at"],
+            )
+            admission = next((event for event in history["events"] if event.get("kind") == "admission"), None)
+            if admission:
+                copy = get_delivery(conn, next_id)
+                cas_delivery(conn, next_id, expected_version=copy["version"], expected_states=("queued",),
+                             values={}, history_event=admission)
+            if run_ids:
+                conn.execute(update(agent_runs).where(agent_runs.c.delivery_id == original).values(delivery_id=next_id))
+        conn.execute(update(message_deliveries).where(message_deliveries.c.id == original).values(
+            delivery_history_json=_canonical_json(history),
+        ))
 
 
 # The predicates of the partial indexes that migration 0044 built over live rows
