@@ -108,10 +108,11 @@ class DirectTransportRuntimeManager(ManagedRuntimeManager):
         manifest = self._load_manifest(allow_network=False)
         if manifest is None:
             return None
-        if require_public_trial and (manifest.payload.get("provenance") or {}).get("source_sha") != (
-            "578659184dfa38bc87261a6fa832f9b4c65a1c90"
+        if require_public_trial and (manifest.payload.get("provenance") or {}).get("source_sha") not in (
+            "578659184dfa38bc87261a6fa832f9b4c65a1c90",  # v0.1.0-2
+            "4e8d24e55583738e5bbf443d4e40e721e43b9a3f",  # v0.1.0-3
         ):
-            # Only the reviewed implementation supports this control protocol.
+            # Only reviewed sources support the public-trial protocol.
             return None
         archive = self._manifest_archive_for_platform(manifest)
         if archive is None:
