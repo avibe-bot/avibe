@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { Check, ChevronRight, Globe, Laptop, Plus, RefreshCw, UserRound, UsersRound } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
-import { StatusDot } from '../components/SidebarStatusRow';
+import { LineGlyph, StatusDot } from '../components/SidebarStatusRow';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { cn } from '../lib/utils';
 import type { DesktopClientState, Instance } from './bridge';
@@ -86,6 +86,9 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
 /** The run-status dot, the App's (`ui/src/mobile/InstanceList.tsx`): gold while this row opens, grey
  * when it reads offline, green when the catalog last reported it reachable, and none without that
  * fact. Being the current row is not being online. */
+/** The name's type, which the dot's column shares so both start on the same baseline. */
+const NAME_TYPE = 'text-sm font-semibold';
+
 function dotTone(opening: boolean, offline: boolean, available: boolean | undefined) {
   if (opening) return 'connecting' as const;
   if (offline) return 'stopped' as const;
@@ -100,11 +103,9 @@ function InstanceRow({ id, name, detail, relationship, selected = false, offline
   const icon = relationship === 'shared' ? <UsersRound className="size-5" /> : relationship === 'owner' ? <Laptop className="size-5" /> : <Globe className="size-5" />;
   const content = <><span data-instance-icon={relationship ?? 'unknown'} className={cn('grid size-10 shrink-0 place-items-center rounded-xl', selected && !offline ? 'bg-mint-soft text-mint-ink' : 'bg-field text-muted')}>{icon}</span>
     <span className="flex min-w-0 flex-1 items-start gap-2">
-      {/* A fixed column on the name's first line (centred on its 20px line), kept when empty so names align. */}
-      <span data-instance-dot className="mt-1.5 flex size-2 shrink-0 items-center justify-center">
-        {tone && <StatusDot tone={tone} label={tone === 'running' ? t('desktopClient.online') : undefined} />}
-      </span>
-      <span className="min-w-0 flex-1"><span className={cn("block break-words text-sm font-semibold [overflow-wrap:anywhere]", offline && "text-muted")}>{name}</span><span className="mt-1 block break-words text-xs font-normal leading-5 text-muted [overflow-wrap:anywhere]">{detail}</span>
+      {/* A fixed column centred on the name's first line, kept when empty so names align. */}
+      <LineGlyph text={name} className={cn('w-2', NAME_TYPE)}>{tone && <StatusDot tone={tone} label={tone === 'running' ? t('desktopClient.online') : undefined} />}</LineGlyph>
+      <span className="min-w-0 flex-1"><span className={cn('block break-words [overflow-wrap:anywhere]', NAME_TYPE, offline && 'text-muted')}>{name}</span><span className="mt-1 block break-words text-xs font-normal leading-5 text-muted [overflow-wrap:anywhere]">{detail}</span>
         {opening && <span role="status" className="mt-1 block text-xs text-gold-ink">{t('desktopClient.opening')}</span>}
         {error && <span role="alert" className="mt-2 block break-words text-sm font-normal leading-6 text-destructive-ink [overflow-wrap:anywhere]">{error}</span>}
       </span>

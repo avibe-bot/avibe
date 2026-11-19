@@ -33,7 +33,7 @@ function view(state: DesktopClientState, extra: Partial<InstanceSwitcherViewProp
 /** The tone each row's dot reads as, or null when the column is empty. */
 function tone(id: string) {
   const row = document.querySelector(`[data-instance-id="${id}"]`)!;
-  const column = row.querySelector('[data-instance-dot]');
+  const column = row.querySelector('[data-line-glyph]');
   expect(column).toBeTruthy();
   const dot = column!.querySelector('[data-status-indicator]');
   if (!dot) return null;

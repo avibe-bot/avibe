@@ -27,7 +27,7 @@ export function DesktopAccountRowView({ state, onPresent, localUpdater }: Deskto
   // The trigger's edge lines up with the Apps button above, and so does its glyph: the same 1px
   // edge and px-4 inset, so the hover wash never ends at the dot.
   const accountTrigger = <Button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md border border-transparent pl-4 pr-1.5 text-left text-xs [--press-scale:1]" title={label}>
-    <StatusGlyph>
+    <StatusGlyph label={label}>
       {offline ? <WifiOff data-status-indicator className="size-3 shrink-0 text-gold-ink" aria-label={t('desktopClient.disconnected')} />
         : busy ? <RefreshCw data-status-indicator className="size-3 shrink-0 animate-spin text-cyan-ink" aria-label={t('desktopClient.connecting')} />
         : <StatusDot tone="running" label={t('desktopClient.connected')} />}

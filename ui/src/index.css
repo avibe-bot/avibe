@@ -1919,6 +1919,14 @@ pre,
     }
   }
 }
+/* The anchor of a glyph set on a text line (`LineGlyph`): a zero-height box raised to half the cap
+   height, where ideographs centre. Without the `cap` unit it falls back to the x-height middle. */
+@utility align-cap-middle {
+  vertical-align: middle;
+  @supports (height: 1cap) {
+    vertical-align: calc(1cap / 2);
+  }
+}
 @utility press-surface {
   --press-scale: var(--motion-scale-press);
   @media (pointer: coarse) {
