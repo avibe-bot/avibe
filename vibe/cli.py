@@ -8559,17 +8559,24 @@ def _query_records_text(result, page_fields: dict, *, rows: list[dict], cut_note
     return "\n".join(lines)
 
 
-def _query_more_rows_message(result, shown: int, page_fields: dict) -> str | None:
-    """The one line saying a page cut rows off: how many it shows and how to read on."""
+def _query_more_rows_message(result, shown: int, page_fields: dict, *, with_command: bool) -> str | None:
+    """The one line saying a page cut rows off: which rows it shows and how to read on.
+
+    Text output ends it with the next page's command; JSON keeps that command in
+    ``pagination.next_command`` alone.
+    """
 
     pagination = page_fields["pagination"]
     if not pagination.get("has_more"):
         return None
-    first = (result.pagination.page - 1) * result.pagination.limit + 1
-    head = f"Rows {first}-{first + shown - 1} shown; more match. --limit reads up to {MAX_PAGE_LIMIT} per page."
-    if pagination.get("next_command"):
-        return f"{head} Next page: {pagination['next_command']}"
-    return f"{head} Add --page {pagination['next_page']} to continue."
+    limit = result.pagination.limit
+    first = (result.pagination.page - 1) * limit + 1
+    line = f"Rows {first}-{first + shown - 1} shown; more match."
+    if limit < MAX_PAGE_LIMIT:
+        line += f" --limit reads up to {MAX_PAGE_LIMIT} per page."
+    if not pagination.get("next_command"):
+        return f"{line} Add --page {pagination['next_page']} --limit {limit} to continue."
+    return f"{line} Next page: {pagination['next_command']}" if with_command else line
 
 
 def cmd_data_query(args):
@@ -8609,7 +8616,7 @@ def cmd_data_query(args):
             command=command,
             include_next_command=not omit_next_command,
         )
-        more = _query_more_rows_message(result, len(rows), page_fields)
+        more = _query_more_rows_message(result, len(rows), page_fields, with_command=text_format)
         if more:
             page_fields["message"] = more
         if text_format:

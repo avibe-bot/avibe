@@ -44,6 +44,9 @@ All list/query commands should return:
 `pagination.next_command` is the only continuation: no top-level prose repeats
 it. A page whose command cannot be replayed (SQL piped on stdin, which has no
 `next_command`) adds one `message` telling the caller to add `--page`.
+`vibe data query` (3.2.8) also adds a `message` on every page that cut rows
+off, saying which rows it shows; its `--format text` ends that line with the
+next page's command, since it has no `pagination` object.
 
 ### Task and Watch Lists
 
