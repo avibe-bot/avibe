@@ -897,6 +897,20 @@ describe('ApiProvider workbench stream liveness', () => {
     await request;
   });
 
+  it('counts requests from the moment the provider module loads, before anything mounts', async () => {
+    const original = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', original);
+    installDirectShell({ direct: 2 });
+    vi.resetModules();
+    await import('./ApiContext');
+    const { pageConnectionsQuiet } = await import('../lib/pageConnections');
+    const early = window.fetch('/api/session');
+    expect(pageConnectionsQuiet()).toBe(false);
+    await early;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pageConnectionsQuiet()).toBe(true);
+  });
+
   it('never hands over without direct version 2', async () => {
     const shell = installDirectShell({ direct: 1 });
     await mountDirectPage();

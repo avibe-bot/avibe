@@ -660,6 +660,13 @@ export type TunnelNetworkPath = {
   };
 };
 
+// Every same-origin request is counted where a hand-over can happen, so it
+// never closes a connection one of them is waiting on. Installed when this
+// module loads, before anything renders: a request a descendant starts on
+// its first mount is counted too. The shell defines its bridge at document
+// start, so the capability is known here.
+if (typeof window !== 'undefined' && nativeDirectHandoverAvailable()) installPageFetchCounting();
+
 /** At most one direct hand-over this often. */
 const DIRECT_HANDOVER_SPACING_MS = 30_000;
 /** How long a hand-over waits for the page to be quiet before skipping. */
@@ -3860,9 +3867,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
     const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
-    // Every same-origin request is counted where a hand-over can happen, so
-    // it never closes a connection one of them is waiting on.
-    if (nativeDirectHandoverAvailable()) installPageFetchCounting();
     const stopDirectPreference = onNativeDirectPreference((preferred) => {
       if (preferred === 'tunnel') {
         directHandoverRef.current.armed = true;
