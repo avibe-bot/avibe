@@ -385,6 +385,8 @@ class DirectTransportSupervisor:
     async def _supervise(self) -> None:
         assert self._stop_event is not None
         next_delay = self._restart_initial_delay
+        next_warning = float("-inf")
+        suppressed = 0
         final_reason = "stopped"
         try:
             while not self._stop_event.is_set():
@@ -417,14 +419,12 @@ class DirectTransportSupervisor:
                 except FileNotFoundError:
                     reason = "executable_not_found"
                     if not self._missing_executable_logged:
-                        logger.warning("direct transport sidecar executable is unavailable: %s", self._executable)
+                        logger.warning("direct transport sidecar unavailable reason=executable_not_found exit_status=unknown")
                         self._missing_executable_logged = True
                 except (BrokenPipeError, ConnectionError, OSError):
                     reason = "control_channel_failed"
-                    logger.warning("direct transport sidecar control channel failed", exc_info=True)
                 except Exception:
                     reason = "supervisor_error"
-                    logger.exception("direct transport supervisor failed for one generation")
 
                 if self._stop_event.is_set():
                     final_reason = "stopped"
@@ -433,6 +433,17 @@ class DirectTransportSupervisor:
                 self._running = False
                 self._withdraw(reason)
                 await self._stop_process(process)
+                if not self._stop_event.is_set() and reason != "executable_not_found":
+                    now = asyncio.get_running_loop().time()
+                    if now >= next_warning:
+                        # Fatal suffixes are child-controlled; other reasons here are local constants.
+                        code = "sidecar_fatal" if reason.startswith("fatal:") else reason
+                        status = process.returncode if process is not None else None
+                        logger.warning("direct transport sidecar restarting reason=%s exit_status=%s suppressed=%d",
+                                       code, status if status is not None else "unknown", suppressed)
+                        next_warning, suppressed = now + 60, 0
+                    else:
+                        suppressed += 1
                 if self._process is process:
                     self._process = None
                 self._token = None
