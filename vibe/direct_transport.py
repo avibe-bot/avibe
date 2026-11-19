@@ -198,6 +198,9 @@ class DirectTransportSupervisor:
         self._running = False
         self._reason: str | None = "not_running"
         self._stream_log = _StreamLogBudget()
+        self._report_window = 0.0
+        self._report_lines = self._report_skipped = 0
+        self._path_reports = False
         self._connections = 0
         self._refusals = 0
         self._started = False
@@ -481,6 +484,11 @@ class DirectTransportSupervisor:
             message_type = message.get("type")
             if message_type == "ready":
                 self._handle_ready(message)
+                self._path_reports = message.get("path_reports_v1") is True
+                if self._path_reports:
+                    await self._write_control(process.stdin, {"type": "observe_paths_v1"})
+            elif message_type == "path_report":
+                self._handle_path_report(message)
             elif message_type == "relay_status":
                 self._handle_relay_status(message)
             elif message_type == "addresses":
@@ -571,6 +579,35 @@ class DirectTransportSupervisor:
             DirectEndpoint(self._endpoint_id, self._published_addresses, self._relay_origin, self._relay_policy),
             reason="running",
         )
+
+    def _handle_path_report(self, msg: dict[str, Any]) -> None:
+        fields = ("open", "rx_bytes", "tx_bytes", "challenge_tx", "challenge_rx", "response_tx", "response_rx")
+        def uint(value):
+            return type(value) is int and 0 <= value < 2**64
+        rows = msg.get("families")
+        if (not self._path_reports or self._endpoint_id is None or
+                set(msg) != {"type", "ordinal", "phase", "selected", "partial", "families"} or
+                msg["phase"] not in ("open", "change", "close") or
+                msg["selected"] not in ("relay", "ipv4", "ipv6", "unknown") or
+                not uint(msg["ordinal"]) or type(msg["partial"]) is not bool or
+                not isinstance(rows, list) or len(rows) != 4 or
+                any(not isinstance(row, dict) or set(row) != set(fields) or
+                    not all(uint(row[k]) for k in fields) for row in rows)):
+            raise _ProtocolError("invalid_path_report")
+        now = asyncio.get_running_loop().time()
+        if now >= self._report_window:
+            self._report_window = now + 60
+            self._report_lines = 0
+        if self._report_lines >= 60:
+            self._report_skipped += 1
+            return
+        self._report_lines += 1
+        # Construct the logged values exclusively from the fixed schema above.
+        logger.info("direct path connection=%d phase=%s selected=%s partial=%s suppressed=%d %s",
+                    msg["ordinal"], msg["phase"], msg["selected"], msg["partial"], self._report_skipped,
+                    " ".join(f"{family}.{k}={row[k]}" for family, row in
+                             zip(("relay", "ipv4", "ipv6", "unknown"), rows) for k in fields))
+        self._report_skipped = 0
 
     def _handle_peer_closed(self, message: dict[str, Any]) -> None:
         if self._endpoint_id is None:

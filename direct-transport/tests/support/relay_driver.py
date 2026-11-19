@@ -105,6 +105,8 @@ async def main(binary, relay):
             )
             ready = await event(sidecar, "ready")
             assert (await event(sidecar, "relay_status"))["url"] == URL
+            assert ready["path_reports_v1"] is True
+            send(sidecar, type="observe_paths_v1")
             send(sidecar, type="admission", endpoint_id=peer, ttl_seconds=60)
             client.stdin.write(ready["endpoint_id"].encode() + b"\n")
             reader, writer = await asyncio.open_connection("127.0.0.1", int(await line(client, b"BRIDGE ")))
@@ -117,6 +119,13 @@ async def main(binary, relay):
             writer.close()
             assert await line(client, b"PATH ") == b"local-relay"
             assert await client.wait() == 0
+            first = await event(sidecar, "path_report")
+            assert first["phase"] == "open"
+            report = first
+            while report["phase"] != "close":
+                report = await event(sidecar, "path_report")
+                assert report["ordinal"] == first["ordinal"]
+            assert report["selected"] == "relay" and report["families"][0]["rx_bytes"] > 0
             send(sidecar, type="stop")
             assert await sidecar.wait() == 0
             print("Verified relayed CONNECT, hostname-verified inner TLS, and /health response.")

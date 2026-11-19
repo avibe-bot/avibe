@@ -1,5 +1,6 @@
 mod admission;
 mod handshake_limit;
+mod path_report;
 
 use admission::Admissions;
 use handshake_limit::{HandshakeLimit, HandshakePermit};
@@ -63,6 +64,8 @@ enum Command {
         max_streams_per_connection: u32,
         relay: Option<RelayOffer>,
     },
+    #[serde(rename = "observe_paths_v1")]
+    ObservePaths,
     #[serde(rename = "admission")]
     Admission {
         endpoint_id: String,
@@ -103,8 +106,14 @@ struct StartConfig {
 #[derive(Serialize)]
 #[serde(tag = "type")]
 enum Message<'a> {
+    #[serde(rename = "path_report")]
+    PathReport {
+        #[serde(flatten)]
+        report: path_report::Report,
+    },
     #[serde(rename = "ready")]
     Ready {
+        path_reports_v1: bool,
         protocol: u32,
         endpoint_id: String,
         addresses: Vec<String>,
@@ -124,6 +133,7 @@ enum Message<'a> {
 
 #[derive(Clone)]
 struct Control {
+    observe: Arc<std::sync::atomic::AtomicBool>,
     stdout: Arc<Mutex<tokio::io::Stdout>>,
     admissions: Admissions,
     stop: StopSignal,
@@ -133,6 +143,7 @@ struct Control {
 impl Control {
     fn new() -> Self {
         Self {
+            observe: Default::default(),
             stdout: Arc::new(Mutex::new(tokio::io::stdout())),
             admissions: Admissions::new(),
             stop: StopSignal::new(),
@@ -268,6 +279,9 @@ async fn run_control_reader<R: AsyncRead + Unpin>(mut reader: R, control: Contro
                 }
                 control.admissions.update(endpoint_id, ttl_seconds);
             }
+            Ok(Some(Command::ObservePaths)) => control
+                .observe
+                .store(true, std::sync::atomic::Ordering::Relaxed),
             Ok(None) | Ok(Some(Command::Stop)) => {
                 control.stop.stop();
                 return;
@@ -374,6 +388,7 @@ async fn handle_connection(
     incoming: Incoming,
     handshake_permit: HandshakePermit,
     control: Control,
+    reports: tokio::sync::mpsc::Sender<path_report::Report>,
     _connection_permit: tokio::sync::OwnedSemaphorePermit,
     config: Arc<StartConfig>,
 ) {
@@ -393,11 +408,25 @@ async fn handle_connection(
     let mut stream_tasks = JoinSet::new();
     let no_stream = time::sleep(NO_STREAM_TIMEOUT);
     tokio::pin!(no_stream);
+    let mut observer = control
+        .observe
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| path_report::Observer::new(&connection));
+    if let Some(obs) = &mut observer {
+        obs.report(&connection, "open", &reports);
+    }
     let mut reason = "connection_closed";
     loop {
         tokio::select! {
             _ = control.stop.wait() => { reason = "stopped"; break; }
             _ = &mut no_stream, if stream_tasks.is_empty() => { reason = "idle_timeout"; break; }
+            event = async { match &mut observer { Some(obs) => obs.next().await, None => std::future::pending().await } } => {
+                if let Some(event) = event {
+                    let obs = observer.as_mut().unwrap();
+                    obs.update(event);
+                    obs.report(&connection, "change", &reports);
+                } else { break; }
+            }
             incoming_stream = connection.accept_bi() => {
                 let Ok((mut send, mut recv)) = incoming_stream else { break; };
                 if !control.admissions.allows_connection(&connection) {
@@ -420,6 +449,10 @@ async fn handle_connection(
     }
     if reason == "connection_closed" && !control.admissions.allows_connection(&connection) {
         reason = "admission_ended";
+    }
+    if let Some(obs) = &mut observer {
+        obs.drain_ready().await;
+        obs.report(&connection, "close", &reports);
     }
     connection.close(close_code(), reason.as_bytes());
     stream_tasks.abort_all();
@@ -512,6 +545,7 @@ async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Resu
     let ready_address = endpoint_watcher.get();
     if let Err(error) = control
         .emit(&Message::Ready {
+            path_reports_v1: true,
             protocol: 1,
             endpoint_id: endpoint.id().to_string(),
             addresses: endpoint_addresses(&ready_address),
@@ -565,11 +599,22 @@ async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Resu
     let control_task = tokio::spawn(run_control_reader(stdin, control.clone()));
     let handshake_limit = HandshakeLimit::new();
     let connection_limit = Arc::new(Semaphore::new(config.max_connections as usize));
+    let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(64);
+    let report_writer = async {
+        while let Some(report) = report_rx.recv().await {
+            if let Err(error) = control.emit(&Message::PathReport { report }).await {
+                control.fail(error).await;
+                break;
+            }
+        }
+    };
+    tokio::pin!(report_writer);
     let mut connection_tasks = JoinSet::new();
     loop {
         tokio::select! {
             biased;
             _ = control.stop.wait() => break,
+            _ = &mut report_writer => break,
             _ = &mut relay_events => break,
             // Drain finished tasks before more arrivals, so an inbound flood
             // cannot retain an unbounded backlog of completed JoinSet entries.
@@ -593,7 +638,7 @@ async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Resu
                     _ => { incoming.ignore(); continue; }
                 };
                 let Some(handshake_permit) = handshake_limit.acquire_source(source) else { incoming.ignore(); continue; };
-                connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), permit, Arc::clone(&config)));
+                connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), report_tx.clone(), permit, Arc::clone(&config)));
             }
         }
     }
