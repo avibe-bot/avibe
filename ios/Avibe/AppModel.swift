@@ -1672,7 +1672,7 @@ final class AppModel: ObservableObject {
         let accountID = runtime.account.id
         // The runtime's own store's pages, whatever store is current later.
         let cache = RuntimePageCache(directory: RuntimePageCache.root
-            .appendingPathComponent(runtime.websiteDataStoreIdentifier.uuidString, isDirectory: true))
+            .appendingPathComponent(runtime.websiteDataStoreID.uuidString, isDirectory: true))
         return RuntimePageCacheAccess(
             load: {
                 guard let page = cache.page(accountID: accountID, origin: origin) else {
