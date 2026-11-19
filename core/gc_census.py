@@ -44,6 +44,7 @@ _TYPES = (
     BaseException,
 )
 _LABELS = {id(t): t.__name__ for t in _TYPES}
+_EDGE_LIMIT = 100_000
 _PATHS = (
     ("dispatcher", "message_dispatcher"),
     ("gateway", "model_hub_turn_gateway"),
@@ -115,17 +116,23 @@ def _counts(controller):
                 or type(obj) is frozenset
             ):
                 size = len(obj) * (2 if type(obj) is dict else 1)
-                if size > 100000 - edges:
+                if size > _EDGE_LIMIT - edges:
                     truncated = True
                     continue
                 children = gc.get_referents(obj)
             elif id(type(obj)) in follow:
+                if edges >= _EDGE_LIMIT:
+                    truncated = True
+                    continue
                 children = [object.__getattribute__(obj, "__dict__").get(follow[id(type(obj))])]
             elif obj is root:
                 # Fixed controller-owned root only; only traverse its already held
                 # container referents, never arbitrary user objects/descriptors.
                 children = [x for x in gc.get_referents(obj) if type(x) is dict or type(x) is list or type(x) is tuple]
             else:
+                continue
+            if len(children) > _EDGE_LIMIT - edges:
+                truncated = True
                 continue
             edges += len(children)
             stack.extend(children)
