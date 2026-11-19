@@ -1217,7 +1217,8 @@ enum VoiceCaptureEndSwitch {
     static let key = "avibe.voiceCapture.endProcessAfterBackgroundCapture"
     private static let decisionKey = "avibe.voiceCapture.lastEndDecision"
 
-    static var isOn: Bool { UserDefaults.standard.bool(forKey: key) }
+    /// Off in an App Store build even if a TestFlight build had set it.
+    static var isOn: Bool { isInternalBuild && UserDefaults.standard.bool(forKey: key) }
 
     /// Handles the switch's URL; returns whether it was one.
     @discardableResult

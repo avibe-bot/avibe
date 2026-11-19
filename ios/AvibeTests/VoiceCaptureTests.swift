@@ -410,11 +410,25 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.instance.transcribed, 0, "nothing sent before a yes")
         XCTAssertEqual(world.audio?.discarded, false, "kept for Retry")
         XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
+        // Let any answer asked early settle while still unreachable.
+        for _ in 0..<20 { await Task.yield() }
 
         // Retry asks again then, not with an answer taken during the outage.
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
-        for _ in 0..<5 { await Task.yield() }
         await controller.retry()
+        XCTAssertEqual(world.instance.sent, ["hello"])
+    }
+
+    /// Unreachable when recording began, reachable at the stop: it sends then.
+    func testAnInstanceUnreachableAtTheStartButReachableAtTheStopSends() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        await controller.consentWatch?.value
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        world.audio?.duration = 3
+        _ = await controller.toggle()
         XCTAssertEqual(world.instance.sent, ["hello"])
     }
 
