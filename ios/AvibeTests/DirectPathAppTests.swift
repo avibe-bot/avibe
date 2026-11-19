@@ -2318,6 +2318,118 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(app.runtimePageCache.page(accountID: "account-1", origin: origin))
     }
 
+    /// A cached page whose shell waits out an unreachable instance is shown
+    /// uncovered: only the progress line, the long-wait row, and out of time
+    /// the page stays with the "can't reach" banner and Retry (no return to
+    /// the list). A late answer ends it; a live navigation from there is
+    /// covered as any open; Retry opens it live, skipping the cache once.
+    @MainActor
+    func testAMarkedCachedPageShowsUncoveredAndKeepsItsContentOutOfTime() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(directTransport: nil, runtimeOpenTiming: timing)
+        defer { app.runtimePageCache.removeAll() }
+        let runtime = try await select("instance-1", in: app)
+        let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
+        let marked = { (stage: RuntimeNavigationStage) in
+            RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true, cachedKeepsShell: true)
+        }
+        for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+            app.handleRuntimeNavigation(marked(stage), attemptID: attempt.id, runtime: runtime)
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive, "\(stage)")
+            XCTAssertEqual(
+                BrowserOverlay(attemptPhase: try XCTUnwrap(app.runtimeOpenAttempt).phase, directFault: false),
+                .showingCachedLive,
+                "\(stage)"
+            )
+        }
+        // An unmarked page stays covered (the gate).
+        XCTAssertEqual(
+            RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true).cachedKeepsShell,
+            false
+        )
+
+        timing.advance(by: .seconds(8))
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
+        timing.advance(by: .seconds(52))
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        XCTAssertEqual(
+            BrowserOverlay(attemptPhase: .cachedUnreachable, directFault: false),
+            .cachedUnreachable
+        )
+        XCTAssertNil(app.runtimeOpenNotice)
+
+        // A late answer from the instance ends it.
+        app.runtimeCachedPageConnected(attemptID: attempt.id, runtime: runtime)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
+
+        // Out of time again; a live navigation from the page is covered.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let other = try await waitForBrowser("instance-2", in: app)
+        let second = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(marked(.finished), attemptID: second.id, runtime: other)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .started, destination: .instance),
+            attemptID: second.id,
+            runtime: other
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
+        XCTAssertEqual(
+            BrowserOverlay(attemptPhase: .connecting, directFault: false),
+            .loading
+        )
+
+        // Out of time once more; Retry opens it live, skipping the cache once.
+        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: other))
+        let page = RuntimeCachedPage(
+            url: other.instance.url,
+            headers: ["Content-Type": "text/html"],
+            body: Data("<!doctype html>".utf8),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+        access.store(page)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        let back = try await waitForBrowser("instance-1", in: app)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let again = try await waitForBrowser("instance-2", in: app)
+        let third = try XCTUnwrap(app.runtimeOpenAttempt)
+        _ = back
+        app.handleRuntimeNavigation(marked(.finished), attemptID: third.id, runtime: again)
+        timing.advance(by: .seconds(60))
+        XCTAssertTrue(app.retryRuntimeCachedPage())
+        XCTAssertGreaterThan(try XCTUnwrap(app.runtimeOpenAttempt).id, third.id)
+        let retried = try XCTUnwrap(app.runtimePageCacheAccess(for: again))
+        XCTAssertNil(retried.load())
+        XCTAssertEqual(retried.load(), page)
+    }
+
+    /// A marked page stored for another WebKit store (another account's, or
+    /// one rotated away) is never read for this runtime.
+    @MainActor
+    func testAMarkedPageFromAnotherStoreIsNeverUsed() async throws {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
+        let otherStore = RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(UUID().uuidString, isDirectory: true))
+        defer { otherStore.removeAll() }
+        otherStore.store(
+            RuntimeCachedPage(
+                url: runtime.instance.url,
+                headers: ["Content-Type": "text/html"],
+                body: Data(#"<meta name="avibe-cached-shell" content="1" />"#.utf8),
+                capturedAt: Date(),
+                keepsShellUnreachable: true
+            ),
+            accountID: "account-1",
+            origin: origin
+        )
+        XCTAssertNil(try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).load())
+    }
+
     /// An account's pages are removed when it signs out.
     @MainActor
     func testAnAccountsCachedPagesGoWithASignOut() async throws {

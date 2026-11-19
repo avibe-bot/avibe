@@ -1107,16 +1107,23 @@ final class WebViewController: UIViewController {
     private func probeCachedPage() {
         cachedPageProbe?.cancel()
         guard let webView = retainedWebView else { return }
+        // A page whose bytes declare that they keep their shell while the
+        // instance cannot be reached is on screen uncovered: its instance is
+        // asked until it answers, and the page itself waits out an outage.
+        // Any other cached page is covered and asked once.
+        let keepsShell = shownCachedPage?.keepsShell == true
         cachedPageProbe = Task { @MainActor [weak self, weak webView] in
-            guard let self, let webView, self.cachedNavigation != nil else { return }
+            while true {
+                guard let self, let webView, self.cachedNavigation != nil else { return }
                 // 1: the instance answered for a signed-in reader. 2: it
                 // answered that sign-in is needed. 0: no answer.
                 let answer = try? await webView.callAsyncJavaScript(
                     """
                     // Under the cover nothing the user does can move the
                     // page: a moved path is the Web UI's own redirect (for
-                    // example to setup after its session read failed).
-                    if (location.pathname !== '/') return 0;
+                    // example to setup after its session read failed). An
+                    // uncovered page is the user's to move.
+                    if (!keepsShell && location.pathname !== '/') return 0;
                     try {
                       const response = await fetch('/api/session', {
                         cache: 'no-store', credentials: 'same-origin'
@@ -1130,6 +1137,7 @@ final class WebViewController: UIViewController {
                       return 0;
                     }
                     """,
+                    arguments: ["keepsShell": keepsShell],
                     contentWorld: Self.pageCacheWorld
                 ) as? Int
                 guard !Task.isCancelled, self.cachedNavigation != nil else { return }
@@ -1137,12 +1145,17 @@ final class WebViewController: UIViewController {
                 case 1:
                     self.cachedPageConnected()
                     self.checkCachedPageIsCurrent(in: webView)
+                    return
+                case 0 where keepsShell:
+                    // Not reachable yet: the page stays; ask again.
+                    try? await Task.sleep(for: .seconds(3))
+                    continue
                 default:
-                    // Sign-in needed, or no answer: a live load, through the
-                    // direct-path load gate as every load the shell starts.
-                    // The cached Web UI cannot wait out an unreachable
-                    // instance (its own session read would send it to
-                    // setup), so the cache is used only when its instance
+                    // Sign-in needed, or (covered) no answer: a live load,
+                    // through the direct-path load gate as every load the
+                    // shell starts. A covered Web UI cannot wait out an
+                    // unreachable instance (its own session read would send
+                    // it to setup), so it is used only when its instance
                     // answers at once; otherwise the open goes on as before
                     // this cache existed.
                     self.cachedNavigation = nil
@@ -1151,7 +1164,9 @@ final class WebViewController: UIViewController {
                         RuntimeNavigationEvent(stage: .started, destination: .instance)
                     )
                     self.loadConfiguredInstance()
+                    return
                 }
+            }
         }
     }
 
@@ -2520,7 +2535,9 @@ extension WebViewController: WKNavigationDelegate {
                     stage: .started,
                     destination: primaryNavigationDestination
                         ?? runtimeDestination(in: webView),
-                    fromCache: navigation != nil && navigation === cachedNavigation
+                    fromCache: navigation != nil && navigation === cachedNavigation,
+                    cachedKeepsShell: navigation != nil && navigation === cachedNavigation
+                        && shownCachedPage?.keepsShell == true
                 )
             )
             didStartLoading()
@@ -2542,7 +2559,9 @@ extension WebViewController: WKNavigationDelegate {
                 RuntimeNavigationEvent(
                     stage: .committed,
                     destination: runtimeDestination(in: webView),
-                    fromCache: navigation != nil && navigation === cachedNavigation
+                    fromCache: navigation != nil && navigation === cachedNavigation,
+                    cachedKeepsShell: navigation != nil && navigation === cachedNavigation
+                        && shownCachedPage?.keepsShell == true
                 )
             )
             blockedBackForwardNavigation = false
@@ -2581,7 +2600,8 @@ extension WebViewController: WKNavigationDelegate {
             RuntimeNavigationEvent(
                 stage: .finished,
                 destination: runtimeDestination(in: webView),
-                fromCache: fromCache
+                fromCache: fromCache,
+                cachedKeepsShell: fromCache && shownCachedPage?.keepsShell == true
             )
         )
         if fromCache {

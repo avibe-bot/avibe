@@ -93,15 +93,20 @@ struct RuntimeNavigationEvent: Equatable {
     /// The document came from the App's cache of the instance's last page
     /// (`RuntimePageCache`), not from the network.
     let fromCache: Bool
+    /// The cached document keeps its shell while its instance cannot be
+    /// reached (`RuntimeCachedPage.keepsShell`): it may show uncovered.
+    let cachedKeepsShell: Bool
 
     init(
         stage: RuntimeNavigationStage,
         destination: NavigationDestination?,
-        fromCache: Bool = false
+        fromCache: Bool = false,
+        cachedKeepsShell: Bool = false
     ) {
         self.stage = stage
         self.destination = destination
         self.fromCache = fromCache
+        self.cachedKeepsShell = fromCache && cachedKeepsShell
     }
 }
 
@@ -113,6 +118,13 @@ enum RuntimeOpenPhase: Equatable {
     /// The instance's last page has loaded from the App's cache, still
     /// covered: the instance itself has not answered yet.
     case showingCached
+    /// The instance's last page is on screen from the App's cache, live to
+    /// touch (its shell waits out an unreachable instance); the instance
+    /// itself has not answered yet.
+    case showingCachedLive
+    /// The open of a page shown from the cache ran out of time: the page
+    /// stays, with a banner offering Retry.
+    case cachedUnreachable
     case awaitingUser
     /// A legacy document finished without a product-ready contract. The page
     /// is handed to the user, but Native does not claim the Runtime is ready.
@@ -299,6 +311,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var systemScheduleConfirmation: SystemScheduleConfirmation?
 
     let websiteDataStore: AccountWebsiteDataStore
+    /// The next open of this runtime loads live, skipping the cache once
+    /// (Retry over a cached page that could not connect).
+    private var runtimeLoadsLiveOnce: MobileRuntimeContext?
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -1439,11 +1454,8 @@ final class AppModel: ObservableObject {
             at: runtimeOpenNow
         )
         guard remaining > .zero else {
-            terminateRuntimeOpen(
-                attemptID: attemptID,
-                reason: .timedOut,
-                showsNotice: true
-            )
+            // As the deadline timer would (a page shown uncovered stays).
+            expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
             return
         }
         runtimeOpenDeadlineTimer = runtimeOpenTiming.schedule(after: remaining) {
@@ -1492,6 +1504,12 @@ final class AppModel: ObservableObject {
         }
         guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
             return false
+        }
+        if attempt.phase == .showingCachedLive {
+            // The page stays; a banner says the instance is not reachable,
+            // with Retry. A later live navigation is covered as any open.
+            finishRuntimeOpenAutomaticBudget(phase: .cachedUnreachable, attemptID: attemptID)
+            return true
         }
         terminateRuntimeOpen(
             attemptID: attemptID,
@@ -1669,12 +1687,33 @@ final class AppModel: ObservableObject {
             let attempt = runtimeOpenAttempt,
             attempt.id == attemptID,
             attempt.runtime == runtime,
-            attempt.phase == .showingCached
+            [.showingCached, .showingCachedLive, .cachedUnreachable].contains(attempt.phase)
         else {
             return
         }
         finishRuntimeOpenAutomaticBudget(phase: .documentLoaded, attemptID: attemptID)
         didFinishRuntimeLoading()
+    }
+
+    /// Retry from the banner over a cached page whose instance could not be
+    /// reached: the instance opens again, live, skipping the cache once.
+    @discardableResult
+    func retryRuntimeCachedPage() -> Bool {
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.phase == .cachedUnreachable,
+            route.runtime == attempt.runtime,
+            sessionCoordinator.isSelectedRuntime(attempt.runtime),
+            authorizeReload(of: attempt.runtime)
+        else {
+            return false
+        }
+        runtimeLoadsLiveOnce = attempt.runtime
+        return openRuntime(attempt.runtime)
+    }
+
+    private func cachedPhase(_ event: RuntimeNavigationEvent) -> RuntimeOpenPhase {
+        event.cachedKeepsShell ? .showingCachedLive : .showingCached
     }
 
     /// The cache as the runtime controller for `runtime` uses it: its page
@@ -1689,7 +1728,11 @@ final class AppModel: ObservableObject {
         let cache = RuntimePageCache(directory: RuntimePageCache.root
             .appendingPathComponent(runtime.websiteDataStoreID.uuidString, isDirectory: true))
         return RuntimePageCacheAccess(
-            load: {
+            load: { [weak self] in
+                if let self, self.runtimeLoadsLiveOnce == runtime {
+                    self.runtimeLoadsLiveOnce = nil
+                    return nil
+                }
                 guard let page = cache.page(accountID: accountID, origin: origin) else {
                     return nil
                 }
@@ -1753,7 +1796,7 @@ final class AppModel: ObservableObject {
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : event.fromCache ? .showingCached : .connecting,
+                    : event.fromCache ? cachedPhase(event) : .connecting,
                 attemptID: attemptID
             )
         case .committed:
@@ -1767,7 +1810,7 @@ final class AppModel: ObservableObject {
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : event.fromCache ? .showingCached : .loadingPage,
+                    : event.fromCache ? cachedPhase(event) : .loadingPage,
                 attemptID: attemptID
             )
         case .finished:
@@ -1782,7 +1825,7 @@ final class AppModel: ObservableObject {
                 // yet show content without its instance (it would fall back
                 // to setup). The budget keeps running; out of time, the open
                 // ends as any open does.
-                setRuntimeOpenPhase(.showingCached, attemptID: attemptID)
+                setRuntimeOpenPhase(cachedPhase(event), attemptID: attemptID)
                 return
             }
             if isAuthenticationDestination(event.destination) {
@@ -1800,8 +1843,14 @@ final class AppModel: ObservableObject {
             }
         case .handedOff:
             guard attempt.phase != .documentLoaded,
-                  attempt.phase != .failed
+                  attempt.phase != .failed,
+                  attempt.phase != .cachedUnreachable
             else {
+                return
+            }
+            if attempt.phase == .showingCachedLive {
+                // A link handed off from the page on screen: it stays, and
+                // the open keeps waiting for the instance, budget running.
                 return
             }
             pauseRuntimeOpenBudget(
@@ -2421,6 +2470,7 @@ final class AppModel: ObservableObject {
         // An account's pages go with it (each account's data is kept
         // separately and removed when it signs out or changes).
         runtimePageCache.removeAll()
+        runtimeLoadsLiveOnce = nil
         // Any account invalidation ends a route-prepare or held open; neither
         // may leave the Native loading surface behind without an attempt.
         retireRuntimeOpenForAccountTransition()

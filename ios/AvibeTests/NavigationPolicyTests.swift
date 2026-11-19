@@ -4795,6 +4795,21 @@ final class FormAccessoryBarTests: XCTestCase {
 
 // MARK: The instance's last page from the cache (cold-start plan, step 2)
 
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+    func set(_ newValue: Bool) {
+        lock.lock()
+        stored = newValue
+        lock.unlock()
+    }
+}
+
 private final class LockedCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
@@ -4862,16 +4877,22 @@ extension NavigationPolicyTests {
     /// transfer ones.
     @MainActor
     func testALiveLoadKeepsItsPageOnlyWhenItsSecurityHeadersMatch() async throws {
-        let rows: [(name: String, second: [(String, String)], status: Int, keeps: Bool)] = [
-            ("same headers", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true),
-            ("CSP changed", [("Content-Security-Policy", "default-src *"), ("Permissions-Policy", "camera=()")], 200, false),
-            ("Permissions-Policy dropped", [("Content-Security-Policy", Self.shellCSP)], 200, false),
-            ("not 200", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 503, false),
+        let marked = Self.cachedShell.replacingOccurrences(
+            of: "<head>",
+            with: #"<head><meta name="avibe-cached-shell" content="1" />"#
+        )
+        let rows: [(name: String, second: [(String, String)], status: Int, keeps: Bool, document: String, keepsShell: Bool)] = [
+            ("same headers", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true, Self.cachedShell, false),
+            ("same headers, the shell marked", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true, marked, true),
+            ("CSP changed", [("Content-Security-Policy", "default-src *"), ("Permissions-Policy", "camera=()")], 200, false, Self.cachedShell, false),
+            ("Permissions-Policy dropped", [("Content-Security-Policy", Self.shellCSP)], 200, false, Self.cachedShell, false),
+            ("not 200", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 503, false, Self.cachedShell, false),
         ]
         for row in rows {
             let documents = LockedCounter()
             let second = row.second
             let status = row.status
+            let document = row.document
             let server = try LocalHTTPServer { request in
                 guard request.path == "/" else { return .status(404) }
                 let first = documents.next() == 1
@@ -4881,7 +4902,7 @@ extension NavigationPolicyTests {
                         + (first
                             ? [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")]
                             : second),
-                    body: Data(Self.cachedShell.utf8)
+                    body: Data(document.utf8)
                 )
             }
             let baseURL = try await server.start()
@@ -4906,7 +4927,9 @@ extension NavigationPolicyTests {
             if row.keeps {
                 try await waitUntil { !stored.isEmpty }
                 let page = try XCTUnwrap(stored.first, row.name)
-                XCTAssertEqual(page.body, Data(Self.cachedShell.utf8), row.name)
+                XCTAssertEqual(page.body, Data(document.utf8), row.name)
+                // Read from the stored bytes: may this page show uncovered.
+                XCTAssertEqual(page.keepsShell, row.keepsShell, row.name)
                 XCTAssertEqual(page.headers.first { $0.key.lowercased() == "content-security-policy" }?.value, Self.shellCSP, row.name)
                 XCTAssertEqual(page.headers.first { $0.key.lowercased() == "permissions-policy" }?.value, "camera=()", row.name)
                 XCTAssertNil(page.headers.first { $0.key.lowercased() == "content-length" }, row.name)
@@ -5081,4 +5104,67 @@ extension NavigationPolicyTests {
             XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache }, row.name)
         }
     }
+
+    /// A cached page whose bytes keep their shell while the instance cannot
+    /// be reached is on screen uncovered (its events say so), and an
+    /// unreachable instance does not replace it with a live load: it is
+    /// asked again until it answers, which ends the open. An unmarked page
+    /// asked the same way loads live (covered, as before).
+    @MainActor
+    func testAMarkedCachedPageWaitsOutAnUnreachableInstance() async throws {
+        let reachable = LockedFlag()
+        let documents = LockedCounter()
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session":
+                return reachable.value ? .json(#"{"authenticated":true}"#) : .status(530)
+            case "/":
+                _ = documents.next()
+                return .html("<!doctype html><title>live</title>")
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let page = RuntimeCachedPage(
+            url: origin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title></head>"#.utf8),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+        var connected = 0
+        var events: [RuntimeNavigationEvent] = []
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            runtimeNavigationChanged: { events.append($0) },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+            cachedPageConnected: { connected += 1 },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+
+        try await waitUntil { events.contains { $0.stage == .finished && $0.fromCache } }
+        XCTAssertTrue(events.filter(\.fromCache).allSatisfy(\.cachedKeepsShell))
+        // Unreachable for a while: no live load, nothing connected.
+        let clock = ContinuousClock()
+        let quiet = clock.now.advanced(by: .seconds(5))
+        while clock.now < quiet {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(documents.count, 0)
+        XCTAssertEqual(connected, 0)
+        XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache })
+
+        reachable.set(true)
+        try await waitUntil { connected == 1 }
+        XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache })
+    }
+
 }

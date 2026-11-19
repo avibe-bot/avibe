@@ -15,6 +15,15 @@ struct RuntimeCachedPage: Codable, Equatable {
     let headers: [String: String]
     let body: Data
     let capturedAt: Date
+    /// The stored bytes carry `<meta name="avibe-cached-shell" content="1">`:
+    /// that Web UI keeps its shell while its instance cannot be reached, so
+    /// the App may show it uncovered while connecting. Read from the bytes
+    /// when the page is captured; absent (nil) in entries from before.
+    var keepsShellUnreachable: Bool? = nil
+
+    /// Whether the App may show this page uncovered before its instance
+    /// answers.
+    var keepsShell: Bool { keepsShellUnreachable == true }
 
     func response() -> HTTPURLResponse? {
         HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)
@@ -77,7 +86,20 @@ enum RuntimePageCapture {
             return nil
         }
         let kept = fetched.filter { !transferHeaders.contains($0.key.lowercased()) }
-        return RuntimeCachedPage(url: url, headers: kept, body: body, capturedAt: Date())
+        return RuntimeCachedPage(
+            url: url, headers: kept, body: body, capturedAt: Date(),
+            keepsShellUnreachable: declaresCachedShell(body)
+        )
+    }
+
+    /// Whether the document declares `<meta name="avibe-cached-shell"
+    /// content="1">` (ui/index.html), in either attribute order.
+    static func declaresCachedShell(_ body: Data) -> Bool {
+        guard let html = String(data: body.prefix(64 * 1_024), encoding: .utf8) else {
+            return false
+        }
+        let pattern = #"<meta\s+(?:name\s*=\s*["']avibe-cached-shell["']\s+content\s*=\s*["']1["']|content\s*=\s*["']1["']\s+name\s*=\s*["']avibe-cached-shell["'])\s*/?>"#
+        return html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// Whether a fresh response to the same URL is still the stored page:
