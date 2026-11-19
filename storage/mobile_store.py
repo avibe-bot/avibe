@@ -11,7 +11,7 @@ from pathlib import Path
 import secrets
 import sqlite3
 import stat
-from typing import Iterator
+from typing import Iterator, Literal
 
 from config import paths
 from core.mobile_health_contract import (
@@ -87,20 +87,26 @@ def mobile_store_path() -> Path:
     return paths.get_state_dir() / "mobile" / "mobile.sqlite3"
 
 
-def has_paired_device() -> bool:
+def mobile_job_mode() -> Literal["paired", "callbacks"] | None:
     """Never initialize, migrate or acquire a writer lock for a scheduling hint."""
     path = mobile_store_path()
     try:
         info = path.lstat()
     except FileNotFoundError:
-        return False
+        return None
     if path.parent.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        return False
-    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=0.1)) as conn:
-        return conn.execute("SELECT 1 FROM devices WHERE revoked_at IS NULL LIMIT 1").fetchone() is not None
+        return None
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as conn:
+        if conn.execute("SELECT 1 FROM devices WHERE revoked_at IS NULL LIMIT 1").fetchone():
+            return "paired"
+        # Include queued connects: even if a phone never pairs, expiry owes a continuation.
+        if conn.execute("SELECT 1 FROM requests WHERE callback_state IN ('pending','claimed') "
+                        "AND callback_session IS NOT NULL LIMIT 1").fetchone():
+            return "callbacks"
+    return None
 
 
-def publish_pairing_changed() -> None:
+def publish_mobile_schedule_changed() -> None:
     from core.inbox_events import publish_definitions_updated
 
     publish_definitions_updated(definition_type="mobile-health")
@@ -237,7 +243,9 @@ class MobileStore:
             )
             self._audit(conn, operation, caller=caller, session_id=callback_session, names=selected)
             row = conn.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
-            return self._request(row), True
+        if callback_session and not device:
+            publish_mobile_schedule_changed()
+        return self._request(row), True
 
     def issue_pairing(self, request_id: str, identity: dict) -> dict:
         now = _now()
@@ -309,7 +317,7 @@ class MobileStore:
             conn.execute("UPDATE requests SET device_id=?,metrics=? WHERE id=?",
                          (device_id, _json(names), request["id"]))
             conn.execute("DELETE FROM pairings WHERE request_id=?", (request["id"],))
-        publish_pairing_changed()
+        publish_mobile_schedule_changed()
         return {"device_id": device_id, "credential": credential,
                 "instance": {"id": identity["id"], "name": identity["name"]}}
 
@@ -345,7 +353,7 @@ class MobileStore:
                 device = dict(row)
         if refusal:
             if row is not None and not row["revoked_at"]:
-                publish_pairing_changed()
+                publish_mobile_schedule_changed()
             raise refusal
         return device
 
@@ -601,7 +609,7 @@ class MobileStore:
                              (now,))
             conn.execute("DELETE FROM pairings")
             self._audit(conn, "health.revoke", caller=caller, session_id=session_id)
-        publish_pairing_changed()
+        publish_mobile_schedule_changed()
         return {"purged": True}
 
     @staticmethod
@@ -633,7 +641,7 @@ class MobileStore:
             conn.execute("DELETE FROM accesses WHERE at<=?", (_after(now, days=-90),))
             conn.execute("DELETE FROM push_attempts WHERE at<=?", (_after(now, hours=-1),))
         if expired:
-            publish_pairing_changed()
+            publish_mobile_schedule_changed()
 
     def status(self) -> dict:
         self.cleanup()
