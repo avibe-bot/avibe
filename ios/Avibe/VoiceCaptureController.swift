@@ -161,19 +161,28 @@ final class VoiceCaptureController {
         case needsForeground
     }
 
+    /// Where a try's island comes relative to its session.
+    enum Island {
+        /// The island, then the session (the 26.1 order).
+        case first
+        /// The session, then a fresh island (an earlier try's is ended).
+        case freshAfterSession
+        /// Keep an island an earlier try started, else one after the session.
+        case keep
+    }
+
     /// One way of trying: its number in the notice and message metadata, the
-    /// session set-up it uses, and whether the island comes before the
-    /// session.
-    typealias Try = (number: Int, candidate: VoiceCaptureSessionCandidate, islandFirst: Bool)
+    /// session set-up it uses, and where its island comes.
+    typealias Try = (number: Int, candidate: VoiceCaptureSessionCandidate, island: Island)
     /// 0: the 26.1 setup (island, then `.record`); 1: `.record` before a
     /// fresh island; 2: mixable. The owner's 35.1 press refused 1 and 2
     /// under a `LiveActivityIntent`; 26.1 started with 0 under a plain
     /// `AudioRecordingIntent`.
     static let backgroundTries: [Try] = [
-        (0, .exclusiveRecord, true), (1, .exclusiveRecord, false), (2, .mixablePlayAndRecord, false),
+        (0, .exclusiveRecord, .first), (1, .exclusiveRecord, .freshAfterSession), (2, .mixablePlayAndRecord, .keep),
     ]
     /// In front, the ordinary non-mixable session.
-    static let foregroundTry: Try = (3, .exclusiveRecord, true)
+    static let foregroundTry: Try = (3, .exclusiveRecord, .first)
 
     /// The refused background tries of a press waiting for Avibe to come
     /// forward (try 3).
@@ -566,8 +575,8 @@ final class VoiceCaptureController {
         var activity: VoiceCaptureActivityHandle?
         var recorded: Int?
         var islandError: Error?
-        tryLoop: for (number, candidate, islandFirst) in tries {
-            if !islandFirst, let current = activity {
+        tryLoop: for (number, candidate, island) in tries {
+            if island == .freshAfterSession, let current = activity {
                 // This try puts the session before a fresh island.
                 activity = nil
                 await current.end(nil, dismissal: .immediate)
@@ -578,7 +587,7 @@ final class VoiceCaptureController {
                     return .stopped
                 }
             }
-            if islandFirst, activity == nil {
+            if island == .first, activity == nil {
                 do {
                     activity = try requestListeningIsland(startedAt)
                 } catch {
