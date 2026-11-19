@@ -53,6 +53,29 @@ pub(super) struct Observer {
     partial: bool,
     selected: &'static str,
 }
+// A missing selection is an observation, not a change of the remembered path.
+fn selection(
+    last: &mut &'static str,
+    current: Option<&'static str>,
+    closing: bool,
+) -> &'static str {
+    if let Some(name) = current {
+        *last = name;
+    }
+    current.unwrap_or(if closing { *last } else { "unknown" })
+}
+
+#[cfg(test)]
+#[test]
+fn empty_change_does_not_erase_close_fallback() {
+    let mut last = "unknown";
+    assert_eq!(selection(&mut last, None, true), "unknown");
+    assert_eq!(selection(&mut last, Some("relay"), false), "relay");
+    assert_eq!(selection(&mut last, None, false), "unknown");
+    assert_eq!(selection(&mut last, None, true), "relay");
+    assert_eq!(selection(&mut last, Some("ipv6"), true), "ipv6");
+}
+
 impl Observer {
     pub(super) fn new(conn: &Connection) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -98,23 +121,21 @@ impl Observer {
         tx: &mpsc::Sender<Report>,
     ) {
         let mut families = self.closed;
-        let mut selected = "unknown";
+        let mut selected = None;
         for p in conn.paths().iter() {
             let (i, name) = family(p.remote_addr());
             families[i].open += 1;
             families[i].add(&p.stats());
             if p.is_selected() {
-                selected = name;
+                selected = Some(name);
             }
         }
-        if phase != "close" || selected != "unknown" {
-            self.selected = selected;
-        }
+        let selected = selection(&mut self.selected, selected, phase == "close");
         if tx
             .try_send(Report {
                 ordinal: self.ordinal,
                 phase,
-                selected: self.selected,
+                selected,
                 partial: self.partial,
                 families,
             })
