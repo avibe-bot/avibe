@@ -1,5 +1,6 @@
 // Hold the composer to talk, on a phone (owner direction, 2026-11-02), as on the center of the
-// tab bar: the box lights from 100 ms, hold 200 ms (moving 10 px first lets the page scroll), slide up 80 px to arm cancel
+// tab bar: the box lights from 100 ms, hold 200 ms (moving 10 px first lets the page scroll); the
+// card and the haptic come once the microphone is capturing (11-20), slide up 80 px to arm cancel
 // (back under 60 px disarms), release to send to this conversation. It records only while the
 // composer is empty and the keyboard is down; a tap raises the keyboard, and once it is up, or
 // there is text, a long press is the system's (caret, selection, Paste).
@@ -54,7 +55,8 @@ const recording = { phase: 'recording', text: said.text, stash: said.stash, seco
 const designFrames = frames([
   frame('a-idle', '1 · 静止：输入框为空、键盘没弹起，占位提示「给首席安全官发消息，或按住说话」', () => <PhoneConversation />),
   frame('b-pressed', '2 · 按下 100ms 后输入框亮起（未到 200ms：松开 = 点一下，弹出键盘）', hold({ phase: 'pressing', progress: 0.5 })),
-  frame('c-listening', '3 · 按满 200ms：开始录音，还没出字', hold({ phase: 'listening', seconds: 1 })),
+  frame('b-waiting', '2b · 按满 200ms，等麦克风开始收音（iPhone 上约 0.5 秒，最长约 1 秒）：输入框保持按下，没有卡片也不震动', hold({ phase: 'pressing', progress: 1 })),
+  frame('c-listening', '3 · 麦克风开始收音：轻震一下，开始录音，还没出字', hold({ phase: 'listening', seconds: 1 })),
   frame('d-recording', '4 · 录音中：实时转写，上滑取消 · 松开发送', hold(recording)),
   frame('d-recording-no-live', '4e · 实时转写连不上（或说了几秒话却一直没出字）：卡片安静地说明，松手后整段识别，说的话都留着', hold({ phase: 'recording', seconds: 23, liveUnavailable: true })),
   frame('d-recording-recorder', '4f · 这台设备的实时音频卡住了（iOS 在 48k 停止渲染，换采样率也不行）：改用系统录音，没有实时文字和音量，波形静止；卡片说明松手后整段识别', hold({ phase: 'listening', seconds: 5, liveUnavailable: true, captureState: 'recorder' })),

@@ -516,8 +516,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // The speak-now cue (the haptic and the listening card) only now that the microphone is
       // capturing: on an iPhone it opens about 0.5 s (p90 1 s) after the hold, and words spoken at
       // an earlier cue were lost (11-20). Until then the press stays as it was, its ring full.
-      if (!armed.current) toPhase('listening');
-      impactFeedback('medium');
+      // Armed (released now, it cancels): no speak-now cue; the card shows once disarmed.
+      if (!armed.current) {
+        toPhase('listening');
+        impactFeedback('medium');
+      }
       clock.current = setInterval(() => {
         if (mounted.current) setSeconds(Math.floor((Date.now() - current.startedAt) / 1000));
       }, 250);

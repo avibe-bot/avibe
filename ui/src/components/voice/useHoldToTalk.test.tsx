@@ -302,6 +302,23 @@ describe('useHoldToTalk', () => {
     expect(native.impact).toHaveBeenCalledWith('medium');
   });
 
+  it('gives no speak-now cue to a take armed to cancel when capture starts, and shows it once disarmed', async () => {
+    pipeline.startMs = 500;
+    const el = await mount();
+    down(el);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await flush();
+    move(el, 400);
+    expect(hold.phase).toBe('armed');
+    await elapse(500);
+    await flush();
+    expect(native.impact).not.toHaveBeenCalledWith('medium');
+    move(el, 480);
+    expect(hold.phase).toBe('listening');
+  });
+
   it('keeps a release before the microphone is capturing a slip, not a sent take', async () => {
     pipeline.startMs = 500;
     const el = await mount();
