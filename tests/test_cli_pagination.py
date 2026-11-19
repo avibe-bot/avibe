@@ -649,7 +649,9 @@ def test_data_query_cli_omits_next_command_for_stdin_sql(monkeypatch, tmp_path, 
     payload = json.loads(capsys.readouterr().out)
     assert payload["pagination"]["has_more"] is True
     assert "next_command" not in payload["pagination"]
-    assert payload["message"] == "More records are available. Add --page to continue."
+    assert payload["message"] == (
+        "Rows 1-10 shown; more match. --limit reads up to 100 per page. Add --page 2 to continue."
+    )
 
 
 def test_data_query_text_prints_records_with_values_verbatim_and_pages(monkeypatch, tmp_path, capsys) -> None:
@@ -676,8 +678,9 @@ def test_data_query_text_prints_records_with_values_verbatim_and_pages(monkeypat
         "gone:",
         "n: 8",
     ]
-    label, next_command = next_line.split(": ", 1)
-    assert label == "next_command"
+    # A page that cuts rows off says so, how many it shows, and how to read on.
+    said, next_command = next_line.split(" Next page: ", 1)
+    assert said == "Rows 1-2 shown; more match. --limit reads up to 100 per page."
 
     args = cli.build_parser().parse_args(shlex.split(next_command)[1:])
     assert cli.cmd_data_query(args) == 0

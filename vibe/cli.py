@@ -8554,12 +8554,22 @@ def _query_records_text(result, page_fields: dict, *, rows: list[dict], cut_note
         lines.append("(0 rows)")
     if cut_note:
         lines.append(cut_note)
-    pagination = page_fields["pagination"]
-    if pagination.get("next_command"):
-        lines.append(f"next_command: {pagination['next_command']}")
-    elif page_fields.get("message"):
+    if page_fields.get("message"):
         lines.append(page_fields["message"])
     return "\n".join(lines)
+
+
+def _query_more_rows_message(result, shown: int, page_fields: dict) -> str | None:
+    """The one line saying a page cut rows off: how many it shows and how to read on."""
+
+    pagination = page_fields["pagination"]
+    if not pagination.get("has_more"):
+        return None
+    first = (result.pagination.page - 1) * result.pagination.limit + 1
+    head = f"Rows {first}-{first + shown - 1} shown; more match. --limit reads up to {MAX_PAGE_LIMIT} per page."
+    if pagination.get("next_command"):
+        return f"{head} Next page: {pagination['next_command']}"
+    return f"{head} Add --page {pagination['next_page']} to continue."
 
 
 def cmd_data_query(args):
@@ -8599,6 +8609,9 @@ def cmd_data_query(args):
             command=command,
             include_next_command=not omit_next_command,
         )
+        more = _query_more_rows_message(result, len(rows), page_fields)
+        if more:
+            page_fields["message"] = more
         if text_format:
             print(_query_records_text(result, page_fields, rows=rows, cut_note=cut_note))
             return 0

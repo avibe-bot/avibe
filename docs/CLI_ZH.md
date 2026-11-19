@@ -355,9 +355,10 @@ vibe data query --sql-file query.sql --limit 50
 
 `--format text` 把每一行输出为一条记录，适合阅读对话记录或消息正文这类长文本：先是
 一行 `-[ RECORD n ]`，然后每列一行 `column: value`。值按存储原样输出，换行就是真实
-换行；多行的值从列名的下一行开始，缩进两个空格；SQL `NULL` 输出为 `(null)`。还有更多
-行时，最后一行是 `next_command: ...`，并保留 `--format text`。默认仍是 JSON；两种格式
-下的错误都是 stderr 上的 JSON 错误信封。
+换行；多行的值从列名的下一行开始，缩进两个空格；SQL `NULL` 输出为 `(null)`。每页 20
+行，可用 `--limit` 调整（最多 100）。还有更多行时，有一行说明显示了第几到第几行，并以下一页
+的命令结尾，命令保留 `--format text`；JSON 在 `pagination.next_command` 旁用 `message`
+给出同一行。默认仍是 JSON；两种格式下的错误都是 stderr 上的 JSON 错误信封。
 
 连接是只读的：写入、schema 变更、`ATTACH` 和事务都会被拒绝。schema PRAGMA
 `table_list`、`table_info`、`table_xinfo`、`index_list`、`index_info` 和
