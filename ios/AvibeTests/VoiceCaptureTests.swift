@@ -561,6 +561,65 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [1, 2, 3])
     }
 
+    /// A press left waiting (a locked phone unlocked much later) never
+    /// records: it says what was refused instead.
+    func testAPressWaitingTooLongForTheAppNeverRecords() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.toggle(foregroundFallback: true)
+        world.prepareErrors = [:]
+        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
+        let late = await controller.startInForeground()
+        XCTAssertEqual(late, .stopped)
+        XCTAssertNotEqual(controller.phase, .listening)
+        XCTAssertEqual(world.failureNotices.count, 1)
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [1, 2])
+    }
+
+    func testAnAbandonedWaitDoesNotBlockTheNextPress() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.toggle(foregroundFallback: true)
+        world.prepareErrors = [:]
+        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
+        let next = await controller.toggle(foregroundFallback: true)
+        XCTAssertEqual(next, .started)
+    }
+
+    func testAnAccountChangeDropsAWaitingPress() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        let controller = world.controller()
+        _ = await controller.toggle(foregroundFallback: true)
+        _ = controller.cancelForAccountTransition()
+        world.prepareErrors = [:]
+        let after = await controller.startInForeground()
+        XCTAssertEqual(after, .stopped)
+        XCTAssertNotEqual(controller.phase, .listening)
+    }
+
+    /// In front with try 3 refused, the alert carries every try.
+    func testTheAlertCarriesTheTriesWhenTryThreeIsRefused() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        let controller = world.controller()
+        _ = await controller.toggle(foregroundFallback: true)
+        _ = await controller.startInForeground()
+        let message = VoiceCaptureAlert.message(.recordingFailed, failure: controller.lastFailure)
+        XCTAssertNotEqual(message, VoiceCaptureAlert.message(.recordingFailed, failure: nil))
+        XCTAssertTrue(message.contains("560557684"), message)
+    }
+
     func testTheInAppLineReadsPlainly() throws {
         let path = try XCTUnwrap(Bundle.main.path(forResource: "zh-Hans", ofType: "lproj"))
         XCTAssertEqual(
