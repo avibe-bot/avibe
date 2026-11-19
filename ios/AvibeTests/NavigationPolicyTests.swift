@@ -4795,6 +4795,21 @@ final class FormAccessoryBarTests: XCTestCase {
 
 // MARK: The instance's last page from the cache (cold-start plan, step 2)
 
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+    func set(_ newValue: Bool) {
+        lock.lock()
+        stored = newValue
+        lock.unlock()
+    }
+}
+
 private final class LockedCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
@@ -4862,16 +4877,22 @@ extension NavigationPolicyTests {
     /// transfer ones.
     @MainActor
     func testALiveLoadKeepsItsPageOnlyWhenItsSecurityHeadersMatch() async throws {
-        let rows: [(name: String, second: [(String, String)], status: Int, keeps: Bool)] = [
-            ("same headers", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true),
-            ("CSP changed", [("Content-Security-Policy", "default-src *"), ("Permissions-Policy", "camera=()")], 200, false),
-            ("Permissions-Policy dropped", [("Content-Security-Policy", Self.shellCSP)], 200, false),
-            ("not 200", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 503, false),
+        let marked = Self.cachedShell.replacingOccurrences(
+            of: "<head>",
+            with: #"<head><meta name="avibe-cached-shell" content="1" />"#
+        )
+        let rows: [(name: String, second: [(String, String)], status: Int, keeps: Bool, document: String, keepsShell: Bool)] = [
+            ("same headers", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true, Self.cachedShell, false),
+            ("same headers, the shell marked", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true, marked, true),
+            ("CSP changed", [("Content-Security-Policy", "default-src *"), ("Permissions-Policy", "camera=()")], 200, false, Self.cachedShell, false),
+            ("Permissions-Policy dropped", [("Content-Security-Policy", Self.shellCSP)], 200, false, Self.cachedShell, false),
+            ("not 200", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 503, false, Self.cachedShell, false),
         ]
         for row in rows {
             let documents = LockedCounter()
             let second = row.second
             let status = row.status
+            let document = row.document
             let server = try LocalHTTPServer { request in
                 guard request.path == "/" else { return .status(404) }
                 let first = documents.next() == 1
@@ -4881,7 +4902,7 @@ extension NavigationPolicyTests {
                         + (first
                             ? [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")]
                             : second),
-                    body: Data(Self.cachedShell.utf8)
+                    body: Data(document.utf8)
                 )
             }
             let baseURL = try await server.start()
@@ -4906,7 +4927,9 @@ extension NavigationPolicyTests {
             if row.keeps {
                 try await waitUntil { !stored.isEmpty }
                 let page = try XCTUnwrap(stored.first, row.name)
-                XCTAssertEqual(page.body, Data(Self.cachedShell.utf8), row.name)
+                XCTAssertEqual(page.body, Data(document.utf8), row.name)
+                // Read from the stored bytes: may this page show uncovered.
+                XCTAssertEqual(page.keepsShell, row.keepsShell, row.name)
                 XCTAssertEqual(page.headers.first { $0.key.lowercased() == "content-security-policy" }?.value, Self.shellCSP, row.name)
                 XCTAssertEqual(page.headers.first { $0.key.lowercased() == "permissions-policy" }?.value, "camera=()", row.name)
                 XCTAssertNil(page.headers.first { $0.key.lowercased() == "content-length" }, row.name)
@@ -5081,4 +5104,180 @@ extension NavigationPolicyTests {
             XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache }, row.name)
         }
     }
+
+    /// The Web UI's own declaration that it keeps its shell (a replayable
+    /// outcome; ui/src/lib/bootSession.ts), as an inline script.
+    private static let replayedShell =
+        #"<script>document.documentElement.dataset.avibeReplayedShell = '1'</script>"#
+
+    private static func markedCachedPage(_ origin: WebOrigin, head: String) -> RuntimeCachedPage {
+        RuntimeCachedPage(
+            url: origin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title>"#.utf8
+                + Data(head.utf8) + Data("</head>".utf8)),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+    }
+
+    /// A cached page whose bytes keep their shell while the instance cannot
+    /// be reached, and whose Web UI says it keeps it now, is uncovered; an
+    /// unreachable instance does not replace it with a live load: it is
+    /// asked again until it answers, which ends the open. A live navigation
+    /// from it that never replaces it (a 204) leaves it uncovered and still
+    /// asking. (An unmarked page's unreachable case is the covered probe's
+    /// "no answer (unreachable)" row: it loads live.)
+    @MainActor
+    func testAMarkedCachedPageWaitsOutAnUnreachableInstance() async throws {
+        let reachable = LockedFlag()
+        let documents = LockedCounter()
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session":
+                return reachable.value ? .json(#"{"authenticated":true}"#) : .status(530)
+            case "/":
+                _ = documents.next()
+                return .html("<!doctype html><title>live</title>")
+            case "/no-content":
+                return LocalHTTPResponse(
+                    status: 204,
+                    headers: [("Content-Type", "text/html; charset=utf-8")],
+                    body: Data()
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let page = Self.markedCachedPage(origin, head: Self.replayedShell)
+        var connected = 0
+        var uncovered = 0
+        var events: [RuntimeNavigationEvent] = []
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            runtimeNavigationChanged: { events.append($0) },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+            cachedPageConnected: { connected += 1 },
+            cachedPageKeepsShell: { uncovered += 1 },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+
+        try await waitUntil { uncovered == 1 }
+        XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache })
+        // A live navigation that never replaces the page.
+        let webView = try primaryWebView(of: controller)
+        _ = try await webView.evaluateJavaScript("location.href = '/no-content'; 0")
+        try await waitUntil { events.contains { $0.stage == .started && !$0.fromCache } }
+        // Unreachable for a while: no live load, nothing connected.
+        let clock = ContinuousClock()
+        let quiet = clock.now.advanced(by: .seconds(5))
+        while clock.now < quiet {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(documents.count, 0)
+        XCTAssertEqual(connected, 0)
+        let title = try await webView.evaluateJavaScript("document.title") as? String
+        XCTAssertEqual(title, "cached")
+
+        reachable.set(true)
+        try await waitUntil { connected == 1 }
+        // Connected without a live document (the currency check that follows
+        // fetches the page's own URL, which is not a navigation).
+        XCTAssertFalse(events.contains { $0.stage == .committed && !$0.fromCache })
+        XCTAssertEqual(events.filter { $0.stage == .started && !$0.fromCache }.count, 1)
+        XCTAssertEqual(uncovered, 1)
+    }
+
+    /// A marked page is uncovered only when its Web UI says it keeps its
+    /// shell: without a replayable outcome (no declaration), or at its setup
+    /// fallback (the outcome it had was refused), it stays covered and the
+    /// instance loads live. An uncovered page that later falls to the setup
+    /// fallback, which it would never leave, loads live as well.
+    @MainActor
+    func testAMarkedCachedPageWithoutAReplayedShellLoadsLive() async throws {
+        let rows: [(name: String, head: String, uncovers: Bool)] = [
+            ("no replayable outcome", "", false),
+            ("at the setup fallback", Self.replayedShell + "<script>history.replaceState(null, '', '/setup')</script>", false),
+            ("falls to the setup fallback later", Self.replayedShell, true),
+        ]
+        for row in rows {
+            let documents = LockedCounter()
+            let server = try LocalHTTPServer { request in
+                switch request.path {
+                case "/api/session":
+                    return .status(530)
+                case "/":
+                    _ = documents.next()
+                    return .html("<!doctype html><title>live</title>")
+                default:
+                    return .status(404)
+                }
+            }
+            let baseURL = try await server.start()
+            defer { server.stop() }
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            let page = Self.markedCachedPage(origin, head: row.head)
+            var connected = 0
+            var uncovered = 0
+            var events: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: origin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { events.append($0) },
+                pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+                cachedPageConnected: { connected += 1 },
+                cachedPageKeepsShell: { uncovered += 1 },
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+            // A row that does not reach a step says where it stood, and the
+            // next row still runs.
+            func reach(_ step: String, _ condition: @MainActor () -> Bool) async -> Bool {
+                do {
+                    try await waitUntil(condition)
+                    return true
+                } catch {
+                    let path = try? await primaryWebView(of: controller)
+                        .evaluateJavaScript("location.pathname + ' ' + document.title") as? String
+                    XCTFail("""
+                        \(row.name): did not reach "\(step)"; page \(path ?? "?"), \
+                        documents \(documents.count), uncovered \(uncovered), connected \(connected), \
+                        events \(events.map { "\($0.stage)\($0.fromCache ? "(cache)" : "")" })
+                        """)
+                    return false
+                }
+            }
+
+            guard await reach("cached page loaded", { events.contains { $0.stage == .finished && $0.fromCache } }) else {
+                continue
+            }
+            if row.uncovers {
+                guard await reach("uncovered", { uncovered == 1 }) else { continue }
+                XCTAssertEqual(documents.count, 0, row.name)
+                // The Web UI's own move to its setup fallback (a replace, as
+                // its router does).
+                let moved = try await primaryWebView(of: controller).evaluateJavaScript(
+                    "history.replaceState(null, '', '/setup'); location.pathname"
+                ) as? String
+                XCTAssertEqual(moved, "/setup", row.name)
+            }
+            // The live document, and then the capture's own fetch of it.
+            guard await reach("live load", { documents.count >= 1 }) else { continue }
+            XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
+            XCTAssertEqual(uncovered, row.uncovers ? 1 : 0, row.name)
+            XCTAssertEqual(connected, 0, row.name)
+        }
+    }
+
 }

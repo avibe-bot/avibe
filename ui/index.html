@@ -20,6 +20,12 @@
          speech to a third-party AI service (src/lib/voiceConsent.ts), so the shell adds no
          question of its own; a page without it predates the question. -->
     <meta name="avibe-voice-consent" content="1" />
+    <!-- Tells the phone app this build keeps its shell when the instance cannot be
+         reached, behind a replayable outcome (App.tsx AuthGuard, web-ui-local-cache
+         section 4.5). Shown from the app's cache, the page is uncovered while
+         connecting only once it also sets data-avibe-replayed-shell (main.tsx);
+         otherwise it would fall back to setup, and the app keeps it covered. -->
+    <meta name="avibe-cached-shell" content="1" />
 
     <!-- PWA / iOS standalone: "Add to Home Screen" launches a full-screen app
          (no Safari chrome), which sidesteps the iOS keyboard whitespace/accessory

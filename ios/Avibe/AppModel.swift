@@ -113,6 +113,13 @@ enum RuntimeOpenPhase: Equatable {
     /// The instance's last page has loaded from the App's cache, still
     /// covered: the instance itself has not answered yet.
     case showingCached
+    /// The instance's last page is on screen from the App's cache, live to
+    /// touch (its shell waits out an unreachable instance); the instance
+    /// itself has not answered yet.
+    case showingCachedLive
+    /// The open of a page shown from the cache ran out of time: the page
+    /// stays, with a banner offering Retry.
+    case cachedUnreachable
     case awaitingUser
     /// A legacy document finished without a product-ready contract. The page
     /// is handed to the user, but Native does not claim the Runtime is ready.
@@ -299,6 +306,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var systemScheduleConfirmation: SystemScheduleConfirmation?
 
     let websiteDataStore: AccountWebsiteDataStore
+    /// The next open of this runtime loads live, skipping the cache once
+    /// (Retry over a cached page that could not connect).
+    private var runtimeLoadsLiveOnce: MobileRuntimeContext?
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -1342,7 +1352,11 @@ final class AppModel: ObservableObject {
             !listed.available,
             let attempt = runtimeOpenAttempt,
             attempt.runtime == runtime,
-            attempt.phase != .documentLoaded
+            attempt.phase != .documentLoaded,
+            // A page shown uncovered from the cache stays: its shell waits
+            // out the outage, and the open ends in the "can't reach" banner.
+            attempt.phase != .showingCachedLive,
+            attempt.phase != .cachedUnreachable
         else {
             return
         }
@@ -1439,11 +1453,8 @@ final class AppModel: ObservableObject {
             at: runtimeOpenNow
         )
         guard remaining > .zero else {
-            terminateRuntimeOpen(
-                attemptID: attemptID,
-                reason: .timedOut,
-                showsNotice: true
-            )
+            // As the deadline timer would (a page shown uncovered stays).
+            expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
             return
         }
         runtimeOpenDeadlineTimer = runtimeOpenTiming.schedule(after: remaining) {
@@ -1492,6 +1503,12 @@ final class AppModel: ObservableObject {
         }
         guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
             return false
+        }
+        if attempt.phase == .showingCachedLive {
+            // The page stays; a banner says the instance is not reachable,
+            // with Retry. A later live navigation is covered as any open.
+            finishRuntimeOpenAutomaticBudget(phase: .cachedUnreachable, attemptID: attemptID)
+            return true
         }
         terminateRuntimeOpen(
             attemptID: attemptID,
@@ -1669,12 +1686,64 @@ final class AppModel: ObservableObject {
             let attempt = runtimeOpenAttempt,
             attempt.id == attemptID,
             attempt.runtime == runtime,
-            attempt.phase == .showingCached
+            [.showingCached, .showingCachedLive, .cachedUnreachable].contains(attempt.phase)
         else {
             return
         }
         finishRuntimeOpenAutomaticBudget(phase: .documentLoaded, attemptID: attemptID)
         didFinishRuntimeLoading()
+    }
+
+    /// Retry from the banner over a cached page whose instance could not be
+    /// reached: the instance opens again, live, skipping the cache once.
+    @discardableResult
+    func retryRuntimeCachedPage() -> Bool {
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.phase == .cachedUnreachable,
+            route.runtime == attempt.runtime,
+            sessionCoordinator.isSelectedRuntime(attempt.runtime),
+            authorizeReload(of: attempt.runtime)
+        else {
+            return false
+        }
+        runtimeLoadsLiveOnce = attempt.runtime
+        return openRuntime(attempt.runtime)
+    }
+
+    /// The page shown from the cache said it keeps its shell while its
+    /// instance cannot be reached (`RuntimeCachedPage.keepsShell`, and the
+    /// Web UI behind a replayable outcome): it is uncovered, live to touch.
+    func runtimeCachedPageKeepsShell(attemptID: Int, runtime: MobileRuntimeContext) {
+        guard
+            runtimeIdentity == attemptID,
+            route.runtime == runtime,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.runtime == runtime,
+            attempt.phase == .showingCached,
+            !expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
+        else {
+            return
+        }
+        setRuntimeOpenPhase(.showingCachedLive, attemptID: attemptID)
+    }
+
+    /// A live document replaced a page shown uncovered from the cache (or
+    /// its process ended): a full budget from now, as a new open has.
+    private func restartRuntimeOpenBudget(attemptID: Int) {
+        guard var attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return
+        }
+        let now = runtimeOpenNow
+        attempt.remainingAutomaticBudget = runtimeOpenBudget
+        attempt.canResumeAutomaticBudget = true
+        attempt.isTakingLong = false
+        attempt.automaticStartedAt = now
+        attempt.deadline = now + runtimeOpenBudget
+        runtimeOpenAttempt = attempt
+        scheduleRuntimeOpenTimers(attemptID: attemptID)
     }
 
     /// The cache as the runtime controller for `runtime` uses it: its page
@@ -1689,7 +1758,11 @@ final class AppModel: ObservableObject {
         let cache = RuntimePageCache(directory: RuntimePageCache.root
             .appendingPathComponent(runtime.websiteDataStoreID.uuidString, isDirectory: true))
         return RuntimePageCacheAccess(
-            load: {
+            load: { [weak self] in
+                if let self, self.runtimeLoadsLiveOnce == runtime {
+                    self.runtimeLoadsLiveOnce = nil
+                    return nil
+                }
                 guard let page = cache.page(accountID: accountID, origin: origin) else {
                     return nil
                 }
@@ -1727,20 +1800,33 @@ final class AppModel: ObservableObject {
         }
         guard
             runtimeIdentity == attemptID,
-            let attempt = runtimeOpenAttempt,
-            attempt.id == attemptID,
-            attempt.runtime == runtime,
+            runtimeOpenAttempt?.id == attemptID,
+            runtimeOpenAttempt?.runtime == runtime,
             route.runtime == runtime,
-            sessionCoordinator.isSelectedRuntime(runtime),
-            !expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
+            sessionCoordinator.isSelectedRuntime(runtime)
         else {
             return
         }
+        // Out of time: the open ends, unless a page shown uncovered stays
+        // (`.cachedUnreachable`), which still takes this event (a live
+        // document replacing it must not leave the banner over it).
+        if expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID),
+           runtimeOpenAttempt?.phase != .cachedUnreachable {
+            return
+        }
+        guard let attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return
+        }
 
+        let showsCachedPageUncovered = attempt.phase == .showingCachedLive
+            || attempt.phase == .cachedUnreachable
         switch event.stage {
         case .started:
             guard attempt.phase != .documentLoaded,
-                  attempt.phase != .failed
+                  attempt.phase != .failed,
+                  // A live navigation from a page shown uncovered: the page
+                  // stays until a document replaces it (committed).
+                  !showsCachedPageUncovered
             else {
                 return
             }
@@ -1761,6 +1847,11 @@ final class AppModel: ObservableObject {
                   attempt.phase != .failed
             else {
                 return
+            }
+            if showsCachedPageUncovered {
+                // A live document replaced the page shown uncovered: from
+                // here it opens as any open does, with a fresh budget.
+                restartRuntimeOpenBudget(attemptID: attemptID)
             }
             // A cached document stays covered from its start: never the
             // uncovered `.loadingPage`.
@@ -1800,8 +1891,14 @@ final class AppModel: ObservableObject {
             }
         case .handedOff:
             guard attempt.phase != .documentLoaded,
-                  attempt.phase != .failed
+                  attempt.phase != .failed,
+                  attempt.phase != .cachedUnreachable
             else {
+                return
+            }
+            if attempt.phase == .showingCachedLive {
+                // A link handed off from the page on screen: it stays, and
+                // the open keeps waiting for the instance, budget running.
                 return
             }
             pauseRuntimeOpenBudget(
@@ -1810,8 +1907,12 @@ final class AppModel: ObservableObject {
                 attemptID: attemptID
             )
         case .cancelled:
+            // Nothing moved; a page on screen (live, or uncovered from the
+            // cache) stays as it is.
             guard attempt.phase != .documentLoaded,
-                  attempt.phase != .failed
+                  attempt.phase != .failed,
+                  attempt.phase != .showingCachedLive,
+                  attempt.phase != .cachedUnreachable
             else {
                 return
             }
@@ -1825,7 +1926,11 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
-            if attempt.automaticStartedAt == nil,
+            if showsCachedPageUncovered {
+                // The page shown uncovered is gone with its process; the
+                // instance loads live, as any open.
+                restartRuntimeOpenBudget(attemptID: attemptID)
+            } else if attempt.automaticStartedAt == nil,
                attempt.canResumeAutomaticBudget,
                !resumeRuntimeOpenBudget(attemptID: attemptID)
             {
@@ -1833,7 +1938,9 @@ final class AppModel: ObservableObject {
             }
             setRuntimeOpenPhase(.connecting, attemptID: attemptID)
         case .failed:
-            guard attempt.phase != .failed else {
+            // A live navigation from a page shown uncovered failed before
+            // replacing it: the page stays.
+            guard attempt.phase != .failed, !showsCachedPageUncovered else {
                 return
             }
             if attempt.phase == .documentLoaded {
@@ -2421,6 +2528,7 @@ final class AppModel: ObservableObject {
         // An account's pages go with it (each account's data is kept
         // separately and removed when it signs out or changes).
         runtimePageCache.removeAll()
+        runtimeLoadsLiveOnce = nil
         // Any account invalidation ends a route-prepare or held open; neither
         // may leave the Native loading surface behind without an attempt.
         retireRuntimeOpenForAccountTransition()

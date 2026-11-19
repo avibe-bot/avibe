@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { forgetBootSession, readBootSession, recordBootSession } from './bootSession';
+import { declareReplayedShell, forgetBootSession, readBootSession, recordBootSession } from './bootSession';
 import { OWNER_INSTANCE_CAPABILITIES } from './sessionInfo';
 
 // Forgetting is what keeps a signed-out or revoked reader from being replayed on
@@ -44,5 +44,28 @@ describe('forgetting the boot session', () => {
     // ...and the write lands afterwards.
     window.localStorage.setItem('avibe.boot-session.v1', lateWrite!);
     expect(readBootSession()).toBeNull();
+  });
+});
+
+describe('declaring a replayed shell to the phone app', () => {
+  // The App uncovers a page shown from its cache only when the page says it
+  // will keep its shell offline: in the App, behind a replayable outcome.
+  it('says so in the App behind a replayable outcome, and not otherwise', () => {
+    const root = document.createElement('html');
+    recordBootSession(reader);
+    declareReplayedShell(true, root);
+    expect(root.dataset.avibeReplayedShell).toBe('1');
+
+    declareReplayedShell(false, root);
+    expect(root.dataset.avibeReplayedShell).toBeUndefined();
+
+    forgetBootSession();
+    declareReplayedShell(true, root);
+    expect(root.dataset.avibeReplayedShell).toBeUndefined();
+
+    // An outcome whose session has expired is not replayed either.
+    recordBootSession({ ...reader, session_expires_at: Math.floor(Date.now() / 1000) + 60 });
+    declareReplayedShell(true, root, Date.now() + 120_000);
+    expect(root.dataset.avibeReplayedShell).toBeUndefined();
   });
 });

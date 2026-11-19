@@ -428,6 +428,12 @@ private struct BrowserScreen: View {
                                 runtime: runtime
                             )
                         },
+                        cachedPageKeepsShell: {
+                            appModel.runtimeCachedPageKeepsShell(
+                                attemptID: attemptID,
+                                runtime: runtime
+                            )
+                        },
                         didCreateController: {
                             appModel.registerRuntimeController(
                                 $0,
@@ -460,6 +466,21 @@ private struct BrowserScreen: View {
                         RuntimeOpenProgress(attempt: attempt) {
                             appModel.cancelRuntimeOpen(attemptID: attempt.id)
                         }
+                    }
+
+                    if overlay == .showingCachedLive, let attempt {
+                        // The last page is on screen and live to touch: only
+                        // the line, and past the long-wait mark one row
+                        // saying it is the last content.
+                        CachedRuntimeOpenProgress(attempt: attempt)
+                    }
+
+                    if overlay == .cachedUnreachable, let attempt {
+                        RuntimeCachedPageTimeoutBanner(
+                            instanceName: attempt.runtime.instance.name,
+                            retry: { appModel.retryRuntimeCachedPage() }
+                        )
+                        .id(attempt.id)
                     }
 
                     if overlay == .loadFailure {
@@ -626,6 +647,91 @@ struct RuntimeProgressLine: View {
         }
         .accessibilityElement()
         .accessibilityLabel(label)
+    }
+}
+
+/// An open showing the instance's last page from the cache, uncovered: the
+/// line, and past the long-wait mark one row over the content (dismissable).
+struct CachedRuntimeOpenProgress: View {
+    let attempt: RuntimeOpenAttempt
+    @State private var dismissedAttempt: Int?
+
+    var body: some View {
+        ZStack {
+            RuntimeOpenProgressLine(attempt: attempt)
+            if attempt.isTakingLong, dismissedAttempt != attempt.id {
+                RuntimeOpenSlowBanner(
+                    showsLastContent: true,
+                    dismiss: { dismissedAttempt = attempt.id }
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: attempt.isTakingLong)
+    }
+}
+
+/// The open of a cached page ran out of time: the content stays, and one
+/// row says the instance is not reachable now, with Retry.
+struct RuntimeCachedPageTimeoutBanner: View {
+    let instanceName: String
+    let retry: () -> Void
+    @State private var dismissed = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        if !dismissed {
+            content
+        }
+    }
+
+    private var content: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    String(
+                        format: NSLocalizedString("runtime.open.cached_timeout.title.named", comment: ""),
+                        instanceName
+                    )
+                )
+                .font(.subheadline.weight(.semibold))
+                Text("runtime.open.cached_timeout.body")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("runtime.open.cached_timeout.retry", action: retry)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(AvibeStyle.accent)
+            Button(action: { dismissed = true }) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("runtime-cached-timeout")
+        .onAppear {
+            AccessibilityNotification.Announcement(
+                String(
+                    format: NSLocalizedString("runtime.open.cached_timeout.title.named", comment: ""),
+                    instanceName
+                )
+            ).post()
+        }
     }
 }
 
@@ -876,7 +982,7 @@ private func runtimeOpenPhaseText(
         key = "runtime.open.phase.authenticating.named"
     case .loadingPage:
         key = "runtime.open.phase.loading_page.named"
-    case .showingCached:
+    case .showingCached, .showingCachedLive, .cachedUnreachable:
         key = "runtime.open.phase.connecting.named"
     case .awaitingUser:
         key = "runtime.open.awaiting_user.title.named"
@@ -902,7 +1008,7 @@ private func runtimeOpenPhaseLabel(_ phase: RuntimeOpenPhase) -> String {
         key = "runtime.open.stage.authenticating"
     case .loadingPage:
         key = "runtime.open.stage.loading_page"
-    case .showingCached:
+    case .showingCached, .showingCachedLive, .cachedUnreachable:
         key = "runtime.open.stage.connecting"
     case .awaitingUser:
         key = "runtime.open.stage.awaiting_user"
@@ -940,6 +1046,8 @@ private struct DirectFaultMessage: View {
 enum BrowserOverlay: Equatable {
     case none
     case loading
+    case showingCachedLive
+    case cachedUnreachable
     case awaitingUser
     case loadFailure
     case directFault
@@ -952,8 +1060,13 @@ enum BrowserOverlay: Equatable {
         switch attemptPhase {
         case .preparingRoute, .connecting, .authenticating, .loadingPage,
              .showingCached:
-            // A cached page stays covered until its instance answers.
+            // A cached page stays covered until its instance answers,
+            // unless its shell waits out an unreachable instance.
             self = .loading
+        case .showingCachedLive:
+            self = .showingCachedLive
+        case .cachedUnreachable:
+            self = .cachedUnreachable
         case .awaitingUser:
             self = .awaitingUser
         case .failed:
