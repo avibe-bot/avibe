@@ -301,6 +301,13 @@ for (const lang of ['en', 'zh'] as const) test(`feedback2 inline failure, disabl
   const offline = page.locator('[data-instance-id="team"]');
   await expect(offline.getByRole('button')).toBeDisabled();
   await expect(offline).toContainText(lang === 'en' ? 'Offline' : '离线');
+  // ui/design: desktop/status-dots — grey for offline, green kept on a failed open, the dot on a wrapped name's first line.
+  await expect(offline.locator('[data-status-indicator]')).toHaveClass(/bg-muted/);
+  await expect(row.locator('[data-status-indicator]')).toHaveClass(/bg-mint/);
+  const dotBox = (await row.locator('[data-status-indicator]').boundingBox())!;
+  const nameBox = (await row.getByText(state.catalog.instances[0].name).boundingBox())!;
+  expect(nameBox.height).toBeGreaterThan(30);
+  expect(Math.abs(dotBox.y + dotBox.height / 2 - (nameBox.y + 10))).toBeLessThanOrEqual(1);
   const errorBox = await row.getByRole('alert').boundingBox();
   const rowBox = await row.boundingBox();
   expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(rowBox!.y + rowBox!.height);

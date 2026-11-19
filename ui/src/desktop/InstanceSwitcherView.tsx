@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { Check, ChevronRight, Globe, Laptop, Plus, RefreshCw, UserRound, UsersRound } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
+import { StatusDot } from '../components/SidebarStatusRow';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { cn } from '../lib/utils';
 import type { DesktopClientState, Instance } from './bridge';
@@ -22,7 +23,7 @@ export interface InstanceSwitcherViewProps {
   consentError?: string | null;
 }
 
-/** ui/design: desktop/instances/instances-*, switching-*, offline-*, consent-*.
+/** ui/design: desktop/instances/instances-*, switching-*, offline-*, consent-*; desktop/status-dots/*.
  * Native owns identity and recency. Keep catalog order; never infer identity from a URL or name. */
 export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, failure,
   onSelect, onLocal, onCancel, onRefresh, onConsent, onAccount, onAdd, consentError }: InstanceSwitcherViewProps) {
@@ -36,9 +37,11 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   const localItem = localInstanceId ? state.catalog.instances.find((item) => item.id === localInstanceId) : null;
   const others = state.catalog.instances.filter((item) => currentRemote ? item.id !== current.instance_id : item.id !== localInstanceId);
   const detail = (item: Instance) => [!item.available && t('desktopClient.offline'), item.relationship === 'shared' && (item.owner_email ? t('desktopClient.sharedBy', { owner: item.owner_email }) : t('desktopClient.shared')), item.host].filter(Boolean).join(' · ');
-  const local = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')} detail={localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected} disabled={blocked} onClick={selected ? onCancel : onLocal} />;
+  // This computer always opens, so its row is never offline: a catalog entry that reports it
+  // reachable draws the green dot, anything else leaves the dot column empty rather than grey.
+  const local = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')} detail={localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected} available={localItem?.available} disabled={blocked} onClick={selected ? onCancel : onLocal} />;
   const remoteRow = (item: Instance, selected = false) => <InstanceRow key={item.id} id={item.id} name={selected ? current.name : item.name} detail={detail(selected && unreachable ? { ...item, available: false } : item)} relationship={item.relationship} selected={selected}
-    offline={!item.available || (selected && unreachable)} opening={pendingId === item.id} disabled={blocked}
+    offline={!item.available || (selected && unreachable)} opening={pendingId === item.id} available={item.available} disabled={blocked}
     error={failure?.instanceId === item.id ? failure.message : null} onClick={() => selected && failure?.instanceId !== item.id ? onCancel() : onSelect(item.id)} />;
   return <div data-instance-switcher className="mx-auto w-full max-w-2xl pt-6">
     <div className="mb-6 flex items-center justify-between gap-4"><h1 className="text-2xl font-semibold tracking-tight">{t('desktopClient.instancesTitle')}</h1>
@@ -48,6 +51,7 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
     <div data-instance-list aria-busy={!!pendingId} className="relative space-y-6">
       <section aria-label={t('desktopClient.currentlyUsing')}><h2 className="mb-2 text-sm font-medium text-muted">{t('desktopClient.currentlyUsing')}</h2>
         <div className="overflow-hidden rounded-xl border border-mint/40 bg-surface">
+          {/* A committed remote the catalog does not list has no reachability fact: no dot unless it is unreachable. */}
           {!currentRemote ? local(true) : currentItem ? remoteRow(currentItem, true) : <InstanceRow id={current.instance_id} name={current.name} detail={current.canonical_origin} selected offline={unreachable} disabled={blocked} onClick={onCancel} />}
         </div>
       </section>
@@ -79,17 +83,33 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   </div>;
 }
 
-function InstanceRow({ id, name, detail, relationship, selected = false, offline = false, opening = false, disabled, error, onClick }: {
-  id: string; name: string; detail: string; relationship?: 'owner' | 'shared'; selected?: boolean; offline?: boolean; opening?: boolean; disabled: boolean; error?: string | null; onClick: () => void;
+/** The run-status dot, the App's (`ui/src/mobile/InstanceList.tsx`): gold while this row opens, grey
+ * when it reads offline, green when the catalog last reported it reachable, and none without that
+ * fact. Being the current row is not being online. */
+function dotTone(opening: boolean, offline: boolean, available: boolean | undefined) {
+  if (opening) return 'connecting' as const;
+  if (offline) return 'stopped' as const;
+  return available === true ? 'running' as const : null;
+}
+
+function InstanceRow({ id, name, detail, relationship, selected = false, offline = false, opening = false, available, disabled, error, onClick }: {
+  id: string; name: string; detail: string; relationship?: 'owner' | 'shared'; selected?: boolean; offline?: boolean; opening?: boolean; available?: boolean; disabled: boolean; error?: string | null; onClick: () => void;
 }) {
   const { t } = useTranslation();
+  const tone = dotTone(opening, offline, available);
   const icon = relationship === 'shared' ? <UsersRound className="size-5" /> : relationship === 'owner' ? <Laptop className="size-5" /> : <Globe className="size-5" />;
   const content = <><span data-instance-icon={relationship ?? 'unknown'} className={cn('grid size-10 shrink-0 place-items-center rounded-xl', selected && !offline ? 'bg-mint-soft text-mint-ink' : 'bg-field text-muted')}>{icon}</span>
-    <span className="min-w-0 flex-1"><span className={cn("block break-words text-sm font-semibold [overflow-wrap:anywhere]", offline && "text-muted")}>{name}</span><span className="mt-1 block break-words text-xs font-normal leading-5 text-muted [overflow-wrap:anywhere]">{detail}</span>
-      {opening && <span role="status" className="mt-1 block text-xs text-mint-ink">{t('desktopClient.opening')}</span>}
-      {error && <span role="alert" className="mt-2 block break-words text-sm font-normal leading-6 text-destructive-ink [overflow-wrap:anywhere]">{error}</span>}
+    <span className="flex min-w-0 flex-1 items-start gap-2">
+      {/* A fixed column on the name's first line (centred on its 20px line), kept when empty so names align. */}
+      <span data-instance-dot className="mt-1.5 flex size-2 shrink-0 items-center justify-center">
+        {tone && <StatusDot tone={tone} label={tone === 'running' ? t('desktopClient.online') : undefined} />}
+      </span>
+      <span className="min-w-0 flex-1"><span className={cn("block break-words text-sm font-semibold [overflow-wrap:anywhere]", offline && "text-muted")}>{name}</span><span className="mt-1 block break-words text-xs font-normal leading-5 text-muted [overflow-wrap:anywhere]">{detail}</span>
+        {opening && <span role="status" className="mt-1 block text-xs text-gold-ink">{t('desktopClient.opening')}</span>}
+        {error && <span role="alert" className="mt-2 block break-words text-sm font-normal leading-6 text-destructive-ink [overflow-wrap:anywhere]">{error}</span>}
+      </span>
     </span></>;
-  const slot = opening ? <RefreshCw className="size-4 animate-spin text-mint-ink" /> : selected ? <span aria-label={t('desktopClient.current')} className="flex items-center gap-1 text-xs text-mint-ink"><Check className="size-4" />{t('desktopClient.current')}</span> : offline ? null : <ChevronRight className="size-4 text-muted" />;
+  const slot = opening ? <RefreshCw className="size-4 animate-spin text-gold-ink" /> : selected ? <span aria-label={t('desktopClient.current')} className="flex items-center gap-1 text-xs text-mint-ink"><Check className="size-4" />{t('desktopClient.current')}</span> : offline ? null : <ChevronRight className="size-4 text-muted" />;
   const retry = !!error && !offline && !opening;
   return <div data-instance-id={id} data-instance-row className={cn('relative flex items-center gap-3', offline && 'text-muted', opening && 'z-10 bg-surface')}>
     {retry ? <><div className="flex min-w-0 flex-1 items-center gap-3 py-4 pl-4">{content}</div><div data-instance-action className="shrink-0 pr-4"><Button variant="outline" size="sm" disabled={disabled} onClick={onClick}>{t('common.retry')}</Button></div></>
