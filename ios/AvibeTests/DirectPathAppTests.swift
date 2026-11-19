@@ -2331,11 +2331,14 @@ final class DirectPathAppTests: XCTestCase {
         )
         try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).store(page)
         let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
-        XCTAssertEqual(app.runtimePageCache.page(accountID: "account-1", origin: origin), page)
+        // The pages of the store the account used, whatever store comes next.
+        let accountsPages = RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(runtime.websiteDataStoreIdentifier.uuidString, isDirectory: true))
+        XCTAssertEqual(accountsPages.page(accountID: "account-1", origin: origin), page)
 
         _ = try await app.mobileSessionCoordinator.logout()
 
-        XCTAssertNil(app.runtimePageCache.page(accountID: "account-1", origin: origin))
+        XCTAssertNil(accountsPages.page(accountID: "account-1", origin: origin))
     }
 
     @MainActor

@@ -115,13 +115,17 @@ final class RuntimePageCache {
     /// How long a stored page is used before a launch loads live again.
     static let maximumAge: TimeInterval = 24 * 60 * 60
 
+    static var root: URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("RuntimePageCache", isDirectory: true)
+    }
+
     private let directory: URL
     private let fileManager = FileManager.default
 
-    init(directory: URL? = nil) {
-        self.directory = directory ?? FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("RuntimePageCache", isDirectory: true)
+    init(directory: URL) {
+        self.directory = directory
     }
 
     func page(accountID: String, origin: String) -> RuntimeCachedPage? {
@@ -142,7 +146,7 @@ final class RuntimePageCache {
             )
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
-            var root = directory
+            var root = Self.root
             try? root.setResourceValues(values)
         } catch {
             try? fileManager.removeItem(at: url)
@@ -153,7 +157,7 @@ final class RuntimePageCache {
         try? fileManager.removeItem(at: fileURL(accountID: accountID, origin: origin))
     }
 
-    /// Every account's pages: a sign-out or an account change.
+    /// This store's pages: a sign-out or an account change.
     func removeAll() {
         try? fileManager.removeItem(at: directory)
     }

@@ -4818,11 +4818,21 @@ extension NavigationPolicyTests {
         <body><p>served</p></body></html>
         """
     private static let shellCSP = "default-src 'self'; script-src 'self'"
-    /// An instance origin nothing listens on: the cached page's own
-    /// requests fail at once and never leave the machine.
-    private static let unreachableInstance = WebOrigin(
-        url: URL(string: "http://127.0.0.1:9")!, requiresHTTPS: false
-    )!
+    /// An instance that answers the cached page's session check as signed
+    /// in (so the page is not replaced by a live load during the test) and
+    /// serves `document` at its root.
+    @MainActor
+    private func signedInInstance(serving document: String) async throws -> (LocalHTTPServer, WebOrigin) {
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session": return .json(#"{"authenticated":true}"#)
+            case "/": return .html(document)
+            default: return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        return (server, try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false)))
+    }
 
     @MainActor
     private func primaryWebView(of controller: WebViewController) throws -> WKWebView {
@@ -4921,12 +4931,14 @@ extension NavigationPolicyTests {
     @MainActor
     func testACachedPageEnforcesTheCSPItWasServedWith() async throws {
         for (label, csp, inlineRuns) in [("with CSP", Optional(Self.shellCSP), false), ("without CSP", nil, true)] {
+            let (server, instanceOrigin) = try await signedInInstance(serving: Self.cachedShell)
+            defer { server.stop() }
             var headers = ["Content-Type": "text/html; charset=utf-8"]
             if let csp { headers["Content-Security-Policy"] = csp }
-            let page = RuntimeCachedPage(url: Self.unreachableInstance.url, headers: headers, body: Data(Self.cachedShell.utf8), capturedAt: Date())
+            let page = RuntimeCachedPage(url: instanceOrigin.url, headers: headers, body: Data(Self.cachedShell.utf8), capturedAt: Date())
             var finished: [RuntimeNavigationEvent] = []
             let controller = WebViewController(
-                instanceOrigin: Self.unreachableInstance,
+                instanceOrigin: instanceOrigin,
                 websiteDataStore: .nonPersistent(),
                 runtimeNavigationChanged: { if $0.stage == .finished { finished.append($0) } },
                 pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
@@ -4943,7 +4955,7 @@ extension NavigationPolicyTests {
             let ran = try await webView.evaluateJavaScript("window.inlineRan === true") as? Bool
             XCTAssertEqual(ran, inlineRuns, label)
             let origin = try await webView.evaluateJavaScript("location.origin") as? String
-            XCTAssertEqual(origin, Self.unreachableInstance.serialized, label)
+            XCTAssertEqual(origin, instanceOrigin.serialized, label)
         }
     }
 
@@ -4951,17 +4963,20 @@ extension NavigationPolicyTests {
     /// for the shell: switching instances works from it.
     @MainActor
     func testTheCachedPageSwitchesInstancesBeforeConnecting() async throws {
+        let shell = "<!doctype html><title>Workbench</title>"
+        let (server, instanceOrigin) = try await signedInInstance(serving: shell)
+        defer { server.stop() }
         let page = RuntimeCachedPage(
-            url: Self.unreachableInstance.url,
+            url: instanceOrigin.url,
             headers: ["Content-Type": "text/html; charset=utf-8"],
-            body: Data("<!doctype html><title>Workbench</title>".utf8),
+            body: Data(shell.utf8),
             capturedAt: Date()
         )
         var finished = false
         var instancesShown = 0
         var accountShown = 0
         let controller = WebViewController(
-            instanceOrigin: Self.unreachableInstance,
+            instanceOrigin: instanceOrigin,
             websiteDataStore: .nonPersistent(),
             showAccount: { accountShown += 1 },
             showInstances: { instancesShown += 1 },

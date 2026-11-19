@@ -288,8 +288,13 @@ final class AppModel: ObservableObject {
     }
     /// Recovery shown over the instance list after an automatic timeout.
     @Published private(set) var runtimeOpenNotice: RuntimeOpenNotice?
-    /// The instances' last pages, per account and origin.
-    let runtimePageCache = RuntimePageCache()
+    /// The instances' last pages, per account and origin, kept with the
+    /// account's WebKit store: each store has its own directory, which goes
+    /// when the account changes or signs out.
+    var runtimePageCache: RuntimePageCache {
+        RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(websiteDataStore.identifier.uuidString, isDirectory: true))
+    }
     @Published private(set) var lastRuntimeOpenTermination: RuntimeOpenTermination?
     @Published private(set) var systemScheduleConfirmation: SystemScheduleConfirmation?
 
@@ -1665,10 +1670,12 @@ final class AppModel: ObservableObject {
             return nil
         }
         let accountID = runtime.account.id
+        // The runtime's own store's pages, whatever store is current later.
+        let cache = RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(runtime.websiteDataStoreIdentifier.uuidString, isDirectory: true))
         return RuntimePageCacheAccess(
-            load: { [weak self] in
-                guard let self else { return nil }
-                guard let page = self.runtimePageCache.page(accountID: accountID, origin: origin) else {
+            load: {
+                guard let page = cache.page(accountID: accountID, origin: origin) else {
                     return nil
                 }
                 // At most a day old: then a live load recaptures it (a new
@@ -1676,17 +1683,17 @@ final class AppModel: ObservableObject {
                 // top-level load does.
                 let age = Date().timeIntervalSince(page.capturedAt)
                 guard age >= 0, age < RuntimePageCache.maximumAge else {
-                    self.runtimePageCache.removePage(accountID: accountID, origin: origin)
+                    cache.removePage(accountID: accountID, origin: origin)
                     return nil
                 }
                 return page
             },
             store: { [weak self] page in
                 guard let self, self.sessionCoordinator.isSelectedRuntime(runtime) else { return }
-                self.runtimePageCache.store(page, accountID: accountID, origin: origin)
+                cache.store(page, accountID: accountID, origin: origin)
             },
-            remove: { [weak self] in
-                self?.runtimePageCache.removePage(accountID: accountID, origin: origin)
+            remove: {
+                cache.removePage(accountID: accountID, origin: origin)
             }
         )
     }
