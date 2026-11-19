@@ -170,7 +170,8 @@ def test_bot_prompts_match_their_plan_drafts(source, heading):
 @pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
 def test_every_bot_keeps_the_boundary_once_in_the_shared_section(bot):
     """Owner decisions (bots.md D9): no Bot does the work itself (2026-11-09); a fact one command or read settles
-    is checked first-hand and anything longer is handed out (2026-11-18)."""
+    is checked first-hand and anything longer is handed out (2026-11-18); a search or anything needing sources or a
+    comparison is not one read (2026-11-19)."""
     blocks = _blocks(enabled_agents=_ROSTER, bot=bot)
     shared = blocks["bot-harness-prompt"]
     assert "finding out" not in shared
@@ -178,7 +179,8 @@ def test_every_bot_keeps_the_boundary_once_in_the_shared_section(bot):
         "apart from that you do no work yourself.",
         "anything that needs getting done goes to a Session",
         "When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it"
-        " yourself. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer"
+        " yourself. A search, or anything that needs sources or a comparison, is not one read; hand it to a Session."
+        " Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer"
         " to a Session.",
     ):
         assert shared.index(line) < shared.index("`vibe agent run` hands work")
@@ -218,6 +220,20 @@ def test_every_bot_keeps_the_brief_and_user_message_rules_once(bot):
     ):
         assert bot_text.count(line) == 1 and line in shared
     assert shared.index("say the goal, what is decided, and what to report. In a brief") > 0
+
+
+@pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
+def test_every_bot_always_passes_a_model_and_effort(bot):
+    """Owner-approved wording 2026-11-19 (bots.md D9): a run that starts a Session always names its model, and an
+    effort whenever that model offers one; the CLI refuses both for `--session-id` and `--bot`, and refuses any effort
+    for a model without one."""
+    shared = _blocks(enabled_agents=_ROSTER, bot=bot)["bot-harness-prompt"]
+    assert (
+        "When you start a Session, always pass `--model`, and `--reasoning-effort` whenever that model offers one,"
+        " choosing from `vibe agent models <agent>`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of"
+        " starting over; the `choose-model` Skill helps, and what the user has told you comes first."
+    ) in shared
+    assert "a model that suits the work" not in shared and "Always pass" not in shared and "pass both" not in shared
 
 
 def test_bot_harness_prompt_teaches_read_receipts():
