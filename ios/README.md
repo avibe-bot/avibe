@@ -315,7 +315,7 @@ iOS 18, which is why the deployment target is iOS 17.4
 process (`supportedModes` `[.background, .foreground(.dynamic)]` from iOS 26),
 and Apple requires a Live Activity for as long as it records. It is also a
 `LiveActivityIntent`: only then may it start its island from the background.
-A starting press tries the background first, then Avibe comes forward
+A starting press tries the background first; if that is refused, Avibe comes forward
 (below).
 `UIBackgroundModes` declares `audio`, which Apple requires to keep recording
 once the App is in the background (`AVAudioSession.Category.record`); the
