@@ -1007,6 +1007,55 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertNotNil(try store.loadRecord(kid: pending.kid))
     }
 
+    /// A bulk revoke that waited for recovery is sent with the reason it was
+    /// staged with; one staged before reasons existed is sent as `unspecified`.
+    func testAPersistedBulkRevokeIsRetriedWithItsStagedReason() async throws {
+        for (staged, sent) in [("session_expired", "session_expired"), (nil, "unspecified")] as [(String?, String)] {
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: nil,
+                providerPatchPending: false
+            )
+            store.installation?.pendingBulkRevokeThroughGeneration = 1
+            store.installation?.pendingBulkRevokeReason = staged
+            let recorder = ManagementRecorder()
+            let coordinator = makeCoordinator(store: store, management: recorder)
+
+            coordinator.resumeAfterAccountActivation()
+            try await recorder.waitForRequestCount(1)
+
+            let bulk = try XCTUnwrap(recorder.requests.first { $0.method == "POST" })
+            XCTAssertEqual(Self.jsonBody(bulk)?["reason"] as? String, sent)
+            try await waitUntil { store.installation?.pendingBulkRevokeThroughGeneration == nil }
+            XCTAssertNil(store.installation?.pendingBulkRevokeReason)
+        }
+    }
+
+    /// Logout stages its reason on the records it newly retires; a revoke
+    /// already pending keeps the reason it was staged with.
+    func testLogoutKeepsAPendingRevokesFirstReason() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        var earlier = makeRecord(kid: "removed-earlier", state: .retiring, pendingRevoke: true, bindGeneration: 1)
+        earlier.revokeReason = PushRevokeReason.instanceRemoved.rawValue
+        try store.saveRecord(earlier)
+        try store.saveRecord(makeRecord(kid: "active", state: .active, pendingRevoke: false, bindGeneration: 1))
+        let recorder = ManagementRecorder()
+        recorder.responseHandler = { _ in
+            PushManagementResponse(statusCode: 503, body: ["error": ["code": "relay_unavailable"]])
+        }
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .sessionExpired)
+
+        XCTAssertEqual(try store.loadRecord(kid: "removed-earlier")?.revokeReason, "instance_removed")
+        XCTAssertEqual(try store.loadRecord(kid: "active")?.revokeReason, "session_expired")
+        XCTAssertEqual(store.installation?.pendingBulkRevokeReason, "session_expired")
+    }
+
     func testRebindUsesHigherGenerationAndConcreteReplacementIDs() async throws {
         let store = makeInstallationStore(
             providerGeneration: 1,
@@ -1241,7 +1290,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             ))
             let recorder = ManagementRecorder()
             recorder.responseHandler = { request in
-                request.method == "DELETE" && request.path.hasSuffix("/stuck-revoke")
+                request.method == "DELETE" && Self.pathname(request).hasSuffix("/stuck-revoke")
                     ? PushManagementResponse(
                         statusCode: 503,
                         body: ["error": ["code": "relay_unavailable"]]
@@ -1268,7 +1317,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             XCTAssertEqual(creates.count, ownOrigin ? 0 : 1, name)
             XCTAssertTrue(
                 recorder.requests.contains {
-                    $0.method == "DELETE" && $0.path.hasSuffix("/stuck-revoke")
+                    $0.method == "DELETE" && Self.pathname($0).hasSuffix("/stuck-revoke")
                 },
                 "The stuck revoke was tried: \(name)"
             )
@@ -1757,7 +1806,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         try store.saveRecord(record("stale-generation", "https://removed-one.example", generation: 0))
         let recorder = ManagementRecorder()
         recorder.responseHandler = { request in
-            request.path.hasSuffix("/removed-1")
+            Self.pathname(request).hasSuffix("/removed-1")
                 ? PushManagementResponse(statusCode: 503, body: ["error": ["code": "relay_unavailable"]])
                 : Self.successResponse
         }
@@ -1822,6 +1871,29 @@ final class NativePushCoordinatorTests: XCTestCase {
             ["/api/push/apns/registrations/legacy-pending?reason=unspecified"]
         )
         XCTAssertNil(try store.loadRecord(kid: "legacy-pending"))
+    }
+
+    /// Turning notifications off for an origin whose revoke is already
+    /// pending retries it with the reason it was staged with.
+    func testUnsubscribeRetryingAPendingRevokeKeepsItsReason() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        var pending = makeRecord(kid: "pending-target", state: .retiring, pendingRevoke: true, bindGeneration: 1)
+        pending.revokeReason = PushRevokeReason.instanceRemoved.rawValue
+        try store.saveRecord(pending)
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        let outcome = try await coordinator.unsubscribe(instanceOrigin: Self.instanceOrigin)
+
+        XCTAssertEqual(outcome, .confirmed)
+        XCTAssertEqual(
+            recorder.requests.map(\.path),
+            ["/api/push/apns/registrations/pending-target?reason=instance_removed"]
+        )
     }
 
     func testUnsubscribeRetriesThePersistedConcretePendingRevoke()
@@ -2219,6 +2291,11 @@ final class NativePushCoordinatorTests: XCTestCase {
             return "\(request.method) registration"
         }
         return "\(request.method) \(request.path.split(separator: "/").last ?? "")"
+    }
+
+    /// The request's path without its query (revokes carry `?reason=`).
+    private static func pathname(_ request: ManagementRecorder.RecordedRequest) -> Substring {
+        request.path.split(separator: "?", maxSplits: 1).first ?? ""
     }
 
     private static func jsonBody(

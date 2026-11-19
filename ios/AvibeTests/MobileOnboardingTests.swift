@@ -2236,10 +2236,14 @@ final class MobileOnboardingTests: XCTestCase {
                 .signedIn(self.snapshot(accountID: passedAccount))
             }
             var relaunchLogouts = 0
+            var relaunchReasons: [PushRevokeReason] = []
             let relaunched = makeCoordinator(
                 defaults: defaults,
                 transports: [relaunchTransport] + (0..<3).map { _ in FakeMobileAuthTransport() },
-                onPreparePushLogout: { _ in relaunchLogouts += 1 }
+                onPreparePushLogout: { reason in
+                    relaunchLogouts += 1
+                    relaunchReasons.append(reason)
+                }
             )
             relaunched.activateAccountSurface()
             let answer2 = try await relaunched.bootstrap()
@@ -2254,6 +2258,8 @@ final class MobileOnboardingTests: XCTestCase {
             }
             XCTAssertEqual(signedIn.account.id, passedAccount, name)
             XCTAssertEqual(relaunchLogouts, expected, name)
+            // The factor passed for another account: that account changed.
+            XCTAssertEqual(relaunchReasons, expected == 1 ? [.accountChanged] : [], name)
             XCTAssertEqual(pushLogouts, 0, name)
         }
 
@@ -2309,6 +2315,41 @@ final class MobileOnboardingTests: XCTestCase {
             transport.session = nil
             _ = try await coordinator.refresh()
             XCTAssertEqual(reasons, [.sessionExpired])
+        }
+        // A relaunch whose session read answers 401.
+        do {
+            let defaults = makeDefaults()
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1")
+            let previous = makeCoordinator(defaults: defaults, transports: [first])
+            previous.activateAccountSurface()
+            _ = try await previous.bootstrap()
+            _ = try previous.selectInstance(id: instance.id)
+            var reasons: [PushRevokeReason] = []
+            let relaunched = makeCoordinator(
+                defaults: defaults,
+                transports: [FakeMobileAuthTransport()] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            relaunched.activateAccountSurface()
+            _ = try await relaunched.bootstrap()
+            XCTAssertEqual(reasons, [.sessionExpired])
+        }
+        // The session read names another account than the one signed in.
+        do {
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            var reasons: [PushRevokeReason] = []
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            transport.session = snapshot(accountID: "account-2")
+            _ = try await coordinator.refresh()
+            XCTAssertEqual(reasons, [.accountChanged])
         }
         // A different account signed in.
         do {
@@ -4853,13 +4894,13 @@ final class MobileOnboardingTests: XCTestCase {
             throw MobileAccountError.signedOut
         }
         let replacement = FakeMobileAuthTransport()
-        var pushLogoutCalls = 0
+        var pushLogouts: [PushRevokeReason] = []
         let coordinator = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
             transports: [transport, replacement],
-            onPreparePushLogout: { _ in
-                pushLogoutCalls += 1
+            onPreparePushLogout: { reason in
+                pushLogouts.append(reason)
             }
         )
         coordinator.activateAccountSurface()
@@ -4875,7 +4916,8 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNotEqual(store.identifier, storeIdentifier)
         XCTAssertTrue(transport.invalidated)
         XCTAssertTrue(coordinator.isAccountSurfaceActive)
-        XCTAssertEqual(pushLogoutCalls, 1)
+        // The first factor lapsed while the second was owed: the session expired.
+        XCTAssertEqual(pushLogouts, [.sessionExpired])
     }
 
     func testPasskeyExchangeStaysBetweenTransportAndNativeCode() async throws {

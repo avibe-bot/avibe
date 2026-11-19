@@ -491,7 +491,6 @@ final class AccountWebsiteDataStore {
     }
 }
 
-@MainActor
 /// Why this device revokes its push registrations, sent to the relay with
 /// the revoke so a "my notifications stopped" report can be traced
 /// (docs/plans/ios-push-relay-contract.md, revoke reasons). A closed enum,
@@ -513,6 +512,7 @@ enum PushRevokeReason: String, CaseIterable {
     case unspecified
 }
 
+@MainActor
 protocol MobileAuthTransporting: AnyObject {
     func requestOTP(email: String) async throws -> Int
     func verifyOTP(email: String, code: String) async throws -> MobileSessionDiscovery
