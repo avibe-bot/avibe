@@ -100,6 +100,7 @@ final class VoiceCaptureTests: XCTestCase {
         let controller = world.controller()
         _ = await controller.toggle()
         world.audio?.duration = 3
+        while !world.instance.isHolding { await Task.yield() }
         let stop = Task { await controller.toggle() }
         while controller.phase != .sending { await Task.yield() }
         world.instance.release()
@@ -118,6 +119,7 @@ final class VoiceCaptureTests: XCTestCase {
         let controller = world.controller()
         _ = await controller.toggle()
         world.audio?.duration = 3
+        while !world.instance.isHolding { await Task.yield() }
         let stop = Task { await controller.toggle() }
         while controller.phase != .sending { await Task.yield() }
         for _ in 0..<5 { await Task.yield() }
@@ -240,6 +242,7 @@ final class VoiceCaptureTests: XCTestCase {
         waiting.instance.holdStatus = true
         let other = waiting.controller()
         _ = await other.toggle()
+        while !waiting.instance.isHolding { await Task.yield() }
         _ = other.cancelForAccountTransition()
         waiting.instance.release()
         await other.consentWatch?.value
@@ -383,13 +386,54 @@ final class VoiceCaptureTests: XCTestCase {
 
     func testADoubledRunAfterAnyFailureNoticeShowsOneNotice() async {
         let world = World()
-        world.instance.statusResult = .failure(VoiceCaptureInstanceClient.Failure.offline)
+        world.instance.statusResult = .failure(Failure.olderAvibe)
         let controller = world.controller()
         _ = await controller.toggle()
         await controller.consentWatch?.value
         let again = await controller.toggle()
         XCTAssertEqual(again, .stopped)
-        XCTAssertEqual(world.activities.filter { $0.states.first?.reason == .offline }.count, 1)
+        XCTAssertEqual(world.activities.filter { $0.states.first?.reason == .updateAvibe }.count, 1)
+    }
+
+    /// An unreachable instance is not a no: the take records on, is kept on
+    /// the phone unsent, and Retry asks again before anything is sent.
+    func testAnUnreachableInstanceKeepsTheTakeForRetryUnsent() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        await controller.consentWatch?.value
+        XCTAssertEqual(controller.phase, .listening, "still recording")
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(controller.phase, .failed)
+        XCTAssertEqual(world.instance.transcribed, 0, "nothing sent before a yes")
+        XCTAssertEqual(world.audio?.discarded, false, "kept for Retry")
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
+
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        await controller.retry()
+        XCTAssertEqual(world.instance.sent, ["hello"])
+    }
+
+    /// A no deletes the take's file; the launch sweep clears leftovers.
+    func testANoDeletesTheTakesFileAndTheLaunchSweepClearsLeftovers() throws {
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID())
+        try Data([1, 2, 3]).write(to: url)
+        let recorder = VoiceCaptureRecorder(url: url, session: FakeSession(), permission: { true }, makeEngine: { _ in FakeEngine() })
+        recorder.discard()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+
+        let leftover = try VoiceCaptureRecorder.takeURL(id: UUID())
+        try Data([4, 5, 6]).write(to: leftover)
+        VoiceCaptureRecorder.discardAll()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
+    }
+
+    func testTakesAreExcludedFromBackup() throws {
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID())
+        let values = try url.deletingLastPathComponent().resourceValues(forKeys: [.isExcludedFromBackupKey])
+        XCTAssertEqual(values.isExcludedFromBackup, true)
     }
 
     func testATakeFileThatCannotBeMadeIsNotAPermissionProblemEither() async {
@@ -604,6 +648,99 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.phase, .idle)
         XCTAssertEqual(world.failureNotices.count, 1)
         XCTAssertEqual(world.failureNotices.first?.errorText, "561015905")
+    }
+
+    // MARK: Variant (a): end the process after a background capture
+
+    func testTheProcessEndsAfterASentBackgroundCaptureOnlyBehindTheSwitch() async {
+        let off = World()
+        let first = off.controller()
+        _ = await first.toggle()
+        off.audio?.duration = 2
+        _ = await first.toggle()
+        await first.endingTask?.value
+        XCTAssertEqual(off.ended, 0, "the switch is off by default")
+        XCTAssertEqual(off.endDecisions, ["off"])
+
+        let on = World()
+        on.endSwitch = true
+        let second = on.controller()
+        _ = await second.toggle()
+        on.audio?.duration = 2
+        _ = await second.toggle()
+        await second.endingTask?.value
+        XCTAssertEqual(on.instance.sent, ["hello"], "only after the message was accepted")
+        XCTAssertEqual(on.audio?.discarded, true)
+        XCTAssertEqual(on.ended, 1)
+        XCTAssertEqual(on.endDecisions, ["ended"])
+    }
+
+    func testTheProcessNeverEndsWhenShownInFrontOrBusy() async {
+        for setup in [{ (w: World) in w.shown = true }, { (w: World) in w.otherWork = "push" }] {
+            let world = World()
+            world.endSwitch = true
+            setup(world)
+            let controller = world.controller()
+            _ = await controller.toggle()
+            world.audio?.duration = 2
+            _ = await controller.toggle()
+            await controller.endingTask?.value
+            XCTAssertEqual(world.ended, 0)
+            XCTAssertTrue(world.endDecisions.first?.hasPrefix("skip:") == true)
+        }
+
+        // A take recorded in front never ends the process.
+        let front = World()
+        front.endSwitch = true
+        let controller = front.controller()
+        _ = await controller.beginPress()
+        _ = await controller.startTake(inFront: true)
+        front.audio?.duration = 2
+        _ = await controller.toggle()
+        await controller.endingTask?.value
+        XCTAssertEqual(front.ended, 0)
+        XCTAssertTrue(front.endDecisions.isEmpty)
+
+        // Nor a take that failed (it is kept for Retry).
+        let failed = World()
+        failed.endSwitch = true
+        failed.instance.pathFailures = 1
+        let other = failed.controller()
+        _ = await other.toggle()
+        failed.audio?.duration = 2
+        _ = await other.toggle()
+        XCTAssertEqual(failed.ended, 0)
+    }
+
+    func testTheSwitchIsAHiddenURLOnly() {
+        XCTAssertFalse(VoiceCaptureEndSwitch.handle(URL(string: "https://avibe.bot/voice/end-after-background?on=1")!))
+        XCTAssertFalse(VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/other?on=1")!))
+        let defaults = UserDefaults.standard
+        let before = defaults.object(forKey: VoiceCaptureEndSwitch.key)
+        defer { defaults.set(before, forKey: VoiceCaptureEndSwitch.key) }
+        XCTAssertTrue(VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/end-after-background?on=1")!))
+        XCTAssertTrue(VoiceCaptureEndSwitch.isOn)
+        XCTAssertTrue(VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/end-after-background?on=0")!))
+        XCTAssertFalse(VoiceCaptureEndSwitch.isOn)
+    }
+
+    /// A reservation whose intent ended without coming forward (never
+    /// `startTake(inFront:)` nor `foregroundUnavailable()`) expires on the
+    /// next press after the wait.
+    func testAnAbandonedReservationExpiresOnTheNextPress() async {
+        let world = World()
+        world.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.beginPress()
+        _ = await controller.startTake(inFront: false, foregroundFallback: true)
+        let soon = await controller.beginPress()
+        XCTAssertEqual(soon, .busy)
+        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
+        world.prepareErrors = [:]
+        let later = await controller.toggle()
+        XCTAssertEqual(later, .started)
     }
 
     /// A press that waited too long to come forward never records.
@@ -948,6 +1085,13 @@ private final class World {
     var presented: [(VoiceCaptureAttributes.Reason, Bool)] = []
     /// `captureStarted` calls: whether in front.
     var announced: [Bool] = []
+    /// Variant (a): the switch, whether the process was shown, other work,
+    /// and what happened.
+    var endSwitch = false
+    var shown = false
+    var otherWork: String?
+    var ended = 0
+    var endDecisions: [String] = []
 
     func controller() -> VoiceCaptureController {
         instance.log = { self.events.append($0) }
@@ -988,6 +1132,12 @@ private final class World {
                 self.events.append("announce")
             },
             presentInFront: { reason, needsApp in self.presented.append((reason, needsApp)) },
+            endProcessAfterBackgroundCapture: { self.endSwitch },
+            processEverShown: { self.shown },
+            otherWorkInFlight: { self.otherWork },
+            waitBeforeEnding: {},
+            endProcess: { self.ended += 1 },
+            noteEndDecision: { self.endDecisions.append($0) },
             now: { self.now() },
             sleep: { _ in await Task.yield(); try? await Task.sleep(for: .seconds(3600)) }
         ))
@@ -1031,6 +1181,9 @@ private final class FakeInstance: VoiceCaptureInstance {
         held?.resume()
         held = nil
     }
+
+    /// Whether a request is suspended, waiting for `release()`.
+    var isHolding: Bool { held != nil }
 
     func mainBotMessagesPath() async throws -> String {
         if pathFailures > 0 {
