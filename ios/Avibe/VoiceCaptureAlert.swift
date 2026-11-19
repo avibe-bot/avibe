@@ -12,10 +12,8 @@ enum VoiceCaptureAlert {
         _ reason: VoiceCaptureAttributes.Reason,
         failure: VoiceCaptureAttributes.ContentState?
     ) -> String {
-        if reason == .activityFailed, let failure, failure.failedStep != nil {
-            return String(localized: VoiceCaptureCopy.reasonLine(
-                .recordingFailed, errorCode: failure.errorCode, step: failure.failedStep, errorText: failure.errorText
-            ))
+        if reason == .activityFailed || reason == .recordingFailed, let failure, failure.failedStep != nil {
+            return String(localized: VoiceCaptureCopy.failureLine(failure))
         }
         return String(localized: VoiceCaptureCopy.reason(reason))
     }
@@ -35,7 +33,9 @@ enum VoiceCaptureAlert {
             return
         }
         let alert = UIAlertController(
-            title: String(localized: VoiceCaptureCopy.text("voiceCapture.phase.needsApp")),
+            title: String(localized: VoiceCaptureCopy.text(
+                reason == .recordingFailed ? "voiceCapture.phase.failed" : "voiceCapture.phase.needsApp"
+            )),
             message: message(reason, failure: failure),
             preferredStyle: .alert
         )

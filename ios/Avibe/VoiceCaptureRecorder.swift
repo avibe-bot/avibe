@@ -1,11 +1,24 @@
 import AVFoundation
 import Foundation
 
+/// The ways a take's audio session is set up, tried in order. A background
+/// start of a non-mixable session can be refused with cannotInterruptOthers
+/// (560557684, the owner's 33.1 press); the mixable one does not interrupt
+/// anyone, though a mixable background recording can be refused with
+/// cannotStartRecording (561145187) instead. Only a device can tell.
+enum VoiceCaptureSessionCandidate: Int, CaseIterable, Hashable {
+    /// `.record`, mode `.default`, no options (non-mixable).
+    case exclusiveRecord = 1
+    /// `.playAndRecord`, mode `.default`, `.mixWithOthers` (mixable;
+    /// `mixWithOthers` is not allowed with `.record`).
+    case mixablePlayAndRecord = 2
+}
+
 /// The audio session a take records in, in the two steps a failure is
 /// reported by.
 protocol VoiceCaptureAudioSession {
     /// Category, mode and options (设置音频会话).
-    func configureForRecording() throws
+    func configure(for candidate: VoiceCaptureSessionCandidate) throws
     /// `setActive(true)` (激活音频会话).
     func activate() throws
     func deactivate()
@@ -22,8 +35,14 @@ protocol VoiceCaptureRecordingEngine: AnyObject {
 extension AVAudioRecorder: VoiceCaptureRecordingEngine {}
 
 struct SystemAudioSession: VoiceCaptureAudioSession {
-    func configureForRecording() throws {
-        try AVAudioSession.sharedInstance().setCategory(.record, mode: .default, options: [])
+    func configure(for candidate: VoiceCaptureSessionCandidate) throws {
+        let session = AVAudioSession.sharedInstance()
+        switch candidate {
+        case .exclusiveRecord:
+            try session.setCategory(.record, mode: .default, options: [])
+        case .mixablePlayAndRecord:
+            try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers])
+        }
     }
 
     func activate() throws {
@@ -105,28 +124,46 @@ final class VoiceCaptureRecorder {
         AVAudioApplication.shared.recordPermission == .granted
     }
 
-    /// Whether this take activated the audio session. The session is
-    /// active only while a take records (the background `audio` mode keeps
-    /// the App running for that, and nothing else), and every way a take
-    /// ends goes through `stop()`, which deactivates it.
+    /// Whether this take activated the audio session. The session is active
+    /// from `prepare` (just before the Live Activity) while the take records
+    /// (the background `audio` mode keeps the App running for that, and
+    /// nothing else); every way a take or a refused try ends goes through
+    /// `stop()`, which deactivates it.
     private var sessionActive = false
 
     func start() throws {
         guard permission() else {
             throw Failure.permission
         }
-        var step = VoiceCaptureAttributes.Step.sessionCategory
+        // The controller prepares a candidate's session first (before the
+        // Live Activity); recording never sets one up on its own.
+        guard sessionActive else {
+            throw StartFailure(step: .sessionActivate, underlying: Failure.start)
+        }
         do {
-            try session.configureForRecording()
-            step = .sessionActivate
-            try session.activate()
-            sessionActive = true
-            step = .recorder
             let recorder = try makeEngine(url)
             guard recorder.record() else { throw Failure.start }
             self.recorder = recorder
         } catch {
             deactivateSession()
+            throw StartFailure(step: .recorder, underlying: error)
+        }
+    }
+
+    /// Sets up and activates the session for one candidate, recording
+    /// nothing yet. The controller does this before the Live Activity.
+    func prepare(_ candidate: VoiceCaptureSessionCandidate) throws {
+        guard permission() else {
+            throw Failure.permission
+        }
+        deactivateSession()
+        var step = VoiceCaptureAttributes.Step.sessionCategory
+        do {
+            try session.configure(for: candidate)
+            step = .sessionActivate
+            try session.activate()
+            sessionActive = true
+        } catch {
             throw StartFailure(step: step, underlying: error)
         }
     }

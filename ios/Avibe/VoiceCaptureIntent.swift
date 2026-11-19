@@ -38,7 +38,44 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         let controller = VoiceCaptureController.shared
-        let outcome = await controller.toggle()
+        var canComeForward = false
+        if #available(iOS 26.0, *) {
+            canComeForward = systemContext.currentMode.canContinueInForeground
+        }
+        let outcome = await controller.toggle(foregroundFallback: canComeForward)
+        if outcome == .needsForeground {
+            // Both background tries were refused: try 3 records in the App
+            // at once, with one line saying why it opened.
+            if #available(iOS 26.0, *) {
+                do {
+                    try await continueInForeground(alwaysConfirm: false)
+                    let before = controller.lastFailure
+                    let notices = controller.noticeCount
+                    switch await controller.startInForeground() {
+                    case .started:
+                        VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.text("voiceCapture.startedInApp")))
+                    case .needsApp(let reason):
+                        // Never in front without a word.
+                        controller.openMainBotChat()
+                        VoiceCaptureAlert.present(reason, failure: controller.lastFailure)
+                    default:
+                        // Try 3 refused too, or the press waited too long:
+                        // the notice is not shown in front, so say it here.
+                        if let failure = controller.lastFailure, failure != before {
+                            VoiceCaptureAlert.present(.recordingFailed, failure: failure)
+                        } else if controller.noticeCount != notices, let reason = controller.lastNoticeReason {
+                            // Its own status check refused (offline, …).
+                            VoiceCaptureAlert.present(reason)
+                        }
+                    }
+                    return .result()
+                } catch {
+                    // The system declined; the notice names the tries.
+                }
+            }
+            controller.foregroundUnavailable()
+            return .result()
+        }
         guard case .needsApp(let reason) = outcome else {
             return .result()
         }

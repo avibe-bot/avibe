@@ -166,12 +166,14 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     /// An ordinary submission clears the Session's composer draft, which
     /// this message never came from, so an unsent draft is put back: read
     /// before, restored after, only if nobody has written one since.
-    func postMessage(_ text: String, to sessionPath: String) async throws {
+    func postMessage(_ text: String, to sessionPath: String, capture: String?) async throws {
         let before = try? await request("GET", sessionPath + "/draft")
         let draft = (before?.status == 200 ? before?.json?["text"] as? String : nil) ?? ""
         let response = try await request(
             "POST", sessionPath + "/messages",
-            json: ["text": text, "metadata": ["input": "voice"]]
+            json: ["text": text, "metadata": ["input": "voice"].merging(
+                capture.map { ["capture_attempt": $0] } ?? [:], uniquingKeysWith: { $1 }
+            )]
         )
         try Self.check(response)
         guard !draft.isEmpty else { return }

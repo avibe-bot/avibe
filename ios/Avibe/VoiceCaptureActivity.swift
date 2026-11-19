@@ -62,6 +62,14 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         case liveActivity
     }
 
+    /// One way of starting a take that was refused: which session
+    /// candidate (1, 2), where, and the error as shown.
+    struct Attempt: Codable, Hashable {
+        var candidate: Int
+        var step: Step
+        var error: String?
+    }
+
     struct ContentState: Codable, Hashable {
         var phase: Phase
         /// When the microphone opened; the timer counts from here.
@@ -79,6 +87,9 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         /// The error as shown with `failedStep`: the system's number, or
         /// an ActivityKit error's type and case.
         var errorText: String?
+        /// Every refused try of one press, in order, when there was more
+        /// than one way to try.
+        var attempts: [Attempt]?
 
         static let heardLimit = 160
     }

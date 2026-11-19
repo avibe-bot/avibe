@@ -9,7 +9,9 @@ protocol VoiceCaptureInstance: AnyObject {
     func status() async throws -> VoiceCaptureInstanceClient.Status
     func transcribe(audio: Data, name: String, mime: String) async throws -> String
     func mainBotMessagesPath() async throws -> String
-    func postMessage(_ text: String, to sessionPath: String) async throws
+    /// `capture` records which session candidate recorded this take (and
+    /// which were refused first), in the message's metadata only.
+    func postMessage(_ text: String, to sessionPath: String, capture: String?) async throws
     func close()
     var releaseBarrier: WebsiteDataStoreReleaseBarrier? { get }
 }
@@ -19,6 +21,9 @@ extension VoiceCaptureInstanceClient: VoiceCaptureInstance {}
 /// One take's recording.
 protocol VoiceCaptureAudio: AnyObject {
     var url: URL { get }
+    /// Sets up and activates the session for one candidate; records nothing.
+    func prepare(_ candidate: VoiceCaptureSessionCandidate) throws
+    /// Starts recording on the prepared session.
     func start() throws
     /// Stops and returns the take's length in seconds.
     @discardableResult func stop() -> TimeInterval
@@ -145,7 +150,25 @@ final class VoiceCaptureController {
         case stopped
         case busy
         case needsApp(VoiceCaptureAttributes.Reason)
+        /// Both background tries were refused: bring Avibe forward and call
+        /// `startInForeground()` (try 3), or `foregroundUnavailable()`.
+        case needsForeground
     }
+
+    /// One way of trying: its number in the notice and message metadata, and
+    /// the session set-up it uses.
+    typealias Try = (number: Int, candidate: VoiceCaptureSessionCandidate)
+    static let backgroundTries: [Try] = [(1, .exclusiveRecord), (2, .mixablePlayAndRecord)]
+    /// In front, the ordinary non-mixable session.
+    static let foregroundTry: Try = (3, .exclusiveRecord)
+
+    /// The refused background tries of a press waiting for Avibe to come
+    /// forward (try 3).
+    private var pendingForeground: [VoiceCaptureAttributes.Attempt]?
+    private var pendingForegroundAt: Date?
+    /// A press waiting for Avibe to come forward longer than this was
+    /// abandoned (the intent ended); the next press starts afresh.
+    static let foregroundWait: TimeInterval = 30
 
     /// The longest take; it is then sent as if the user stopped it.
     static let maximumDuration: Duration = .seconds(5 * 60)
@@ -207,6 +230,8 @@ final class VoiceCaptureController {
         let audio: VoiceCaptureAudio
         let activity: VoiceCaptureActivityHandle
         let startedAt: Date
+        /// Which candidate recorded, and the tries refused before it.
+        let capture: String
         var endedAt: Date?
         /// Kept once transcribed, so Retry does not transcribe again.
         var text: String?
@@ -254,7 +279,15 @@ final class VoiceCaptureController {
     // MARK: Entry points
 
     /// The intent: start a take, or stop and send the one recording.
-    func toggle() async -> Outcome {
+    /// `foregroundFallback`: the caller can bring Avibe forward, so a press
+    /// whose background tries are all refused returns `.needsForeground`.
+    func toggle(foregroundFallback: Bool = false) async -> Outcome {
+        if pendingForeground != nil {
+            if let at = pendingForegroundAt, environment.now().timeIntervalSince(at) < Self.foregroundWait {
+                return .busy
+            }
+            pendingForeground = nil
+        }
         // The system may run the intent twice for one press: a run right
         // after a start that failed and said so does nothing more.
         if case .idle = state, let failedStartAt,
@@ -286,9 +319,9 @@ final class VoiceCaptureController {
             // A new press replaces a failed take the user did not retry.
             state = .idle
             await end(take, dismissal: .immediate)
-            return await start()
+            return await start(foregroundFallback: foregroundFallback)
         case .idle:
-            return await start()
+            return await start(foregroundFallback: foregroundFallback)
         }
     }
 
@@ -389,6 +422,7 @@ final class VoiceCaptureController {
     /// the store transition waits for.
     func cancelForAccountTransition() -> [WebsiteDataStoreReleaseBarrier] {
         generation += 1
+        pendingForeground = nil
         maximumDurationTask?.cancel()
         maximumDurationTask = nil
         stopObservingInterruptions()
@@ -424,7 +458,33 @@ final class VoiceCaptureController {
 
     // MARK: Take lifecycle
 
-    private func start() async -> Outcome {
+    /// Try 3, once Avibe is in front: records at once, nothing to tap.
+    func startInForeground() async -> Outcome {
+        guard let prior = pendingForeground else { return .stopped }
+        if let at = pendingForegroundAt, environment.now().timeIntervalSince(at) >= Self.foregroundWait {
+            // Avibe came forward long after the press (a locked phone
+            // unlocked later): never open the microphone for it now.
+            foregroundUnavailable()
+            return .stopped
+        }
+        pendingForeground = nil
+        return await start(tries: [Self.foregroundTry], prior: prior)
+    }
+
+    /// Avibe could not come forward: the notice names the refused tries.
+    func foregroundUnavailable() {
+        guard let prior = pendingForeground else { return }
+        pendingForeground = nil
+        let failed = Self.failure(prior, at: environment.now())
+        postFailure(failed)
+        showNotice(failed)
+    }
+
+    private func start(
+        foregroundFallback: Bool = false,
+        tries: [Try] = VoiceCaptureController.backgroundTries,
+        prior: [VoiceCaptureAttributes.Attempt] = []
+    ) async -> Outcome {
         state = .preparing
         let startGeneration = generation
         guard let target = environment.target() else {
@@ -470,47 +530,99 @@ final class VoiceCaptureController {
             return .stopped
         }
 
-        // The system requires the Live Activity when recording begins.
+        // The session goes active first, while the intent's launch still
+        // counts as in front: a Live Activity that begins ends that, and a
+        // non-mixable activation after it was refused (560557684, 11-19).
+        // Then the Live Activity, which the system requires when recording
+        // begins, then the recorder. Candidates are tried in order within
+        // the one press; each refusal is kept for the notice.
         let startedAt = environment.now()
-        let activity: VoiceCaptureActivityHandle
-        do {
-            activity = try environment.requestActivity(
-                VoiceCaptureAttributes.ContentState(phase: .listening, startedAt: startedAt)
-            )
-        } catch {
-            instance.close()
-            state = .idle
-            // No island means no recording (Apple stops it). Nothing was
-            // recorded; the App comes forward and says why, and the
-            // notification keeps the step and code.
-            audio.discard()
-            record("start: activity request failed \((error as NSError).domain) \((error as NSError).code) \(error)")
-            failedStartAt = environment.now()
-            postFailure(Self.failure(
-                step: .liveActivity, error: error, at: environment.now()
-            ))
-            return .needsApp(.activityFailed)
+        var attempts = prior
+        var activity: VoiceCaptureActivityHandle?
+        var recorded: Int?
+        for (number, candidate) in tries {
+            do {
+                try audio.prepare(candidate)
+            } catch {
+                record("start: try \(number) session refused \((error as NSError).domain) \((error as NSError).code) \(error)")
+                attempts.append(Self.attempt(number, error: error, step: .sessionActivate))
+                continue
+            }
+            if activity == nil {
+                do {
+                    activity = try environment.requestActivity(
+                        VoiceCaptureAttributes.ContentState(phase: .listening, startedAt: startedAt)
+                    )
+                } catch {
+                    _ = audio.stop()
+                    instance.close()
+                    state = .idle
+                    // No island means no recording (Apple stops it). Nothing
+                    // was recorded; the App comes forward and says why, and
+                    // the notification keeps the step and code.
+                    audio.discard()
+                    record("start: activity request failed \((error as NSError).domain) \((error as NSError).code) \(error)")
+                    failedStartAt = environment.now()
+                    attempts.append(Self.attempt(number, error: error, step: .liveActivity))
+                    var failed = Self.failure(step: .liveActivity, error: error, at: environment.now())
+                    failed.attempts = attempts.count > 1 ? attempts : nil
+                    postFailure(failed)
+                    return .needsApp(.activityFailed)
+                }
+            }
+            do {
+                try audio.start()
+                recorded = number
+                break
+            } catch {
+                record("start: try \(number) recorder refused \((error as NSError).domain) \((error as NSError).code) \(error)")
+                attempts.append(Self.attempt(number, error: error, step: .recorder))
+                _ = audio.stop()
+            }
         }
-        do {
-            try audio.start()
-        } catch {
-            record("start: recorder failed \((error as NSError).domain) \((error as NSError).code) \(error)")
+        guard let recorded, let activity else {
             instance.close()
             state = .idle
+            if foregroundFallback, !attempts.contains(where: { $0.step == .liveActivity }) {
+                // Try 3 in the App. Nothing is left active, and the island
+                // of a refused try goes at once; the notice waits for try 3.
+                // Published before the await: an account change meanwhile
+                // clears it, and the recheck below gives the press up.
+                audio.discard()
+                pendingForeground = attempts
+                pendingForegroundAt = environment.now()
+                if let activity { await activity.end(nil, dismissal: .immediate) }
+                guard generation == startGeneration, pendingForeground != nil else {
+                    pendingForeground = nil
+                    return .stopped
+                }
+                record("start: background tries refused; continuing in the App")
+                return .needsForeground
+            }
             // Permission was checked above: this is the system refusing to
             // record, not a missing permission. Say where, with its code.
-            failedStartAt = environment.now()
-            let step = (error as? VoiceCaptureRecorder.StartFailure)?.step ?? .recorder
-            let failed = Self.failure(step: step, error: error, at: startedAt)
-            postFailure(failed)
-            await activity.end(
-                failed,
-                dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal))
-            )
+            let failed = Self.failure(attempts, at: startedAt)
+            if let activity {
+                failedStartAt = environment.now()
+                postFailure(failed)
+                await activity.end(
+                    failed,
+                    dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal))
+                )
+            } else {
+                postFailure(failed)
+                showNotice(failed)
+            }
+            audio.discard()
             return .stopped
         }
+        let capture = ([String(recorded)] + (attempts.isEmpty ? [] : [
+            "(" + attempts.map { "\($0.candidate) \($0.step.rawValue) \($0.error ?? "-")" }.joined(separator: "; ") + ")"
+        ])).joined(separator: " ")
+        record("start: recording with try \(recorded) [\(capture)]")
         state = .listening(Take(
-            id: id, instance: instance, audio: audio, activity: activity, startedAt: startedAt
+            id: id, instance: instance, audio: audio, activity: activity, startedAt: startedAt,
+            capture: capture
         ))
         observeInterruptions()
         let sleep = environment.sleep
@@ -581,7 +693,7 @@ final class VoiceCaptureController {
             let path = try await take.instance.mainBotMessagesPath()
             guard generation == deliverGeneration else { return }
             posted = true
-            try await take.instance.postMessage(text, to: path)
+            try await take.instance.postMessage(text, to: path, capture: take.capture)
             guard generation == deliverGeneration else { return }
             record("deliver: sent")
             state = .idle
@@ -687,6 +799,33 @@ final class VoiceCaptureController {
         environment.postFailureNotice(failure)
     }
 
+    /// One refused try, its step taken from the recorder's error when it
+    /// says (setting up vs activating the session).
+    static func attempt(
+        _ number: Int, error: Error, step fallback: VoiceCaptureAttributes.Step
+    ) -> VoiceCaptureAttributes.Attempt {
+        VoiceCaptureAttributes.Attempt(
+            candidate: number,
+            step: (error as? VoiceCaptureRecorder.StartFailure)?.step ?? fallback,
+            error: errorText(error)
+        )
+    }
+
+    /// A start whose every try was refused; the last try's step and code
+    /// also fill the single-step fields.
+    static func failure(
+        _ attempts: [VoiceCaptureAttributes.Attempt], at date: Date
+    ) -> VoiceCaptureAttributes.ContentState {
+        var state = VoiceCaptureAttributes.ContentState(
+            phase: .failed, startedAt: date, endedAt: date, reason: .recordingFailed
+        )
+        state.attempts = attempts.count > 1 ? attempts : nil
+        state.failedStep = attempts.last?.step
+        state.errorText = attempts.last?.error
+        state.errorCode = attempts.last?.error.flatMap { Int($0) }
+        return state
+    }
+
     static func failure(
         step: VoiceCaptureAttributes.Step, error: Error, at date: Date
     ) -> VoiceCaptureAttributes.ContentState {
@@ -720,12 +859,19 @@ final class VoiceCaptureController {
         }
     }
 
+    /// Every short notice shown, for the alert in front, where the island is
+    /// not drawn (try 3's own checks).
+    private(set) var noticeCount = 0
+    private(set) var lastNoticeReason: VoiceCaptureAttributes.Reason?
+
     /// A short notice for a press that never recorded.
     private func showNotice(
         phase: VoiceCaptureAttributes.Phase,
         reason: VoiceCaptureAttributes.Reason,
         errorCode: Int? = nil
     ) {
+        noticeCount += 1
+        lastNoticeReason = reason
         let now = environment.now()
         failedStartAt = now
         var notice = VoiceCaptureAttributes.ContentState(
