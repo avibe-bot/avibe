@@ -4984,27 +4984,30 @@ extension NavigationPolicyTests {
         XCTAssertEqual(accountShown, 1)
     }
 
-    /// The cached page asks the instance for its session. A signed-in
+    /// The cached page asks the instance for its session once. A signed-in
     /// answer ends the open, and the instance's page as it is now is
     /// compared with the one shown: if it changed, the stored entry is
-    /// dropped (the next launch loads live). An answer that needs sign-in
-    /// loads the instance live, which signs in natively as any first load
-    /// does.
+    /// dropped (the next launch loads live). An answer that needs sign-in,
+    /// or none, loads the instance live, which signs in natively as any
+    /// first load does.
     @MainActor
     func testTheCachedPageConnectsOrLoadsLiveForSignIn() async throws {
         let cached = "<!doctype html><title>cached</title>"
-        let rows: [(name: String, signedIn: Bool, served: String, drops: Bool)] = [
-            ("signed in, page current", true, cached, false),
-            ("signed in, page changed", true, "<!doctype html><title>new build</title>", true),
-            ("sign-in needed", false, cached, false),
+        let rows: [(name: String, signedIn: Bool, sessionStatus: Int, served: String, drops: Bool)] = [
+            ("signed in, page current", true, 200, cached, false),
+            ("signed in, page changed", true, 200, "<!doctype html><title>new build</title>", true),
+            ("sign-in needed", false, 200, cached, false),
+            ("no answer (unreachable)", false, 530, cached, false),
         ]
         for row in rows {
             let documents = LockedCounter()
             let signedIn = row.signedIn
+            let sessionStatus = row.sessionStatus
             let served = row.served
             let server = try LocalHTTPServer { request in
                 switch request.path {
                 case "/api/session":
+                    if sessionStatus != 200 { return .status(sessionStatus) }
                     return .json(signedIn ? #"{"authenticated":true}"# : #"{"remote":true,"authenticated":false}"#)
                 case "/":
                     _ = documents.next()

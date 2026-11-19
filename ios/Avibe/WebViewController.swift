@@ -1090,19 +1090,16 @@ final class WebViewController: UIViewController {
         return cachedNavigation != nil
     }
 
-    /// Asks the instance, from the cached page's own origin and cookies,
-    /// for its session until it answers. Any answer from the instance ends
-    /// the wait. One that needs sign-in loads the instance live, which
-    /// signs in natively as any first load does; until that navigation
-    /// starts the native layer covers the page (no signed-out flash).
-    /// Without an answer it asks again; the open's budget decides when the
-    /// page says it is not reachable.
+    /// Asks the instance once, from the cached page's own origin and
+    /// cookies, for its session. A signed-in answer uncovers the page. Any
+    /// other outcome (sign-in needed, or no answer) loads the instance live,
+    /// which signs in natively as any first load does, or waits for the
+    /// instance as before. The page stays covered throughout.
     private func probeCachedPage() {
         cachedPageProbe?.cancel()
         guard let webView = retainedWebView else { return }
         cachedPageProbe = Task { @MainActor [weak self, weak webView] in
-            while !Task.isCancelled {
-                guard let self, let webView, self.cachedNavigation != nil else { return }
+            guard let self, let webView, self.cachedNavigation != nil else { return }
                 // 1: the instance answered for a signed-in reader. 2: it
                 // answered that sign-in is needed. 0: no answer.
                 let answer = try? await webView.callAsyncJavaScript(
@@ -1127,21 +1124,21 @@ final class WebViewController: UIViewController {
                 case 1:
                     self.cachedPageConnected()
                     self.checkCachedPageIsCurrent(in: webView)
-                    return
-                case 2:
-                    // A live load, through the direct-path load gate as every
-                    // load the shell starts.
+                default:
+                    // Sign-in needed, or no answer: a live load, through the
+                    // direct-path load gate as every load the shell starts.
+                    // The cached Web UI cannot wait out an unreachable
+                    // instance (its own session read would send it to
+                    // setup), so the cache is used only when its instance
+                    // answers at once; otherwise the open goes on as before
+                    // this cache existed.
                     self.cachedNavigation = nil
                     self.hasLoadedLive = true
                     self.runtimeNavigationChanged(
                         RuntimeNavigationEvent(stage: .started, destination: .instance)
                     )
                     self.loadConfiguredInstance()
-                    return
-                default:
-                    try? await Task.sleep(for: .seconds(3))
                 }
-            }
         }
     }
 

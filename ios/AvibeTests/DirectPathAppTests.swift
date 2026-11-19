@@ -2269,16 +2269,21 @@ final class DirectPathAppTests: XCTestCase {
         let runtime = try await select("instance-1", in: app)
         let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
 
-        app.handleRuntimeNavigation(
-            RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true),
-            attemptID: attempt.id,
-            runtime: runtime
-        )
-        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached)
-        XCTAssertEqual(
-            BrowserOverlay(attemptPhase: .showingCached, directFault: false),
-            .loading
-        )
+        // Covered from the cached document's start to its load, never the
+        // uncovered `.loadingPage`.
+        for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+            app.handleRuntimeNavigation(
+                RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                attemptID: attempt.id,
+                runtime: runtime
+            )
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached, "\(stage)")
+            XCTAssertEqual(
+                BrowserOverlay(attemptPhase: try XCTUnwrap(app.runtimeOpenAttempt).phase, directFault: false),
+                .loading,
+                "\(stage)"
+            )
+        }
         app.runtimeCachedPageConnected(attemptID: attempt.id, runtime: runtime)
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
         XCTAssertEqual(app.route, .browser(runtime))
@@ -3180,8 +3185,7 @@ final class DirectPathAppTests: XCTestCase {
                     ("Content-Type", "application/octet-stream"),
                     ("Content-Disposition", "attachment; filename=fixture.bin"),
                 ],
-                body: Data("fixture".utf8),
-                capturedAt: Date()
+                body: Data("fixture".utf8)
             )
         }
         let url = try await server.start()

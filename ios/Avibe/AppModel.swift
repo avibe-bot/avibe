@@ -1674,18 +1674,19 @@ final class AppModel: ObservableObject {
                 // At most a day old: then a live load recaptures it (a new
                 // build, new headers) and renews the instance's cookie as a
                 // top-level load does.
-                guard Date().timeIntervalSince(page.capturedAt) < RuntimePageCache.maximumAge else {
+                let age = Date().timeIntervalSince(page.capturedAt)
+                guard age >= 0, age < RuntimePageCache.maximumAge else {
                     self.runtimePageCache.removePage(accountID: accountID, origin: origin)
                     return nil
                 }
                 return page
             },
-            remove: { [weak self] in
-                self?.runtimePageCache.removePage(accountID: accountID, origin: origin)
-            },
             store: { [weak self] page in
                 guard let self, self.sessionCoordinator.isSelectedRuntime(runtime) else { return }
                 self.runtimePageCache.store(page, accountID: accountID, origin: origin)
+            },
+            remove: { [weak self] in
+                self?.runtimePageCache.removePage(accountID: accountID, origin: origin)
             }
         )
     }
@@ -1730,7 +1731,7 @@ final class AppModel: ObservableObject {
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : .connecting,
+                    : event.fromCache ? .showingCached : .connecting,
                 attemptID: attemptID
             )
         case .committed:
@@ -1739,10 +1740,12 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
+            // A cached document stays covered from its start: never the
+            // uncovered `.loadingPage`.
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : .loadingPage,
+                    : event.fromCache ? .showingCached : .loadingPage,
                 attemptID: attemptID
             )
         case .finished:
