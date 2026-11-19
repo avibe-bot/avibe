@@ -62,12 +62,22 @@ struct ProbeIntent: AudioRecordingIntent {
 
 struct ProbeShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
+        #if VARIANT_A
         AppShortcut(
-            intent: ProbeIntent(),
-            phrases: ["Record in \(.applicationName)"],
-            shortTitle: ProbeIntent.title,
-            systemImageName: "mic"
+            intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
+            shortTitle: "Record A", systemImageName: "mic"
         )
+        #elseif VARIANT_B
+        AppShortcut(
+            intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
+            shortTitle: "Record B", systemImageName: "mic"
+        )
+        #else
+        AppShortcut(
+            intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
+            shortTitle: "Record C", systemImageName: "mic"
+        )
+        #endif
     }
 }
 
