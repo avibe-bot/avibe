@@ -53,6 +53,11 @@ final class ProbeUITests: XCTestCase {
         }
         let tile = shortcuts.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS[c] %@", "Record \(variant)")).firstMatch
+        // Later Apps' groups sit below the fold, under the tab bar.
+        for _ in 0..<4 where !(tile.exists && tile.isHittable) {
+            shortcuts.swipeUp()
+            sleep(1)
+        }
         if !tile.waitForExistence(timeout: 4) {
             let search = shortcuts.searchFields.firstMatch
             if search.waitForExistence(timeout: 3) {
