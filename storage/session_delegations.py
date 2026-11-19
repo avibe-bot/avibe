@@ -147,23 +147,33 @@ def pending_wake_queries(session_id: str):
     )
 
 
-def pending_return_queries(sender: str, recipient: str):
-    """Any return B→A defers the notice, not just the latest Run's callback.
+def pending_return_queries(sender: str, recipient: str, run_id: str | None = None):
+    """A return B→A still on its way defers the notice, not just the latest Run's callback.
 
+    "On its way" means not yet accepted by A: once A accepted it, A has it, and A's
+    own live Turn must not hold back a receipt for a newer dispatch (#4014 review).
     An older callback can share a turn with a newer no-callback message. Live
     callback children are bounded by A's live Runs before their metadata is read.
+    An idle receipt counts only for the dispatch it was sent for (``run_id``).
     """
     callback_mode = case((func.json_valid(agent_runs.c.metadata_json) == 1,
                           func.json_extract(agent_runs.c.metadata_json, "$.callback_mode")))
     source_session = case((func.json_valid(agent_runs.c.metadata_json) == 1,
                            func.json_extract(agent_runs.c.metadata_json, "$.source_session_id")))
+    not_accepted = ~exists(select(message_deliveries.c.id).where(
+        message_deliveries.c.id == agent_runs.c.delivery_id, message_deliveries.c.state == "accepted",
+    ))
+    own_receipt = or_(
+        ~agent_runs.c.source_actor.startswith(IDLE_NOTICE_ACTOR_PREFIX),
+        agent_runs.c.source_actor == f"{IDLE_NOTICE_ACTOR_PREFIX}{run_id or ''}",
+    )
     return (
         # A report B is sending back to A has not entered the pair projection until
         # A accepts it; it is a return in flight. B's Runs to anyone else are not:
         # B's own delegate may work for hours (#4014 review).
         select(agent_runs.c.id).where(
             agent_runs.c.source_kind == "agent", agent_runs.c.source_actor == recipient,
-            agent_runs.c.session_id == sender, agent_runs.c.status.in_(_LIVE_RUN_STATUSES),
+            agent_runs.c.session_id == sender, agent_runs.c.status.in_(_LIVE_RUN_STATUSES), not_accepted,
         ),
         select(agent_runs.c.id).where(
             agent_runs.c.session_id == recipient, agent_runs.c.callback_session_id == sender,
@@ -173,7 +183,7 @@ def pending_return_queries(sender: str, recipient: str):
         ),
         select(agent_runs.c.id).where(
             agent_runs.c.session_id == sender, agent_runs.c.status.in_(_LIVE_RUN_STATUSES),
-            agent_runs.c.source_kind == "callback", source_session == recipient,
+            agent_runs.c.source_kind == "callback", source_session == recipient, not_accepted, own_receipt,
         ),
     )
 
@@ -215,7 +225,9 @@ def eligible_pair(
             agent_runs.c.source_actor == pair["sender_session_id"], agent_runs.c.session_id == recipient,
         )):
             return None
-    if any(_has_rows(conn, query) for query in pending_return_queries(pair["sender_session_id"], recipient)):
+    if any(_has_rows(conn, query) for query in pending_return_queries(
+        pair["sender_session_id"], recipient, str(pair["run_id"]),
+    )):
         return None
     return {**dict(pair), "metadata": metadata}
 

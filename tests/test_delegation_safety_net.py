@@ -899,3 +899,22 @@ def test_an_old_receipt_does_not_answer_a_newer_dispatch(harness):
     assert _pair(h)["state"] == "open"
     assert h.lane._notify(_pair(h))
     assert len(_notices(h)) == 2
+
+
+@pytest.mark.parametrize("returned", ["report", "receipt"])
+def test_a_return_the_dispatcher_already_accepted_does_not_hold_back_the_next_receipt(harness, returned):
+    """A accepts B's return in a Turn that is still live, sends B a new dispatch from
+    that Turn, and B finishes silently: A must not wait on its own Turn (#4014 review)."""
+    from core.scheduled_tasks import TaskExecutionRequest
+    h = harness
+    _accept(h, _send(h))
+    if returned == "report":
+        back = _send(h, sender="sesB", recipient="sesA")
+    else:
+        assert h.lane._notify(_pair(h))
+        back = TaskExecutionRequest.from_dict(h.requests.get_run(_notices(h)[0]["id"]))
+    _accept(h, back, finish=False)  # A's Turn that took the return is still live
+    second = _send(h)
+    _accept(h, second)
+    assert _pair(h)["run_id"] == second.id
+    assert h.lane._notify(_pair(h))
