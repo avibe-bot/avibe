@@ -6004,8 +6004,8 @@ final class DirectPathAppTests: XCTestCase {
         )
     }
 
-    /// What `direct.status()` answers for `origin`, through the provider
-    /// the App gives its WebViews. `nil` when it answers later or not at all.
+    /// What `direct.handover()` answers for `origin`, through the provider
+    /// the App gives its WebViews; nil without a direct transport.
     @MainActor
     private func handover(_ app: AppModel, _ origin: WebOrigin, sole: Bool?) async -> DirectHandoverOutcome? {
         guard let provider = app.directHandoverProvider else {
@@ -6016,6 +6016,9 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    /// What `direct.status()` answers for `origin`, through the provider
+    /// the App gives its WebViews. `nil` when it answers later or not at all.
+    @MainActor
     private func directStatus(_ app: AppModel, _ origin: WebOrigin) -> DirectPathStatus? {
         var answer: DirectPathStatus?
         app.directStatusProvider?(origin) { answer = $0 }
