@@ -13,9 +13,7 @@ enum VoiceCaptureAlert {
         failure: VoiceCaptureAttributes.ContentState?
     ) -> String {
         if reason == .activityFailed, let failure, failure.failedStep != nil {
-            return String(localized: VoiceCaptureCopy.reasonLine(
-                .recordingFailed, errorCode: failure.errorCode, step: failure.failedStep, errorText: failure.errorText
-            ))
+            return String(localized: VoiceCaptureCopy.failureLine(failure))
         }
         return String(localized: VoiceCaptureCopy.reason(reason))
     }

@@ -81,6 +81,54 @@
         }
       }
     },
+    "voiceCapture.attempt %lld %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "try %1$lld: %2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "方案%1$lld %2$@"
+          }
+        }
+      }
+    },
+    "voiceCapture.attempt %lld %@ %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "try %1$lld: %2$@, error %3$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "方案%1$lld %2$@ 错误 %3$@"
+          }
+        }
+      }
+    },
+    "voiceCapture.attempt.separator" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "; "
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "；"
+          }
+        }
+      }
+    },
     "voiceCapture.phase.failed" : {
       "localizations" : {
         "en" : {

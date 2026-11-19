@@ -357,6 +357,18 @@ the main Bot acts on the user's computer.
   one starts a new take. A listening or sending Live Activity also goes stale
   on its own 90 seconds past the five-minute cap, and a stale one is drawn as
   interrupted, so no timer runs on for a take nobody holds.
+- Order of a start, after the instance agreed: the audio session goes
+  active first, then the Live Activity, then the recorder. The owner's 33.1
+  press showed a non-mixable session activated after the Live Activity
+  refused with cannotInterruptOthers (560557684): a `LiveActivityIntent`'s
+  launch counts as in front only until its Live Activity begins (seen in
+  another App's device logs, not documented by Apple). Two session set-ups
+  are tried in order within one press: 方案1 `.record` (non-mixable), then
+  方案2 `.playAndRecord` with `.mixWithOthers` (mixable; a mixable background
+  recording can instead be refused with cannotStartRecording, 561145187).
+  Activating a session records nothing; recording starts only once the Live
+  Activity is up. The message carries which one recorded in
+  `metadata.capture_attempt` (for example `2 (1 sessionActivate 560557684)`).
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is

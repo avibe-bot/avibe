@@ -12,10 +12,7 @@ enum VoiceCaptureFailureNotification {
     static func content(for state: VoiceCaptureAttributes.ContentState) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = String(localized: VoiceCaptureCopy.title(state))
-        content.body = String(localized: VoiceCaptureCopy.reasonLine(
-            state.reason ?? .recordingFailed, errorCode: state.errorCode,
-            step: state.failedStep, errorText: state.errorText
-        ))
+        content.body = String(localized: VoiceCaptureCopy.failureLine(state))
         content.threadIdentifier = thread
         return content
     }

@@ -124,6 +124,34 @@ enum VoiceCaptureCopy {
         return self.reason(reason)
     }
 
+    /// The line for a state: every refused try of one press in order when
+    /// there were several (方案1 激活音频会话 错误 560557684；方案2 …), else
+    /// the step and code, else the reason.
+    static func failureLine(_ state: VoiceCaptureAttributes.ContentState) -> LocalizedStringResource {
+        let reason = state.reason ?? .recordingFailed
+        if reason == .recordingFailed, let attempts = state.attempts, attempts.count > 1 {
+            let separator = String(localized: text("voiceCapture.attempt.separator"))
+            let tries = attempts.map { attempt -> String in
+                let step = String(localized: text("voiceCapture.step.\(attempt.step.rawValue)"))
+                if let error = attempt.error {
+                    return String(localized: LocalizedStringResource(
+                        String.LocalizationValue("voiceCapture.attempt \(attempt.candidate) \(step) \(error)"),
+                        table: "VoiceCapture"
+                    ))
+                }
+                return String(localized: LocalizedStringResource(
+                    String.LocalizationValue("voiceCapture.attempt \(attempt.candidate) \(step)"),
+                    table: "VoiceCapture"
+                ))
+            }.joined(separator: separator)
+            return LocalizedStringResource(
+                String.LocalizationValue("voiceCapture.reason.recordingFailedAt \(tries)"),
+                table: "VoiceCapture"
+            )
+        }
+        return reasonLine(reason, errorCode: state.errorCode, step: state.failedStep, errorText: state.errorText)
+    }
+
     static func reason(_ reason: VoiceCaptureAttributes.Reason) -> LocalizedStringResource {
         switch reason {
         case .offline: return text("voiceCapture.reason.offline")
@@ -251,8 +279,8 @@ struct VoiceCaptureDetail: View {
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            } else if let reason = state.reason {
-                Text(VoiceCaptureCopy.reasonLine(reason, errorCode: state.errorCode, step: state.failedStep, errorText: state.errorText))
+            } else if state.reason != nil {
+                Text(VoiceCaptureCopy.failureLine(state))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
