@@ -1254,6 +1254,12 @@ final class AppModel: ObservableObject {
         {
             Self.coldStartSignposter.emitEvent("opened before the session check")
             openRuntime(runtime)
+            // The check holds the account, and while it does the direct path
+            // authorizes no connection (`DirectPathController` asks
+            // `isCurrentRuntime`). So it starts once the page has loaded,
+            // or at the long-wait mark if it has not: the page's own
+            // connections are planned with the account free.
+            await waitForOpenToLoad(runtime, atMost: runtimeOpenLongWait)
             let check = Self.coldStartSignposter.beginInterval("session check")
             let checked = try? await sessionCoordinator.refresh()
             Self.coldStartSignposter.endInterval("session check", check)
@@ -1284,6 +1290,27 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         completeBootstrap()
+    }
+
+    /// Returns once `runtime`'s open has loaded its document or ended, or
+    /// after `limit`.
+    private func waitForOpenToLoad(
+        _ runtime: MobileRuntimeContext,
+        atMost limit: Duration
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: limit)
+        while clock.now < deadline {
+            guard
+                let attempt = runtimeOpenAttempt,
+                attempt.runtime == runtime,
+                attempt.phase != .documentLoaded,
+                attempt.phase != .failed
+            else {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
     }
 
     /// After an open-first's session check: push work the open started was
