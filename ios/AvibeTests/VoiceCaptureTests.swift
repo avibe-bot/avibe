@@ -438,6 +438,21 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.instance.transcribed, 0)
     }
 
+    /// A take cancelled before its answer: the pending ask is cancelled too.
+    func testACancelledTakeCancelsItsPendingAsk() async {
+        let world = World()
+        world.instance.holdStatus = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        while !world.instance.isHolding { await Task.yield() }
+        await controller.finish(send: false)
+        XCTAssertTrue(world.instance.closed)
+        world.instance.release()
+        await controller.consentWatch?.value
+        XCTAssertEqual(world.instance.statusCalls, 1)
+        XCTAssertEqual(world.instance.transcribed, 0)
+    }
+
     /// Unreachable when recording began, reachable at the stop: it sends then.
     func testAnInstanceUnreachableAtTheStartButReachableAtTheStopSends() async {
         let world = World()

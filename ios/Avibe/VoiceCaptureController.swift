@@ -721,6 +721,9 @@ final class VoiceCaptureController {
             guard !Task.isCancelled, let self, case .listening(let take) = self.state, take.id == id else {
                 return
             }
+            // This task sends: `finish` must not cancel it (its ask would
+            // then ask nothing).
+            self.maximumDurationTask = nil
             await self.finish(send: true)
         }
         record("start: listening")
@@ -1033,6 +1036,8 @@ final class VoiceCaptureController {
         dismissal: ActivityUIDismissalPolicy,
         final: VoiceCaptureAttributes.ContentState? = nil
     ) async {
+        // Any ask still pending for this take asks nothing once it is over.
+        take.consent.cancel()
         take.instance.close()
         take.audio.discard()
         await take.activity.end(final, dismissal: dismissal)
