@@ -645,6 +645,23 @@ _MESSAGE_MERGE_IDENTITY_FIELDS = (
 )
 
 
+def admitted_authority(snapshot: Any) -> dict[str, Any] | None:
+    """The authority an input was admitted with, from its immutable snapshot.
+
+    A scheduled Task's Run does not keep it (its definition's current authority is
+    passed to the admitted input instead), so a notice about the input takes it here.
+    """
+    metadata = _json_object(_json_object(snapshot).get("metadata_json"))
+    provenance = metadata.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, Mapping) else None
+    nested = spec.get("message_metadata") if isinstance(spec, Mapping) else None
+    for value in (metadata, nested):
+        context = value.get("resource_user_context") if isinstance(value, Mapping) else None
+        if isinstance(context, dict):
+            return context
+    return None
+
+
 def _delegated_authority_merge_identity(metadata: Mapping[str, Any]) -> str:
     provenance = metadata.get("scheduled_provenance")
     spec = provenance.get("platform_specific") if isinstance(provenance, Mapping) else None
@@ -2266,9 +2283,9 @@ def carry_accepted_inputs(
     """
     turn_id = str(turn["id"])
     reason = _carry_reason(turn)
-    parked_runs: dict[str, str] = {}
+    parked_runs: dict[str, dict[str, Any]] = {}
     exhausted_input_ids: list[str] = []
-    exhausted_runs: dict[str, str] = {}
+    exhausted_runs: dict[str, dict[str, Any]] = {}
     provenance = _json_object(turn.get("terminal_evidence_json")).get("output_provenance")
     kind = provenance.get("error_kind") if isinstance(provenance, Mapping) else None
     provider_failed = reason == "failed" and kind in TRANSIENT_FAILURE_KINDS
@@ -2294,7 +2311,7 @@ def carry_accepted_inputs(
             # Its one carry is spent and the next Turn failed too.
             exhausted_input_ids.append(str(prior.get("original_id") or row["id"]))
             exhausted_runs.update({
-                run_id: str(prior.get("original_id") or row["id"])
+                run_id: {"input": str(prior.get("original_id") or row["id"]), "authority": admitted_authority(envelope[0])}
                 for run_id in agent_run_ids_for_delivery(conn, row)
             })
         if envelope is not None and reason is not None and eligible and (run_ids := _carriable_run_ids(conn, row)) is not None:
@@ -2326,7 +2343,10 @@ def carry_accepted_inputs(
             _rebind_runs(conn, run_ids, carried_id, source_turn_id=turn_id)
             if provider_failed and depth == 4:
                 # Parked from now on; its senders are told once, here.
-                parked_runs.update({run_id: str(prior.get("original_id") or row["id"]) for run_id in run_ids})
+                parked_runs.update({
+                    run_id: {"input": str(prior.get("original_id") or row["id"]), "authority": admitted_authority(envelope[0])}
+                    for run_id in run_ids
+                })
         if envelope is not None:
             conn.execute(update(message_deliveries).where(message_deliveries.c.id == row["id"]).values(
                 delivery_history_json=_canonical_json(history),

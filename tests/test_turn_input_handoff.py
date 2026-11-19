@@ -762,8 +762,14 @@ def test_a_task_from_another_session_tells_its_creator(managers):
     manager, _, engine, _, _ = managers
     _seed_session(engine, "ses_creator")
     turn_id, _ = asyncio.run(_activate(manager))
-    report = _merge(manager, "task output")
-    _run(engine, "run-task", report, source_kind="scheduler", source_actor="task_1",
+    # As production enqueues a Task: the Run drops the definition's authority, the
+    # admitted input carries it (``drop_definition_resource_context``).
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    report = str(asyncio.run(manager.deliver(DeliveryRequest(
+        session_id="ses_fsm", priority="p1", content="task output", source="harness", author="harness",
+        message_type="harness", metadata={"resource_user_context": {"user_key": "remote:creator"}},
+    ), context=_context())).delivery_id)
+    _run(engine, "run-task", report, run_type="scheduled", source_kind="scheduler", source_actor="task_1",
          metadata_json=json.dumps({"created_by": {"kind": "caller_context", "caller": {"session_id": "ses_creator"}}}))
     _fail_through_manager(manager, turn_id, "auth")
     with engine.begin() as conn:
@@ -772,3 +778,8 @@ def test_a_task_from_another_session_tells_its_creator(managers):
     assert _notices_to(engine, "ses_creator") == [
         (store.TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=report), "run-task:turn-carry-exhausted"),
     ]
+    with engine.connect() as conn:
+        metadata = conn.execute(
+            select(agent_runs.c.metadata_json).where(agent_runs.c.source_actor == "run-task:turn-carry-exhausted")
+        ).scalar_one()
+    assert json.loads(metadata)["resource_user_context"] == {"user_key": "remote:creator"}

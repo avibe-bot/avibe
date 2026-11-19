@@ -5235,7 +5235,7 @@ class SessionTurnManager:
         } if any(runs_by_kind.values()) else {}
         # An internal notice is never named to anyone as something to resend.
         notice_inputs = {
-            input_id for runs in runs_by_kind.values() for run_id, input_id in runs.items()
+            entry["input"] for runs in runs_by_kind.values() for run_id, entry in runs.items()
             if run_id in rows and delivery_store.is_carry_notice_run(rows[run_id]["source_actor"])
         }
         exhausted = [
@@ -5256,7 +5256,8 @@ class SessionTurnManager:
         # authority, or names more inputs, than each Run it answers (#4010 review).
         owed: dict[tuple[str, str, str], dict[str, Any]] = {}
         for kind, runs in runs_by_kind.items():
-            for run_id, input_id in runs.items():
+            for run_id, carried in runs.items():
+                input_id = carried["input"]
                 run = rows.get(run_id)
                 if run is None or delivery_store.is_carry_notice_run(run["source_actor"]):
                     continue
@@ -5278,7 +5279,9 @@ class SessionTurnManager:
                 ).strip()
                 if not sender or sender == session_id:
                     continue
-                authority = run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+                # The authority the input was admitted with (a scheduled Task's Run
+                # does not keep it), else its Run's own (#4010 review).
+                authority = carried.get("authority") or run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
                 authority = authority if isinstance(authority, dict) else None
                 key = (kind, sender, json.dumps(authority, sort_keys=True))
                 entry = owed.setdefault(key, {"run_ids": [], "inputs": [], "authority": authority})
