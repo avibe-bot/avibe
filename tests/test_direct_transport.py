@@ -165,6 +165,8 @@ SIDECAR = textwrap.dedent(
             wait_for_stop()
         else:
             wait_for_stop()
+    elif mode == "exit_flap":
+        raise SystemExit(17)
     elif mode == "restart":
         ready()
         if generation == 1:
@@ -516,7 +518,28 @@ async def test_invalid_sidecar_messages_withdraw_and_restart(sidecar, mode, reas
 
 
 @pytest.mark.asyncio
-async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar):
+async def test_exit_flap_logs_one_warning_with_observed_status(sidecar, caplog):
+    path, _, env = sidecar
+    env["DIRECT_TEST_MODE"] = "exit_flap"
+    rendezvous = RecordingRendezvous()
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), rendezvous,
+                                           restart_initial_delay_seconds=0.02, restart_max_delay_seconds=0.05)
+    old_env = os.environ.copy()
+    os.environ.update(env)
+    try:
+        await supervisor.start()
+        await _wait_until(lambda: sum(reason == "sidecar_exited" for _, reason in rendezvous.published) >= 3)
+    finally:
+        await supervisor.stop()
+        os.environ.clear()
+        os.environ.update(old_env)
+    assert [r.getMessage() for r in caplog.records if r.name == "vibe.direct_transport" and r.levelno >= logging.WARNING] == [
+        "direct transport sidecar restarting reason=sidecar_exited exit_status=17 suppressed=0"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar, caplog):
     """Protect immediate rendezvous withdrawal and non-tight fatal recovery."""
     path, _events_path, env = sidecar
     env["DIRECT_TEST_MODE"] = "fatal_restart"
@@ -538,6 +561,9 @@ async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar):
         )
         await _wait_until(lambda: supervisor.diagnostics.endpoint_id == ENDPOINT_TWO)
         assert any(endpoint is not None for endpoint, _reason in rendezvous.published[fatal_index + 1 :])
+        assert [r.getMessage() for r in caplog.records if r.name == "vibe.direct_transport" and r.levelno >= logging.WARNING] == [
+            "direct transport sidecar restarting reason=sidecar_fatal exit_status=0 suppressed=0"
+        ]
     finally:
         await supervisor.stop()
         os.environ.clear()
