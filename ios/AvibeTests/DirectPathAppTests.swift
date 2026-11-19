@@ -2731,6 +2731,63 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    /// Draft only: the offline row and the 8 s row rendered over a mock
+    /// cached page, for review (not for merge). Fixture data only.
+    @MainActor
+    func testCaptureOfflineRowForReview() async throws {
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        let page = MockCachedPage()
+        let mock = UIWindow(windowScene: scene)
+        mock.windowLevel = .normal + 2
+        let host = UIHostingController(rootView: AnyView(EmptyView()))
+        mock.rootViewController = host
+        mock.makeKeyAndVisible()
+        let offline = RuntimeCachedPageOfflineBanner(retry: {}, switchInstance: {})
+        let slow = RuntimeOpenSlowBanner(showsLastContent: true, dismiss: {})
+        let shots: [(name: String, width: CGFloat, height: CGFloat, dark: Bool, size: DynamicTypeSize, locale: String, slowRow: Bool)] = [
+            ("offline-393-light", 393, 852, false, .large, "zh-Hans", false),
+            ("offline-393-dark", 393, 852, true, .large, "zh-Hans", false),
+            ("offline-375-light", 375, 812, false, .large, "zh-Hans", false),
+            ("offline-375-dark", 375, 812, true, .large, "zh-Hans", false),
+            ("offline-393-light-ax3", 393, 852, false, .accessibility3, "zh-Hans", false),
+            ("offline-375-light-en", 375, 812, false, .large, "en", false),
+            ("offline-393-light-en-ax3", 393, 852, false, .accessibility3, "en", false),
+            ("slow-8s-393-light", 393, 852, false, .large, "zh-Hans", true),
+        ]
+        var loadedDark: Bool?
+        for shot in shots {
+            mock.frame = CGRect(x: 0, y: 0, width: shot.width, height: shot.height)
+            mock.overrideUserInterfaceStyle = shot.dark ? .dark : .light
+            if loadedDark != shot.dark {
+                try await page.load(dark: shot.dark)
+                // The first WebKit paint of a mock page takes a while on CI.
+                try await Task.sleep(for: .seconds(3))
+                loadedDark = shot.dark
+            }
+            let row: AnyView = shot.slowRow ? AnyView(slow) : AnyView(offline)
+            host.rootView = AnyView(
+                ZStack { page.view; row }
+                    .environment(\.dynamicTypeSize, shot.size)
+                    .environment(\.locale, Locale(identifier: shot.locale))
+            )
+            try await Task.sleep(for: .milliseconds(1500))
+            let image = UIGraphicsImageRenderer(bounds: mock.bounds).image { _ in
+                mock.drawHierarchy(in: mock.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "offline-row-\(shot.name)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            print("[review capture] \(shot.name) \(Int(shot.width))x\(Int(shot.height))")
+        }
+        // Leave the window alive past the test's own teardown.
+        Self.retainedFrameWindows.append(mock)
+    }
+
+    private static var retainedFrameWindows: [UIWindow] = []
+
     /// An account's pages are removed when it signs out.
     @MainActor
     func testAnAccountsCachedPagesGoWithASignOut() async throws {
@@ -8181,3 +8238,115 @@ private final class RootViewStandIn {
         )
     }
 }
+
+private final class MockCachedPage {
+    let webView = WKWebView(frame: .zero)
+    var view: some View { MockWebViewHost(webView: webView).ignoresSafeArea() }
+
+    func load(dark: Bool = false) async throws {
+        let background = dark ? "#111" : "#fff"
+        let text = dark ? "#eee" : "#111"
+        let muted = dark ? "#999" : "#666"
+        let rows = [
+            ("奶酪包", "今天的日程我整理好了，下午三点有个评审。", "10:42"),
+            ("产品伙伴", "冷启动方案的三张帧图已经发你了。", "10:30"),
+            ("vibey", "PR #3920 的 CI 全部通过。", "昨天"),
+            ("Studio 周报", "本周完成 12 项，延期 1 项。", "昨天"),
+            ("账单提醒", "下月续费将在 3 天后扣款。", "周一"),
+            ("旅行计划", "已为你比较了三家酒店的价格。", "周日"),
+        ].map { name, line, time in
+            """
+            <div class="row"><div class="avatar">\(name.prefix(1))</div>
+            <div class="body"><div class="top"><b>\(name)</b><span>\(time)</span></div>
+            <div class="line">\(line)</div></div></div>
+            """
+        }.joined()
+        let html = """
+            <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+            <style>
+            body{margin:0;font-family:-apple-system,"PingFang SC";background:\(background);color:\(text)}
+            .topbar{position:fixed;top:0;left:0;right:0;padding:env(safe-area-inset-top) 16px 0;height:44px;display:flex;align-items:center;gap:10px;background:\(background);border-bottom:1px solid rgba(127,127,127,.15)}
+            .topbar .logo{width:28px;height:28px;border-radius:8px;background:#7c6cf2}
+            .topbar b{flex:1;font-size:17px}.topbar .me{width:30px;height:30px;border-radius:15px;background:#10b981;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px}
+            main{padding-top:calc(env(safe-area-inset-top) + 52px);padding-bottom:calc(env(safe-area-inset-bottom) + 64px)}
+            h1{margin:8px 20px 2px;font-size:26px}
+            .status{margin:0 20px 8px;font-size:12px;color:\(muted)}
+            .row{display:flex;gap:12px;padding:12px 20px}
+            .avatar{width:40px;height:40px;border-radius:20px;background:#7c6cf2;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600}
+            .body{flex:1;min-width:0}.top{display:flex;justify-content:space-between}
+            .top span,.line{color:\(muted);font-size:13px}.line{margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .tabs{position:fixed;left:0;right:0;bottom:0;padding:6px 0 calc(env(safe-area-inset-bottom) + 4px);display:flex;justify-content:space-around;background:\(background);border-top:1px solid rgba(127,127,127,.15);font-size:11px;color:\(muted)}
+            .tabs div{display:flex;flex-direction:column;align-items:center;gap:3px}.tabs i{width:24px;height:24px;border-radius:6px;background:rgba(127,127,127,.25)}
+            .tabs .on{color:#10b981}.tabs .on i{background:#10b981}
+            </style></head><body>
+            <div class="topbar"><div class="logo"></div><b>Studio</b><div class="me">A</div></div>
+            <main><h1>收件箱</h1><div class="status" id="status">上次更新 10:42</div>\(rows)</main>
+            <div class="tabs"><div class="on"><i></i>收件箱</div><div><i></i>会话</div><div><i></i>应用</div><div><i></i>我</div></div>
+            </body></html>
+            """
+        webView.isOpaque = false
+        webView.loadHTMLString(html, baseURL: nil)
+        try await Task.sleep(for: .milliseconds(800))
+    }
+
+    /// A Bot conversation, with the phone chat header's geometry from
+    /// ChatHeaderBar and BotConversationTitle: a 44 pt bar with a 28 pt back
+    /// button, the Bot switch (26 pt face, name, chevron), and on the right
+    /// the Show Page control and the session menu.
+    func loadChat(dark: Bool = false) async throws {
+        let bg = dark ? "#111" : "#fff", fg = dark ? "#eee" : "#111"
+        let bar = dark ? "rgba(17,17,17,.92)" : "rgba(255,255,255,.92)"
+        let rule = dark ? "#2a2a2e" : "#e5e5ea", edge = dark ? "#3a3a40" : "#d9d9e0"
+        let bubble = dark ? "#222226" : "#f2f2f7"
+        let html = """
+            <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+            <style>
+            body{margin:0;font-family:-apple-system,"PingFang SC";background:\(bg);color:\(fg)}
+            button{font:inherit;color:inherit;background:none;border:0;padding:0;-webkit-appearance:none}
+            .hdr{position:fixed;top:0;left:0;right:0;height:44px;padding:env(safe-area-inset-top) 16px 0;display:flex;align-items:center;gap:12px;background:\(bar);border-bottom:1px solid \(rule)}
+            .back{width:28px;height:28px;border:1px solid \(edge) !important;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+            .bot{margin-left:-6px;display:flex;align-items:center;gap:8px;padding:2px 8px 2px 6px;border-radius:999px;min-width:0}
+            .face{width:26px;height:26px;border-radius:13px;background:#f5b041;flex-shrink:0}
+            .bot b{font-size:16px;white-space:nowrap}.chev{color:#888;font-size:12px}
+            .right{margin-left:auto;display:flex;gap:6px}.icon{width:28px;height:28px;border-radius:8px;border:1px solid \(edge) !important}
+            main{padding:calc(env(safe-area-inset-top) + 56px) 16px 120px}
+            .msg{max-width:78%;padding:10px 12px;border-radius:16px;margin:8px 0;font-size:15px;line-height:1.45}
+            .me{margin-left:auto;background:#10b981;color:#fff}.it{background:\(bubble)}
+            .composer{position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom) + 8px);height:44px;border-radius:22px;border:1px solid \(edge);background:\(bg);color:#999;display:flex;align-items:center;padding:0 16px;font-size:15px}
+            </style></head><body>
+            <div class="hdr"><button class="back" data-tap="返回">←</button>
+            <button class="bot" data-tap="切换伙伴"><span class="face"></span><b>奶酪包</b><span class="chev">⌄</span></button>
+            <div class="right"><button class="icon" data-tap="Show Page"></button><button class="icon" data-tap="会话菜单"></button></div></div>
+            <main>
+            <div class="msg me">帮我看看下午的日程</div>
+            <div class="msg it">下午三点有一个评审，四点半和设计组同步。要我把评审材料先整理出来吗？</div>
+            <div class="msg me">好，顺便提醒我带上周报</div>
+            <div class="msg it">好的，三点前十分钟提醒你，周报我已经放进评审材料里了。</div>
+            </main>
+            <div class="composer">给奶酪包发消息</div>
+            </body></html>
+            """
+        webView.loadHTMLString(html, baseURL: nil)
+        try await Task.sleep(for: .milliseconds(800))
+    }
+
+    func markLive() async throws {
+        _ = try? await webView.evaluateJavaScript(
+            "document.getElementById('status').textContent='刚刚更新';"
+            + "document.querySelector('.row .line').textContent='新消息：下午三点的评审改到四点。';"
+        )
+    }
+
+    func markCached() async throws {
+        _ = try? await webView.evaluateJavaScript(
+            "document.getElementById('status').textContent='上次更新 10:42';"
+        )
+    }
+}
+
+private struct MockWebViewHost: UIViewRepresentable {
+    let webView: WKWebView
+    func makeUIView(context: Context) -> WKWebView { webView }
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+}
+
