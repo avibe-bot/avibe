@@ -344,6 +344,8 @@ actor DirectConnectListener {
     private struct Relay {
         /// Which came first: the relay ending on its own, or a close.
         let claim: DirectRelayClaim
+        /// When its tunnel last carried bytes, either way.
+        let activity: DirectRelayActivity
         let task: Task<Void, Never>
         /// Cancelled by this actor (an event's close, a retirement, the
         /// listener leaving serving) and not yet ended. Its record stays,
@@ -702,6 +704,37 @@ actor DirectConnectListener {
         return closed
     }
 
+    /// A page asked to move to the direct path (`direct.handover`): closes
+    /// the committed `backend` relays for `host` that have carried no bytes
+    /// either way for at least `quietSeconds`, and keeps the busy ones. Not
+    /// an event's close: no closure is counted. A relay not yet committed,
+    /// and one this listener did not accept, is never touched.
+    func closeQuietRelays(
+        host: String,
+        backend: DirectRelayBackend,
+        quietSeconds: TimeInterval,
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> (closed: Int, kept: Int) {
+        var closed = 0
+        var kept = 0
+        let grants = lifecycle.grants
+        for (id, relay) in relays where !relay.isDraining {
+            guard let grant = grants[id], grant.host == host, grant.backend == backend else {
+                continue
+            }
+            guard now - relay.activity.lastActivity >= quietSeconds else {
+                kept += 1
+                continue
+            }
+            if relay.claim.closeByEvent() {
+                closed += 1
+            }
+            lifecycle.end(id)
+            drain(id)
+        }
+        return (closed, kept)
+    }
+
     /// Retires uncommitted work made before an event: a relay whose plan's
     /// scope is older than `scope` ends (a new selection or account never
     /// takes over a CONNECT planned for the old one), and a relay whose plan's
@@ -830,11 +863,13 @@ actor DirectConnectListener {
         let allowedHosts = allowedHosts
         let nonce = ownershipNonce
         let claim = DirectRelayClaim()
-        relays[id] = Relay(claim: claim, task: Task { [weak self] in
+        let activity = DirectRelayActivity()
+        relays[id] = Relay(claim: claim, activity: activity, task: Task { [weak self] in
             await Self.serve(
                 connection,
                 id: id,
                 claim: claim,
+                activity: activity,
                 listener: self,
                 allowedHosts: allowedHosts,
                 ownershipNonce: nonce,
@@ -960,6 +995,7 @@ actor DirectConnectListener {
         _ connection: NWConnection,
         id: UUID,
         claim: DirectRelayClaim,
+        activity: DirectRelayActivity,
         listener: DirectConnectListener?,
         allowedHosts: Set<String>,
         ownershipNonce: String,
@@ -1164,7 +1200,8 @@ actor DirectConnectListener {
                         to: connection,
                         stream,
                         leftover: leftover,
-                        limits: limits
+                        limits: limits,
+                        activity: activity
                     )
                 } catch {
                     // Either side ended the tunnel, or the relay was closed.
@@ -1424,8 +1461,10 @@ actor DirectConnectListener {
         to connection: NWConnection,
         _ stream: any DirectByteStream,
         leftover: Data,
-        limits: DirectConnectLimits
+        limits: DirectConnectLimits,
+        activity: DirectRelayActivity
     ) async throws {
+        activity.touch()
         try await withThrowingTaskGroup(of: Void.self) { group in
             defer {
                 group.cancelAll()
@@ -1433,6 +1472,7 @@ actor DirectConnectListener {
             group.addTask {
                 // The reader holds WebKit's early bytes first, then the rest.
                 while let data = try await reader.read() {
+                    activity.touch()
                     try await write(data, to: stream)
                 }
                 try await closeWrite(of: stream)
@@ -1452,6 +1492,7 @@ actor DirectConnectListener {
                         try await connection.finishSending()
                         return
                     }
+                    activity.touch()
                     pending = data
                 }
             }
@@ -2471,6 +2512,22 @@ final class DirectListenerLifecycle: @unchecked Sendable {
 
 /// Decides, once, whether a relay ended on its own or was closed by an
 /// event. Whichever call comes first wins; the other learns it lost.
+/// When a relay's tunnel last carried bytes, either way, on the clock that
+/// never runs backwards.
+final class DirectRelayActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stamp = ProcessInfo.processInfo.systemUptime
+
+    var lastActivity: TimeInterval {
+        lock.withLock { stamp }
+    }
+
+    func touch() {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.withLock { stamp = now }
+    }
+}
+
 final class DirectRelayClaim: @unchecked Sendable {
     private enum State {
         case open

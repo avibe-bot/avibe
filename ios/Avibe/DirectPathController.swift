@@ -23,15 +23,36 @@ struct DirectPathStatus: Equatable, Sendable {
     /// How many times the App closed connections for this host because
     /// their path was lost. Never decreases.
     let closure: Int
+    /// For diagnosis only, and only for the selected instance's host: the
+    /// path the App's own direct connection runs on, and its last attempts.
+    /// Families and counts, never an address. Nil when there is nothing.
+    var diagnostics: DirectPathDiagnostics? = nil
 
     static let initial = DirectPathStatus(preferred: .tunnel, sequence: 0, closure: 0)
 
-    var jsonObject: [String: Any] {
+    /// Diagnostics are not part of what a status says: two statuses with
+    /// the same preference, sequence, and closure are the same.
+    static func == (lhs: DirectPathStatus, rhs: DirectPathStatus) -> Bool {
+        lhs.preferred == rhs.preferred && lhs.sequence == rhs.sequence && lhs.closure == rhs.closure
+    }
+
+    /// What `direct.transportChanged` carries: no diagnostics.
+    var eventObject: [String: Any] {
         [
             "preferred": preferred.rawValue,
             "sequence": sequence,
             "closure": closure,
         ]
+    }
+
+    /// What `direct.status()` answers: the status, and the diagnostics if any.
+    var jsonObject: [String: Any] {
+        var object = eventObject
+        if let diagnostics {
+            object["path"] = diagnostics.current.map { $0.rawValue as Any } ?? NSNull()
+            object["attempts"] = diagnostics.attempts.map(\.jsonObject)
+        }
+        return object
     }
 
     /// The script that delivers `direct.transportChanged` to a document.
@@ -43,7 +64,7 @@ struct DirectPathStatus: Equatable, Sendable {
             let data = try? JSONSerialization.data(
                 withJSONObject: [
                     "origin": origin.serialized,
-                    "detail": jsonObject,
+                    "detail": eventObject,
                 ],
                 options: [.sortedKeys]
             ),
@@ -69,6 +90,42 @@ struct DirectPathStatus: Equatable, Sendable {
 typealias DirectStatusProvider = @MainActor (
     WebOrigin,
     @escaping @MainActor (DirectPathStatus?) -> Void
+) -> Void
+
+/// How a page's request to move to the direct path ended
+/// (`direct.handover`).
+enum DirectHandoverOutcome: Equatable, Sendable {
+    /// The quiet public relays for the page's host were closed; busy ones
+    /// were kept.
+    case done(closed: Int, kept: Int)
+    /// Nothing was closed.
+    case skipped(DirectHandoverSkip)
+
+    var jsonObject: [String: Any] {
+        switch self {
+        case .done(let closed, let kept):
+            return ["closed": closed, "kept": kept]
+        case .skipped(let reason):
+            return ["closed": 0, "kept": 0, "skipped": reason.rawValue]
+        }
+    }
+}
+
+enum DirectHandoverSkip: String, Equatable, Sendable {
+    /// The App's direct path is not usable for this host now.
+    case notUsable = "not_usable"
+    /// Another live document of the same store has this host loaded, or
+    /// the App cannot tell.
+    case otherDocuments = "other_documents"
+}
+
+/// Answers `direct.handover` for an instance origin. `soleDocument` is
+/// whether the calling WebView is the only live document of its data store
+/// with that host loaded: `nil` when the App cannot tell.
+typealias DirectHandoverProvider = @MainActor (
+    WebOrigin,
+    _ soleDocument: Bool?,
+    @escaping @MainActor (DirectHandoverOutcome) -> Void
 ) -> Void
 
 /// The only writer of `proxyConfigurations`. A store's route lists exact
@@ -419,12 +476,71 @@ final class DirectPathController {
     /// What `direct.status()` answers for `origin` now. `preferred` is
     /// `direct` only for the selected instance's host.
     func currentStatus(for origin: WebOrigin) -> DirectPathStatus {
-        DirectPathStatus(
+        var diagnostics: DirectPathDiagnostics?
+        if origin.host == target?.authority.host {
+            let read = transport.pathDiagnostics
+            // The current path only while new connections prefer it.
+            let shown = DirectPathDiagnostics(
+                current: preferred == .direct ? read.current : nil,
+                attempts: read.attempts
+            )
+            diagnostics = shown == .empty ? nil : shown
+        }
+        return DirectPathStatus(
             preferred: preferred == .direct && origin.host == target?.authority.host
                 ? .direct : .tunnel,
             sequence: sequence,
-            closure: closures[origin.host] ?? 0
+            closure: closures[origin.host] ?? 0,
+            diagnostics: diagnostics
         )
+    }
+
+    /// Quiet time after which a public relay counts as idle for a hand-over.
+    static let handoverQuietSeconds: TimeInterval = 1
+
+    /// A page asks to move its new connections to the direct path
+    /// (`direct.handover`): while the path is usable for `origin`'s host, the
+    /// committed public relays for that host that carried nothing for
+    /// `handoverQuietSeconds` are closed, so WebKit's next connection takes
+    /// the route to the direct backend. Busy relays are kept; nothing is
+    /// replayed. Only when the caller is the sole live document of the store
+    /// with that host loaded (`soleDocument == true`): a relay of another
+    /// document's connection is never closed for this one.
+    func handover(
+        for origin: WebOrigin,
+        soleDocument: Bool?,
+        reply: @escaping @MainActor (DirectHandoverOutcome) -> Void
+    ) {
+        settleRecordedFault()
+        guard
+            !isResuming,
+            preferred == .direct,
+            let target,
+            origin.host == target.authority.host,
+            directAuthorized(for: target.authority),
+            let listener
+        else {
+            reply(.skipped(.notUsable))
+            return
+        }
+        guard soleDocument == true else {
+            reply(.skipped(.otherDocuments))
+            return
+        }
+        let host = origin.host
+        Task {
+            let result = await listener.closeQuietRelays(
+                host: host,
+                backend: .publicOrigin,
+                quietSeconds: Self.handoverQuietSeconds
+            )
+            Self.logger.info(
+                "Direct hand-over: closed \(result.closed, privacy: .public), kept \(result.kept, privacy: .public) public relays"
+            )
+            await MainActor.run {
+                reply(.done(closed: result.closed, kept: result.kept))
+            }
+        }
     }
 
     /// Answers `direct.status()` for `origin`. While the App returns from the
@@ -1586,5 +1702,63 @@ struct DirectRebindAttempts: Equatable {
     /// The return was settled another way (a failure, a retirement).
     mutating func abandon() {
         current = nil
+    }
+}
+
+/// Every WKWebView the App makes, held weakly, so a hand-over can tell
+/// whether another live document of the same data store has a host loaded
+/// (`direct.handover`). A WebView is listed from creation until it is
+/// deallocated, whether or not it is on screen: one that still exists may
+/// still hold connections.
+@MainActor
+final class DirectWebViewRegistry {
+    static let shared = DirectWebViewRegistry()
+
+    private final class Entry {
+        weak var webView: WKWebView?
+
+        init(_ webView: WKWebView) {
+            self.webView = webView
+        }
+    }
+
+    private var entries: [Entry] = []
+
+    func register(_ webView: WKWebView) {
+        entries.removeAll { $0.webView == nil }
+        guard !entries.contains(where: { $0.webView === webView }) else {
+            return
+        }
+        entries.append(Entry(webView))
+    }
+
+    /// Whether `webView` is the only live WebView of its data store with
+    /// `host` loaded or loading. `nil` when that cannot be told: the caller
+    /// is not registered, or another WebView of the store has no URL yet.
+    func isSoleDocument(_ webView: WKWebView, host: String) -> Bool? {
+        entries.removeAll { $0.webView == nil }
+        guard entries.contains(where: { $0.webView === webView }) else {
+            return nil
+        }
+        let store = webView.configuration.websiteDataStore
+        for entry in entries {
+            guard let other = entry.webView, other !== webView else {
+                continue
+            }
+            // Two objects can name one persistent store.
+            let otherStore = other.configuration.websiteDataStore
+            let sameStore = otherStore === store
+                || (store.identifier != nil && otherStore.identifier == store.identifier)
+            guard sameStore else {
+                continue
+            }
+            guard let url = other.url else {
+                return nil
+            }
+            if url.host?.lowercased() == host.lowercased() {
+                return false
+            }
+        }
+        return true
     }
 }

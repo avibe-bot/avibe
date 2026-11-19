@@ -463,6 +463,46 @@ final class DirectConnectListenerTests: XCTestCase {
         third.close()
     }
 
+    func testAHandOverClosesOnlyQuietPublicRelaysAndKeepsBusyOnesAndDirectOnes() async throws {
+        let fixture = try await makeListener()
+        let direct = LoopbackClient(port: fixture.port)
+        let directStream = try await establish(direct, fixture)
+        fixture.plans.set(direct: false)
+        let quiet = LoopbackClient(port: fixture.port)
+        let quietStream = try await establishPublic(quiet, fixture)
+        let busy = LoopbackClient(port: fixture.port)
+        let busyStream = try await establishPublic(busy, fixture)
+
+        // Both public relays go quiet; then one carries bytes again.
+        try await Task.sleep(for: .milliseconds(600))
+        try await busy.send("still")
+        try await eventually {
+            String(decoding: busyStream.written, as: UTF8.self) == "still"
+        }
+
+        let result = await fixture.listener.closeQuietRelays(
+            host: host,
+            backend: .publicOrigin,
+            quietSeconds: 0.5
+        )
+        XCTAssertEqual(result.closed, 1)
+        XCTAssertEqual(result.kept, 1)
+        try await eventually { quietStream.isCancelled }
+        XCTAssertFalse(busyStream.isCancelled)
+        // A direct relay is never a hand-over's to close, however quiet.
+        XCTAssertFalse(directStream.isCancelled)
+        // Another host's relays are not either.
+        let other = await fixture.listener.closeQuietRelays(
+            host: "other.example",
+            backend: .publicOrigin,
+            quietSeconds: 0
+        )
+        XCTAssertEqual(other.closed, 0)
+        XCTAssertEqual(other.kept, 0)
+        direct.close()
+        busy.close()
+    }
+
     func testARelayCommittedAfterAnEventIsNotClosedByThatEventsLateClose() async throws {
         let fixture = try await makeListener()
         fixture.plans.set(generation: 5)

@@ -117,6 +117,90 @@ protocol DirectByteStream: AnyObject, Sendable {
     func cancel()
 }
 
+/// The kind of path a direct connection runs on: through a relay, or
+/// straight to an IPv4 or IPv6 address. Families only, never an address.
+enum DirectPathKind: String, Equatable, Sendable {
+    case relay
+    case ipv4
+    case ipv6
+
+    /// The family of a numeric socket address (`a.b.c.d:port` or
+    /// `[x:...:x]:port`), or nil for anything else.
+    static func family(ofSocketAddress address: String) -> DirectPathKind? {
+        if address.hasPrefix("[") {
+            return .ipv6
+        }
+        let host = address.split(separator: ":").first.map(String.init) ?? ""
+        let octets = host.split(separator: ".")
+        return octets.count == 4 && octets.allSatisfy({ UInt8($0) != nil }) ? .ipv4 : nil
+    }
+}
+
+/// How many candidate addresses of each family. Counts only.
+struct DirectAddressFamilies: Equatable, Sendable {
+    var ipv4 = 0
+    var ipv6 = 0
+
+    init(ipv4: Int = 0, ipv6: Int = 0) {
+        self.ipv4 = ipv4
+        self.ipv6 = ipv6
+    }
+
+    init(socketAddresses: [String]) {
+        for address in socketAddresses {
+            switch DirectPathKind.family(ofSocketAddress: address) {
+            case .ipv4: ipv4 += 1
+            case .ipv6: ipv6 += 1
+            default: break
+            }
+        }
+    }
+
+    var jsonObject: [String: Any] {
+        ["ipv4": ipv4, "ipv6": ipv6]
+    }
+}
+
+/// One connection attempt to the instance, for diagnosis: what the
+/// instance's answer offered, what this device could offer, and which path
+/// won. No address, key, or identity.
+struct DirectDialAttempt: Equatable, Sendable {
+    /// The instance's candidate addresses, by family.
+    let offered: DirectAddressFamilies
+    /// Whether the answer named a relay.
+    let offeredRelay: Bool
+    /// This device's own candidate addresses when the attempt ended, if
+    /// the endpoint was bound.
+    let local: DirectAddressFamilies?
+    /// The path the connection ran on when it was found usable; nil if the
+    /// attempt failed.
+    let path: DirectPathKind?
+
+    var jsonObject: [String: Any] {
+        var object: [String: Any] = [
+            "offered": offered.jsonObject,
+            "offered_relay": offeredRelay,
+            "result": path?.rawValue ?? "failed",
+        ]
+        if let local {
+            object["local"] = local.jsonObject
+        }
+        return object
+    }
+}
+
+/// What the transport can say about its path, for diagnosis.
+struct DirectPathDiagnostics: Equatable, Sendable {
+    /// The path the live connection runs on now, if one is usable.
+    var current: DirectPathKind?
+    /// The last few attempts, oldest first.
+    var attempts: [DirectDialAttempt] = []
+
+    static let empty = DirectPathDiagnostics(current: nil, attempts: [])
+    /// How many attempts are kept.
+    static let attemptLimit = 5
+}
+
 /// "Open a byte stream to the selected instance."
 protocol DirectTransporting: AnyObject, Sendable {
     /// A runtime opened for `target`. The transport stops any work for the
@@ -144,4 +228,15 @@ protocol DirectTransporting: AnyObject, Sendable {
     /// Opens one stream over the path reported usable for `tag`. Throws when
     /// that path is gone, and promptly when its task is cancelled.
     func openStream(for tag: DirectStreamTag) async throws -> any DirectByteStream
+
+    /// The path the live connection runs on, and the last attempts.
+    @MainActor
+    var pathDiagnostics: DirectPathDiagnostics { get }
+}
+
+extension DirectTransporting {
+    @MainActor
+    var pathDiagnostics: DirectPathDiagnostics {
+        .empty
+    }
 }

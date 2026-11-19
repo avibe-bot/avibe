@@ -628,6 +628,10 @@ type DirectTracker = {
   readForHidden: number;
   closureHandlers: Set<() => void>;
   stateListeners: Set<() => void>;
+  /** The latest preference, ordered by `sequence`; null before any. */
+  preferred: NativeDirectPreference | null;
+  preferredSequence: number;
+  preferenceHandlers: Set<(preferred: NativeDirectPreference) => void>;
 };
 
 // One per document: a WebView document and each child window load their own
@@ -651,6 +655,7 @@ function observeDirectStatus(
   status: NativeDirectStatus,
   fromRead: boolean,
 ): void {
+  observeDirectPreference(tracker, status, fromRead);
   if (tracker.state !== 'ready') {
     // No stream of this document is open yet: a closure only raises the
     // baseline. A valid status answer is the baseline; an event is not.
@@ -666,6 +671,29 @@ function observeDirectStatus(
   tracker.closure = status.closure;
   for (const handler of Array.from(tracker.closureHandlers)) {
     if (tracker.closureHandlers.has(handler)) handler();
+  }
+}
+
+// The preference, ordered by `sequence`. Its handlers hear every change, and
+// every status read while it is `direct` (a resume), so a hand-over skipped
+// earlier can be tried again; they decide for themselves whether to act.
+function observeDirectPreference(
+  tracker: DirectTracker,
+  status: NativeDirectStatus,
+  fromRead: boolean,
+): void {
+  if (status.sequence <= tracker.preferredSequence && tracker.preferred !== null) {
+    if (!(fromRead && tracker.preferred === 'direct')) return;
+  } else {
+    const changed = tracker.preferred !== status.preferred;
+    tracker.preferred = status.preferred;
+    tracker.preferredSequence = status.sequence;
+    if (!changed && !fromRead) return;
+  }
+  const preferred = tracker.preferred;
+  if (preferred === null) return;
+  for (const handler of Array.from(tracker.preferenceHandlers)) {
+    if (tracker.preferenceHandlers.has(handler)) handler(preferred);
   }
 }
 
@@ -722,6 +750,9 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
     readForHidden: 0,
     closureHandlers: new Set(),
     stateListeners: new Set(),
+    preferred: null,
+    preferredSequence: -1,
+    preferenceHandlers: new Set(),
   };
   directTracker = tracker;
 
@@ -816,4 +847,88 @@ export function onNativeDirectClosure(handler: () => void): () => void {
   return () => {
     tracker.closureHandlers.delete(handler);
   };
+}
+
+/**
+ * Calls `handler` with the preference whenever it changes (ordered by
+ * `sequence`), and on every status read while it is `direct`. Without the
+ * `direct` capability this never fires.
+ */
+export function onNativeDirectPreference(
+  handler: (preferred: NativeDirectPreference) => void,
+): () => void {
+  const native = directBridge();
+  if (!native) return () => undefined;
+  const tracker = directTrackerFor(native);
+  tracker.preferenceHandlers.add(handler);
+  return () => {
+    tracker.preferenceHandlers.delete(handler);
+  };
+}
+
+/** This document's latest preference, or null before any (or without `direct`). */
+export function nativeDirectPreference(): NativeDirectPreference | null {
+  const native = directBridge();
+  return native ? directTrackerFor(native).preferred : null;
+}
+
+/** The shell answers `direct.handover` (`direct` version 2). */
+export function nativeDirectHandoverAvailable(): boolean {
+  return hasNativeCapability('direct', 2);
+}
+
+export type NativeDirectHandoverResult = { closed: number; kept: number; skipped?: string };
+
+const DIRECT_HANDOVER_WAIT_MS = 5000;
+
+/**
+ * Asks the shell to close the quiet public connections for this host, so the
+ * next connection takes the direct path (`direct.handover`). Null when
+ * unsupported, failed, or unanswered within a few seconds.
+ */
+export async function nativeDirectHandover(): Promise<NativeDirectHandoverResult | null> {
+  const native = directBridge();
+  if (!native || !nativeDirectHandoverAvailable()) return null;
+  let timer: number | null = null;
+  try {
+    const answer = await Promise.race([
+      native.call<unknown>('direct.handover'),
+      new Promise<null>((resolve) => {
+        timer = window.setTimeout(() => resolve(null), DIRECT_HANDOVER_WAIT_MS);
+      }),
+    ]);
+    if (!answer || typeof answer !== 'object') return null;
+    const { closed, kept, skipped } = answer as { closed?: unknown; kept?: unknown; skipped?: unknown };
+    if (!isCounter(closed) || !isCounter(kept)) return null;
+    return typeof skipped === 'string' ? { closed, kept, skipped } : { closed, kept };
+  } catch {
+    return null;
+  } finally {
+    if (timer !== null) window.clearTimeout(timer);
+  }
+}
+
+/** The kind of path the App's own direct connection runs on. */
+export type NativeDirectPathKind = 'relay' | 'ipv4' | 'ipv6';
+
+/** For the Settings line: the preference, and the App's own path if it has one. */
+export type NativeDirectPathSnapshot = {
+  preferred: NativeDirectPreference;
+  path: NativeDirectPathKind | null;
+};
+
+/** Reads `direct.status()` once for display. Null without `direct` or on failure. */
+export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot | null> {
+  const native = directBridge();
+  if (!native) return null;
+  try {
+    const answer = await native.call<unknown>('direct.status');
+    const status = parseNativeDirectStatus(answer);
+    if (!status) return null;
+    const raw = (answer as { path?: unknown }).path;
+    const path = raw === 'relay' || raw === 'ipv4' || raw === 'ipv6' ? raw : null;
+    return { preferred: status.preferred, path };
+  } catch {
+    return null;
+  }
 }

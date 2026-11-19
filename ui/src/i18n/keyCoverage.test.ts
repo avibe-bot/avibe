@@ -935,6 +935,7 @@ const NON_KEY_LITERALS = [
   'badge.set',
   // A native capability key; the shell advertises it beside the method names.
   'c1.share_draft',
+  'direct.handover',
   'direct.status',
   'direct.transportChanged',
   'haptics.impact',

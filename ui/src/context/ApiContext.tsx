@@ -35,9 +35,13 @@ import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import {
   nativeDirectBaselineState,
+  nativeDirectHandover,
+  nativeDirectHandoverAvailable,
   onNativeDirectClosure,
+  onNativeDirectPreference,
   subscribeNativeDirectBaseline,
 } from '../lib/native';
+import { pageConnectionsQuiet } from '../lib/pageConnections';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
@@ -654,6 +658,22 @@ export type TunnelNetworkPath = {
     assessment: 'same_metro' | 'same_country' | 'cross_country' | 'unknown';
   };
 };
+
+/** At most one direct hand-over this often. */
+const DIRECT_HANDOVER_SPACING_MS = 30_000;
+/** How long a hand-over waits for the page to be quiet before skipping. */
+const DIRECT_HANDOVER_QUIET_WAIT_MS = 10_000;
+const DIRECT_HANDOVER_QUIET_POLL_MS = 250;
+
+/** Resolves true once nothing of this page uses the network, false after `limitMs`. */
+async function waitForQuietPage(limitMs: number): Promise<boolean> {
+  const until = Date.now() + limitMs;
+  for (;;) {
+    if (pageConnectionsQuiet()) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => window.setTimeout(resolve, DIRECT_HANDOVER_QUIET_POLL_MS));
+  }
+}
 
 export type RemoteAccessStatus = {
   ok: boolean;
@@ -2850,6 +2870,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
   const rebuildWorkbenchEventsRef = useRef<() => void>(() => {});
+  // One hand-over per usable stretch of the direct path: re-armed when the
+  // preference goes back to the public path.
+  const directHandoverRef = useRef({ armed: true, running: false, lastAt: -Infinity });
+  const attemptDirectHandoverRef = useRef<() => Promise<void>>(async () => {});
   const openWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
@@ -3759,6 +3783,43 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWorkbenchEventReconnectLoop().wake();
   };
   rebuildWorkbenchEventsRef.current = rebuildWorkbenchEventsAfterClosure;
+
+  /**
+   * The App's direct path became usable while this page's live stream still
+   * runs on the public connection it loaded on. WebKit keeps reusing a pooled
+   * connection, so a rebuilt stream alone would stay on it
+   * (docs/plans/remote-direct-ios.md section 2). Once per usable stretch, and
+   * at most every DIRECT_HANDOVER_SPACING_MS: when nothing of this page is
+   * using the network (no request waiting for its answer, no WebSocket open),
+   * the stream is closed, the shell closes the public connections for this
+   * host that have gone quiet (`direct.handover`), and the stream is opened
+   * again, now over a new connection that takes the direct path. A page that
+   * is not quiet within DIRECT_HANDOVER_QUIET_WAIT_MS skips it; the next
+   * status read on a resume, or the next change, tries again. Nothing is
+   * replayed. Without `direct` version 2 nothing happens.
+   */
+  const attemptDirectHandover = async () => {
+    const state = directHandoverRef.current;
+    if (!state.armed || state.running || !nativeDirectHandoverAvailable()) return;
+    if (Date.now() - state.lastAt < DIRECT_HANDOVER_SPACING_MS) return;
+    if (nativeDirectBaselineState() !== 'ready' || eventHandlersRef.current.size === 0) return;
+    state.running = true;
+    try {
+      const quiet = await waitForQuietPage(DIRECT_HANDOVER_QUIET_WAIT_MS);
+      if (!quiet || !state.armed) return;
+      state.armed = false;
+      state.lastAt = Date.now();
+      closeActiveWorkbenchEventSource();
+      setWorkbenchEventConnectionState('reconnecting');
+      await nativeDirectHandover();
+      // Opened again at once, and its handshake announces the gap, as after a
+      // closure.
+      rebuildWorkbenchEventsAfterClosure();
+    } finally {
+      state.running = false;
+    }
+  };
+  attemptDirectHandoverRef.current = attemptDirectHandover;
   openWorkbenchEventsRef.current = () => {
     if (nativeDirectBaselineState() === 'ready') ensureWorkbenchEventSource();
   };
@@ -3776,11 +3837,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
     const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
+    const stopDirectPreference = onNativeDirectPreference((preferred) => {
+      if (preferred === 'tunnel') {
+        directHandoverRef.current.armed = true;
+        return;
+      }
+      void attemptDirectHandoverRef.current();
+    });
     const stopDirectBaseline = subscribeNativeDirectBaseline(() => openWorkbenchEventsRef.current());
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();
       stopDirectClosures();
+      stopDirectPreference();
       stopDirectBaseline();
       window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();

@@ -3146,7 +3146,14 @@
       "certificate": "Certificate valid until {{date}}",
       "detail": "{{certificate}} · {{page}}",
       "pageDirect": "This page's live connection: direct",
-      "pageOther": "This page's live connection: not direct"
+      "pageOther": "This page's live connection: not direct",
+      "device": "This device's direct path: {{state}}",
+      "deviceWithPath": "This device's direct path: {{state}} · {{path}}",
+      "deviceInUse": "in use",
+      "deviceOn": "on",
+      "pathRelay": "relay",
+      "pathIpv4": "direct IPv4",
+      "pathIpv6": "direct IPv6"
     }
   },
   "models": {

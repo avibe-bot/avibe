@@ -215,6 +215,13 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
     private var answers: [Data]
     private var storedStreams: [DirectIrohFakeStream] = []
     private var storedGate: DirectIrohPending<Void>?
+    private var storedPath: DirectPathKind?
+
+    /// The path the stand-in reports as selected.
+    var selectedPath: DirectPathKind? {
+        get { lock.withLock { storedPath } }
+        set { lock.withLock { storedPath = newValue } }
+    }
 
     /// `answers` are what the first read of each new stream returns, in
     /// order: the instance's answer to a probe. A stream beyond them stays
@@ -289,6 +296,12 @@ final class DirectIrohFakeEndpoint: DirectIrohEndpoint, @unchecked Sendable {
     private let log: DirectIrohEventLog
     private let lock = NSLock()
     private var storedDials: [Dial] = []
+    private var storedLocal: DirectAddressFamilies?
+    /// What the stand-in reports as its own candidates.
+    var localFamilies: DirectAddressFamilies? {
+        get { lock.withLock { storedLocal } }
+        set { lock.withLock { storedLocal = newValue } }
+    }
     /// What the dial returns, once the test supplies it.
     let connection = DirectIrohPending<DirectIrohFakeConnection>()
 

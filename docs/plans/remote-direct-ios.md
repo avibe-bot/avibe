@@ -199,17 +199,21 @@ A transport report counts only for the selection it was made for, and is dropped
 | An account transition (sign-in, sign-out, switch, store rotation) | Public | Closed | **Closed**: nothing of the old account is kept |
 | The listener fault (section 9) | Direct never again in the process; nothing is re-bound or rewritten | Kept (not closed to present the fault) | Kept |
 | The listener stops for good (no transport any more, process exit) | Not accepted | Closed | Closed |
+| A page asks to hand over (`direct.handover`, decision 2026-11-19), while the path is usable for its host and the caller is the sole live document of its data store with that host loaded | Direct | Kept | **Closed if quiet**: those for that host that carried no bytes either way for 1 s; busy ones kept |
 
 **A network callback alone is not proof of loss** (rule). It changes only what new connections prefer, until the transport validates the path.
 
 **A committed public relay is closed only for these reasons:**
 
 - its own connection fails, or reports itself not viable for longer than a bound set from measurement;
+- a page's hand-over, only while quiet (the row above);
 - an account transition;
 - port recovery;
 - the listener stopping for good.
 
-A loss of the direct path, a selection change, or a better path appearing never closes it. So a healthy upload or terminal on the public backend survives an unrelated direct loss.
+A loss of the direct path or a selection change never closes it. So a healthy upload or terminal on the public backend survives an unrelated direct loss.
+
+**The hand-over** (decision, 2026-11-19, after the owner's trial). A path that becomes usable does not move a page by itself: WebKit keeps reusing the pooled public connection the page loaded on (section 2), so a rebuilt stream stays on it. So the page asks. Once per usable stretch, and at most every 30 s, when nothing of the page is using the network (no `apiFetch` waiting for its answer, no WebSocket open; skipped after 10 s and tried again on the next resume or change), it closes its live stream and calls `direct.handover()`. The App closes that host's committed public relays that have been quiet for 1 s, keeps busy ones, and answers `{closed, kept}`; the page then opens its stream again, over a new connection that takes the direct backend. Limits: the App acts only for the sole live document of the store with that host loaded, and skips when another WebView of the store has it, or when it cannot tell; a relay busy for another reason is kept, and the stream may then stay public until the next try; other requests may stay on a pooled public connection that was not quiet. Nothing is replayed. The loss path is unchanged: a closure rebuilds the stream onto the public path.
 
 Closing a relay closes WebKit's connection to the listener. Over HTTP/2 one connection carries many requests, so every request on a lost direct connection fails with it. That is the cost of a lost path, not of the closing. Nothing replays them.
 

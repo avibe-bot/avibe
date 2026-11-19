@@ -74,6 +74,15 @@ protocol DirectIrohEndpoint: AnyObject, Sendable {
     /// Closes the endpoint, its sockets, and everything still running on
     /// it, a dial in progress included.
     func close() async
+
+    /// This endpoint's own candidate addresses now, by family.
+    var localFamilies: DirectAddressFamilies? { get }
+}
+
+extension DirectIrohEndpoint {
+    var localFamilies: DirectAddressFamilies? {
+        nil
+    }
 }
 
 protocol DirectIrohConnection: AnyObject, Sendable {
@@ -87,6 +96,16 @@ protocol DirectIrohConnection: AnyObject, Sendable {
 
     /// Closes the connection and every stream on it, at once.
     func close()
+
+    /// The path selected for application data now, if the binding can
+    /// tell.
+    var selectedPath: DirectPathKind? { get }
+}
+
+extension DirectIrohConnection {
+    var selectedPath: DirectPathKind? {
+        nil
+    }
 }
 
 struct DirectIrohStreamHalves: Sendable {

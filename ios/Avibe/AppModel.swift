@@ -481,6 +481,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Answers `direct.handover` for the runtime's WebViews; `nil` without a
+    /// direct transport.
+    var directHandoverProvider: DirectHandoverProvider? {
+        guard directPathController != nil else {
+            return nil
+        }
+        return { [weak self] origin, soleDocument, reply in
+            guard let controller = self?.directPathController else {
+                reply(.skipped(.notUsable))
+                return
+            }
+            controller.handover(for: origin, soleDocument: soleDocument, reply: reply)
+        }
+    }
+
     var pushCoordinator: NativePushCoordinator {
         nativePushCoordinator
     }

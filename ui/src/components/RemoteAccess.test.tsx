@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { RemoteAccess } from './RemoteAccess';
-import { remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import { deviceDirectLine, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
 import { setLiveStreamVia } from '../lib/liveStreamVia';
 import type { RemoteAccessStatus, TunnelQualitySnapshot } from '../context/ApiContext';
 import { InstanceAuthorizationProvider } from '../context/InstanceAuthorizationProvider';
@@ -136,6 +136,20 @@ describe('RemoteAccess direct lines', () => {
     expect(remoteAccessDirectLines(direct('running'), null, NOW)?.certificateDate?.toISOString()).toBe('2027-02-14T08:00:00.000Z');
     expect(remoteAccessDirectLines(direct('running', '', '2026-11-01T00:00:00Z'), null, NOW)?.certificateDate).toBeNull();
     expect(remoteAccessDirectLines(direct('running', '', null), null, NOW)?.certificateDate).toBeNull();
+  });
+
+  it('says whether this device\'s own direct path is up, and which kind, only in the App', () => {
+    expect(deviceDirectLine(null, 'direct')).toBeNull();
+    expect(deviceDirectLine({ preferred: 'tunnel', path: null }, null)).toBeNull();
+    expect(deviceDirectLine({ preferred: 'direct', path: 'relay' }, 'other')).toEqual({
+      stateKey: 'remoteAccess.direct.deviceOn', pathKey: 'remoteAccess.direct.pathRelay',
+    });
+    expect(deviceDirectLine({ preferred: 'direct', path: 'ipv6' }, 'direct')).toEqual({
+      stateKey: 'remoteAccess.direct.deviceInUse', pathKey: 'remoteAccess.direct.pathIpv6',
+    });
+    expect(deviceDirectLine({ preferred: 'direct', path: null }, null)).toEqual({
+      stateKey: 'remoteAccess.direct.deviceOn', pathKey: null,
+    });
   });
 
   it('hides the page line until a live stream has answered', () => {
