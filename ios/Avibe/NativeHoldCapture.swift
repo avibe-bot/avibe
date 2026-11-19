@@ -93,10 +93,11 @@ final class NativeHoldCapture {
     private let afterQueued: (@escaping () -> Void) -> Void
     private var backgroundObserver: NSObjectProtocol?
 
-    /// `afterQueued` runs its work once what the input already sent to the
-    /// main queue has arrived (by default, the main queue's next turn).
     private let isInBackground: () -> Bool
 
+    /// `afterQueued` runs its work once what the input already sent to the
+    /// main queue has arrived (by default, the main queue's next turn);
+    /// `isInBackground` says whether the App is in the background.
     init(
         audio: NativeHoldCaptureAudio,
         afterQueued: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
