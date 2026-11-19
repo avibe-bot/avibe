@@ -187,3 +187,86 @@ struct FixtureReadinessError: Error, CustomStringConvertible {
 enum WebKitReadinessError: Error {
     case documentNotLoaded
 }
+
+/// Draft probe (not for merge), for cold-start PR 3: what WebKit gives back
+/// of a live main-document response, and whether a simulated load with that
+/// response's headers enforces its CSP.
+@MainActor
+final class CachedPageProbeTests: XCTestCase {
+    private static let body = """
+        <!doctype html><html><head><title>probe</title>
+        <script>window.inlineRan = true;</script></head>
+        <body><p id="x">served bytes</p></body></html>
+        """
+
+    func testWhatWebKitKeepsOfTheLiveDocument() async throws {
+        let server = try LocalHTTPServer { request in
+            LocalHTTPResponse(
+                status: 200,
+                headers: [
+                    ("Content-Type", "text/html; charset=utf-8"),
+                    ("Content-Security-Policy", "default-src 'self'; script-src 'self'"),
+                    ("Permissions-Policy", "camera=(), microphone=(self)"),
+                    ("Cache-Control", "no-store, private"),
+                ],
+                body: Data(Self.body.utf8)
+            )
+        }
+        let base = try await server.start()
+        defer { server.stop() }
+
+        // Live load: headers from the navigation response, then the archive.
+        let recorder = ResponseRecorder()
+        let live = WKWebView(frame: .zero)
+        live.navigationDelegate = recorder
+        live.load(URLRequest(url: base))
+        try await WebKitReadiness.waitForDocument(in: live)
+        let liveInline = try await live.evaluateJavaScript("window.inlineRan === true") as? Bool
+        print("[cache probe] live: inline script ran=\(String(describing: liveInline))")
+        print("[cache probe] navigation response headers: \(recorder.headers.keys.sorted())")
+        print("[cache probe] CSP from navigation response: \(recorder.headers["Content-Security-Policy"] ?? "none")")
+
+        let archive: Data = try await withCheckedThrowingContinuation { continuation in
+            live.createWebArchiveData { continuation.resume(with: $0) }
+        }
+        let plist = try PropertyListSerialization.propertyList(from: archive, format: nil) as? [String: Any]
+        let main = plist?["WebMainResource"] as? [String: Any]
+        let data = main?["WebResourceData"] as? Data
+        print("[cache probe] archive keys: \(plist?.keys.sorted() ?? []); main keys: \(main?.keys.sorted() ?? [])")
+        print("[cache probe] archive main data equals served bytes: \(data == Data(Self.body.utf8)); size=\(data?.count ?? -1) served=\(Data(Self.body.utf8).count)")
+        if let responseData = main?["WebResourceResponse"] as? Data,
+           let response = try? NSKeyedUnarchiver.unarchivedObject(ofClass: HTTPURLResponse.self, from: responseData) {
+            print("[cache probe] archive response headers: \(response.allHeaderFields.keys.map { "\($0)" }.sorted())")
+        } else {
+            print("[cache probe] archive response: not an HTTPURLResponse archive (\(type(of: main?["WebResourceResponse"])))")
+        }
+
+        // Simulated load with the recorded headers and the served bytes.
+        for (label, headers) in [("with CSP", recorder.headers), ("without CSP", recorder.headers.filter { $0.key != "Content-Security-Policy" })] {
+            let simulated = WKWebView(frame: .zero)
+            let response = HTTPURLResponse(url: base, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!
+            simulated.loadSimulatedRequest(URLRequest(url: base), response: response, responseData: Data(Self.body.utf8))
+            try await WebKitReadiness.waitForDocument(in: simulated)
+            let inline = try await simulated.evaluateJavaScript("window.inlineRan === true") as? Bool
+            let origin = try await simulated.evaluateJavaScript("location.origin") as? String
+            print("[cache probe] simulated \(label): inline script ran=\(String(describing: inline)), origin=\(origin ?? "?")")
+        }
+    }
+}
+
+@MainActor
+private final class ResponseRecorder: NSObject, WKNavigationDelegate {
+    var headers: [String: String] = [:]
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void
+    ) {
+        if let http = navigationResponse.response as? HTTPURLResponse, navigationResponse.isForMainFrame {
+            for (key, value) in http.allHeaderFields {
+                headers["\(key)"] = "\(value)"
+            }
+        }
+        decisionHandler(.allow)
+    }
+}
