@@ -1254,7 +1254,7 @@ enum VoiceCaptureEndSwitch {
 
     /// Only TestFlight and development builds take the switch's URL; an App
     /// Store build ignores it.
-    static var isInternalBuild: Bool {
+    nonisolated static var isInternalBuild: Bool {
         #if DEBUG
         return true
         #else
