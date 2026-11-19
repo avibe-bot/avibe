@@ -127,6 +127,11 @@ struct MobileRuntimeContext: Equatable {
     fileprivate let websiteDataStoreIdentifier: UUID
 }
 
+extension MobileRuntimeContext {
+    /// The WebKit store this runtime belongs to (read-only outside this file).
+    var websiteDataStoreID: UUID { websiteDataStoreIdentifier }
+}
+
 enum MobileSessionState: Equatable {
     case signedOut
     case signedIn(

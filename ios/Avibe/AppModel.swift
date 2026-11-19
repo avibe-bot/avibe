@@ -90,6 +90,19 @@ enum RuntimeNavigationStage: Equatable {
 struct RuntimeNavigationEvent: Equatable {
     let stage: RuntimeNavigationStage
     let destination: NavigationDestination?
+    /// The document came from the App's cache of the instance's last page
+    /// (`RuntimePageCache`), not from the network.
+    let fromCache: Bool
+
+    init(
+        stage: RuntimeNavigationStage,
+        destination: NavigationDestination?,
+        fromCache: Bool = false
+    ) {
+        self.stage = stage
+        self.destination = destination
+        self.fromCache = fromCache
+    }
 }
 
 enum RuntimeOpenPhase: Equatable {
@@ -97,6 +110,9 @@ enum RuntimeOpenPhase: Equatable {
     case connecting
     case authenticating
     case loadingPage
+    /// The instance's last page has loaded from the App's cache, still
+    /// covered: the instance itself has not answered yet.
+    case showingCached
     case awaitingUser
     /// A legacy document finished without a product-ready contract. The page
     /// is handed to the user, but Native does not claim the Runtime is ready.
@@ -272,6 +288,13 @@ final class AppModel: ObservableObject {
     }
     /// Recovery shown over the instance list after an automatic timeout.
     @Published private(set) var runtimeOpenNotice: RuntimeOpenNotice?
+    /// The instances' last pages, per account and origin, kept with the
+    /// account's WebKit store: each store has its own directory, which goes
+    /// when the account changes or signs out.
+    var runtimePageCache: RuntimePageCache {
+        RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(websiteDataStore.identifier.uuidString, isDirectory: true))
+    }
     @Published private(set) var lastRuntimeOpenTermination: RuntimeOpenTermination?
     @Published private(set) var systemScheduleConfirmation: SystemScheduleConfirmation?
 
@@ -1617,6 +1640,64 @@ final class AppModel: ObservableObject {
         runtimeOpenNotice = nil
     }
 
+    /// A page shown from the cache reached its instance (the instance
+    /// answered a request from that page's origin): the open is done.
+    func runtimeCachedPageConnected(attemptID: Int, runtime: MobileRuntimeContext) {
+        guard
+            runtimeIdentity == attemptID,
+            route.runtime == runtime,
+            sessionCoordinator.isSelectedRuntime(runtime)
+        else {
+            return
+        }
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.runtime == runtime,
+            attempt.phase == .showingCached
+        else {
+            return
+        }
+        finishRuntimeOpenAutomaticBudget(phase: .documentLoaded, attemptID: attemptID)
+        didFinishRuntimeLoading()
+    }
+
+    /// The cache as the runtime controller for `runtime` uses it: its page
+    /// for this account and origin, and storing a new one while `runtime`
+    /// is still the account's selected instance.
+    func runtimePageCacheAccess(for runtime: MobileRuntimeContext) -> RuntimePageCacheAccess? {
+        guard let origin = WebOrigin(url: runtime.instance.url)?.serialized else {
+            return nil
+        }
+        let accountID = runtime.account.id
+        // The runtime's own store's pages, whatever store is current later.
+        let cache = RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(runtime.websiteDataStoreID.uuidString, isDirectory: true))
+        return RuntimePageCacheAccess(
+            load: {
+                guard let page = cache.page(accountID: accountID, origin: origin) else {
+                    return nil
+                }
+                // At most a day old: then a live load recaptures it (a new
+                // build, new headers) and renews the instance's cookie as a
+                // top-level load does.
+                let age = Date().timeIntervalSince(page.capturedAt)
+                guard age >= 0, age < RuntimePageCache.maximumAge else {
+                    cache.removePage(accountID: accountID, origin: origin)
+                    return nil
+                }
+                return page
+            },
+            store: { [weak self] page in
+                guard let self, self.sessionCoordinator.isSelectedRuntime(runtime) else { return }
+                cache.store(page, accountID: accountID, origin: origin)
+            },
+            remove: {
+                cache.removePage(accountID: accountID, origin: origin)
+            }
+        )
+    }
+
     func handleRuntimeNavigation(
         _ event: RuntimeNavigationEvent,
         attemptID: Int,
@@ -1657,7 +1738,7 @@ final class AppModel: ObservableObject {
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : .connecting,
+                    : event.fromCache ? .showingCached : .connecting,
                 attemptID: attemptID
             )
         case .committed:
@@ -1666,16 +1747,27 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
+            // A cached document stays covered from its start: never the
+            // uncovered `.loadingPage`.
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : .loadingPage,
+                    : event.fromCache ? .showingCached : .loadingPage,
                 attemptID: attemptID
             )
         case .finished:
             guard attempt.phase != .documentLoaded,
                   attempt.phase != .failed
             else {
+                return
+            }
+            if event.fromCache, !isAuthenticationDestination(event.destination) {
+                // Loaded but covered until the instance answers for this
+                // session (`runtimeCachedPageConnected`): the Web UI cannot
+                // yet show content without its instance (it would fall back
+                // to setup). The budget keeps running; out of time, the open
+                // ends as any open does.
+                setRuntimeOpenPhase(.showingCached, attemptID: attemptID)
                 return
             }
             if isAuthenticationDestination(event.destination) {
@@ -2311,6 +2403,9 @@ final class AppModel: ObservableObject {
     ] {
         invalidatePendingSystemSchedule()
         clearPendingPushOpened()
+        // An account's pages go with it (each account's data is kept
+        // separately and removed when it signs out or changes).
+        runtimePageCache.removeAll()
         // Any account invalidation ends a route-prepare or held open; neither
         // may leave the Native loading surface behind without an attempt.
         retireRuntimeOpenForAccountTransition()

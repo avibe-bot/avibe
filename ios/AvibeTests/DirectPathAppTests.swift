@@ -2256,6 +2256,91 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(app.mayReload(runtime))
     }
 
+    /// An open whose page loaded from the cache stays covered (the loading
+    /// layer) until the instance answers for this session, which ends the
+    /// open. Without an answer the open ends as any open does: back to the
+    /// list with the timeout notice. A stored page is used for at most a
+    /// day.
+    @MainActor
+    func testACachedPageStaysCoveredUntilItsInstanceAnswers() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(directTransport: nil, runtimeOpenTiming: timing)
+        defer { app.runtimePageCache.removeAll() }
+        let runtime = try await select("instance-1", in: app)
+        let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
+
+        // Covered from the cached document's start to its load, never the
+        // uncovered `.loadingPage`.
+        for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+            app.handleRuntimeNavigation(
+                RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                attemptID: attempt.id,
+                runtime: runtime
+            )
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached, "\(stage)")
+            XCTAssertEqual(
+                BrowserOverlay(attemptPhase: try XCTUnwrap(app.runtimeOpenAttempt).phase, directFault: false),
+                .loading,
+                "\(stage)"
+            )
+        }
+        app.runtimeCachedPageConnected(attemptID: attempt.id, runtime: runtime)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
+        XCTAssertEqual(app.route, .browser(runtime))
+
+        // Opened again from the cache, and the instance never answers.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let other = try await waitForBrowser("instance-2", in: app)
+        let second = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true),
+            attemptID: second.id,
+            runtime: other
+        )
+        timing.advance(by: .seconds(60))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertEqual(app.runtimeOpenNotice?.lastPhase, .showingCached)
+
+        // A day-old page is not used, and is removed.
+        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: runtime))
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
+        app.runtimePageCache.store(
+            RuntimeCachedPage(
+                url: runtime.instance.url,
+                headers: ["Content-Type": "text/html"],
+                body: Data("<!doctype html>".utf8),
+                capturedAt: Date().addingTimeInterval(-(RuntimePageCache.maximumAge + 60))
+            ),
+            accountID: "account-1",
+            origin: origin
+        )
+        XCTAssertNil(access.load())
+        XCTAssertNil(app.runtimePageCache.page(accountID: "account-1", origin: origin))
+    }
+
+    /// An account's pages are removed when it signs out.
+    @MainActor
+    func testAnAccountsCachedPagesGoWithASignOut() async throws {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let page = RuntimeCachedPage(
+            url: runtime.instance.url,
+            headers: ["Content-Type": "text/html"],
+            body: Data("<!doctype html>".utf8),
+            capturedAt: Date()
+        )
+        try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).store(page)
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
+        // The pages of the store the account used, whatever store comes next.
+        let accountsPages = RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(runtime.websiteDataStoreID.uuidString, isDirectory: true))
+        XCTAssertEqual(accountsPages.page(accountID: "account-1", origin: origin), page)
+
+        _ = try await app.mobileSessionCoordinator.logout()
+
+        XCTAssertNil(accountsPages.page(accountID: "account-1", origin: origin))
+    }
+
     @MainActor
     func testRuntimeOpenBudgetShowsLongWaitThenTimesOutToThePickerAndCanRetry() async throws {
         let timing = RuntimeOpenManualTiming()

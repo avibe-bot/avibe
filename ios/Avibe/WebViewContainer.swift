@@ -43,6 +43,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
+    let pageCache: RuntimePageCacheAccess?
+    let cachedPageConnected: () -> Void
     let didCreateController: (WebViewController) -> Void
     let didReleaseWebViews: (WebsiteDataStoreReleaseBarrier) -> Void
     let didStartLoading: () -> Void
@@ -81,6 +83,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
+        pageCache: RuntimePageCacheAccess? = nil,
+        cachedPageConnected: @escaping () -> Void = {},
         didCreateController: @escaping (WebViewController) -> Void,
         didReleaseWebViews: @escaping (WebsiteDataStoreReleaseBarrier) -> Void,
         didStartLoading: @escaping () -> Void,
@@ -111,6 +115,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
         self.runtimeNavigationChanged = runtimeNavigationChanged
+        self.pageCache = pageCache
+        self.cachedPageConnected = cachedPageConnected
         self.didCreateController = didCreateController
         self.didReleaseWebViews = didReleaseWebViews
         self.didStartLoading = didStartLoading
@@ -148,6 +154,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,
             runtimeNavigationChanged: runtimeNavigationChanged,
+            pageCache: pageCache,
+            cachedPageConnected: cachedPageConnected,
             didStartLoading: didStartLoading,
             didFinishLoading: didFinishLoading,
             didFailLoading: didFailLoading

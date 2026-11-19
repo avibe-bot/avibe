@@ -420,6 +420,13 @@ private struct BrowserScreen: View {
                                 runtime: runtime
                             )
                         },
+                        pageCache: appModel.runtimePageCacheAccess(for: runtime),
+                        cachedPageConnected: {
+                            appModel.runtimeCachedPageConnected(
+                                attemptID: attemptID,
+                                runtime: runtime
+                            )
+                        },
                         didCreateController: {
                             appModel.registerRuntimeController(
                                 $0,
@@ -868,6 +875,8 @@ private func runtimeOpenPhaseText(
         key = "runtime.open.phase.authenticating.named"
     case .loadingPage:
         key = "runtime.open.phase.loading_page.named"
+    case .showingCached:
+        key = "runtime.open.phase.connecting.named"
     case .awaitingUser:
         key = "runtime.open.awaiting_user.title.named"
     case .documentLoaded:
@@ -892,6 +901,8 @@ private func runtimeOpenPhaseLabel(_ phase: RuntimeOpenPhase) -> String {
         key = "runtime.open.stage.authenticating"
     case .loadingPage:
         key = "runtime.open.stage.loading_page"
+    case .showingCached:
+        key = "runtime.open.stage.connecting"
     case .awaitingUser:
         key = "runtime.open.stage.awaiting_user"
     case .documentLoaded:
@@ -938,7 +949,9 @@ enum BrowserOverlay: Equatable {
             return
         }
         switch attemptPhase {
-        case .preparingRoute, .connecting, .authenticating, .loadingPage:
+        case .preparingRoute, .connecting, .authenticating, .loadingPage,
+             .showingCached:
+            // A cached page stays covered until its instance answers.
             self = .loading
         case .awaitingUser:
             self = .awaitingUser
