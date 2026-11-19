@@ -1260,7 +1260,7 @@ final class AppModel: ObservableObject {
             settleOpenFirst(runtime, checked: checked)
             // A tap or shortcut that arrived meanwhile waited for the
             // check, so it opens against the answered session.
-            completeBootstrap()
+            await completeBootstrap()
             return
         }
         sessionCoordinator.activateAccountSurface()
@@ -1283,7 +1283,7 @@ final class AppModel: ObservableObject {
             // confirms signed-out or a different account.
             route = .onboarding(.instances)
         }
-        completeBootstrap()
+        await completeBootstrap()
     }
 
     /// After an open-first's session check: push work the open started was
@@ -1311,7 +1311,7 @@ final class AppModel: ObservableObject {
         cancelRuntimeOpen(attemptID: attempt.id)
     }
 
-    private func completeBootstrap() {
+    private func completeBootstrap() async {
         hasCompletedBootstrap = true
         // Navigation requested before bootstrap is delivered before Health
         // restoration, which may wait on the network and HealthKit.

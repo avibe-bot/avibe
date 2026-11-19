@@ -4218,7 +4218,7 @@ final class DirectPathAppTests: XCTestCase {
             )
             await fulfillment(
                 of: [started.expectation],
-                timeout: WebKitReadiness.standardTransportOperationSeconds
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
             )
             // avibe.bot has not answered, and the instance is already open.
             guard case .browser(let opened) = next.route else {
@@ -4230,12 +4230,12 @@ final class DirectPathAppTests: XCTestCase {
 
             release.signal()
             if row.staysOpen {
-                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                     next.mobileSessionCoordinator.isCurrentRuntime(opened)
                 }
                 XCTAssertEqual(next.route, .browser(opened), row.name)
             } else {
-                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                     next.route == .onboarding(.instances)
                 }
                 XCTAssertFalse(next.mobileSessionCoordinator.isSelectedRuntime(opened), row.name)
