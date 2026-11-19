@@ -2705,6 +2705,29 @@ final class DirectPathAppTests: XCTestCase {
                     third.route == .onboarding(.instances)
                 }
             }
+
+            // A launch with no last good session checks first: the confirmed
+            // listing opens it only for its page, and the open waits for it.
+            defaults.removeObject(forKey: "avibe.mobile.lastGoodSession")
+            let checkFirst = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { offline },
+                reusingDefaults: defaults
+            )
+            if marked {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    checkFirst.runtimeOpenAttempt?.listedOffline == true
+                }
+                guard case .browser(let opened) = checkFirst.route else {
+                    return XCTFail("A checked launch did not open an offline instance with its cached page")
+                }
+                XCTAssertFalse(opened.instance.available)
+            } else {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    checkFirst.route == .onboarding(.instances)
+                }
+                XCTAssertNil(checkFirst.runtimeOpenAttempt)
+            }
         }
     }
 

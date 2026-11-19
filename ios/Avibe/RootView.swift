@@ -695,6 +695,7 @@ struct RuntimeCachedPageOfflineBanner: View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .center, spacing: 10) {
                 message
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 buttons
             }
             VStack(alignment: .leading, spacing: 10) {
