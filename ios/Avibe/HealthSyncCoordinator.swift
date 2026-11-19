@@ -39,6 +39,13 @@ final class HealthSyncCoordinator: ObservableObject {
     var protectedDataAvailable: () -> Bool = { UIApplication.shared.isProtectedDataAvailable }
     private var foreground = false
     private var restoring = false
+
+    /// A connection, restoration, sync, cleanup or convergence under way
+    /// (not the idle poll or retry timers), for voice capture's check before
+    /// it ends a background process.
+    var hasWorkInFlight: Bool {
+        connecting != nil || restoring || syncTask != nil || cleanupTask != nil || convergeTask != nil
+    }
     private var uploadingIDs: Set<String> = []
     private var backgroundDelivery = false
     private var pollTask: Task<Void, Never>?

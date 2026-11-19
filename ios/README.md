@@ -334,14 +334,20 @@ the main Bot acts on the user's computer.
   App's process. A take ends by itself after five minutes, is discarded under
   0.6 seconds, and is sent as far as it got when the microphone is
   interrupted.
-- Before the microphone opens, `VoiceCaptureController` reads the selected
-  instance's `GET /api/asr/status` and records only when `consent` is
-  `granted`. A missing `consent` field is an Avibe from before the voice
-  consent question: nothing is recorded, and the Live Activity asks to update
-  Avibe. `null` or `declined`, no sign-in, no microphone permission, or Live
-  Activities turned off bring the App to the main Bot's conversation, where
-  the Web UI asks. A later `403 voice_consent_required` stops the take and
-  keeps nothing.
+- Once recording has begun, `VoiceCaptureController` reads the selected
+  instance's `GET /api/asr/status`; nothing is transcribed or sent unless
+  `consent` is `granted`. A missing `consent` field is an Avibe from before
+  the voice consent question: the take is discarded and the Live Activity
+  asks to update Avibe. `null` or `declined` discards the take; in front the
+  App opens the main Bot's conversation, where the Web UI asks, and in the
+  background the island says so. An unreachable instance is not a no: the
+  take is kept on the phone, unsent, for Retry, which asks again. No
+  sign-in, no microphone permission, or Live Activities turned off bring the
+  App to the main Bot's conversation before anything records. A later
+  `403 voice_consent_required` stops the take and keeps nothing. The take's
+  file lives in `Caches/VoiceCapture` (excluded from backup, the default
+  protection class) until it is sent or discarded; leftovers are deleted at
+  launch.
 - The take is sent as `POST /api/asr/transcribe` (the whole AAC take), then
   `GET /api/sessions/main` and `POST /api/sessions/<id>/messages` with
   `metadata.input = "voice"`. The reply arrives as the instance's usual
@@ -380,12 +386,13 @@ the main Bot acts on the user's computer.
   stops the take and discards it unsent, said in the App (in front) or on
   the island. A stop before the answer waits for it. The message carries how
   it recorded (`0` in the background, `3` in front, with the refused
-  background try), the press's process facts (`cold` when this press
-  launched the process in the background and it was never shown; `launch=`,
-  `age=`, `front=`, `presses=`, and `bgTries=` background activations this
-  process made before), whether another App was playing audio and where
-  sound goes, in `metadata.capture_attempt`, for example
-  `3 [background warm launch=inactive age=95 front=1 presses=2 otherAudio=0 silenceHint=0 out=Speaker bgTries=2] (0 sessionActivate 561015905)`.
+  background try), the press's process facts (`pid=`, `start=`, `age=`,
+  `byPress=` and `cold` when this press launched the process within 2 s and
+  it was never shown, `scene=`, `presses=` that started a take, `session=`,
+  `launch=`, `prevEnd=`, and `bgTries=` background activations this process
+  made before), whether another App was playing audio and where sound goes,
+  in `metadata.capture_attempt`, for example
+  `3 [background warm pid=812 start=1795104000 age=95.2 byPress=0 scene=1 presses=2 session=0 launch=background prevEnd=- otherAudio=0 silenceHint=0 out=Speaker bgTries=2] (0 sessionActivate 561015905)`.
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is
@@ -402,8 +409,18 @@ the main Bot acts on the user's computer.
 - If the system will not start the Live Activity, nothing is recorded. When
   "Talk to Main Bot" has to bring Avibe forward, an alert says why.
 - An account sign-out or change (`AppModel.prepareForAccountTransition`)
-  stops and discards any take, releases its WebView, and makes a start still
-  waiting on the instance give up.
+  stops and discards any take, releases its WebView, and makes a press still
+  coming forward give up.
+- Variant (a), behind a hidden switch that is off by default: once a take
+  recorded in the background has been sent (its message accepted, its audio
+  deleted), the process ends about a second later, so the next press is a
+  process launched for it (legato and oliv do the same; Apple's QA1561
+  discourages ending an App, so it stays off unless the owner turns it on).
+  It never ends a process that was ever shown, while Avibe is in front, with
+  a take under way, or with health sync or push work in flight; the decision
+  goes into the next press's `capture_attempt` (`prevEnd=`). The switch is
+  not in Settings and not discoverable: opening
+  `avibe-diagnostics://voice/end-after-background?on=1` (or `on=0`) sets it.
 - `VoiceCaptureInstanceClient` makes these requests as the signed-in user
   without the runtime WebView: a hidden `WKWebView` on the account's own
   named store (the selection and store identifier the account coordinator

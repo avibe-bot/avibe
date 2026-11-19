@@ -172,6 +172,10 @@ struct AvibeApp: App {
             RootView()
                 .modifier(HealthConsentHost(health: AvibeAppDelegate.healthSync))
                 .environmentObject(appModel)
+                .onOpenURL { url in
+                    // The hidden diagnostics switch (VoiceCaptureEndSwitch).
+                    VoiceCaptureEndSwitch.handle(url)
+                }
                 .task {
                     // App Shortcuts (AppShortcuts.swift) reach the model here.
                     let appModel = appModel

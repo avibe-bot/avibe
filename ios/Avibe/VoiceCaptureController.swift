@@ -122,6 +122,19 @@ struct VoiceCaptureEnvironment {
     /// Says a refusal in front: the main Bot chat for what the App must ask
     /// (voice consent, sign-in), and an alert with the reason.
     var presentInFront: (_ reason: VoiceCaptureAttributes.Reason, _ needsApp: Bool) -> Void
+    /// Variant (a), behind a hidden switch (default off): end this process
+    /// shortly after a background capture is sent, so the next press gets a
+    /// process launched for it (iOS lets such a process start audio once).
+    var endProcessAfterBackgroundCapture: () -> Bool
+    /// Whether a scene of this process was ever active (shown).
+    var processEverShown: () -> Bool
+    /// Other work that must not be cut off (nil when none), e.g. `push`.
+    var otherWorkInFlight: () -> String?
+    /// Waits before ending the process (about 1 s).
+    var waitBeforeEnding: () async -> Void
+    var endProcess: () -> Void
+    /// Keeps the decision for the next press's `capture_attempt`.
+    var noteEndDecision: (String) -> Void
     var now: () -> Date
     var sleep: (Duration) async -> Void
 
@@ -167,6 +180,17 @@ struct VoiceCaptureEnvironment {
             }
             VoiceCaptureAlert.present(reason)
         },
+        endProcessAfterBackgroundCapture: { VoiceCaptureEndSwitch.isOn },
+        processEverShown: { VoiceCaptureLaunch.everShown },
+        otherWorkInFlight: {
+            if UIApplication.shared.applicationState != .background { return "front" }
+            if AvibeAppDelegate.healthSync.hasWorkInFlight { return "health" }
+            if NativePushCoordinator.current?.hasWorkInFlight == true { return "push" }
+            return nil
+        },
+        waitBeforeEnding: { try? await Task.sleep(for: .seconds(1)) },
+        endProcess: { exit(0) },
+        noteEndDecision: { VoiceCaptureEndSwitch.noteDecision($0) },
         now: Date.init,
         sleep: { try? await Task.sleep(for: $0) }
     )
@@ -215,12 +239,19 @@ final class VoiceCaptureController {
     struct Refusal: Equatable {
         let reason: VoiceCaptureAttributes.Reason
         let needsApp: Bool
+        /// The instance could not be reached (or answered with an error):
+        /// not a no. The take is kept on the phone for Retry, which asks
+        /// again before anything is sent.
+        var transient = false
     }
 
     /// The App's state at the press that is starting, for the message.
     private var pressContext = ""
     /// The account generation a press reserved its take under.
     private var reservedGeneration = 0
+    /// The press holding the reservation: an older intent resuming late
+    /// cannot take over a newer press's reservation.
+    private(set) var reservation: UUID?
 
     /// The longest take; it is then sent as if the user stopped it.
     static let maximumDuration: Duration = .seconds(5 * 60)
@@ -288,7 +319,10 @@ final class VoiceCaptureController {
         /// The instance's answer on voice input, asked once recording has
         /// begun so no word is lost: the audio stays on the phone until it
         /// is a yes, and is discarded unsent on a no (5.1.2(i)).
-        let consent: Task<Refusal?, Never>
+        var consent: Task<Refusal?, Never>
+        /// Recorded in the background (not in front): the process may then
+        /// end after it is sent, behind the switch.
+        let inBackground: Bool
         var endedAt: Date?
         /// Kept once transcribed, so Retry does not transcribe again.
         var text: String?
@@ -341,6 +375,15 @@ final class VoiceCaptureController {
     /// (`.preparing`) for `startTake(inFront:)`, which the intent calls once
     /// it has brought Avibe forward.
     func beginPress() async -> Outcome? {
+        // A reservation whose intent ended without coming forward (or
+        // saying so) is abandoned once the wait is over.
+        if case .preparing = state, let reservedAt,
+           environment.now().timeIntervalSince(reservedAt) >= Self.foregroundWait
+        {
+            record("an abandoned press expired")
+            state = .idle
+            backgroundAttempt = nil
+        }
         // The system may run the intent twice for one press: a run right
         // after a start that failed and said so does nothing more.
         if case .idle = state, let failedStartAt,
@@ -378,6 +421,7 @@ final class VoiceCaptureController {
         guard case .idle = state else { return .busy }
         state = .preparing
         reservedGeneration = generation
+        reservation = UUID()
         reservedAt = environment.now()
         backgroundAttempt = nil
         pressContext = environment.pressContext() + " bgTries=\(backgroundActivations)"
@@ -545,8 +589,10 @@ final class VoiceCaptureController {
     /// On the owner's iPhone a background-launched App is refused the
     /// microphone (11-19, 38.1: `!int` for `.record`, `!pla` for a mixable
     /// session, with no other audio playing), so in front is the way.
-    func startTake(inFront: Bool, foregroundFallback: Bool = false) async -> Outcome {
-        guard case .preparing = state, generation == reservedGeneration else { return .stopped }
+    func startTake(inFront: Bool, foregroundFallback: Bool = false, reservation press: UUID? = nil) async -> Outcome {
+        guard case .preparing = state, generation == reservedGeneration,
+              press == nil || press == reservation
+        else { return .stopped }
         if inFront, let reservedAt, environment.now().timeIntervalSince(reservedAt) >= Self.foregroundWait {
             // Avibe came forward long after the press: never open the
             // microphone for it now.
@@ -643,10 +689,12 @@ final class VoiceCaptureController {
         let consent = Task { await Self.refusal(from: instance) }
         state = .listening(Take(
             id: id, instance: instance, audio: audio, activity: activity, startedAt: startedAt,
-            capture: capture, consent: consent
+            capture: capture, consent: consent, inBackground: !inFront
         ))
         consentWatch = Task { [weak self] in
-            guard let refusal = await consent.value else { return }
+            // A transient failure is not a no: the take records on, and its
+            // send keeps it for Retry instead.
+            guard let refusal = await consent.value, !refusal.transient else { return }
             await self?.consentRefused(refusal, takeID: id)
         }
         observeInterruptions()
@@ -682,8 +730,8 @@ final class VoiceCaptureController {
 
     /// Avibe could not come forward (or came forward too late): the notice
     /// names what the background try was refused.
-    func foregroundUnavailable() {
-        guard case .preparing = state else { return }
+    func foregroundUnavailable(reservation press: UUID? = nil) {
+        guard case .preparing = state, press == nil || press == reservation else { return }
         state = .idle
         guard let attempt = backgroundAttempt else { return }
         backgroundAttempt = nil
@@ -718,6 +766,44 @@ final class VoiceCaptureController {
         state.errorText = attempts.last?.error
         state.errorCode = attempts.last?.error.flatMap { Int($0) }
         return state
+    }
+
+    /// The pending end of this process after a background capture (tests
+    /// await it).
+    private(set) var endingTask: Task<Void, Never>?
+
+    /// Variant (a): once a background capture is sent (its message
+    /// accepted, its audio deleted), and only behind the switch, end this
+    /// process about a second later, so the next press is a fresh launch.
+    /// Never in front, in a process ever shown, with a take under way, or
+    /// with other work in flight; the decision goes into the next capture.
+    private func considerEndingProcess(after take: Take) {
+        guard take.inBackground else { return }
+        guard environment.endProcessAfterBackgroundCapture() else {
+            environment.noteEndDecision("off")
+            return
+        }
+        if let blocker = endBlocker() {
+            environment.noteEndDecision("skip:\(blocker)")
+            return
+        }
+        endingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.environment.waitBeforeEnding()
+            if let blocker = self.endBlocker() {
+                self.environment.noteEndDecision("skip:\(blocker)")
+                return
+            }
+            self.environment.noteEndDecision("ended")
+            self.record("ending the process after a background capture")
+            self.environment.endProcess()
+        }
+    }
+
+    private func endBlocker() -> String? {
+        guard case .idle = state else { return "voice" }
+        if environment.processEverShown() { return "shown" }
+        return environment.otherWorkInFlight()
     }
 
     /// Follows the current take's voice-input answer (tests await it).
@@ -765,10 +851,10 @@ final class VoiceCaptureController {
             case .consentRequired: return Refusal(reason: .consent, needsApp: true)
             case .olderAvibe: return Refusal(reason: .updateAvibe, needsApp: false)
             case .unavailable: return Refusal(reason: .voiceUnavailable, needsApp: false)
-            default: return Refusal(reason: .offline, needsApp: false)
+            default: return Refusal(reason: .offline, needsApp: false, transient: true)
             }
         } catch {
-            return Refusal(reason: .offline, needsApp: false)
+            return Refusal(reason: .offline, needsApp: false, transient: true)
         }
     }
 
@@ -780,6 +866,15 @@ final class VoiceCaptureController {
         // Nothing leaves the phone before the instance said yes.
         if let refusal = await take.consent.value {
             guard generation == deliverGeneration else { return }
+            if refusal.transient {
+                // Unreachable is not a no: keep the take on the phone, and
+                // ask again when the user retries.
+                record("deliver: instance unreachable; kept for Retry, unsent")
+                let instance = take.instance
+                take.consent = Task { await Self.refusal(from: instance) }
+                await keepForRetry(take, reason: .offline)
+                return
+            }
             record("deliver: consent refused \(refusal.reason); discarded unsent")
             take.audio.discard()
             take.instance.close()
@@ -816,6 +911,7 @@ final class VoiceCaptureController {
                 dismissal: .after(environment.now().addingTimeInterval(Self.sentDismissal)),
                 final: content(for: take, phase: .sent, heard: heard)
             )
+            considerEndingProcess(after: take)
         } catch let failure as VoiceCaptureInstanceClient.Failure {
             record("deliver: failed \(failure) posted=\(posted)")
             guard generation == deliverGeneration else { return }
@@ -1041,16 +1137,25 @@ enum VoiceCaptureLaunch {
         }
     }
 
-    /// The press's process facts (the 11-20 finding: iOS lets a process it
-    /// launched in the background start audio once): `cold` when this press
-    /// launched this process in the background, never shown, and it is the
-    /// first press here; `launch=` the state at launch, `age=` seconds since,
-    /// `front=` whether it was ever active, `presses=` presses before this.
+    static var everShown: Bool { everActive }
+
+    /// The press's process facts (E1, 11-20: iOS lets a process it launched
+    /// in the background start audio once): `pid=`, `start=` (launch, Unix
+    /// seconds), `age=` (seconds since), `byPress=1` when this press
+    /// launched it (within 2 s, never shown, first press), `scene=` whether
+    /// a scene was ever active, `presses=` presses that started a take
+    /// before, `session=` whether our audio session was already active,
+    /// `launch=` the state at launch, `prevEnd=` what the last background
+    /// capture decided about ending its process.
     static func pressContext() -> String {
-        let age = launchedAt.map { Int(Date().timeIntervalSince($0)) } ?? -1
-        let cold = launchState == "background" && !everActive && presses == 0 && age >= 0 && age < 10
-        let facts = "\(name(UIApplication.shared.applicationState)) \(cold ? "cold" : "warm") "
-            + "launch=\(launchState) age=\(age) front=\(everActive ? 1 : 0) presses=\(presses)"
+        let age = launchedAt.map { Date().timeIntervalSince($0) } ?? -1
+        let byPress = !everActive && presses == 0 && age >= 0 && age < 2
+        let start = launchedAt.map { String(Int($0.timeIntervalSince1970)) } ?? "-"
+        let facts = "\(name(UIApplication.shared.applicationState)) \(byPress ? "cold" : "warm") "
+            + "pid=\(ProcessInfo.processInfo.processIdentifier) start=\(start) age=\(String(format: "%.1f", age)) "
+            + "byPress=\(byPress ? 1 : 0) scene=\(everActive ? 1 : 0) presses=\(presses) "
+            + "session=\(VoiceCaptureAudioState.active ? 1 : 0) launch=\(launchState) "
+            + "prevEnd=\(VoiceCaptureEndSwitch.takeLastDecision() ?? "-")"
         presses += 1
         let session = AVAudioSession.sharedInstance()
         return facts + " " + audioContext(
@@ -1068,5 +1173,43 @@ enum VoiceCaptureLaunch {
     nonisolated static func audioContext(otherAudio: Bool, silenceHint: Bool, outputs: [String]) -> String {
         "otherAudio=\(otherAudio ? 1 : 0) silenceHint=\(silenceHint ? 1 : 0) "
             + "out=\(outputs.isEmpty ? "-" : outputs.joined(separator: ","))"
+    }
+}
+
+/// The hidden switch for variant (a), default off. Not in Settings and not
+/// discoverable: the owner flips it by opening
+/// `avibe-diagnostics://voice/end-after-background?on=1` (or `on=0`).
+@MainActor
+enum VoiceCaptureEndSwitch {
+    static let key = "avibe.voiceCapture.endProcessAfterBackgroundCapture"
+    private static let decisionKey = "avibe.voiceCapture.lastEndDecision"
+
+    static var isOn: Bool { UserDefaults.standard.bool(forKey: key) }
+
+    /// Handles the switch's URL; returns whether it was one.
+    @discardableResult
+    static func handle(_ url: URL) -> Bool {
+        guard url.scheme == "avibe-diagnostics", url.host == "voice",
+              url.path == "/end-after-background",
+              let on = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "on" })?.value
+        else { return false }
+        let enabled = on == "1"
+        UserDefaults.standard.set(enabled, forKey: key)
+        VoiceCaptureBanner.show(enabled
+            ? "后台录音后结束进程：已开启 / End after background capture: on"
+            : "后台录音后结束进程：已关闭 / End after background capture: off")
+        return true
+    }
+
+    static func noteDecision(_ decision: String) {
+        UserDefaults.standard.set(decision, forKey: decisionKey)
+    }
+
+    /// The last decision, once (the next press reports it).
+    static func takeLastDecision() -> String? {
+        let decision = UserDefaults.standard.string(forKey: decisionKey)
+        UserDefaults.standard.removeObject(forKey: decisionKey)
+        return decision
     }
 }

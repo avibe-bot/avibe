@@ -42,6 +42,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         if await controller.beginPress() != nil {
             return .result()
         }
+        let press = controller.reservation
         var canComeForward = false
         if #available(iOS 26.0, *) {
             canComeForward = systemContext.currentMode.canContinueInForeground
@@ -49,7 +50,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         // One background try first (island, a mixable session, the
         // recorder); if iOS refuses it, Avibe comes forward and records
         // there as soon as it is active.
-        var outcome = await controller.startTake(inFront: false, foregroundFallback: canComeForward)
+        var outcome = await controller.startTake(inFront: false, foregroundFallback: canComeForward, reservation: press)
         var inFront = false
         let before = controller.lastFailure
         let notices = controller.noticeCount
@@ -64,10 +65,10 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
             }
             if outcome == .needsForeground {
                 guard inFront else {
-                    controller.foregroundUnavailable()
+                    controller.foregroundUnavailable(reservation: press)
                     return .result()
                 }
-                outcome = await controller.startTake(inFront: true)
+                outcome = await controller.startTake(inFront: true, reservation: press)
             }
         }
         switch outcome {

@@ -34,6 +34,11 @@ protocol VoiceCaptureRecordingEngine: AnyObject {
 
 extension AVAudioRecorder: VoiceCaptureRecordingEngine {}
 
+/// Whether our audio session is active, for the press's diagnostics.
+enum VoiceCaptureAudioState {
+    nonisolated(unsafe) static var active = false
+}
+
 struct SystemAudioSession: VoiceCaptureAudioSession {
     func configure(for candidate: VoiceCaptureSessionCandidate) throws {
         let session = AVAudioSession.sharedInstance()
@@ -47,10 +52,12 @@ struct SystemAudioSession: VoiceCaptureAudioSession {
 
     func activate() throws {
         try AVAudioSession.sharedInstance().setActive(true)
+        VoiceCaptureAudioState.active = true
     }
 
     func deactivate() {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        VoiceCaptureAudioState.active = false
     }
 }
 
@@ -115,6 +122,16 @@ final class VoiceCaptureRecorder {
             at: directory,
             withIntermediateDirectories: true
         )
+        // A take stays on the phone only until it is sent or discarded; it
+        // is never backed up (Caches is not, and this says so explicitly).
+        // Its protection stays the default class (complete until the first
+        // unlock): a take may be written while the phone locks mid-take, and
+        // `completeUnlessOpen` could not be verified for the recorder's
+        // writes after a lock (the Simulator enforces no data protection).
+        var directoryURL = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? directoryURL.setResourceValues(values)
         return directory.appending(path: "\(id.uuidString.lowercased()).m4a")
     }
 
