@@ -549,6 +549,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.returnToInstance",
                 "app.openPage",
                 "auth.signInWithProvider",
+                "auth.providers",
             ]
         )
         XCTAssertThrowsError(
@@ -1451,21 +1452,37 @@ final class MobileOnboardingTests: XCTestCase {
         return false
     }
 
-    func testTheAdvertisedListIsReadWithinItsBoundOrLeftOut() async throws {
+    func testTheAdvertisedListIsReadWithinItsBoundOrTheLastOneServes() async throws {
+        let defaults = makeDefaults()
+        // Never read, and this read fails: none, so Welcome shows email alone.
+        let failing = FakeMobileAuthTransport()
+        failing.advertised = nil
+        let first = makeCoordinator(defaults: defaults, transports: [failing])
+        first.activateAccountSurface()
+        let none = await first.advertisedProviders(within: 5)
+        XCTAssertNil(none)
+
         let transport = FakeMobileAuthTransport()
         transport.advertised = [.github, .apple]
-        let coordinator = makeCoordinator(defaults: makeDefaults(), transports: [transport])
+        let coordinator = makeCoordinator(defaults: defaults, transports: [transport])
         coordinator.activateAccountSurface()
-
         let quick = await coordinator.advertisedProviders(within: 5)
         XCTAssertEqual(quick, [.github, .apple])
 
+        // A slow read never holds the answer up; the last list serves meanwhile.
+        transport.advertised = [.google]
         transport.advertisedDelay = 5_000_000_000
         let clock = ContinuousClock()
         let started = clock.now
         let slow = await coordinator.advertisedProviders(within: 0.05)
-        XCTAssertNil(slow)
+        XCTAssertEqual(slow, [.github, .apple])
         XCTAssertLessThan(clock.now - started, .seconds(2))
+
+        // The list outlives the process: a later launch whose read fails shows it.
+        let relaunched = makeCoordinator(defaults: defaults, transports: [failing])
+        relaunched.activateAccountSurface()
+        let remembered = await relaunched.advertisedProviders(within: 5)
+        XCTAssertEqual(remembered, [.github, .apple])
     }
 
     func testSignInWithProviderAcceptsOnlyGoogleGitHubOrApple() async throws {
