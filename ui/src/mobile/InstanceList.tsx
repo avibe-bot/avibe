@@ -6,7 +6,7 @@ import { useId, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
-import { StatusDot } from '@/components/SidebarStatusRow';
+import { LineGlyph, StatusDot } from '@/components/SidebarStatusRow';
 import { Button } from '@/components/ui/button';
 import type { TranslationKey } from '@/i18n/types';
 import { cn } from '@/lib/utils';
@@ -15,6 +15,9 @@ import type { MobileInstance } from './bridge';
 
 const group = 'overflow-hidden rounded-2xl border border-edge bg-surface';
 const sectionLabel = 'mb-2 px-1 text-xs font-medium text-muted';
+// Each name's type, which its status dot's column shares so both sit on the name's first baseline.
+const CURRENT_NAME = 'text-base font-semibold leading-6';
+const ROW_NAME = 'text-sm font-semibold leading-5';
 
 /** What a row is doing: opening, failed to open (with the reason's copy), or idle. */
 export type RowStatus =
@@ -79,11 +82,11 @@ export function CurrentInstance({
     <>
       <InstanceIcon instance={instance} current />
       <span className="flex min-w-0 flex-1 items-start gap-2">
-        <span className="mt-2 flex size-2 shrink-0 items-center justify-center">
+        <LineGlyph text={instance.name} className={cn('w-2', CURRENT_NAME)}>
           <StatusDot tone={opening ? 'connecting' : offline ? 'stopped' : 'running'} label={!opening && !offline ? t('mobileApp.instances.online') : undefined} />
-        </span>
+        </LineGlyph>
         <span className="min-w-0 flex-1">
-          <span className="block break-words text-base font-semibold leading-6">{instance.name}</span>
+          <span className={cn('block break-words', CURRENT_NAME)}>{instance.name}</span>
           {status.kind === 'opening' ? (
             <span role="status" className="mt-0.5 block text-xs leading-5 text-gold-ink">{t('mobileApp.sheet.opening')}</span>
           ) : status.kind === 'failed' ? (
@@ -185,11 +188,11 @@ export function InstanceListRow({
     <>
       <InstanceIcon instance={instance} />
       <span className="flex min-w-0 flex-1 items-start gap-2">
-        <span className="mt-1.5 flex size-2 shrink-0 items-center justify-center">
+        <LineGlyph text={instance.name} className={cn('w-2', ROW_NAME)}>
           <StatusDot tone={opening ? 'connecting' : offline ? 'stopped' : 'running'} label={!opening && !offline ? t('mobileApp.instances.online') : undefined} />
-        </span>
+        </LineGlyph>
         <span className="min-w-0 flex-1">
-          <span className={cn('block break-words text-sm font-semibold leading-5', offline && 'text-muted')}>
+          <span className={cn('block break-words', ROW_NAME, offline && 'text-muted')}>
             {instance.name}
           </span>
           {status.kind === 'opening' ? (

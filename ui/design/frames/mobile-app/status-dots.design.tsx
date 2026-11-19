@@ -43,6 +43,14 @@ const longOthers = [
   { ...teamTest, name: 'Product research team workspace for the shared regression runs' },
   { ...win, name: 'max-win-11-parallels-virtual-machine-on-the-studio' },
 ];
+// Names that start in an ideograph centre their dot on the cap height, Latin ones on the x-height.
+const cjkCurrent = { ...max, name: '小麦的 Mac' };
+const mixedOthers = [
+  instance('studio', '工作室 Studio'),
+  driver,
+  { ...teamTest, available: true, name: '跨时区产品研发团队 — 共享回归环境与评审工作站（书房）' },
+  { ...win, name: 'max-win' },
+];
 
 function nativeFixtures(lang: 'zh' | 'en') {
   return workbenchFixtures({
@@ -95,6 +103,7 @@ const designFrames = frames([
   frame('offline-expanded', 'Offline instance with its explanation', page({ rows: rows({ expandedId: win.id }) })),
   frame('open-failed', 'Open failure retains its availability dot', page({ rows: rows({ failure: { id: feedback.id, reason: 'mobileApp.sheet.openFailed' } }) })),
   frame('stale', 'Refresh failure retains the cached list', page({ errorKey: 'mobileApp.errors.network' })),
+  frame('mixed-scripts', 'Latin- and ideograph-led names, each dot centred on its own first line', page({ session: session(cjkCurrent, mixedOthers) }), { size: SMALL }),
   frame('long-names', 'Long names wrap within the name column', page({ session: session(longCurrent, longOthers), rows: rows({ openingId: driver.id }) }), { size: SMALL }),
   frame('sheet', 'The sheet uses the same status rows', () => (
     <InstanceSheetPage session={session()} locked refreshing={false} stale={false}
