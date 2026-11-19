@@ -17,7 +17,8 @@ export function SidebarStatusRow({ status, version }: { status: ReactNode; versi
 
 /** The status's leading glyph, in a fixed 10px slot so the label beside it never shifts when the
  *  glyph changes (a dot while connected, a 10px icon while offline or switching). The glyph starts
- *  at the slot's left edge, flush with the Apps button above. */
+ *  at the slot's left edge. The row is flush with the Apps button above; a status drawn as a button
+ *  (the desktop account trigger) keeps its own inset so the glyph stays inside its hover wash. */
 export function StatusGlyph({ children }: { children: ReactNode }) {
   return <span className="flex size-2.5 shrink-0 items-center justify-start [&>svg]:size-2.5">{children}</span>;
 }

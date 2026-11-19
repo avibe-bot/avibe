@@ -58,13 +58,18 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
         const rect = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
         const tools = node.firstElementChild!.getBoundingClientRect();
         const row = rect('[data-sidebar-status-row]');
-        return { dot: rect('[data-status-indicator]').x, tools: tools.x,
+        const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
+        return { dot: rect('[data-status-indicator]').x, tools: tools.x, trigger: rect('[data-account-trigger]').x,
+          inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
           labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
           versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
           above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
       });
-      expect(measurements.dot).toBe(16);
+      // The trigger's edge is flush with the tools above; its dot sits inside its own inset, never on the hover wash's edge.
       expect(measurements.tools).toBe(16);
+      expect(measurements.trigger).toBe(measurements.tools);
+      expect(measurements.inset).toBeGreaterThanOrEqual(16);
+      expect(measurements.dot - measurements.trigger).toBe(measurements.inset);
       expect(measurements.labelGap).toBeGreaterThanOrEqual(0);
       expect(measurements.labelGap).toBeLessThanOrEqual(8);
       await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
@@ -148,12 +153,14 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await expect(chip).toHaveText(`v${state.desktop.version}`);
     const geometry = await row.evaluate((node) => {
       const box = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
-      return { left: box('[data-status-indicator]').left,
+      const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
+      return { left: box('[data-account-trigger]').left, dot: box('[data-status-indicator]').left - box('[data-account-trigger]').left,
+        inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
         gap: box('[data-account-label]').left - box('[data-status-indicator]').right,
         right: box('[data-version-chip]').right - node.getBoundingClientRect().right,
         bottom: innerHeight - node.getBoundingClientRect().bottom };
     });
-    expect(geometry.left).toBe(16); expect(geometry.gap).toBeGreaterThanOrEqual(0);
+    expect(geometry.left).toBe(16); expect(geometry.inset).toBeGreaterThanOrEqual(16); expect(geometry.dot).toBe(geometry.inset); expect(geometry.gap).toBeGreaterThanOrEqual(0);
     expect(geometry.gap).toBeLessThanOrEqual(8); expect(geometry.right).toBe(0); expect(geometry.bottom).toBe(8);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('remote-bottom-row.png') });
     await chip.click();
