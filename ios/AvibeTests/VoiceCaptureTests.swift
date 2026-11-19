@@ -679,6 +679,33 @@ final class VoiceCaptureTests: XCTestCase {
         )
     }
 
+    /// Each step's time from the press rides along for device numbers.
+    func testTheMessageCarriesEachStepsTimeFromThePress() async {
+        let world = World()
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        let timing = world.instance.timings.first ?? nil
+        for step in ["island=", "session=", "record=", "audio="] {
+            XCTAssertTrue(timing?.contains(step) == true, "\(step) in \(timing ?? "nil")")
+        }
+
+        let refused = World()
+        refused.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        let other = refused.controller()
+        _ = await other.beginPress()
+        _ = await other.startTake(inFront: false, foregroundFallback: true)
+        other.markInFront()
+        _ = await other.startTake(inFront: true)
+        refused.audio?.duration = 2
+        _ = await other.toggle()
+        let fallback = refused.instance.timings.first ?? nil
+        for step in ["refused=", "front=", "frontIsland=", "frontSession=", "frontRecord=", "audio="] {
+            XCTAssertTrue(fallback?.contains(step) == true, "\(step) in \(fallback ?? "nil")")
+        }
+    }
+
     /// The process counts its background activations (iOS allows one).
     func testTheMessageCountsThisProcesssEarlierBackgroundTries() async {
         let world = World()
@@ -1302,8 +1329,11 @@ private final class FakeInstance: VoiceCaptureInstance {
         return "/api/sessions/ses_main"
     }
 
-    func postMessage(_ text: String, to sessionPath: String, capture: String?) async throws {
+    var timings: [String?] = []
+
+    func postMessage(_ text: String, to sessionPath: String, capture: String?, timing: String?) async throws {
         captures.append(capture)
+        timings.append(timing)
         posts += 1
         if postFailures > 0 {
             postFailures -= 1
@@ -1342,11 +1372,14 @@ private final class FakeAudio: VoiceCaptureAudio {
         prepared = candidate
     }
 
+    var firstAudioAt: Date?
+
     func start() throws {
         log("record")
         if let startError { throw startError }
         if let prepared, let error = startErrors[prepared] { throw error }
         started = true
+        firstAudioAt = Date()
     }
     func stop() -> TimeInterval { stops += 1; prepared = nil; log("stop"); return duration }
     func discard() { discarded = true }
