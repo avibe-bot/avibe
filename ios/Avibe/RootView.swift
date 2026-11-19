@@ -428,6 +428,12 @@ private struct BrowserScreen: View {
                                 runtime: runtime
                             )
                         },
+                        cachedPageKeepsShell: {
+                            appModel.runtimeCachedPageKeepsShell(
+                                attemptID: attemptID,
+                                runtime: runtime
+                            )
+                        },
                         didCreateController: {
                             appModel.registerRuntimeController(
                                 $0,

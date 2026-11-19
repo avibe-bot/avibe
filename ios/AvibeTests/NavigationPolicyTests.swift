@@ -5105,11 +5105,29 @@ extension NavigationPolicyTests {
         }
     }
 
+    /// The Web UI's own declaration that it keeps its shell (a replayable
+    /// outcome; ui/src/lib/bootSession.ts), as an inline script.
+    private static let replayedShell =
+        #"<script>document.documentElement.dataset.avibeReplayedShell = '1'</script>"#
+
+    private static func markedCachedPage(_ origin: WebOrigin, head: String) -> RuntimeCachedPage {
+        RuntimeCachedPage(
+            url: origin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title>"#.utf8
+                + Data(head.utf8) + Data("</head>".utf8)),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+    }
+
     /// A cached page whose bytes keep their shell while the instance cannot
-    /// be reached is on screen uncovered (its events say so), and an
+    /// be reached, and whose Web UI says it keeps it now, is uncovered; an
     /// unreachable instance does not replace it with a live load: it is
-    /// asked again until it answers, which ends the open. An unmarked page
-    /// asked the same way loads live (covered, as before).
+    /// asked again until it answers, which ends the open. A live navigation
+    /// from it that never replaces it (a 204) leaves it uncovered and still
+    /// asking. (An unmarked page's unreachable case is the covered probe's
+    /// "no answer (unreachable)" row: it loads live.)
     @MainActor
     func testAMarkedCachedPageWaitsOutAnUnreachableInstance() async throws {
         let reachable = LockedFlag()
@@ -5121,6 +5139,8 @@ extension NavigationPolicyTests {
             case "/":
                 _ = documents.next()
                 return .html("<!doctype html><title>live</title>")
+            case "/no-content":
+                return .status(204)
             default:
                 return .status(404)
             }
@@ -5128,14 +5148,9 @@ extension NavigationPolicyTests {
         let baseURL = try await server.start()
         defer { server.stop() }
         let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
-        let page = RuntimeCachedPage(
-            url: origin.url,
-            headers: ["Content-Type": "text/html; charset=utf-8"],
-            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title></head>"#.utf8),
-            capturedAt: Date(),
-            keepsShellUnreachable: true
-        )
+        let page = Self.markedCachedPage(origin, head: Self.replayedShell)
         var connected = 0
+        var uncovered = 0
         var events: [RuntimeNavigationEvent] = []
         let controller = WebViewController(
             instanceOrigin: origin,
@@ -5143,6 +5158,7 @@ extension NavigationPolicyTests {
             runtimeNavigationChanged: { events.append($0) },
             pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
             cachedPageConnected: { connected += 1 },
+            cachedPageKeepsShell: { uncovered += 1 },
             didStartLoading: {},
             didFinishLoading: {},
             didFailLoading: {}
@@ -5150,8 +5166,12 @@ extension NavigationPolicyTests {
         let window = host(controller)
         defer { window.isHidden = true }
 
-        try await waitUntil { events.contains { $0.stage == .finished && $0.fromCache } }
-        XCTAssertTrue(events.filter(\.fromCache).allSatisfy(\.cachedKeepsShell))
+        try await waitUntil { uncovered == 1 }
+        XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache })
+        // A live navigation that never replaces the page.
+        let webView = try primaryWebView(of: controller)
+        _ = try await webView.evaluateJavaScript("location.href = '/no-content'; 0")
+        try await waitUntil { events.contains { $0.stage == .started && !$0.fromCache } }
         // Unreachable for a while: no live load, nothing connected.
         let clock = ContinuousClock()
         let quiet = clock.now.advanced(by: .seconds(5))
@@ -5160,69 +5180,76 @@ extension NavigationPolicyTests {
         }
         XCTAssertEqual(documents.count, 0)
         XCTAssertEqual(connected, 0)
-        XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache })
+        XCTAssertEqual(try await webView.evaluateJavaScript("document.title") as? String, "cached")
 
         reachable.set(true)
         try await waitUntil { connected == 1 }
-        XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache })
+        XCTAssertEqual(documents.count, 0)
+        XCTAssertEqual(uncovered, 1)
     }
 
-
-    /// A marked page that had no session to keep falls to the Web UI's setup
-    /// fallback while the instance is unreachable, and would never leave it:
-    /// the App loads the instance live instead of waiting there uncovered.
+    /// A marked page is uncovered only when its Web UI says it keeps its
+    /// shell: without a replayable outcome (no declaration), or at its setup
+    /// fallback (the outcome it had was refused), it stays covered and the
+    /// instance loads live. An uncovered page that later falls to the setup
+    /// fallback, which it would never leave, loads live as well.
     @MainActor
-    func testAMarkedCachedPageAtTheSetupFallbackLoadsLive() async throws {
-        let documents = LockedCounter()
-        let server = try LocalHTTPServer { request in
-            switch request.path {
-            case "/api/session":
-                return .status(530)
-            case "/":
-                _ = documents.next()
-                return .html("<!doctype html><title>live</title>")
-            default:
-                return .status(404)
+    func testAMarkedCachedPageWithoutAReplayedShellLoadsLive() async throws {
+        let rows: [(name: String, head: String, uncovers: Bool)] = [
+            ("no replayable outcome", "", false),
+            ("at the setup fallback", Self.replayedShell + "<script>history.replaceState(null, '', '/setup')</script>", false),
+            ("falls to the setup fallback later", Self.replayedShell, true),
+        ]
+        for row in rows {
+            let documents = LockedCounter()
+            let server = try LocalHTTPServer { request in
+                switch request.path {
+                case "/api/session":
+                    return .status(530)
+                case "/":
+                    _ = documents.next()
+                    return .html("<!doctype html><title>live</title>")
+                default:
+                    return .status(404)
+                }
             }
+            let baseURL = try await server.start()
+            defer { server.stop() }
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            let page = Self.markedCachedPage(origin, head: row.head)
+            var connected = 0
+            var uncovered = 0
+            var events: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: origin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { events.append($0) },
+                pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+                cachedPageConnected: { connected += 1 },
+                cachedPageKeepsShell: { uncovered += 1 },
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+
+            try await waitUntil { events.contains { $0.stage == .finished && $0.fromCache } }
+            if row.uncovers {
+                try await waitUntil { uncovered == 1 }
+                XCTAssertEqual(documents.count, 0, row.name)
+                // The Web UI's own move to its setup fallback (a replace, as
+                // its router does).
+                let moved = try await primaryWebView(of: controller).evaluateJavaScript(
+                    "history.replaceState(null, '', '/setup'); location.pathname"
+                ) as? String
+                XCTAssertEqual(moved, "/setup", row.name)
+            }
+            try await waitUntil { documents.count == 1 }
+            XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
+            XCTAssertEqual(uncovered, row.uncovers ? 1 : 0, row.name)
+            XCTAssertEqual(connected, 0, row.name)
         }
-        let baseURL = try await server.start()
-        defer { server.stop() }
-        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
-        let page = RuntimeCachedPage(
-            url: origin.url,
-            headers: ["Content-Type": "text/html; charset=utf-8"],
-            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title></head>"#.utf8),
-            capturedAt: Date(),
-            keepsShellUnreachable: true
-        )
-        var connected = 0
-        var events: [RuntimeNavigationEvent] = []
-        let controller = WebViewController(
-            instanceOrigin: origin,
-            websiteDataStore: .nonPersistent(),
-            runtimeNavigationChanged: { events.append($0) },
-            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
-            cachedPageConnected: { connected += 1 },
-            didStartLoading: {},
-            didFinishLoading: {},
-            didFailLoading: {}
-        )
-        let window = host(controller)
-        defer { window.isHidden = true }
-
-        try await waitUntil { events.contains { $0.stage == .finished && $0.fromCache } }
-        XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache && $0.cachedKeepsShell })
-        XCTAssertEqual(documents.count, 0)
-        // The Web UI's own move to its setup fallback (a replace, as its
-        // router does).
-        let moved = try await primaryWebView(of: controller).evaluateJavaScript(
-            "history.replaceState(null, '', '/setup'); location.pathname"
-        ) as? String
-        XCTAssertEqual(moved, "/setup")
-
-        try await waitUntil { documents.count == 1 }
-        XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache })
-        XCTAssertEqual(connected, 0)
     }
 
 }

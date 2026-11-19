@@ -2318,11 +2318,14 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(app.runtimePageCache.page(accountID: "account-1", origin: origin))
     }
 
-    /// A cached page whose shell waits out an unreachable instance is shown
-    /// uncovered: only the progress line, the long-wait row, and out of time
-    /// the page stays with the "can't reach" banner and Retry (no return to
-    /// the list). A late answer ends it; a live navigation from there is
-    /// covered as any open; Retry opens it live, skipping the cache once.
+    /// A cached page is covered from its start; once it says it keeps its
+    /// shell while the instance cannot be reached it is uncovered: only the
+    /// progress line, the long-wait row, and out of time the page stays with
+    /// the "can't reach" banner and Retry (no return to the list). A late
+    /// answer ends it. A live navigation from the page leaves it on screen
+    /// until a document replaces it (a handoff, a cancel or a failure before
+    /// that changes nothing); the replacing document opens covered, with a
+    /// fresh, bounded budget. Retry opens it live, skipping the cache once.
     @MainActor
     func testAMarkedCachedPageShowsUncoveredAndKeepsItsContentOutOfTime() async throws {
         let timing = RuntimeOpenManualTiming()
@@ -2330,26 +2333,37 @@ final class DirectPathAppTests: XCTestCase {
         defer { app.runtimePageCache.removeAll() }
         let runtime = try await select("instance-1", in: app)
         let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
-        let marked = { (stage: RuntimeNavigationStage) in
-            RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true, cachedKeepsShell: true)
+        let cached = { (stage: RuntimeNavigationStage) in
+            RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true)
+        }
+        let live = { (stage: RuntimeNavigationStage) in
+            RuntimeNavigationEvent(stage: stage, destination: .instance)
+        }
+        func show(_ attempt: RuntimeOpenAttempt, _ runtime: MobileRuntimeContext) {
+            for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+                app.handleRuntimeNavigation(cached(stage), attemptID: attempt.id, runtime: runtime)
+            }
+            app.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: runtime)
         }
         for stage in [RuntimeNavigationStage.started, .committed, .finished] {
-            app.handleRuntimeNavigation(marked(stage), attemptID: attempt.id, runtime: runtime)
-            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive, "\(stage)")
-            XCTAssertEqual(
-                BrowserOverlay(attemptPhase: try XCTUnwrap(app.runtimeOpenAttempt).phase, directFault: false),
-                .showingCachedLive,
-                "\(stage)"
-            )
+            app.handleRuntimeNavigation(cached(stage), attemptID: attempt.id, runtime: runtime)
+            // Covered until the page says it keeps its shell.
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached, "\(stage)")
         }
-        // Nothing moved (a blocked download or back/forward from the page):
-        // the page stays, the open keeps waiting.
-        app.handleRuntimeNavigation(
-            RuntimeNavigationEvent(stage: .cancelled, destination: .instance),
-            attemptID: attempt.id,
-            runtime: runtime
-        )
+        app.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: runtime)
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive)
+        XCTAssertEqual(
+            BrowserOverlay(attemptPhase: .showingCachedLive, directFault: false),
+            .showingCachedLive
+        )
+        // A live navigation from the page that never replaces it (a link
+        // whose response is a download, then nothing; a blocked one; one that
+        // fails): the page stays, the open keeps waiting.
+        for end in [RuntimeNavigationStage.handedOff, .cancelled, .failed] {
+            app.handleRuntimeNavigation(live(.started), attemptID: attempt.id, runtime: runtime)
+            app.handleRuntimeNavigation(live(end), attemptID: attempt.id, runtime: runtime)
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive, "\(end)")
+        }
 
         timing.advance(by: .seconds(8))
         XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
@@ -2366,28 +2380,48 @@ final class DirectPathAppTests: XCTestCase {
         app.runtimeCachedPageConnected(attemptID: attempt.id, runtime: runtime)
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
 
-        // Out of time again; a live navigation from the page is covered.
+        // Out of time again; a live document replacing the page opens
+        // covered, and is bounded again: out of time, the open ends.
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         let other = try await waitForBrowser("instance-2", in: app)
         let second = try XCTUnwrap(app.runtimeOpenAttempt)
-        app.handleRuntimeNavigation(marked(.finished), attemptID: second.id, runtime: other)
+        show(second, other)
         timing.advance(by: .seconds(60))
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
-        app.handleRuntimeNavigation(
-            RuntimeNavigationEvent(stage: .started, destination: .instance),
-            attemptID: second.id,
-            runtime: other
-        )
-        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
+        app.handleRuntimeNavigation(live(.started), attemptID: second.id, runtime: other)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        app.handleRuntimeNavigation(live(.committed), attemptID: second.id, runtime: other)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .loadingPage)
         XCTAssertEqual(
-            BrowserOverlay(attemptPhase: .connecting, directFault: false),
+            BrowserOverlay(attemptPhase: .loadingPage, directFault: false),
             .loading
         )
+        XCTAssertFalse(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
+        timing.advance(by: .seconds(59))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .loadingPage)
+        timing.advance(by: .seconds(1))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertEqual(app.runtimeOpenNotice?.lastPhase, .loadingPage)
+
+        // The page's process ending while out of time: the live reload is
+        // bounded as well.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        _ = try await waitForBrowser("instance-1", in: app)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let reopened = try await waitForBrowser("instance-2", in: app)
+        let restarted = try XCTUnwrap(app.runtimeOpenAttempt)
+        show(restarted, reopened)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        app.handleRuntimeNavigation(live(.restarting), attemptID: restarted.id, runtime: reopened)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
+        timing.advance(by: .seconds(60))
+        XCTAssertTrue(isOnInstancePicker(app))
 
         // Out of time once more; Retry opens it live, skipping the cache once.
-        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: other))
+        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: reopened))
         let page = RuntimeCachedPage(
-            url: other.instance.url,
+            url: reopened.instance.url,
             headers: ["Content-Type": "text/html"],
             body: Data("<!doctype html>".utf8),
             capturedAt: Date(),
@@ -2400,7 +2434,7 @@ final class DirectPathAppTests: XCTestCase {
         let again = try await waitForBrowser("instance-2", in: app)
         let third = try XCTUnwrap(app.runtimeOpenAttempt)
         _ = back
-        app.handleRuntimeNavigation(marked(.finished), attemptID: third.id, runtime: again)
+        show(third, again)
         timing.advance(by: .seconds(60))
         XCTAssertTrue(app.retryRuntimeCachedPage())
         XCTAssertGreaterThan(try XCTUnwrap(app.runtimeOpenAttempt).id, third.id)
@@ -2445,13 +2479,13 @@ final class DirectPathAppTests: XCTestCase {
                 return XCTFail("The instance did not open first (marked: \(marked))")
             }
             next.handleRuntimeNavigation(
-                RuntimeNavigationEvent(
-                    stage: .finished, destination: .instance,
-                    fromCache: true, cachedKeepsShell: marked
-                ),
+                RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true),
                 attemptID: attempt.id,
                 runtime: opened
             )
+            if marked {
+                next.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: opened)
+            }
             XCTAssertEqual(
                 next.runtimeOpenAttempt?.phase,
                 marked ? .showingCachedLive : .showingCached,

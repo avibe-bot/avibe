@@ -51,10 +51,12 @@ and Web resizing cannot both run.
   `/show/` or `/p/`, is refused without that alert.
 - On a cold start the App may show the instance's last page from its own
   cache (stored per store, account and origin, at most a day old). A cached page
-  whose bytes carry `<meta name="avibe-cached-shell" content="1">` keeps its
-  shell while the instance cannot be reached, so the App shows it uncovered with
-  the progress line while connecting; any other cached page stays covered until
-  the instance answers.
+  whose bytes carry `<meta name="avibe-cached-shell" content="1">` comes from a
+  Web UI that keeps its shell while the instance cannot be reached, behind a
+  replayable outcome; when the loaded page also sets
+  `data-avibe-replayed-shell="1"` on its root element (it replays one, and is not
+  at its setup fallback), the App uncovers it with the progress line while
+  connecting. Any other cached page stays covered until the instance answers.
 - Google, GitHub and Apple authorization are intercepted with an alert whose
   「去登录」 / "Go to sign-in" reads the session: the instance page asked
   avibe.bot to sign in, so the App's avibe.bot session has lapsed, and the

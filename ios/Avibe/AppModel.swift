@@ -93,20 +93,15 @@ struct RuntimeNavigationEvent: Equatable {
     /// The document came from the App's cache of the instance's last page
     /// (`RuntimePageCache`), not from the network.
     let fromCache: Bool
-    /// The cached document keeps its shell while its instance cannot be
-    /// reached (`RuntimeCachedPage.keepsShell`): it may show uncovered.
-    let cachedKeepsShell: Bool
 
     init(
         stage: RuntimeNavigationStage,
         destination: NavigationDestination?,
-        fromCache: Bool = false,
-        cachedKeepsShell: Bool = false
+        fromCache: Bool = false
     ) {
         self.stage = stage
         self.destination = destination
         self.fromCache = fromCache
-        self.cachedKeepsShell = fromCache && cachedKeepsShell
     }
 }
 
@@ -1716,8 +1711,39 @@ final class AppModel: ObservableObject {
         return openRuntime(attempt.runtime)
     }
 
-    private func cachedPhase(_ event: RuntimeNavigationEvent) -> RuntimeOpenPhase {
-        event.cachedKeepsShell ? .showingCachedLive : .showingCached
+    /// The page shown from the cache said it keeps its shell while its
+    /// instance cannot be reached (`RuntimeCachedPage.keepsShell`, and the
+    /// Web UI behind a replayable outcome): it is uncovered, live to touch.
+    func runtimeCachedPageKeepsShell(attemptID: Int, runtime: MobileRuntimeContext) {
+        guard
+            runtimeIdentity == attemptID,
+            route.runtime == runtime,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            attempt.runtime == runtime,
+            attempt.phase == .showingCached,
+            !expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
+        else {
+            return
+        }
+        setRuntimeOpenPhase(.showingCachedLive, attemptID: attemptID)
+    }
+
+    /// A live document replaced a page shown uncovered from the cache (or
+    /// its process ended): a full budget from now, as a new open has.
+    private func restartRuntimeOpenBudget(attemptID: Int) {
+        guard var attempt = runtimeOpenAttempt, attempt.id == attemptID else {
+            return
+        }
+        let now = runtimeOpenNow
+        attempt.remainingAutomaticBudget = runtimeOpenBudget
+        attempt.canResumeAutomaticBudget = true
+        attempt.isTakingLong = false
+        attempt.automaticStartedAt = now
+        attempt.deadline = now + runtimeOpenBudget
+        runtimeOpenAttempt = attempt
+        scheduleRuntimeOpenTimers(attemptID: attemptID)
     }
 
     /// The cache as the runtime controller for `runtime` uses it: its page
@@ -1784,10 +1810,15 @@ final class AppModel: ObservableObject {
             return
         }
 
+        let showsCachedPageUncovered = attempt.phase == .showingCachedLive
+            || attempt.phase == .cachedUnreachable
         switch event.stage {
         case .started:
             guard attempt.phase != .documentLoaded,
-                  attempt.phase != .failed
+                  attempt.phase != .failed,
+                  // A live navigation from a page shown uncovered: the page
+                  // stays until a document replaces it (committed).
+                  !showsCachedPageUncovered
             else {
                 return
             }
@@ -1800,7 +1831,7 @@ final class AppModel: ObservableObject {
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : event.fromCache ? cachedPhase(event) : .connecting,
+                    : event.fromCache ? .showingCached : .connecting,
                 attemptID: attemptID
             )
         case .committed:
@@ -1809,12 +1840,17 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
+            if showsCachedPageUncovered {
+                // A live document replaced the page shown uncovered: from
+                // here it opens as any open does, with a fresh budget.
+                restartRuntimeOpenBudget(attemptID: attemptID)
+            }
             // A cached document stays covered from its start: never the
             // uncovered `.loadingPage`.
             setRuntimeOpenPhase(
                 isAuthenticationDestination(event.destination)
                     ? .authenticating
-                    : event.fromCache ? cachedPhase(event) : .loadingPage,
+                    : event.fromCache ? .showingCached : .loadingPage,
                 attemptID: attemptID
             )
         case .finished:
@@ -1829,7 +1865,7 @@ final class AppModel: ObservableObject {
                 // yet show content without its instance (it would fall back
                 // to setup). The budget keeps running; out of time, the open
                 // ends as any open does.
-                setRuntimeOpenPhase(cachedPhase(event), attemptID: attemptID)
+                setRuntimeOpenPhase(.showingCached, attemptID: attemptID)
                 return
             }
             if isAuthenticationDestination(event.destination) {
@@ -1882,7 +1918,11 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
-            if attempt.automaticStartedAt == nil,
+            if showsCachedPageUncovered {
+                // The page shown uncovered is gone with its process; the
+                // instance loads live, as any open.
+                restartRuntimeOpenBudget(attemptID: attemptID)
+            } else if attempt.automaticStartedAt == nil,
                attempt.canResumeAutomaticBudget,
                !resumeRuntimeOpenBudget(attemptID: attemptID)
             {
@@ -1890,7 +1930,9 @@ final class AppModel: ObservableObject {
             }
             setRuntimeOpenPhase(.connecting, attemptID: attemptID)
         case .failed:
-            guard attempt.phase != .failed else {
+            // A live navigation from a page shown uncovered failed before
+            // replacing it: the page stays.
+            guard attempt.phase != .failed, !showsCachedPageUncovered else {
                 return
             }
             if attempt.phase == .documentLoaded {

@@ -130,6 +130,24 @@ export function settleSignOutBootSession(): void {
   forgetBootSession();
 }
 
+/** For the phone app, before the first render: whether this document keeps its
+ *  shell while the instance cannot be reached, which it does only in the App's
+ *  shell and behind a replayable outcome (AuthGuard's ``behindReplay``). The App
+ *  may show this page from its own cache; it uncovers it only when this says
+ *  so, since without a replayable outcome an unreachable instance sends the
+ *  Web UI to its setup fallback (ios/README.md). */
+export function declareReplayedShell(
+  nativeShell: boolean,
+  root: HTMLElement = document.documentElement,
+  now = Date.now(),
+): void {
+  if (nativeShell && readBootSession(now)) {
+    root.dataset.avibeReplayedShell = '1';
+  } else {
+    delete root.dataset.avibeReplayedShell;
+  }
+}
+
 /** Forget it, and void every check in flight in any tab: the next cold start
  *  waits for the server again. */
 export function forgetBootSession(): void {
