@@ -1425,19 +1425,35 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 reply(replyHandler, error: .invalidArgument("voice.captureStart requires take."))
                 return
             }
-            switch capture.start(take: take, webView: sourceWebView) {
-            case .success(let timings):
-                reply(replyHandler, result: [
-                    "sampleRate": 16_000,
-                    "activateMs": timings.activateMs,
-                    "engineMs": timings.engineMs,
-                ])
-            case .failure(.permission):
-                reply(replyHandler, error: .failed("permission"))
-            case .failure(.busy):
-                reply(replyHandler, error: .failed("busy"))
-            case .failure(.failed(let step)):
-                reply(replyHandler, error: .failed(step))
+            // The same document gate as WebKit's own microphone
+            // (WebViewController's media capture decision): only a page that
+            // asks each account before speech goes to a third-party AI service.
+            let origin = policy.instanceOrigin
+            sourceWebView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak sourceWebView] result, error in
+                guard let self, let sourceWebView, let url = sourceWebView.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin
+                else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                guard error == nil, VoiceConsentMarker(result: result) == .marked else {
+                    self.reply(replyHandler, error: .failed("consent"))
+                    return
+                }
+                switch capture.start(take: take, webView: sourceWebView) {
+                case .success(let timings):
+                    self.reply(replyHandler, result: [
+                        "sampleRate": 16_000,
+                        "activateMs": timings.activateMs,
+                        "engineMs": timings.engineMs,
+                    ])
+                case .failure(.permission):
+                    self.reply(replyHandler, error: .failed("permission"))
+                case .failure(.busy):
+                    self.reply(replyHandler, error: .failed("busy"))
+                case .failure(.failed(let step)):
+                    self.reply(replyHandler, error: .failed(step))
+                }
             }
         default:
             guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {

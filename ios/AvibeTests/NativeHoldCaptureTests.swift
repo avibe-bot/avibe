@@ -245,9 +245,13 @@ final class NativeHoldCaptureTests: XCTestCase {
     func testOnlyTheInstancesOwnDocumentReachesTheMicrophone() async throws {
         let audio = FakeAudio()
         let capture = makeCapture(audio)
-        for (base, expected) in [
-            ("https://elsewhere.example", "forbidden"),
-            ("https://instance-one.example", "ok"),
+        let marked = #"<!doctype html><meta name="avibe-voice-consent" content="1"><title>t</title>"#
+        for (base, html, expected) in [
+            ("https://elsewhere.example", marked, "forbidden"),
+            // As WebKit's own microphone: a page that does not ask each account
+            // first (an older Workbench, a Show Page on its own) gets none.
+            ("https://instance-one.example", "<!doctype html><title>t</title>", "consent"),
+            ("https://instance-one.example", marked, "ok"),
         ] {
             let webView = WKWebView(
                 frame: .zero,
@@ -259,7 +263,7 @@ final class NativeHoldCaptureTests: XCTestCase {
             )
             let loader = Loader()
             webView.navigationDelegate = loader
-            try await loader.load("<!doctype html><title>t</title>", baseURL: URL(string: base)!, in: webView)
+            try await loader.load(html, baseURL: URL(string: base)!, in: webView)
             let result = try await webView.callAsyncJavaScript(
                 """
                 if (!window.avibeNative) return "forbidden";
@@ -269,7 +273,7 @@ final class NativeHoldCaptureTests: XCTestCase {
                   await window.avibeNative.call("voice.captureStop", { take: "t1" });
                   return started.sampleRate === 16000 ? "ok" : JSON.stringify(started);
                 } catch (error) {
-                  return error.code;
+                  return error.code === "failed" ? error.message : error.code;
                 }
                 """,
                 arguments: [:],
@@ -294,7 +298,11 @@ final class NativeHoldCaptureTests: XCTestCase {
         )
         let loader = Loader()
         webView.navigationDelegate = loader
-        try await loader.load("<!doctype html><title>t</title>", baseURL: instance.url, in: webView)
+        try await loader.load(
+            #"<!doctype html><meta name="avibe-voice-consent" content="1"><title>t</title>"#,
+            baseURL: instance.url,
+            in: webView
+        )
         _ = try await webView.callAsyncJavaScript(
             """
             window.heard = [];
@@ -323,6 +331,33 @@ final class NativeHoldCaptureTests: XCTestCase {
             heard as? String,
             #"[{"pcm":"AQA=","take":"t1"},{"ended":true,"reason":"route","take":"t1"}]"#
         )
+
+        // A take still flushing when its document is replaced: the next
+        // document hears none of it.
+        _ = try await webView.callAsyncJavaScript(
+            """
+            window.heard = [];
+            await window.avibeNative.call("voice.captureStart", { take: "t2" });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        audio.onPCM?(Data([2, 0]))
+        audio.onPCM?(Data([3, 0]))
+        capture.stop(take: "t2")
+        capture.stop(webView: webView)
+        drain()
+        let after = try await webView.callAsyncJavaScript(
+            """
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            return JSON.stringify(window.heard);
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(after as? String, #"[{"pcm":"AgA=","take":"t2"}]"#)
     }
 }
 

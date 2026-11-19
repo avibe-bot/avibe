@@ -200,8 +200,12 @@ final class NativeHoldCapture {
 
     /// Stops whatever runs for `webView` (it is going away).
     func stop(webView gone: WKWebView) {
+        // Its document is not the one that asked: it hears nothing more,
+        // a take still flushing included.
+        for take in closing.values where take.webView === gone {
+            take.detached = true
+        }
         guard let running, running.webView === gone else { return }
-        // Its document is not the one that asked: it hears nothing more.
         running.detached = true
         end(reason: "gone")
     }
