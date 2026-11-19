@@ -46,28 +46,27 @@ final class NativeHoldCapture {
     private final class Take {
         let id: String
         weak var webView: WKWebView?
-        /// The document the take was started from, when it goes to a page.
-        let origin: WebOrigin?
         /// Whether the audio goes to `webView`'s page, which may go away.
         let toPage: Bool
-        let deliver: (Event) -> Void
+        private let send: (Event) -> Void
+        /// The document that started the take was replaced, or its process
+        /// died: nothing more goes into that WebView.
+        var detached = false
         var pending = Data()
         var deliveredFirst = false
 
         init(id: String, webView: WKWebView?, toPage: Bool, deliver: @escaping (Event) -> Void) {
             self.id = id
             self.webView = webView
-            self.origin = webView?.url.flatMap { WebOrigin(url: $0, requiresHTTPS: false) }
             self.toPage = toPage
-            self.deliver = deliver
+            self.send = deliver
         }
 
-        /// Whether the page that started the take is still the one shown:
-        /// not deallocated, and not navigated to another origin.
-        var pageIsPresent: Bool {
-            guard toPage else { return true }
-            guard let url = webView?.url else { return false }
-            return WebOrigin(url: url, requiresHTTPS: false) == origin
+        var pageIsPresent: Bool { !toPage || webView != nil }
+
+        func deliver(_ event: Event) {
+            guard !(toPage && detached) else { return }
+            send(event)
         }
 
         func receive(_ data: Data) {
@@ -96,12 +95,16 @@ final class NativeHoldCapture {
 
     /// `afterQueued` runs its work once what the input already sent to the
     /// main queue has arrived (by default, the main queue's next turn).
+    private let isInBackground: () -> Bool
+
     init(
         audio: NativeHoldCaptureAudio,
-        afterQueued: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }
+        afterQueued: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
+        isInBackground: @escaping () -> Bool = { UIApplication.shared.applicationState == .background }
     ) {
         self.audio = audio
         self.afterQueued = afterQueued
+        self.isInBackground = isInBackground
         // A hold is a finger on the screen: it never records in the
         // background, whatever the page managed to say before it hid.
         backgroundObserver = NotificationCenter.default.addObserver(
@@ -138,6 +141,9 @@ final class NativeHoldCapture {
         webView: WKWebView?,
         deliver: ((Event) -> Void)? = nil
     ) -> Result<Timings, StartError> {
+        // A hold is a finger on the screen: a page that hid before its
+        // start arrived does not get the microphone in the background.
+        guard !isInBackground() else { return .failure(.failed("background")) }
         guard audio.permissionGranted else { return .failure(.permission) }
         if let running {
             guard let webView, webView === running.webView else { return .failure(.busy) }
@@ -146,19 +152,12 @@ final class NativeHoldCapture {
             end(reason: "replaced")
         }
         guard !VoiceCaptureAudioState.active, closing[newTake] == nil else { return .failure(.busy) }
-        let origin = webView?.url.flatMap { WebOrigin(url: $0, requiresHTTPS: false) }
         let take = Take(
             id: newTake,
             webView: webView,
             toPage: deliver == nil,
             deliver: deliver ?? { [weak webView] event in
-                // Only into the document that started it: never another page.
-                guard let webView, let url = webView.url,
-                      WebOrigin(url: url, requiresHTTPS: false) == origin
-                else {
-                    return
-                }
-                webView.evaluateJavaScript(Self.eventScript(take: newTake, event: event))
+                webView?.evaluateJavaScript(Self.eventScript(take: newTake, event: event))
             }
         )
         running = take
@@ -201,6 +200,8 @@ final class NativeHoldCapture {
     /// Stops whatever runs for `webView` (it is going away).
     func stop(webView gone: WKWebView) {
         guard let running, running.webView === gone else { return }
+        // Its document is not the one that asked: it hears nothing more.
+        running.detached = true
         end(reason: "gone")
     }
 

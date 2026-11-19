@@ -14,11 +14,18 @@ final class NativeHoldCaptureTests: XCTestCase {
     override func tearDown() {
         VoiceCaptureAudioState.active = false
         queued = []
+        inBackground = false
         super.tearDown()
     }
 
+    private var inBackground = false
+
     private func makeCapture(_ audio: FakeAudio) -> NativeHoldCapture {
-        NativeHoldCapture(audio: audio, afterQueued: { [unowned self] in queued.append($0) })
+        NativeHoldCapture(
+            audio: audio,
+            afterQueued: { [unowned self] in queued.append($0) },
+            isInBackground: { [unowned self] in inBackground }
+        )
     }
 
     private func drain() {
@@ -129,14 +136,27 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(audio.calls, ["start", "stop", "start", "stop"])
     }
 
-    func testAudioForAPageThatIsNoLongerShownEndsTheTake() throws {
+    func testAudioForAPageThatWasDeallocatedEndsTheTake() throws {
         let audio = FakeAudio()
         let capture = makeCapture(audio)
-        // A page with no document of the take's origin (here, none at all).
-        _ = try capture.start(take: "one", webView: WKWebView()).get()
+        weak var released: WKWebView?
+        try autoreleasepool {
+            let page = WKWebView()
+            released = page
+            _ = try capture.start(take: "one", webView: page).get()
+        }
+        guard released == nil else { throw XCTSkip("WebKit kept the WebView alive") }
         audio.onPCM?(Data([1, 0]))
         XCTAssertNil(capture.currentTake)
         XCTAssertEqual(audio.calls, ["start", "stop"])
+    }
+
+    func testAHiddenAppStartsNoMicrophone() {
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        inBackground = true
+        XCTAssertEqual(capture.start(take: "one", webView: nil) { _ in }, .failure(.failed("background")))
+        XCTAssertEqual(audio.calls, [])
     }
 
     func testNoTakeStartsWithoutThePermissionOrWhileTheActionButtonRecords() {

@@ -74,6 +74,8 @@ export class NativePcmCapture implements VoicePcmCapture {
   private levelCount = 0;
   private levels: number[] = [];
   private levelTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the next paced reading is due (`Date.now()`). */
+  private levelDue = 0;
   private started = false;
   private stopping = false;
   private stopped = false;
@@ -87,6 +89,8 @@ export class NativePcmCapture implements VoicePcmCapture {
   async start(): Promise<void> {
     if (this.started) throw new Error('native voice capture already started');
     this.started = true;
+    // Stopped before it began (the page hid while the hold was checked): the App is never asked.
+    if (this.stopping || this.stopped) return;
     // Listening before the App starts: its first audio can come before the start's answer.
     this.unsubscribe = onNativeVoiceCapture((event) => this.handleEvent(event));
     if (!this.unsubscribe) throw new Error('native voice capture unavailable');
@@ -118,6 +122,7 @@ export class NativePcmCapture implements VoicePcmCapture {
     if (this.stopping || this.stopped) {
       // Stopped while the App was starting: it ends the take now.
       void nativeVoiceCaptureStop(this.take);
+      if (this.stopped) this.release();
       return;
     }
     this.handlers.onCaptureState?.('live');
@@ -176,7 +181,10 @@ export class NativePcmCapture implements VoicePcmCapture {
   private queueLevel(rms: number): void {
     this.levels.push(rms);
     if (this.levels.length > MAX_QUEUED_LEVELS) this.levels.shift();
-    if (!this.levelTimer) this.nextLevel();
+    if (!this.levelTimer) {
+      this.levelDue = Date.now();
+      this.nextLevel();
+    }
   }
 
   private nextLevel(): void {
@@ -187,7 +195,10 @@ export class NativePcmCapture implements VoicePcmCapture {
     }
     if (this.attempt) this.trace?.level(this.attempt);
     this.handlers.onLevel?.(rms);
-    this.levelTimer = setTimeout(() => this.nextLevel(), VOICE_LEVEL_INTERVAL_MS);
+    // Against a deadline: a timer that fires late does not let the readings fall behind the audio.
+    const now = Date.now();
+    this.levelDue = Math.max(this.levelDue + VOICE_LEVEL_INTERVAL_MS, now);
+    this.levelTimer = setTimeout(() => this.nextLevel(), Math.max(0, this.levelDue - now));
   }
 
   private finish(): void {

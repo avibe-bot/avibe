@@ -169,6 +169,53 @@ describe('NativePcmCapture', () => {
     expect(on.onStopped).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps its readings level with the audio when its timers fire late', async () => {
+    vi.useFakeTimers();
+    const on = handlers();
+    const capture = new NativePcmCapture(on, 5_000);
+    await capture.start();
+    // Three seconds of audio in 100 ms chunks (93.75 readings), each timer firing 3 ms late:
+    // paced 35 ms apart they would fall ~10 readings (300 ms) behind.
+    const realSetTimeout = globalThis.setTimeout;
+    const late = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => realSetTimeout(fn, (ms ?? 0) + 3)) as typeof setTimeout);
+    for (let chunk = 0; chunk < 30; chunk += 1) {
+      emit({ pcm: pcm(new Array(1_600).fill(8_192)) });
+      vi.advanceTimersByTime(100);
+    }
+    late.mockRestore();
+    // Paced against a deadline: what is still queued is at most about one chunk's worth.
+    expect(on.onLevel.mock.calls.length).toBeGreaterThanOrEqual(90);
+    capture.stop();
+  });
+
+  it('asks the App for nothing when its take was stopped before it began', async () => {
+    const on = handlers();
+    const capture = new NativePcmCapture(on, 5_000);
+    capture.stop();
+    await capture.start();
+    expect(call).not.toHaveBeenCalled();
+    expect(listeners).toHaveLength(0);
+    expect(on.onStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts no App microphone for a take whose page was already hidden", async () => {
+    const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      const pipeline = new VoiceRecordingPipeline({
+        stream: { getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream,
+        segmentMs: 30_000,
+        createCapture: nativeCaptureFactory,
+        onSegment: () => undefined,
+        onStopped: () => undefined,
+      });
+      expect(await pipeline.start()).toBe(false);
+    } finally {
+      hidden.mockRestore();
+    }
+    expect(call).not.toHaveBeenCalled();
+    expect(listeners).toHaveLength(0);
+  });
+
   it('names a refused start as the microphone errors the hold already explains', async () => {
     for (const [message, name] of [['permission', 'NotAllowedError'], ['busy', 'NotReadableError'], ['engine:-10868', 'other']]) {
       startAnswer = async () => {
@@ -199,6 +246,7 @@ describe('NativePcmCapture', () => {
     answer({ sampleRate: 16_000 });
     await started;
     expect(on.onCaptureState).not.toHaveBeenCalled();
+    expect(listeners).toHaveLength(1);
     expect(call.mock.calls.filter(([method]) => method === 'voice.captureStop')).toHaveLength(2);
     emit({ ended: true });
     expect(on.onStopped).toHaveBeenCalledTimes(1);
