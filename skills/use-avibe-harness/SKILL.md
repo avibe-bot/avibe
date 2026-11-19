@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.3.2
+version: 0.3.3
 ---
 
 # Use Avibe Harness
@@ -39,7 +39,7 @@ A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and 
 To pick the Agent, model, and effort for new work, load the `choose-model` Skill.
 
 ### Reporting
-Dispatch inputs name how to report. If the recipient is idle without writing back and has no pending input, delegate, Task, or Watch, Avibe sends a read receipt with its last reply. Failures, cancellations, and interruptions still notify immediately. `--sync` waits inline; read results with `vibe runs show`.
+Dispatch inputs name how to report. A silent dispatched Turn gets one read receipt with its last reply once nothing is queued, despite any Task, Watch or delegate; repeat dispatches to one Session before it share one, quoting the later. Failures notify now. `--sync` waits inline; read results with `vibe runs show`.
 
 Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation or receipt, does not re-arm a pair, and closes a reverse pair. It rejects `--sync` and forks/new Sessions; it does not change delivery. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
 
