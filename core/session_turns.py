@@ -497,7 +497,7 @@ def _delivery_dispatch_text(delivery: dict[str, Any]) -> str:
 
 
 def _segment_dispatch_text(segment: list[dict[str, Any]]) -> str:
-    texts = delivery_store.with_turn_carry_line(segment, [_delivery_dispatch_text(row) for row in segment])
+    texts = [_delivery_dispatch_text(row) for row in segment]
     texts = [text for text in texts if text.strip()]
     leader = segment[0] if segment else {}
     if "snapshot_json" in leader:
@@ -2725,6 +2725,10 @@ class SessionTurnManager:
                         ),
                     }
                 harness_hints.append(harness_hint(hint_spec, receiver=receiver_session_id))
+            # Carried inputs say so first, in the same Harness lines (approved copy).
+            carry_line = delivery_store.turn_carry_line(payloads)
+            if carry_line:
+                harness_hints.insert(0, carry_line)
         context.files = file_attachments_from_specs(specs)
         context.platform_specific.update(
             {
@@ -4822,15 +4826,8 @@ class SessionTurnManager:
         text = str(turn.get("dispatch_text") or "")
         if source == SOURCE_HUMAN:
             stored = "\n".join(str(row.get("dispatch_text") or "") for row in deliveries if row.get("dispatch_text"))
-            segment_text = _segment_dispatch_text(deliveries)
             if stored and text.endswith(stored):
-                head = text[: -len(stored)]
-                # The stored Turn text already opens with a carried batch's line.
-                for line in delivery_store.TURN_CARRY_LINES.values():
-                    opening = f"{line}\n\n"
-                    if segment_text.startswith(opening) and head.endswith(opening):
-                        segment_text = segment_text[len(opening):]
-                text = head + segment_text
+                text = text[: -len(stored)] + _segment_dispatch_text(deliveries)
         if source == SOURCE_SCHEDULED:
             # Keep the raw prompt until MessageHandler parses an explicit
             # ``subagent: prompt`` prefix. The handler prepares structured
@@ -5215,10 +5212,10 @@ class SessionTurnManager:
     ) -> None:
         """In the terminal transaction, so each notice is written exactly once.
 
-        A sender whose input is parked behind a failing model is told once not to
-        resend; the Session's owner is told which inputs a second failure left.
-        The sender of an input that will not be carried again learns it from its
-        Run's own failure callback (``ScheduledTaskService._did_not_complete_text``).
+        The Session's owner is told which inputs a second failure left. Each sender
+        is told once, with its own inputs only: that its input waits behind a failing
+        model (parked), or that it will not be retried (exhausted). A notice is itself
+        never a cause of another notice, nor new work that releases parked inputs.
         """
         exhausted = list(settled.get("exhausted_input_ids") or [])
         if exhausted:
@@ -5231,55 +5228,76 @@ class SessionTurnManager:
                 text=i18n_t("harness.turnCarry.exhausted", self._controller_language(), inputs=", ".join(exhausted)),
                 metadata={"event": "turn_carry_exhausted", "turn_id": turn_id, "input_ids": exhausted},
             )
-        parked = list(settled.get("parked_run_ids") or [])
-        if not parked:
+        owed: dict[tuple[str, str], list[str]] = {}
+        for kind, runs in (
+            ("parked", {run_id: "" for run_id in settled.get("parked_run_ids") or []}),
+            ("exhausted", dict(settled.get("exhausted_runs") or {})),
+        ):
+            if not runs:
+                continue
+            for run in conn.execute(
+                select(
+                    agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json,
+                    agent_runs.c.source_kind, agent_runs.c.source_actor,
+                ).where(agent_runs.c.id.in_(list(runs)))
+            ).mappings().all():
+                if delivery_store.is_carry_notice_run(run["source_actor"]):
+                    continue
+                try:
+                    run_metadata = json.loads(run["metadata_json"] or "{}")
+                except (TypeError, ValueError):
+                    run_metadata = {}
+                if not isinstance(run_metadata, dict):
+                    run_metadata = {}
+                # Who waits on it: the failure-callback target, else the Session that
+                # sent it (an Agent Run's actor, a callback's source Session).
+                sender = str(
+                    run["callback_session_id"]
+                    or (run["source_actor"] if run["source_kind"] == "agent" else "")
+                    or (run_metadata.get("source_session_id") if run["source_kind"] == "callback" else "")
+                    or ""
+                ).strip()
+                if sender and sender != session_id:
+                    owed.setdefault((kind, sender), []).append(str(run["id"]))
+                    owed.setdefault((kind + ":inputs", sender), []).append(runs[str(run["id"])])
+        if not owed:
             return
         from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
         from storage.background import enqueue_run_in_connection
+        from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
 
         now = datetime.now(timezone.utc).isoformat()
-        for run in conn.execute(
-            select(
-                agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json,
-                agent_runs.c.source_kind, agent_runs.c.source_actor,
-            ).where(agent_runs.c.id.in_(parked))
-        ).mappings().all():
-            try:
-                run_metadata = json.loads(run["metadata_json"] or "{}")
-            except (TypeError, ValueError):
-                run_metadata = {}
-            if not isinstance(run_metadata, dict):
-                run_metadata = {}
-            # Who waits on it: the failure-callback target, else the Session that
-            # sent it (an Agent Run's actor, a callback's source Session).
-            sender = str(
-                run["callback_session_id"]
-                or (run["source_actor"] if run["source_kind"] == "agent" else "")
-                or (run_metadata.get("source_session_id") if run["source_kind"] == "callback" else "")
-                or ""
-            ).strip()
-            if not sender or sender == session_id:
+        for (kind, sender), run_ids in owed.items():
+            if ":" in kind:
                 continue
             try:
                 target = resolve_session_id_target(sender, db_path=Path(str(self._sqlite_engine().url.database)))
             except UnresolvableSessionTarget:
                 continue
-            metadata = {"source_session_id": session_id, "parked_run_id": str(run["id"])}
-            from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
-
+            if kind == "parked":
+                prompt = delivery_store.TURN_CARRY_PARKED_NOTICE
+            else:
+                inputs = ", ".join(dict.fromkeys(owed[("exhausted:inputs", sender)]))
+                prompt = delivery_store.TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=inputs)
+            metadata: dict[str, Any] = {"source_session_id": session_id, "turn_carry_run_ids": run_ids}
             # The notice runs with the authority the sender's Run was given, no more.
-            authority = run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY) if isinstance(run_metadata, dict) else None
+            first = conn.execute(select(agent_runs.c.metadata_json).where(agent_runs.c.id == run_ids[0])).scalar()
+            try:
+                authority = (json.loads(first or "{}") or {}).get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+            except (TypeError, ValueError, AttributeError):
+                authority = None
             if isinstance(authority, dict):
                 metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = authority
             enqueue_run_in_connection(conn, {
                 "id": uuid.uuid4().hex[:12], "run_type": "agent_run", "status": "queued",
-                "source_kind": "callback", "source_actor": f"{run['id']}:turn-carry-parked",
-                "parent_run_id": str(run["id"]), "session_policy": "existing",
+                "source_kind": "callback",
+                "source_actor": f"{run_ids[0]}{delivery_store.TURN_CARRY_NOTICE_ACTOR_MARKER}{kind}",
+                "parent_run_id": run_ids[0], "session_policy": "existing",
                 "session_id": target.session_id, "legacy_session_key": target.session_key.to_key(),
                 "agent_id": target.agent_id, "agent_name": target.agent_name,
                 "agent_backend": target.agent_backend, "model": target.model,
                 "reasoning_effort": target.reasoning_effort,
-                "prompt": delivery_store.TURN_CARRY_PARKED_NOTICE,
+                "prompt": prompt,
                 "metadata_json": json.dumps(metadata), "created_at": now, "updated_at": now,
             })
 

@@ -134,7 +134,7 @@ from storage.background import (
     resolve_run_at,
     task_schedule_generation,
 )
-from storage.models import agent_runs as agent_runs_table, agent_sessions, scope_settings, scopes
+from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
 from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 from storage.session_delegations import has_dispatch_pair
@@ -8354,52 +8354,12 @@ class ScheduledTaskService:
         text of its own, so its interruption reason is named instead.
         """
         text = self._fallback_callback_result(run, status=status)
-        carried = self._exhausted_carry_input(run) if status == "failed" else None
-        if carried:
-            # Its one carry is spent: the sender decides whether it still matters.
-            from storage.message_deliveries import TURN_CARRY_EXHAUSTED_NOTICE
-
-            text = "\n\n".join(part for part in (TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=carried), text) if part)
         metadata = run.get("metadata") if isinstance(run.get("metadata"), Mapping) else {}
         reason = str(metadata.get("interrupt_reason") or "").strip()
         if reason and not str(run.get("error") or "").strip():
             label = i18n_t(failure_notices.notice_reason_i18n_key(reason), "en")
             text = "\n\n".join(part for part in (text, i18n_t("harness.run.fallbackResult.reason", "en", reason=label)) if part)
         return text
-
-    def _exhausted_carry_input(self, run: dict[str, Any]) -> Optional[str]:
-        """The sender's own input id, when its Run failed on an input a Turn's end carried."""
-        delivery_id = str(run.get("delivery_id") or "").strip()
-        store = getattr(self.request_store, "sqlite_backend", None)
-        if not delivery_id or store is None:
-            return None
-        from storage import message_deliveries as delivery_store
-
-        with store.engine.connect() as conn:
-            delivery = delivery_store.get_delivery(conn, delivery_id)
-            turn_id = str((delivery or {}).get("turn_id") or "")
-            if not turn_id:
-                return None
-            # Callbacks to one Session from one terminal Turn coalesce into one
-            # (``_enqueue_callback_run``), whichever Run wins: name every input of
-            # that Turn whose carry ended there, for this recipient (#4010 review).
-            recipient = str(run.get("callback_session_id") or "").strip()
-            inputs: list[str] = []
-            for row in delivery_store.deliveries_for_turn(conn, turn_id):
-                carry = delivery_store.turn_carry(row)
-                if carry is None or row.get("turn_id") != turn_id:
-                    continue
-                owner = conn.execute(
-                    select(agent_runs_table.c.callback_session_id, agent_runs_table.c.status)
-                    .where(agent_runs_table.c.delivery_id == row["id"])
-                ).first()
-                # Its Run still points here: it was not carried on again.
-                if owner is None or str(owner.status) != "failed":
-                    continue
-                if str(row["id"]) != delivery_id and (not recipient or str(owner.callback_session_id or "").strip() != recipient):
-                    continue
-                inputs.append(str(carry.get("original_id") or row["id"]))
-        return ", ".join(dict.fromkeys(inputs)) or None
 
     def _fallback_callback_result(self, run: dict[str, Any], *, status: str) -> str:
         parts: list[str] = []

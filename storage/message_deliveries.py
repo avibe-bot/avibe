@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -1093,7 +1092,7 @@ def claim_start_batch(
         if row is None:
             raise RuntimeError("Delivery batch claim lost after writer reservation")
         claimed.append(row)
-    if any(turn_carry(row) is None or failure_retry_binding(row) is not None for row in claimed):
+    if any(_is_new_work(conn, row) for row in claimed):
         release_parked_inputs(conn, session_id, turn_id=turn_id)
     return {"turn": turn, "deliveries": claimed}
 
@@ -1128,7 +1127,7 @@ def activate_waiting_successor(
     )
     if started is None:
         return None
-    if turn_carry(delivery) is None or failure_retry_binding(delivery) is not None:
+    if _is_new_work(conn, delivery):
         release_parked_inputs(conn, str(turn["session_id"]), turn_id=str(turn["id"]))
     claimed = cas_delivery(
         conn,
@@ -2139,28 +2138,19 @@ def turn_carry(delivery: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-_URL_START = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+def turn_carry_line(rows: Iterable[Mapping[str, Any]]) -> str | None:
+    """The line a batch of carried inputs is read with, as a Harness hint line.
 
-
-def with_turn_carry_line(rows: Iterable[Mapping[str, Any]], texts: Iterable[str]) -> list[str]:
-    """``texts``, one per input of a batch, with the first carried one opened by its line."""
-    opened: list[str] = []
-    pending = True
-    for row, body in zip(rows, texts):
+    A batch never mixes carried and fresh inputs (``message_merge_identity``), so
+    its first row decides. The inputs' own text is never touched.
+    """
+    for row in rows:
         metadata = row.get("metadata")
         if not isinstance(metadata, Mapping):
             snapshot = _json_object(row.get("snapshot_json")) if row.get("snapshot_json") else row
             metadata = _json_object(snapshot.get("metadata_json"))
-        line = TURN_CARRY_LINES.get(str(metadata.get(TURN_CARRY_METADATA_KEY) or "")) if pending else None
-        if line and body:
-            pending = False
-            from modules.agents.subagent_router import parse_subagent_prefix
-
-            # ``reviewer: …`` routes by its first word: the line goes after the prefix.
-            routed = None if _URL_START.match(body.lstrip()) else parse_subagent_prefix(body)
-            body = f"{routed.name}: {line}\n\n{routed.message}" if routed else f"{line}\n\n{body}"
-        opened.append(body)
-    return opened
+        return TURN_CARRY_LINES.get(str(metadata.get(TURN_CARRY_METADATA_KEY) or ""))
+    return None
 
 
 def _carry_reason(turn: dict[str, Any]) -> str | None:
@@ -2186,6 +2176,29 @@ def waiting_for_external_input(delivery: dict[str, Any]) -> bool:
     return parked and not any(
         isinstance(event, dict) and event.get("kind") == TURN_CARRY_RELEASE_KIND for event in events
     )
+
+
+#: ``agent_runs.source_actor`` suffix of the notices a carry sends its senders.
+TURN_CARRY_NOTICE_ACTOR_MARKER = ":turn-carry-"
+
+
+def is_carry_notice_run(source_actor: Any) -> bool:
+    return TURN_CARRY_NOTICE_ACTOR_MARKER in str(source_actor or "")
+
+
+def _is_new_work(conn: Connection, delivery: Mapping[str, Any]) -> bool:
+    """Whether starting this input releases parked ones: a person's Retry, or an
+    input no Turn carried that is not itself a carry notice. Two Sessions with
+    failing models must not wake each other through their notices (#4010 review).
+    """
+    if failure_retry_binding(dict(delivery)) is not None:
+        return True
+    if turn_carry(dict(delivery)) is not None:
+        return False
+    actors = conn.execute(
+        select(agent_runs.c.source_actor).where(agent_runs.c.delivery_id == str(delivery["id"]))
+    ).scalars().all()
+    return not any(is_carry_notice_run(actor) for actor in actors)
 
 
 def release_parked_inputs(conn: Connection, session_id: str, *, turn_id: str) -> None:
@@ -2255,6 +2268,7 @@ def carry_accepted_inputs(
     reason = _carry_reason(turn)
     parked_run_ids: list[str] = []
     exhausted_input_ids: list[str] = []
+    exhausted_runs: dict[str, str] = {}
     provenance = _json_object(turn.get("terminal_evidence_json")).get("output_provenance")
     kind = provenance.get("error_kind") if isinstance(provenance, Mapping) else None
     provider_failed = reason == "failed" and kind in TRANSIENT_FAILURE_KINDS
@@ -2279,6 +2293,10 @@ def carry_accepted_inputs(
         ):
             # Its one carry is spent and the next Turn failed too.
             exhausted_input_ids.append(str(prior.get("original_id") or row["id"]))
+            exhausted_runs.update({
+                run_id: str(prior.get("original_id") or row["id"])
+                for run_id in agent_run_ids_for_delivery(conn, row)
+            })
         if envelope is not None and reason is not None and eligible and (run_ids := _carriable_run_ids(conn, row)) is not None:
             # Consecutive provider failures only: a Stop or other carry starts no count.
             depth = int(prior.get("depth", 0)) + 1 if provider_failed and prior.get("provider") else 1
@@ -2313,12 +2331,16 @@ def carry_accepted_inputs(
             conn.execute(update(message_deliveries).where(message_deliveries.c.id == row["id"]).values(
                 delivery_history_json=_canonical_json(history),
             ))
-    result = {"parked_run_ids": parked_run_ids, "exhausted_input_ids": exhausted_input_ids}
+    result = {
+        "parked_run_ids": parked_run_ids, "exhausted_input_ids": exhausted_input_ids,
+        "exhausted_runs": exhausted_runs,
+    }
     if late and (parked_run_ids or exhausted_input_ids):
         owed = conn.info.setdefault(LATE_CARRY_NOTICES_KEY, {})
-        entry = owed.setdefault(turn_id, {"parked_run_ids": [], "exhausted_input_ids": []})
+        entry = owed.setdefault(turn_id, {"parked_run_ids": [], "exhausted_input_ids": [], "exhausted_runs": {}})
         entry["parked_run_ids"].extend(parked_run_ids)
         entry["exhausted_input_ids"].extend(exhausted_input_ids)
+        entry["exhausted_runs"].update(exhausted_runs)
     return result
 
 
