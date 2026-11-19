@@ -983,6 +983,12 @@ final class WebViewController: UIViewController {
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(askCachedPageInstanceAgain),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(resetOuterScrollPosition),
             name: UIResponder.keyboardWillHideNotification,
             object: nil
@@ -1111,7 +1117,8 @@ final class WebViewController: UIViewController {
     /// other outcome (sign-in needed, or no answer) loads the instance live,
     /// which signs in natively as any first load does, or waits for the
     /// instance as before. The page stays covered throughout.
-    private func probeCachedPage() {
+    /// `uncovered`: the page is already shown uncovered (asking again).
+    private func probeCachedPage(uncovered: Bool = false) {
         cachedPageProbe?.cancel()
         guard retainedWebView != nil else { return }
         // A page whose bytes declare that they keep their shell while the
@@ -1121,20 +1128,29 @@ final class WebViewController: UIViewController {
         // Any other cached page stays covered and is asked once.
         let marked = shownCachedPage?.keepsShell == true
         cachedPageProbe = Task { @MainActor [weak self] in
-            var keepsShell = false
-            if marked, await self?.cachedPageDeclaresReplayedShell() == true {
+            var keepsShell = uncovered
+            if !uncovered, marked, await self?.cachedPageDeclaresReplayedShell() == true {
                 guard !Task.isCancelled, let self, self.cachedNavigation != nil else { return }
                 keepsShell = true
                 self.cachedPageUncovered = true
                 self.cachedPageKeepsShell()
             }
+            // Every 3 s while the open's budget runs (a minute), then
+            // doubling up to 30 s; a return to the foreground asks at once
+            // (`askCachedPageInstanceAgain`).
+            var interval: Duration = .seconds(3)
+            var waited: Duration = .zero
             while !Task.isCancelled {
                 let answer = await self?.askCachedPageInstance(keepsShell: keepsShell)
                 guard let answer, !Task.isCancelled else { return }
                 if answer == 0, keepsShell {
                     // Not reachable yet: the page stays; ask again. Nothing
                     // is held across the wait.
-                    do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                    do { try await Task.sleep(for: interval) } catch { return }
+                    waited += interval
+                    if waited >= .seconds(60) {
+                        interval = min(interval * 2, .seconds(30))
+                    }
                     continue
                 }
                 guard let self, self.cachedNavigation != nil else { return }
@@ -1174,6 +1190,15 @@ final class WebViewController: UIViewController {
                 }
             }
         }
+    }
+
+    /// Back in the foreground with an uncovered cached page still waiting
+    /// for its instance: ask now, then on the usual schedule.
+    @objc private func askCachedPageInstanceAgain() {
+        guard cachedPageUncovered, cachedNavigation != nil, !isInvalidatedForAccountTransition else {
+            return
+        }
+        probeCachedPage(uncovered: true)
     }
 
     private func leaveCachedPage() {
@@ -2732,8 +2757,15 @@ extension WebViewController: WKNavigationDelegate {
             }
             primaryWebContentTerminationHandled = true
             primaryNavigationInProgress = false
-            // The cached page went with its process.
+            // The cached page went with its process. One shown uncovered
+            // (its shell waits out an unreachable instance) is shown again,
+            // so a process ended in the background brings back the same
+            // page, not a live load of an instance that may be offline.
+            let showsCachedPageAgain = cachedPageUncovered
             leaveCachedPage()
+            if showsCachedPageAgain {
+                hasUsedCache = false
+            }
             discardAllPopups(animated: false)
             reportPrimaryNavigationSettlement(
                 RuntimeNavigationEvent(
