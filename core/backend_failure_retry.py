@@ -10,7 +10,7 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import Connection
 
 from core.input_admission import InputEnvelope, admit_input
@@ -129,12 +129,33 @@ def _validate_boundary(
         or (turn["backend"] != session["agent_backend"] and turn["terminal_outcome"] != "not_written")
     ):
         raise RetryUnavailable("retry_not_available")
-    latest = conn.execute(
-        select(session_turns.c.id)
-        .where(session_turns.c.session_id == session_id)
-        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
-        .limit(1)
+    # Stale once anything newer than this failure ran or runs: a live Turn, or a
+    # Turn that took an input no failed or stopped Turn carried, or one whose
+    # inputs left it (a Turn stopped before its write). Turns of carried inputs
+    # only, already ended, do not count: a press must still work after them.
+    source_created = conn.execute(
+        select(session_turns.c.created_at).where(session_turns.c.id == turn_id)
     ).scalar_one_or_none()
+    membership = select(message_deliveries.c.id).where(message_deliveries.c.turn_id == session_turns.c.id)
+    newer_work = (
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == session_id, session_turns.c.id != turn_id)
+        .where(or_(
+            session_turns.c.created_at > source_created,
+            and_(session_turns.c.created_at == source_created, session_turns.c.id > turn_id),
+        ))
+        .where(or_(
+            session_turns.c.state != "terminal",
+            ~membership.exists(),
+            membership.where(
+                ~message_deliveries.c.delivery_history_json.like('%"kind":"turn_carry"%')
+            ).exists(),
+        ))
+        .limit(1)
+    )
+    latest = (
+        turn_id if source_created is not None and conn.execute(newer_work).first() is None else None
+    )
     if latest != turn_id:
         raise RetryUnavailable("retry_stale")
     if turn["state"] != "terminal":
@@ -150,12 +171,17 @@ def _validate_boundary(
     # A reserved/unknown input is just as important as an active Turn: it may
     # already have an owner on its way to admission.
     pending = conn.execute(
-        select(message_deliveries.c.id, message_deliveries.c.state)
+        select(message_deliveries.c.id, message_deliveries.c.state, message_deliveries.c.delivery_history_json)
         .where(message_deliveries.c.session_id == session_id)
         .where(message_deliveries.c.id.not_in(exclude_ids))
         .where(message_deliveries.c.state.not_in(("accepted", "retired")))
-    )
-    if any(policy_for(row.state).ordering != "terminal" for row in pending):
+    ).all()
+    # Inputs parked behind a failing model wait for exactly this: the next start.
+    if any(
+        policy_for(row.state).ordering != "terminal"
+        and not deliveries.waiting_for_external_input(dict(row._mapping))
+        for row in pending
+    ):
         raise RetryUnavailable("retry_pending_input")
     return turn
 

@@ -102,6 +102,9 @@
     }
   },
   "harness": {
+    "turnCarry": {
+      "exhausted": "这些输入已转交过一次，接下来那一轮也失败了。它们不会再自动重试；如果仍然需要，请重新发送：{inputs}"
+    },
     "agentInitiatedContinuation": "Agent 主动发起的续接",
     "promptEcho": {
       "scheduled": "⏰ 定时任务",

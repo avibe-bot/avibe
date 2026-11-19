@@ -70,6 +70,21 @@ const callbacks = [
   callback('run_v3', 'Spot-check of the 15:42 snapshot: one P1, three P2 findings, all with failing tests attached.', 5),
 ];
 
+// A Stop with two reports merged into the Turn: they run again in the next Turn, labelled as carried.
+const carried = [
+  userSays('把 3.2.8 的发版说明整理一下，按模块分组。', 40),
+  agentSays('好，先读一遍这次合并的 PR 列表。', 39),
+  callback('run_c1', 'iOS 37.1 已处理完，在内部组，测试说明写好了。', 36),
+  callback('run_c2', '直连试用：流里已有真实数据，延迟中位数 41 ms。', 35),
+  message('agent', 'interim', '列表读完了，正在按模块分组。', 34),
+  harness('agent_run', 'run_c1', 'iOS 37.1 已处理完，在内部组，测试说明写好了。\n直连试用：流里已有真实数据，延迟中位数 41 ms。', 33, {
+    source_session_id: 'sesv7t2q9m4kd',
+    source_session_title: 'Vault sandbox Taproot 签名',
+    source_session_agent_name: 'codex',
+    metadata: { turn_carry: 'stopped' },
+  }),
+];
+
 const claude = { title: '周报与图表', agent_name: 'claude', agent_backend: 'claude', agent_variant: 'claude', model: 'claude-opus-5-5' };
 
 const designFrames = frames([
@@ -118,6 +133,27 @@ const designFrames = frames([
     fixtures: chatFixtures({ session: { title: '修复 Vault Taproot 签名' }, messages: callbacks }),
     click: ['button:has-text("{t:chat.harnessGroup.expand}")'],
     render: chatPhone,
+  },
+  {
+    name: 'harness-carried',
+    title: '会话 · 被停止那一轮里收到的回报，转到下一轮',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ session: { title: '3.2.8 发版说明' }, messages: carried }),
+    render: chatDesktop,
+  },
+  {
+    name: 'harness-carried-expanded',
+    title: '会话 · 展开转到下一轮的回报',
+    width: 1192,
+    height: 1000,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ session: { title: '3.2.8 发版说明' }, messages: carried }),
+    click: ['role=button[name=/iOS 37.1 已处理完/]'],
+    render: chatDesktop,
   },
   {
     name: 'phone-media',

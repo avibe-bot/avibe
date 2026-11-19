@@ -102,6 +102,9 @@
     }
   },
   "harness": {
+    "turnCarry": {
+      "exhausted": "These inputs were carried forward once and the next Turn failed too. They will not be retried automatically; send them again if they still matter: {inputs}"
+    },
     "agentInitiatedContinuation": "Agent-initiated continuation",
     "promptEcho": {
       "scheduled": "⏰ Scheduled task",
