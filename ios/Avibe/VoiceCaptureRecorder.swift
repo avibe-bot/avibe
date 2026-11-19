@@ -125,7 +125,7 @@ final class VoiceCaptureRecorder {
     }
 
     /// Whether this take activated the audio session. The session is active
-    /// from `prepare` (just before the Live Activity) while the take records
+    /// from `prepare` (around the island, by the try) while the take records
     /// (the background `audio` mode keeps the App running for that, and
     /// nothing else); every way a take or a refused try ends goes through
     /// `stop()`, which deactivates it.
@@ -151,7 +151,8 @@ final class VoiceCaptureRecorder {
     }
 
     /// Sets up and activates the session for one candidate, recording
-    /// nothing yet. The controller does this before the Live Activity.
+    /// nothing yet. The controller does this before or after the island, by the
+    /// try.
     func prepare(_ candidate: VoiceCaptureSessionCandidate) throws {
         guard permission() else {
             throw Failure.permission

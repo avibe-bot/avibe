@@ -502,13 +502,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Couldn't start recording in the background this time, so it started in the App."
+            "value" : "Recording. Long-press the Action Button again to send."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "这次没能在后台开始录音，已在 App 里开始。"
+            "value" : "正在录音，再长按一次侧边键发送"
           }
         }
       }

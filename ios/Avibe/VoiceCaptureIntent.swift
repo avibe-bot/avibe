@@ -12,12 +12,14 @@ import Foundation
 /// `AudioRecordingIntent` tells the system the App records audio; the
 /// system then requires a Live Activity for as long as it records
 /// (developer.apple.com/documentation/appintents/audiorecordingintent).
-/// It is also a `LiveActivityIntent`: an App that is not in front may start
-/// a Live Activity only from such an intent
-/// (developer.apple.com/documentation/appintents/liveactivityintent), and a
-/// press that finds no running process must still be able to.
+/// It is an `AudioRecordingIntent` only, as in 26.1, the one build whose
+/// press started recording in the background on the owner's phone. With
+/// `LiveActivityIntent` too (#3923), the system launched it as a background
+/// Live Activity start, and the microphone was refused (35.1: 560557684,
+/// 561015905). A cold press, whose island cannot start from the
+/// background, goes on in the App (try 3) and records there.
 @available(iOS 18.0, *)
-struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
+struct SpeakToMainBotIntent: AudioRecordingIntent {
     static let title: LocalizedStringResource = "Talk to Main Bot"
     static let description = IntentDescription(
         "Records what you say and sends it to your main Bot without opening Avibe."
@@ -44,7 +46,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         }
         let outcome = await controller.toggle(foregroundFallback: canComeForward)
         if outcome == .needsForeground {
-            // Both background tries were refused: try 3 records in the App
+            // Every background try was refused: try 3 records in the App
             // at once, with one line saying why it opened.
             if #available(iOS 26.0, *) {
                 do {
