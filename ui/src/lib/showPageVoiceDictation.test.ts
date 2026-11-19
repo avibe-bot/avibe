@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { nativeCaptureFactory } from './nativeVoiceCapture';
 import { ShowPageVoiceDictation } from './showPageVoiceDictation';
 import { claimVoiceCapture, isVoiceCaptureActive, type VoiceRecordingPipelineOptions } from './voiceRecording';
 import type { VoiceRealtimeOptions } from './voiceRealtime';
@@ -179,6 +180,34 @@ describe('ShowPageVoiceDictation', () => {
     options?.trace?.observePcm(new Int16Array(2048).fill(8000));
     expect(options?.trace).toMatchObject({ entry: 'hold', dictationId: dictation.id });
     expect(dictation.captureClass()).toBe('sound');
+    dictation.abort();
+  });
+
+  it('lets the iOS App record a take: no microphone of the page, the App as its capture', async () => {
+    const getUserMedia = vi.fn(async () => fakeStream().stream);
+    let options: VoiceRecordingPipelineOptions | undefined;
+    const pressedAt = Date.now() - 260;
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold', nativeCapture: true, pressedAt }, {
+      getUserMedia,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: '', cleanup: 'success' as const }),
+        abort: vi.fn(),
+      }),
+      createPipeline: (pipelineOptions) => {
+        options = pipelineOptions;
+        return { start: async () => true, finish: vi.fn(), abort: vi.fn() };
+      },
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    await dictation.start();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(options?.createCapture).toBe(nativeCaptureFactory);
+    expect(options?.stream.getTracks()).toEqual([]);
+    // How long the press waited for the take: press to first audio is this plus the capture's.
+    expect(options?.trace?.toEvent('sent').pressMs).toBeGreaterThanOrEqual(260);
     dictation.abort();
   });
 

@@ -1628,6 +1628,8 @@ final class WebViewController: UIViewController {
                 + popupRecords.values.map(\.webView)
         )
         isInvalidatedForAccountTransition = true
+        // An in-App hold's take ends with the account's page.
+        if let retainedWebView { NativeHoldCapture.shared.stop(webView: retainedWebView) }
         hasPendingAutoLoad = false
         cachedPageProbe?.cancel()
         cachedPageProbe = nil
@@ -2725,6 +2727,8 @@ extension WebViewController: WKNavigationDelegate {
         guard acceptsRuntimeCallback(from: webView) else {
             return
         }
+        // The page that held the take is gone: nothing can stop it but us.
+        NativeHoldCapture.shared.stop(webView: webView)
         cancelPendingDialogs(for: webView)
         if isPrimaryWebView(webView) {
             guard !primaryWebContentTerminationHandled else {

@@ -4,9 +4,11 @@ import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { isDesktopShell } from '../../lib/desktopShell';
 import {
+  hasNativeVoiceCapture,
   nativeHapticImpact,
   nativeHapticNotify,
   nativeHapticSelection,
+  nativeVoiceCapturePrepare,
   nativeVoicePermission,
 } from '../../lib/native';
 import { IS_APPLE } from '../../lib/platform';
@@ -256,6 +258,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   useEffect(() => {
     latest.current = options;
   });
+  // In the iOS App the App records the take (lib/nativeVoiceCapture): its audio session is set
+  // up here, with nothing started (no microphone indicator), so a hold starts at once.
+  useEffect(() => {
+    if (hasNativeVoiceCapture()) void nativeVoiceCapturePrepare();
+  }, []);
 
   const [phase, setPhase] = useState<HoldPhase>('idle');
   const [interruptReason, setInterruptReason] = useState<HoldInterruptReason | null>(null);
@@ -463,12 +470,15 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     interrupt(failureReason(current, error), heard);
   }, [end, interrupt]);
 
-  const startTake = useCallback((granted: boolean) => {
+  const startTake = useCallback((granted: boolean, pressedAt: number) => {
     const startupAsk = isDesktopShell() ? Symbol('capture-start') : null;
     if (startupAsk) permissionAsk.current = startupAsk;
     const keep = latest.current.keep?.();
     const dictation = new ShowPageVoiceDictation({
       entry: 'hold',
+      pressedAt,
+      // The App records once the microphone is allowed; its first answer is still WebKit's.
+      ...(granted && hasNativeVoiceCapture() ? { nativeCapture: true } : {}),
       before: '',
       after: '',
       context: latest.current.context?.(),
@@ -605,7 +615,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       );
       return;
     }
-    startTake(permission === 'granted');
+    startTake(permission === 'granted', current.startedAt);
   }, [end, startTake]);
 
   /** Release (or Esc, or the system) decides how the take ends. */
@@ -801,7 +811,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         // Without capture the hold still works while the pointer stays on the element.
       }
     }
-    void prewarmVoiceCapture().catch(() => undefined);
+    // The App's own capture needs no audio context of the page's.
+    if (!hasNativeVoiceCapture()) void prewarmVoiceCapture().catch(() => undefined);
     const startedAt = Date.now();
     const requested = latest.current.gesture;
     const gesture: HoldGesture = { ...HOLD_GESTURE, ...(typeof requested === 'function' ? requested(event.pointerType) : requested) };

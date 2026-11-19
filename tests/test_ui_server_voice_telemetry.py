@@ -294,6 +294,35 @@ def test_voice_telemetry_logs_a_capture_trace_and_only_its_known_states(caplog):
     assert "device-id-secret" not in record.message
 
 
+def test_voice_telemetry_keeps_a_take_the_ios_app_recorded(caplog):
+    client = app.test_client()
+    trace = _capture_trace(
+        pressMs=262,
+        attempts=[
+            {
+                "kind": "native",
+                "atMs": 3,
+                "mic": "ok",
+                "micMs": 61,
+                "sampleRate": 16_000,
+                "chunks": 40,
+                "firstFrameMs": 83,
+                "levels": 120,
+                "trackStart": "none",
+                "trackEnd": "none",
+                "end": "rendered",
+            }
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post("/api/asr/telemetry", json=trace, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    _, metric = _logged_metric(caplog)
+    assert metric["pressMs"] == 262
+    assert metric["attempts"] == trace["attempts"]
+
+
 def test_voice_telemetry_rejects_a_malformed_capture_trace():
     client = app.test_client()
     attempt_with_text = _capture_trace()

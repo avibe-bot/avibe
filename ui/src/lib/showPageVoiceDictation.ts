@@ -1,3 +1,4 @@
+import { emptyVoiceStream, nativeCaptureFactory } from './nativeVoiceCapture';
 import {
   finalizeVoiceDictation,
   VOICE_SEGMENT_MS,
@@ -58,6 +59,10 @@ export type ShowPageVoiceDictationInput = {
   /** How the take is recorded (lib/voiceRecording): through Web Audio, or without it (no live
    *  words, no level: its words come on release), or without it and getting no sound at all. */
   onCaptureState?: (state: VoiceCaptureState) => void;
+  /** The iOS App records the take (lib/nativeVoiceCapture) instead of getUserMedia and Web Audio. */
+  nativeCapture?: boolean;
+  /** When the press that started this take began (`Date.now()`), for the capture trace. */
+  pressedAt?: number;
 };
 
 /** Speech heard without one live preview for this long: the realtime path is taken as not
@@ -168,6 +173,7 @@ export class ShowPageVoiceDictation {
     };
     this.dictationId = this.dependencies.newDictationId();
     this.trace = new VoiceCaptureTrace(input.entry ?? 'show_page', this.dictationId);
+    if (input.pressedAt !== undefined) this.trace.pressed(input.pressedAt);
     this.keeper = input.keep ? new VoiceTakeKeeper(this.dictationId, input.keep) : null;
     this.context = resolveVoiceContext(input.context);
     this.queue = this.dependencies.createQueue({
@@ -202,7 +208,8 @@ export class ShowPageVoiceDictation {
       const requestedAt = this.trace.mark();
       let stream: MediaStream;
       try {
-        stream = await this.dependencies.getUserMedia();
+        // A take the App records opens no microphone in the page.
+        stream = this.input.nativeCapture ? emptyVoiceStream() : await this.dependencies.getUserMedia();
       } catch (error) {
         // The microphone never opened: refused, missing, or held by something else.
         this.trace.micSettled(requestedAt, error);
@@ -242,6 +249,7 @@ export class ShowPageVoiceDictation {
       const pipeline = this.dependencies.createPipeline({
         stream,
         trace: this.trace,
+        ...(this.input.nativeCapture ? { createCapture: nativeCaptureFactory } : {}),
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: this.input.maxFileBytes,
         onSegment: (blob, metadata) => {

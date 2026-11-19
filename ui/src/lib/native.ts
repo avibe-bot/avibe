@@ -11,7 +11,8 @@ export type NativeCapability =
   | 'push'
   | 'systemSchedule'
   | 'viewport'
-  | 'voice';
+  | 'voice'
+  | 'voiceCapture';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';
@@ -476,6 +477,69 @@ export async function nativeVoicePermission(): Promise<NativeVoicePermission | n
   } catch {
     return null;
   }
+}
+
+/** The App records a hold's take itself (ios/Avibe/NativeHoldCapture.swift): 16 kHz mono PCM. */
+export function hasNativeVoiceCapture(): boolean {
+  return hasNativeCapability('voiceCapture');
+}
+
+/** Gets the App's audio session ready for a take, without starting the microphone. */
+export async function nativeVoiceCapturePrepare(): Promise<boolean> {
+  try {
+    await callNative('voiceCapture', 'voice.capturePrepare');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type NativeVoiceCaptureStarted = {
+  sampleRate: number;
+  /** How long the App took to activate its audio session, and to start the microphone (ms). */
+  activateMs?: number;
+  engineMs?: number;
+};
+
+/** What a take's App capture says: a chunk of PCM (base64, Int16 little-endian), or its end. */
+export type NativeVoiceCaptureEvent = {
+  take: string;
+  pcm?: string;
+  ended?: boolean;
+  /** Why the App ended it, when the page did not: `interrupted`, `route`, `background`, … */
+  reason?: string;
+};
+
+/** Starts the App's microphone for `take`; rejects with the bridge's error when it does not. */
+export async function nativeVoiceCaptureStart(take: string): Promise<NativeVoiceCaptureStarted> {
+  const started = await callNative<NativeVoiceCaptureStarted>('voiceCapture', 'voice.captureStart', { take });
+  if (!started) throw { code: 'unavailable', message: 'The App cannot record.' } satisfies NativeBridgeError;
+  return started;
+}
+
+export async function nativeVoiceCaptureStop(take: string): Promise<void> {
+  try {
+    await callNative('voiceCapture', 'voice.captureStop', { take });
+  } catch {
+    // The App ends the take on its own when the page goes.
+  }
+}
+
+/** Listens to the App's capture events; null without a native shell. */
+export function onNativeVoiceCapture(handler: (event: NativeVoiceCaptureEvent) => void): (() => void) | null {
+  const native = bridge();
+  if (!native) return null;
+  return native.on('voice.capture', (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const event = payload as Partial<NativeVoiceCaptureEvent>;
+    if (typeof event.take !== 'string') return;
+    handler({
+      take: event.take,
+      ...(typeof event.pcm === 'string' ? { pcm: event.pcm } : {}),
+      ...(event.ended === true ? { ended: true } : {}),
+      ...(typeof event.reason === 'string' ? { reason: event.reason } : {}),
+    });
+  });
 }
 
 export async function nativePushStatus(

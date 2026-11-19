@@ -13611,8 +13611,9 @@ _VOICE_CONTEXT_STATES = {"running", "suspended", "interrupted", "closed", "other
 _VOICE_TRACK_STATES = {"none", "ended", "live", "live_muted", "live_disabled", "live_muted_disabled"}
 _VOICE_AUDIO_SESSION_STATES = {"active", "interrupted", "inactive"}
 _VOICE_CAPTURE_ATTEMPT_ENUMS = {
-    # "microphone": a fresh microphone, which earlier releases tried.
-    "kind": {"initial", "start_rebuild", "context", "microphone", "recorder"},
+    # "microphone": a fresh microphone, which earlier releases tried; "native": the iOS App
+    # recorded the take itself (ui/src/lib/nativeVoiceCapture.ts).
+    "kind": {"initial", "start_rebuild", "context", "microphone", "recorder", "native"},
     "mic": _VOICE_MIC_RESULTS,
     "contextState": _VOICE_CONTEXT_STATES,
     "resumedState": _VOICE_CONTEXT_STATES,
@@ -13820,6 +13821,7 @@ def asr_telemetry():
         "stopToFinalMs",
         "voicedReadings",
         "micMs",
+        "pressMs",
         "audioInputCount",
         "totalMs",
         "pageAgeMs",
