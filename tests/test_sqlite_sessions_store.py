@@ -2548,18 +2548,26 @@ def test_succeed_retired_session_route_moves_only_the_values_still_stored(tmp_pa
 
         # The user already switched the effort: nothing moves, not even the model.
         assert not service.succeed_retired_session_route(
-            session_id, model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("max", "high")
+            session_id, stored_model="gpt-6-astra",
+            model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("max", "high"),
+        )
+        # An effort chosen for another model than the one the row now stores does not move.
+        assert not service.succeed_retired_session_route(
+            session_id, stored_model="gpt-5.4", reasoning_effort=("ultra", "high")
         )
         row = service.get_agent_session_by_id(session_id)
         assert (row["model"], row["reasoning_effort"]) == ("gpt-6-astra", "ultra")
 
         assert service.succeed_retired_session_route(
-            session_id, model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("ultra", "max")
+            session_id, stored_model="gpt-6-astra",
+            model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("ultra", "max"),
         )
         row = service.get_agent_session_by_id(session_id)
         assert (row["model"], row["reasoning_effort"]) == ("gpt-6.2-astra", "max")
         # Moved once: the same move finds nothing left to replace.
-        assert not service.succeed_retired_session_route(session_id, model=("gpt-6-astra", "gpt-6.2-astra"))
+        assert not service.succeed_retired_session_route(
+            session_id, stored_model="gpt-6-astra", model=("gpt-6-astra", "gpt-6.2-astra")
+        )
     finally:
         service.close()
 

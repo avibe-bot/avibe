@@ -1497,7 +1497,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
                     sessions_store.succeed_retired_session_route.assert_not_called()
                 else:
                     sessions_store.succeed_retired_session_route.assert_called_once_with(
-                        "ses_wb", model=moved[0], reasoning_effort=moved[1]
+                        "ses_wb", stored_model=stored_model, model=moved[0], reasoning_effort=moved[1]
                     )
                 notices = [item for item in controller.im_client.sent_messages if isinstance(item, tuple) and notice in item]
                 self.assertEqual(len(notices), 0 if notice is None else 1, controller.im_client.sent_messages)

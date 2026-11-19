@@ -129,11 +129,12 @@ class SessionsFacade:
         self,
         agent_session_id: str,
         *,
+        stored_model: str | None,
         model: tuple[str, str] | None = None,
         reasoning_effort: tuple[str, str] | None = None,
     ) -> bool:
         return self.sessions_store.succeed_retired_session_route(
-            agent_session_id, model=model, reasoning_effort=reasoning_effort
+            agent_session_id, stored_model=stored_model, model=model, reasoning_effort=reasoning_effort
         )
 
     def get_agent_session_by_id(self, agent_session_id: str) -> Optional[dict]:

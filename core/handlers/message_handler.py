@@ -1914,7 +1914,12 @@ class MessageHandler(BaseHandler):
             )
             if succession is None:
                 return None
-            moved = succeed(session_id, model=succession.model, reasoning_effort=succession.reasoning_effort)
+            moved = succeed(
+                session_id,
+                stored_model=row.get("model"),
+                model=succession.model,
+                reasoning_effort=succession.reasoning_effort,
+            )
             return succession if moved else None
 
         try:
