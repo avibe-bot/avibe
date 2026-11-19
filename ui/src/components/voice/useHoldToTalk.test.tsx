@@ -281,6 +281,44 @@ describe('useHoldToTalk', () => {
     expect(hold.phase).toBe('idle');
   });
 
+  // The owner (11-20): a word spoken right at the cue was lost. On his iPhone the microphone opens
+  // about 0.5 s (p90 1 s) after the hold is reached (602 takes' capture traces), so the cue that
+  // says "speak now" (the haptic and the listening card) comes only once capture has started.
+  it('gives the speak-now cue only once the microphone is capturing, not at the hold', async () => {
+    pipeline.startMs = 500;
+    const el = await mount();
+    down(el);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await flush();
+    expect(pipeline.takes).toHaveLength(1);
+    expect(hold.phase).not.toBe('listening');
+    expect(native.impact).not.toHaveBeenCalledWith('medium');
+
+    await elapse(500);
+    await flush();
+    expect(hold.phase).toBe('listening');
+    expect(native.impact).toHaveBeenCalledWith('medium');
+  });
+
+  it('keeps a release before the microphone is capturing a slip, not a sent take', async () => {
+    pipeline.startMs = 500;
+    const el = await mount();
+    down(el);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await flush();
+    move(el, 470);
+    expect(hold.phase).not.toBe('listening');
+    up(el);
+    await elapse(500);
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+    expect(native.impact).not.toHaveBeenCalledWith('medium');
+  });
+
   it('records from 200 ms, shows the live words, and sends the final text as a voice message on release', async () => {
     const el = await mount();
     await holdFor(el);
