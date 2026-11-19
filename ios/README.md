@@ -371,9 +371,9 @@ the main Bot acts on the user's computer.
   the intent can bring Avibe forward) records at once with nothing to tap and
   one line, 正在录音，再长按一次侧边键发送; the second press sends as usual. The
   message carries which try recorded, the App's state at the press, whether
-  another App was playing audio and the route, and every refused try before
-  it in `metadata.capture_attempt`, for example
-  `1 [background warm otherAudio=1 silenceHint=1 in=MicrophoneBuiltIn out=Speaker] (0 sessionActivate 560557684)`.
+  another App was playing audio and where sound goes, and every refused try
+  before it in `metadata.capture_attempt`, for example
+  `1 [background warm otherAudio=1 silenceHint=1 out=Speaker] (0 sessionActivate 560557684)`.
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is

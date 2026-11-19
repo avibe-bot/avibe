@@ -532,16 +532,14 @@ final class VoiceCaptureTests: XCTestCase {
 
     /// The audio around the press rides along in the message: whether
     /// another App holds audio (navigation), and the route.
-    func testThePressContextNamesOtherAudioAndTheRoute() {
+    func testThePressContextNamesOtherAudioAndTheOutput() {
         XCTAssertEqual(
-            VoiceCaptureLaunch.audioContext(
-                otherAudio: true, silenceHint: true, inputs: ["MicrophoneBuiltIn"], outputs: ["Speaker"]
-            ),
-            "otherAudio=1 silenceHint=1 in=MicrophoneBuiltIn out=Speaker"
+            VoiceCaptureLaunch.audioContext(otherAudio: true, silenceHint: true, outputs: ["CarAudio"]),
+            "otherAudio=1 silenceHint=1 out=CarAudio"
         )
         XCTAssertEqual(
-            VoiceCaptureLaunch.audioContext(otherAudio: false, silenceHint: false, inputs: [], outputs: []),
-            "otherAudio=0 silenceHint=0 in=- out=-"
+            VoiceCaptureLaunch.audioContext(otherAudio: false, silenceHint: false, outputs: []),
+            "otherAudio=0 silenceHint=0 out=-"
         )
     }
 
