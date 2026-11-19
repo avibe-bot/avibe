@@ -72,7 +72,7 @@ const CANCELLED = new Set([
 // The same answer would come back in a browser: the request or its context is stale or invalid,
 // this Avibe and the pinned sandbox disagree, or the vault itself is in a state the user must change.
 const NOT_WHERE_IT_RUNS = new Set([
-  'sandbox_integrity_failed', 'sandbox_unreachable', 'sandbox_build_mismatch', 'sandbox_capability_mismatch', 'build_hash_mismatch',
+  'sandbox_integrity_failed', 'sandbox_unreachable', 'sandbox_offline', 'sandbox_build_mismatch', 'sandbox_capability_mismatch', 'build_hash_mismatch',
   'passkey_not_configured', 'passkey_multiple_not_supported', 'parent_value_seal_disabled',
   'policy_downgrade_unavailable', 'protected_hd_unavailable', 'sandbox_curve_unsupported',
   'sandbox_browser_required', 'sandbox_entry_unavailable', 'sandbox_browser_unavailable',

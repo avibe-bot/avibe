@@ -341,12 +341,16 @@ describe('VaultApprovalCard secure code that did not load', () => {
     return onResolved;
   };
 
-  it('says the network was too slow and retries the same step in place', async () => {
+  it.each([
+    ['the network was too slow', 'sandbox_unreachable', en.errors.sandbox_unreachable],
+    // An offline device is told so, not that its network is slow (3.2.8).
+    ['the device is offline', 'sandbox_offline', en.errors.sandbox_offline],
+  ])('says %s and retries the same step in place', async (_label, code, copy) => {
     vault.signProtectedRequest
-      .mockRejectedValueOnce(fail('sandbox_unreachable'))
+      .mockRejectedValueOnce(fail(code))
       .mockResolvedValueOnce({ scheme: 'ecdsa-secp256k1-recoverable', signature: 'cd'.repeat(64), recovery_id: 1 });
     const onResolved = await start();
-    expect(await screen.findByText(en.errors.sandbox_unreachable)).toBeTruthy();
+    expect(await screen.findByText(copy)).toBeTruthy();
     expect(screen.queryByText(en.errors.sandbox_integrity_failed)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: en.vaults.requests.retry }));
     await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));

@@ -356,10 +356,13 @@ function failIntegrity(message: string): never {
   throw new VaultSandboxError('sandbox_integrity_failed', message);
 }
 
-/** The release could not be downloaded in time, or at all (a slow or lost connection). Nothing was
- *  verified or opened; trying again verifies afresh. Never used for a byte or identity mismatch. */
+/** The release could not be downloaded in time, or at all. Nothing was verified or opened; trying
+ *  again verifies afresh. A device the browser reports offline is `sandbox_offline`, so it is not told
+ *  its network is slow; any other failure (slow, lost or blocked) is `sandbox_unreachable`. Never used
+ *  for a byte or identity mismatch. */
 function failUnreachable(message: string): never {
-  throw new VaultSandboxError('sandbox_unreachable', message, true);
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  throw new VaultSandboxError(offline ? 'sandbox_offline' : 'sandbox_unreachable', message, true);
 }
 
 /** The pinned resources the verified document itself loads under browser-enforced SRI (its script
