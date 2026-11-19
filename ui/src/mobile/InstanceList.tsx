@@ -52,9 +52,13 @@ function useSubline() {
 /**
  * Where you are. In the sheet, tapping it returns to it, unchanged; on the full page (nothing open
  * behind it) it opens it again, so it reports opening, a failure, or offline as a row does.
+ * Its dot follows the connection, as the Desktop's current row does: over a live instance it is
+ * green whatever the catalog last said; with nothing open, gold while it reopens and grey when
+ * reopening failed, and otherwise the catalog's word, there being no connection to report.
  */
 export function CurrentInstance({
-  instance,
+  instance: listed,
+  live = false,
   label,
   status = { kind: 'idle' },
   expanded = false,
@@ -64,6 +68,8 @@ export function CurrentInstance({
   onRefresh,
 }: {
   instance: MobileInstance;
+  /** The instance is open behind this list, so it is connected now. */
+  live?: boolean;
   /** What tapping it does, for assistive tech (`mobileApp.sheet.returnTo` or `…reopen`). */
   label: string;
   status?: RowStatus;
@@ -76,14 +82,17 @@ export function CurrentInstance({
   const { t } = useTranslation();
   const statusId = useId();
   const subline = useSubline();
+  // A live instance is reachable now, so the catalog's older offline cannot grey or disable it.
+  const instance = live && !listed.available ? { ...listed, available: true } : listed;
   const offline = !instance.available;
   const opening = status.kind === 'opening';
+  const tone = opening ? 'connecting' : offline || status.kind === 'failed' ? 'stopped' : 'running';
   const body = (
     <>
       <InstanceIcon instance={instance} current />
       <span className="flex min-w-0 flex-1 items-start gap-2">
         <LineGlyph text={instance.name} className={cn('w-2', CURRENT_NAME)}>
-          <StatusDot tone={opening ? 'connecting' : offline ? 'stopped' : 'running'} label={!opening && !offline ? t('mobileApp.instances.online') : undefined} />
+          <StatusDot tone={tone} label={tone === 'running' ? t('mobileApp.instances.online') : undefined} />
         </LineGlyph>
         <span className="min-w-0 flex-1">
           <span className={cn('block break-words', CURRENT_NAME)}>{instance.name}</span>

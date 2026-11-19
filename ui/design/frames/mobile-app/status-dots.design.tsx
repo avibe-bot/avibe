@@ -109,6 +109,15 @@ const designFrames = frames([
     <InstanceSheetPage session={session()} locked refreshing={false} stale={false}
       rows={rows({ openingId: preview.id })} onClose={noop} onRefresh={noop} onAdd={noop} />
   )),
+  // The current block follows the connection: over a live instance it is green whatever the catalog
+  // last said; with nothing open, gold while it reopens and grey when reopening failed.
+  frame('current-live-sheet', 'Over a live instance the catalog calls offline: the current block stays green', () => (
+    <InstanceSheetPage session={session({ ...max, available: false })} locked={false} refreshing={false} stale={false}
+      rows={rows()} onClose={noop} onRefresh={noop} onAdd={noop} />
+  )),
+  frame('current-live-page', 'The page over a live instance (Back returns to it): green whatever the catalog says', page({ session: session({ ...max, available: false }), onBack: noop })),
+  frame('current-reopening', 'Nothing open: the current block reopening is gold', page({ locked: true, rows: rows({ openingId: max.id }) })),
+  frame('current-reopen-failed', 'Nothing open: reopening failed, the current block is grey', page({ rows: rows({ failure: { id: max.id, reason: 'mobileApp.sheet.openFailed' } }) })),
 ]);
 
 export default designFrames;

@@ -1600,6 +1600,7 @@ function InstanceListBody({
       {selected ? (
         <CurrentInstance
           instance={selected}
+          live={!current.reportsOpening}
           label={current.label(selected.name)}
           {...(current.reportsOpening ? {
             status: rowStatus(selected, rows.openingId, rows.failure),
