@@ -47,13 +47,19 @@ enum VoiceCaptureBanner {
     }
 
     private final class PaddedLabel: UILabel {
-        override func drawText(in rect: CGRect) {
-            super.drawText(in: rect.inset(by: UIEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)))
+        private let insets = UIEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+
+        // Measure and draw at the same inset width, so a wrapped line is
+        // never cut off.
+        override func textRect(forBounds bounds: CGRect, limitedToNumberOfLines lines: Int) -> CGRect {
+            let rect = super.textRect(forBounds: bounds.inset(by: insets), limitedToNumberOfLines: lines)
+            return rect.inset(by: UIEdgeInsets(
+                top: -insets.top, left: -insets.left, bottom: -insets.bottom, right: -insets.right
+            ))
         }
 
-        override var intrinsicContentSize: CGSize {
-            let size = super.intrinsicContentSize
-            return CGSize(width: size.width + 28, height: size.height + 20)
+        override func drawText(in rect: CGRect) {
+            super.drawText(in: rect.inset(by: insets))
         }
     }
 }

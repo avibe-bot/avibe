@@ -49,8 +49,20 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
             if #available(iOS 26.0, *) {
                 do {
                     try await continueInForeground(alwaysConfirm: false)
-                    if await controller.startInForeground() == .started {
+                    let before = controller.lastFailure
+                    switch await controller.startInForeground() {
+                    case .started:
                         VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.text("voiceCapture.startedInApp")))
+                    case .needsApp(let reason):
+                        // Never in front without a word.
+                        controller.openMainBotChat()
+                        VoiceCaptureAlert.present(reason, failure: controller.lastFailure)
+                    default:
+                        // Try 3 refused too, or the press waited too long:
+                        // the notice is not shown in front, so say it here.
+                        if let failure = controller.lastFailure, failure != before {
+                            VoiceCaptureAlert.present(.recordingFailed, failure: failure)
+                        }
                     }
                     return .result()
                 } catch {

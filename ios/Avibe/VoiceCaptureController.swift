@@ -461,6 +461,12 @@ final class VoiceCaptureController {
     /// Try 3, once Avibe is in front: records at once, nothing to tap.
     func startInForeground() async -> Outcome {
         guard let prior = pendingForeground else { return .stopped }
+        if let at = pendingForegroundAt, environment.now().timeIntervalSince(at) >= Self.foregroundWait {
+            // Avibe came forward long after the press (a locked phone
+            // unlocked later): never open the microphone for it now.
+            foregroundUnavailable()
+            return .stopped
+        }
         pendingForeground = nil
         return await start(tries: [Self.foregroundTry], prior: prior)
     }
