@@ -413,6 +413,9 @@ final class VoiceCaptureTests: XCTestCase {
         let session = FakeSession()
         let engine = FakeEngine()
         let recorder = VoiceCaptureRecorder(url: url, session: session, permission: { true }, makeEngine: { _ in engine })
+        XCTAssertThrowsError(try recorder.start(), "no prepared session")
+        XCTAssertEqual(session.activations, 0)
+        try recorder.prepare(.exclusiveRecord)
         try recorder.start()
         XCTAssertTrue(session.active)
         recorder.stop()
@@ -424,19 +427,22 @@ final class VoiceCaptureTests: XCTestCase {
         let refusing = FakeEngine()
         refusing.records = false
         let refused = FakeSession()
-        XCTAssertThrowsError(try VoiceCaptureRecorder(
-            url: url, session: refused, permission: { true }, makeEngine: { _ in refusing }
-        ).start())
+        let refusedRecorder = VoiceCaptureRecorder(url: url, session: refused, permission: { true }, makeEngine: { _ in refusing })
+        try refusedRecorder.prepare(.exclusiveRecord)
+        XCTAssertThrowsError(try refusedRecorder.start())
         XCTAssertFalse(refused.active, "a recorder that would not record")
 
         let broken = FakeSession()
-        XCTAssertThrowsError(try VoiceCaptureRecorder(
+        let brokenRecorder = VoiceCaptureRecorder(
             url: url, session: broken, permission: { true }, makeEngine: { _ in throw CancellationError() }
-        ).start())
+        )
+        try brokenRecorder.prepare(.exclusiveRecord)
+        XCTAssertThrowsError(try brokenRecorder.start())
         XCTAssertFalse(broken.active, "a recorder that could not be made")
 
         let discarded = FakeSession()
         let other = VoiceCaptureRecorder(url: url, session: discarded, permission: { true }, makeEngine: { _ in FakeEngine() })
+        try other.prepare(.exclusiveRecord)
         try other.start()
         other.discard()
         XCTAssertFalse(discarded.active, "discard")
@@ -444,7 +450,7 @@ final class VoiceCaptureTests: XCTestCase {
         let denied = FakeSession()
         XCTAssertThrowsError(try VoiceCaptureRecorder(
             url: url, session: denied, permission: { false }, makeEngine: { _ in FakeEngine() }
-        ).start())
+        ).prepare(.exclusiveRecord))
         XCTAssertEqual(denied.activations, 0)
     }
 
@@ -479,7 +485,7 @@ final class VoiceCaptureTests: XCTestCase {
         world.startErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
         let outcome = await world.controller().toggle()
         XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["prepare1", "activity", "record", "prepare2", "record"])
+        XCTAssertEqual(world.events, ["prepare1", "activity", "record", "stop", "prepare2", "record"])
         XCTAssertEqual(world.activities.count, 1)
         XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "the first session is released before the second")
     }
@@ -498,6 +504,69 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(attempts.map(\.error), ["560557684", "561145187"])
         XCTAssertEqual(world.activities.first?.ended?.attempts, attempts)
         XCTAssertNil(world.audio?.prepared, "no session left active")
+    }
+
+    // MARK: Try 3: in the App (Product, 11-19 09:40)
+
+    /// Both background tries refused, and the intent can bring Avibe
+    /// forward: no notice yet, nothing left active, and the press goes on in
+    /// the App, where it records at once and the message names every try.
+    func testBothBackgroundTriesRefusedGoOnInTheAppAndRecord() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        let controller = world.controller()
+        let outcome = await controller.toggle(foregroundFallback: true)
+        XCTAssertEqual(outcome, .needsForeground)
+        XCTAssertTrue(world.failureNotices.isEmpty)
+        XCTAssertNil(world.audio?.prepared)
+
+        let busy = await controller.toggle(foregroundFallback: true)
+        XCTAssertEqual(busy, .busy, "a doubled run waits for the App")
+
+        world.prepareErrors = [:]  // in front, activation is allowed
+        let inApp = await controller.startInForeground()
+        XCTAssertEqual(inApp, .started)
+        XCTAssertEqual(controller.phase, .listening)
+        world.audio?.duration = 2
+        _ = await controller.toggle()  // the second press sends as usual
+        XCTAssertEqual(
+            world.instance.captures.first ?? nil,
+            "3 (1 sessionActivate 560557684; 2 sessionActivate 560557684)"
+        )
+    }
+
+    func testWhenTheAppCannotComeForwardTheNoticeNamesBothTries() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        let controller = world.controller()
+        _ = await controller.toggle(foregroundFallback: true)
+        controller.foregroundUnavailable()
+        XCTAssertEqual(world.failureNotices.count, 1)
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [1, 2])
+        let next = await controller.toggle(foregroundFallback: true)
+        XCTAssertNotEqual(next, .busy)
+    }
+
+    func testATryInTheAppThatIsRefusedTooNamesAllThree() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        let controller = world.controller()
+        _ = await controller.toggle(foregroundFallback: true)
+        let inApp = await controller.startInForeground()
+        XCTAssertEqual(inApp, .stopped)
+        XCTAssertEqual(world.failureNotices.count, 1)
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [1, 2, 3])
+    }
+
+    func testTheInAppLineReadsPlainly() throws {
+        let path = try XCTUnwrap(Bundle.main.path(forResource: "zh-Hans", ofType: "lproj"))
+        XCTAssertEqual(
+            try XCTUnwrap(Bundle(path: path)).localizedString(forKey: "voiceCapture.startedInApp", value: nil, table: "VoiceCapture"),
+            "这次没能在后台开始录音，已在 App 里开始。"
+        )
     }
 
     func testRefusedBeforeAnyIslandStillLeavesOneNotice() async {
@@ -564,7 +633,11 @@ final class VoiceCaptureTests: XCTestCase {
             -> VoiceCaptureRecorder.StartFailure?
         {
             let recorder = VoiceCaptureRecorder(url: url, session: session, permission: { true }, makeEngine: engine)
-            do { try recorder.start(); return nil } catch { return error as? VoiceCaptureRecorder.StartFailure }
+            do {
+                try recorder.prepare(.exclusiveRecord)
+                try recorder.start()
+                return nil
+            } catch { return error as? VoiceCaptureRecorder.StartFailure }
         }
         let cannotInterrupt = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
 
@@ -881,7 +954,7 @@ private final class FakeAudio: VoiceCaptureAudio {
         if let prepared, let error = startErrors[prepared] { throw error }
         started = true
     }
-    func stop() -> TimeInterval { stops += 1; prepared = nil; return duration }
+    func stop() -> TimeInterval { stops += 1; prepared = nil; log("stop"); return duration }
     func discard() { discarded = true }
 }
 
