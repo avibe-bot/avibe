@@ -1,0 +1,142 @@
+name: ios-voice-intent-sample
+
+# DRAFT ONLY (not for merge): runs ios/VoiceIntentSample's App Shortcuts on
+# the Simulator with the probe Apps in the background, to learn which intent
+# declaration lets a third-party App start a Live Activity and the
+# microphone without opening. App Shortcuts run only for a Team-signed
+# bundle, so the probe Apps are signed with an Apple Development identity
+# when IOS_DEV_CERT_P12_BASE64 is set; without it the run still checks the
+# harness (iOS will refuse the shortcut).
+
+on:
+  push:
+    branches: [draft/ios-voice-intent-sample]
+    paths:
+      - ios/VoiceIntentSample/**
+      - .github/workflows/ios-voice-intent-sample.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+jobs:
+  sample:
+    runs-on: macos-26
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: ios/VoiceIntentSample
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Generate the project
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build the probe Apps, the helper and the UI tests
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project VoiceIntentSample.xcodeproj \
+            -scheme SampleUITests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/SampleDerived" \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing
+
+      - name: Sign the probe Apps with the Apple Development identity
+        env:
+          P12: ${{ secrets.IOS_DEV_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_DEV_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          products="$RUNNER_TEMP/SampleDerived/Build/Products/Debug-iphonesimulator"
+          if [ -z "${P12:-}" ]; then
+            echo "SIGNING=none (no IOS_DEV_CERT_P12_BASE64): iOS will refuse the shortcuts" | tee "$RUNNER_TEMP/signing.txt"
+            exit 0
+          fi
+          work="$RUNNER_TEMP/sign"; mkdir -p "$work"
+          echo "$P12" | base64 --decode > "$work/dev.p12"
+          curl -fsSL -o "$work/wwdr.cer" https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          security create-keychain -p probe "$work/probe.keychain-db"
+          security set-keychain-settings "$work/probe.keychain-db"
+          security unlock-keychain -p probe "$work/probe.keychain-db"
+          security import "$work/wwdr.cer" -k "$work/probe.keychain-db" || true
+          security import "$work/dev.p12" -k "$work/probe.keychain-db" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k probe "$work/probe.keychain-db" >/dev/null
+          security list-keychains -d user -s "$work/probe.keychain-db" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$work/probe.keychain-db" | awk '/Apple Development/{print $2; exit}')"
+          [ -n "$identity" ] || { security find-identity -p codesigning "$work/probe.keychain-db"; echo "no Apple Development identity" >&2; exit 1; }
+          for app in ProbeA ProbeB ProbeC Helper; do
+            bundle="$products/$app.app"
+            for appex in "$bundle"/PlugIns/*.appex; do
+              codesign --force --sign "$identity" --keychain "$work/probe.keychain-db" --timestamp=none "$appex"
+            done
+            codesign --force --sign "$identity" --keychain "$work/probe.keychain-db" --timestamp=none "$bundle"
+            codesign -dv "$bundle" 2>&1 | grep -E "Authority|TeamIdentifier" || true
+          done
+          echo "SIGNING=apple-development" | tee "$RUNNER_TEMP/signing.txt"
+
+      - name: Boot the pinned iPhone 17 Pro simulator and install
+        run: |
+          set -euo pipefail
+          simulator_id="$(xcrun simctl list devices available --json | /usr/bin/python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-26-5", [])
+          print(sorted(d["udid"] for d in devices if d.get("isAvailable") and d.get("name") == "iPhone 17 Pro")[0])')"
+          echo "SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+          xcrun simctl bootstatus "$simulator_id" -b
+          products="$RUNNER_TEMP/SampleDerived/Build/Products/Debug-iphonesimulator"
+          for app in ProbeA ProbeB ProbeC Helper; do
+            xcrun simctl install "$simulator_id" "$products/$app.app"
+          done
+          for id in a b c helper; do
+            xcrun simctl privacy "$simulator_id" grant microphone "bot.avibe.sample.$id" || true
+          done
+
+      - name: Run each variant's shortcut, quiet and with the navigation helper
+        run: |
+          set -euo pipefail
+          xctestrun="$(ls "$RUNNER_TEMP"/SampleDerived/Build/Products/*.xctestrun | head -1)"
+          xcodebuild test-without-building \
+            -xctestrun "$xctestrun" \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -resultBundlePath "$RUNNER_TEMP/Sample.xcresult" \
+            -only-testing:SampleUITests/ProbeUITests
+
+      - name: Collect the evidence
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/evidence"; mkdir -p "$out/attachments"
+          cp "$RUNNER_TEMP/signing.txt" "$out/" 2>/dev/null || true
+          for id in a b c helper; do
+            container="$(xcrun simctl get_app_container "$SIMULATOR_ID" "bot.avibe.sample.$id" data 2>/dev/null)"
+            cp "$container/Library/Caches/probe.log" "$out/probe-$id.log" 2>/dev/null || echo "(no log)" > "$out/probe-$id.log"
+          done
+          xcrun simctl spawn "$SIMULATOR_ID" log show --last 40m --style compact --info --debug > "$out/system-full.log" 2>&1 || true
+          grep -E 'bot\.avibe\.sample|linkd|appintents|liveactivitiesd|audiomxd|mediaserverd|Shortcuts\[' "$out/system-full.log" \
+            | grep -vE 'runningboard:monitor|xctest' > "$out/system.log" || true
+          gzip -f "$out/system-full.log" || true
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/Sample.xcresult" --output-path "$out/attachments" > /dev/null 2>&1 || true
+          cat "$out/signing.txt" 2>/dev/null || true
+          for id in a b c helper; do echo "== probe $id"; cat "$out/probe-$id.log"; done
+          echo "== system (requiresValidBundle / errors)"
+          grep -E 'requiresValidBundle|Unable to run App Shortcut|Target is not foreground|cannot|!int|!pla|!rec|visibility' "$out/system.log" | tail -60 || true
+
+      - name: Upload the evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: voice-intent-sample
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 14

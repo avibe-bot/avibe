@@ -1,0 +1,128 @@
+name: VoiceIntentSample
+options:
+  bundleIdPrefix: bot.avibe.sample
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: 68B2SQ6YK3
+    CODE_SIGNING_ALLOWED: "NO"
+    GENERATE_INFOPLIST_FILE: "YES"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targetTemplates:
+  ProbeApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Shared
+      - path: Probe
+    settings:
+      base:
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Records 3 seconds to test background voice capture."
+        INFOPLIST_KEY_NSSupportsLiveActivities: "YES"
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
+  ProbeWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Shared
+      - path: Widget
+    settings:
+      base:
+        INFOPLIST_FILE: Widget/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) PROBE_WIDGET"
+targets:
+  ProbeA:
+    templates: [ProbeApp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.a
+        INFOPLIST_KEY_CFBundleDisplayName: "Probe A"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) VARIANT_A"
+    dependencies:
+      - target: ProbeAWidget
+  ProbeAWidget:
+    templates: [ProbeWidget]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.a.widget
+  ProbeB:
+    templates: [ProbeApp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.b
+        INFOPLIST_KEY_CFBundleDisplayName: "Probe B"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) VARIANT_B"
+        INFOPLIST_FILE: Probe/Info-audio.plist
+    dependencies:
+      - target: ProbeBWidget
+  ProbeBWidget:
+    templates: [ProbeWidget]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.b.widget
+  ProbeC:
+    templates: [ProbeApp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.c
+        INFOPLIST_KEY_CFBundleDisplayName: "Probe C"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) VARIANT_C"
+        INFOPLIST_FILE: Probe/Info-audio.plist
+    dependencies:
+      - target: ProbeCWidget
+  ProbeCWidget:
+    templates: [ProbeWidget]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.c.widget
+  Helper:
+    type: application
+    platform: iOS
+    sources:
+      - path: Shared
+      - path: Helper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.helper
+        INFOPLIST_KEY_CFBundleDisplayName: "Nav Helper"
+        INFOPLIST_FILE: Probe/Info-audio.plist
+        INFOPLIST_KEY_NSSupportsLiveActivities: "YES"
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HELPER"
+    dependencies:
+      - target: HelperWidget
+  HelperWidget:
+    templates: [ProbeWidget]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.helper.widget
+  SampleUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: bot.avibe.sample.uitests
+        TEST_TARGET_NAME: Helper
+    dependencies:
+      - target: Helper
+schemes:
+  SampleUITests:
+    build:
+      targets:
+        Helper: all
+        ProbeA: all
+        ProbeB: all
+        ProbeC: all
+        SampleUITests: [test]
+    test:
+      targets:
+        - SampleUITests
