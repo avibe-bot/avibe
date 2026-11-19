@@ -331,6 +331,7 @@ final class WebViewFactory {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let healthConnect: HealthConnectAction
     private let showShare = ShowShareCoordinator.shared
     private let instanceID: () -> String?
     private let deviceID: () -> String?
@@ -376,6 +377,7 @@ final class WebViewFactory {
         instanceID: instanceID,
         deviceID: deviceID,
         directStatus: directStatus,
+        healthConnect: healthConnect,
         showShare: showShare,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
@@ -440,6 +442,7 @@ final class WebViewFactory {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
@@ -472,6 +475,7 @@ final class WebViewFactory {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.healthConnect = healthConnect
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
@@ -639,6 +643,7 @@ final class WebViewController: UIViewController {
     /// The App's own sign-in screen, for a Google, GitHub or Apple sign-in tapped inside the page.
     private let showSignIn: () -> Void
     private let instanceName: () -> String?
+    private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
@@ -739,6 +744,10 @@ final class WebViewController: UIViewController {
                 return self.deviceID()
             },
             directStatus: directStatus,
+            healthConnect: { [weak self] requestID, pairingCode, origin in
+                guard let self, !self.isInvalidatedForAccountTransition else { return "failed" }
+                return await self.healthConnect(requestID, pairingCode, origin)
+            },
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
             },
@@ -833,6 +842,7 @@ final class WebViewController: UIViewController {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -867,6 +877,7 @@ final class WebViewController: UIViewController {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])

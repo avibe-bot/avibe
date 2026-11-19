@@ -1681,6 +1681,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "haptics.impact",
                 "haptics.notify",
                 "haptics.selection",
+                "health.connect",
                 "navigation.historyChanged",
                 "notifications.reconcile",
                 "push.status",
@@ -3240,6 +3241,7 @@ final class MobileOnboardingTests: XCTestCase {
         refreshTransport.secondFactor = requirement
         var runtime: MobileRuntimeContext?
         var transitions = 0
+        var healthEvents: [String] = []
         let coordinator = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
@@ -3248,6 +3250,13 @@ final class MobileOnboardingTests: XCTestCase {
             onPrepareAccountTransition: {
                 transitions += 1
                 return []
+            },
+            onHealthAccountEvent: { event in
+                switch event {
+                case .signedOut: healthEvents.append("signedOut")
+                case .authorizationUnavailable: healthEvents.append("paused")
+                case .authenticated: healthEvents.append("authenticated")
+                }
             }
         )
         coordinator.activateAccountSurface()
@@ -3261,6 +3270,9 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(coordinator.isSelectedRuntime(selected))
         XCTAssertEqual(transitions, 1)
         XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertTrue(healthEvents.contains("paused"))
+        XCTAssertFalse(healthEvents.contains("signedOut"))
+        XCTAssertNil(coordinator.healthAccountID)
 
         refreshTransport.secondFactor = nil
         refreshTransport.session = snapshot(accountID: "account-1")
@@ -3270,6 +3282,8 @@ final class MobileOnboardingTests: XCTestCase {
             .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: nil)
         )
         XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertEqual(coordinator.healthAccountID, "account-1")
+        XCTAssertEqual(healthEvents.last, "authenticated")
     }
 
     func testRefreshNetworkFailureKeepsSelectedRuntimeAndSnapshot() async throws {
@@ -5226,6 +5240,130 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    func testColdSecondFactorAuthenticationRestoresSavedHealthWithoutForegroundEntry() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let health = try makeSavedHealthFixture(binding: store.identifier)
+        let transport = FakeMobileAuthTransport()
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        transport.verifySecondFactorHandler = { _ in .signedIn(self.snapshot(accountID: "account-1")) }
+        let coordinator = makeCoordinator(defaults: defaults, websiteDataStore: store, transports: [transport],
+            onHealthAccountEvent: { health.coordinator.accountEvent($0) })
+        health.coordinator.accountIDProvider = { [weak coordinator] in coordinator?.healthAccountID }
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        await health.coordinator.resume(foreground: false)
+        XCTAssertEqual(health.reader.starts, 0)
+        _ = try await coordinator.verifySecondFactor(method: .totp, code: "123456")
+        try await waitForHealthRestore(health)
+        XCTAssertEqual(health.reader.starts, 1)
+        XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+    }
+
+    func testHealthAuthenticationWaitsForPushCleanupAndLogoutRetiresIt() async throws {
+        // Since #3953 a refresh settles push first only when the persisted push account
+        // names another account; removing the selected instance runs no push cleanup.
+        for scenario in ["pushCleanup", "pushCleanupThenSignOut", "removedInstance"] {
+            let signOut = scenario == "pushCleanupThenSignOut"
+            let removedInstance = scenario == "removedInstance"
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let health = try makeSavedHealthFixture(binding: store.identifier)
+            let initial = FakeMobileAuthTransport()
+            initial.session = snapshot(accountID: "account-1")
+            let refreshTransport = FakeMobileAuthTransport()
+            refreshTransport.session = removedInstance
+                ? snapshot(accountID: "account-1", instances: []) : snapshot(accountID: "account-1")
+            // Not registered with the test: the removed-instance scenario never waits on them.
+            let started = XCTestExpectation(description: "push cleanup")
+            let release = XCTestExpectation(description: "release push cleanup")
+            var cleanups = 0
+            var forward = false
+            var authentications = 0
+            let coordinator = makeCoordinator(defaults: defaults, websiteDataStore: store,
+                transports: [initial, refreshTransport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+                onHealthAccountEvent: { event in
+                    guard forward else { return }
+                    if case .authenticated = event { authentications += 1 }
+                    health.coordinator.accountEvent(event)
+                }, onPreparePushLogout: {
+                    cleanups += 1
+                    if cleanups == 1 {
+                        started.fulfill()
+                        await self.fulfillment(of: [release], timeout: 10)
+                    }
+                })
+            health.coordinator.accountIDProvider = { [weak coordinator] in coordinator?.healthAccountID }
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+            coordinator.activateAccountSurface()
+            if !removedInstance {
+                // The persisted push record names another account, so this refresh settles push first.
+                defaults.set("account-0", forKey: "avibe.mobile.pushAccount")
+            }
+            forward = true
+            let refresh = Task { try await coordinator.refresh() }
+            if removedInstance {
+                _ = try await refresh.value
+                try await waitForHealthRestore(health)
+                XCTAssertEqual(cleanups, 0)
+                XCTAssertEqual(authentications, 1)
+                XCTAssertEqual(health.reader.starts, 1)
+                XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+                continue
+            }
+            await fulfillment(of: [started], timeout: 10)
+            XCTAssertNil(coordinator.healthAccountID)
+            XCTAssertEqual(authentications, 0)
+            XCTAssertEqual(health.reader.starts, 0)
+            if signOut { _ = try await coordinator.logout() }
+            release.fulfill()
+            if signOut {
+                switch await refresh.result {
+                case .success: XCTFail("A superseded refresh must not authenticate Health")
+                case .failure(let error):
+                    XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+                }
+                XCTAssertEqual(authentications, 0)
+                XCTAssertNil(coordinator.healthAccountID)
+                XCTAssertEqual(health.reader.starts, 0)
+                XCTAssertTrue(health.client.calls.allSatisfy { $0.method == "DELETE" })
+            } else {
+                _ = try await refresh.value
+                try await waitForHealthRestore(health)
+                XCTAssertEqual(authentications, 1)
+                XCTAssertEqual(health.reader.starts, 1)
+                XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+            }
+        }
+    }
+
+    private func makeSavedHealthFixture(binding: UUID) throws -> HealthCoordinatorFixture {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MobileHealthConsumer.\(UUID().uuidString)", isDirectory: true)
+        let health = HealthCoordinatorFixture(directory: directory, savedIdentity: true)
+        health.credentials.identity?.websiteDataStoreID = binding
+        health.coordinator.websiteDataStoreIDProvider = { binding }
+        addTeardownBlock { @MainActor in
+            await health.coordinator.logout()
+            health.client.releasePending()
+        }
+        return health
+    }
+
+    private func waitForHealthRestore(_ health: HealthCoordinatorFixture) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while health.client.calls.filter({ $0.path.hasSuffix("/manifest") }).isEmpty {
+            guard ContinuousClock.now < deadline else {
+                return XCTFail("Authenticated Health restoration did not run")
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     func testLogoutRevokesAndDetachesBeforeAwaitingPushCleanup() async throws {
         let transport = FakeMobileAuthTransport()
         transport.session = snapshot(accountID: "account-1")
@@ -5249,6 +5387,9 @@ final class MobileOnboardingTests: XCTestCase {
                 transitionEvents.append("detached")
                 return true
             },
+            onHealthAccountEvent: { event in
+                if case .signedOut = event { transitionEvents.append("health_revoked") }
+            },
             onPreparePushLogout: {
                 transitionEvents.append("push_cleanup_started")
                 cleanupStarted.fulfill()
@@ -5266,6 +5407,7 @@ final class MobileOnboardingTests: XCTestCase {
             transitionEvents,
             [
                 "runtime_revoked",
+                "health_revoked",
                 "detached",
                 "push_cleanup_started",
             ]
@@ -5536,6 +5678,7 @@ final class MobileOnboardingTests: XCTestCase {
         onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
         onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
         onPreparePushLogout: @escaping @MainActor () async -> Void = {},
         onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in }
     ) -> MobileSessionCoordinator {
@@ -5560,6 +5703,7 @@ final class MobileOnboardingTests: XCTestCase {
             onDetachActiveOwner: onDetachActiveOwner,
             onDetachActiveOwnerForAuthenticatedAccount: onDetachActiveOwnerForAuthenticatedAccount,
             onAuthenticatedAccount: onAuthenticatedAccount,
+            onHealthAccountEvent: onHealthAccountEvent,
             onPreparePushLogout: onPreparePushLogout,
             onReconcileInstancePush: onReconcileInstancePush
         )

@@ -313,6 +313,8 @@ final class AppModel: ObservableObject {
     /// A call of the fault marker's `mark()` has returned in this process.
     /// That is all it says: not that the marker is on disk.
     private var directFaultIsMarked = false
+    let healthSync: HealthSyncCoordinator?
+
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
     private let pushInstallationMarker: PushInstallationMarkerStoring
@@ -373,6 +375,9 @@ final class AppModel: ObservableObject {
             self?.systemScheduleCoordinator.synchronizeAccount(
                 accountID: accountID
             ) ?? false
+        },
+        onHealthAccountEvent: { [weak self] event in
+            self?.healthSync?.accountEvent(event)
         },
         onPreparePushLogout: { [weak self] in
             // Signing out or another account: the badge counted this
@@ -482,9 +487,11 @@ final class AppModel: ObservableObject {
         runtimeOpenBudget: Duration = AppModel.runtimeOpenAutomaticBudget,
         runtimeOpenLongWait: Duration = .seconds(8),
         runtimeOpenNotificationCenter: NotificationCenter = .default,
-        badgeCenter: AppBadgeCentering? = nil
+        badgeCenter: AppBadgeCentering? = nil,
+        healthSync: HealthSyncCoordinator? = nil
     ) {
         self.defaults = defaults
+        self.healthSync = healthSync
         self.controlPlane = controlPlane
         let directFaultMarker = directFaultMarker
             ?? UserDefaultsDirectFaultMarker(defaults: defaults)
@@ -521,7 +528,18 @@ final class AppModel: ObservableObject {
         sessionNotifications = SessionNotificationCleaner(
             center: pushNotificationCenter ?? SystemPushNotificationCenter()
         )
+        healthSync?.captureStartupReadiness()
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
+        healthSync?.websiteDataStoreIDProvider = { [weak self] in self?.websiteDataStore.identifier }
+        healthSync?.accountIDProvider = { [weak self] in
+            self?.sessionCoordinator.healthAccountID
+        }
+        healthSync?.targetProvider = { [weak self] in
+            guard let self, let accountID = self.sessionCoordinator.healthAccountID,
+                  let instance = self.sessionCoordinator.selectedInstance,
+                  let origin = WebOrigin(url: instance.url) else { return nil }
+            return HealthConnectionTarget(accountID: accountID, instanceID: instance.id, name: instance.name, origin: origin.serialized)
+        }
         _ = nativePushCoordinator
         _ = directPathController
         runtimeOpenLifecycleObservers = [
@@ -634,6 +652,11 @@ final class AppModel: ObservableObject {
 
     /// App metadata is read by the Runtime on document load. The catalog,
     /// rather than the runtime's creation-time snapshot, owns its display name.
+    func connectHealth(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
+        guard !route.coversRuntime, let healthSync else { return "failed" }
+        return await healthSync.connect(requestID: requestID, pairingCode: pairingCode, origin: origin)
+    }
+
     func selectedInstanceName() -> String? {
         guard let runtime = route.runtime,
               sessionCoordinator.isSelectedRuntime(runtime) else { return nil }
@@ -1238,6 +1261,8 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         hasCompletedBootstrap = true
+        // Navigation requested before bootstrap is delivered before Health
+        // restoration, which may wait on the network and HealthKit.
         if let pendingInstanceOpen {
             self.pendingInstanceOpen = nil
             switch pendingInstanceOpen {
@@ -1247,6 +1272,7 @@ final class AppModel: ObservableObject {
                 openSelectedInstance(path: path)
             }
         }
+        await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
     }
 
     private func stopRuntime() {
@@ -1678,6 +1704,7 @@ final class AppModel: ObservableObject {
     /// cancelled. Resigning active alone (Control Center, an alert) keeps
     /// WebKit running and keeps charging the budget.
     private func runtimeOpenDidEnterBackground() {
+        healthSync?.setBackground()
         guard runtimeOpenBackgroundedAt == nil else {
             return
         }
@@ -1689,6 +1716,7 @@ final class AppModel: ObservableObject {
     /// remainder. A timer that could not fire on time (no background
     /// interval was reported) ends its attempt here.
     private func runtimeOpenWillEnterForeground() {
+        Task { await healthSync?.resume(foreground: true) }
         Task { [weak self] in
             await self?.systemScheduleCoordinator.retryPendingCleanup()
         }

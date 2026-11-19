@@ -64,6 +64,8 @@ ASSOCIATED_DOMAINS = [
 SIGN_IN_WITH_APPLE = "com.apple.developer.applesignin"
 MAIN_REQUIRED_ENTITLEMENTS = {
     "aps-environment": ["production"],
+    "com.apple.developer.healthkit": True,
+    "com.apple.developer.healthkit.background-delivery": True,
     "com.apple.developer.associated-domains": ASSOCIATED_DOMAINS,
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
     "keychain-access-groups": [
@@ -81,12 +83,20 @@ LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS: dict[str, list[str]] = {}
 FORBIDDEN_ENTITLEMENTS = {
     "com.apple.developer.usernotifications.filtering",
 }
-# Extensions never carry push; the Live Activity carries no shared state.
+# Extensions never carry push, HealthKit or Sign in with Apple; the Live Activity carries
+# no shared state.
 EXTENSION_FORBIDDEN_ENTITLEMENTS = {
-    NOTIFICATION_SERVICE_BUNDLE_ID: {"aps-environment", SIGN_IN_WITH_APPLE},
+    NOTIFICATION_SERVICE_BUNDLE_ID: {
+        "aps-environment",
+        "com.apple.developer.healthkit",
+        "com.apple.developer.healthkit.background-delivery",
+        SIGN_IN_WITH_APPLE,
+    },
     LIVE_ACTIVITY_BUNDLE_ID: {
         "aps-environment",
         "com.apple.security.application-groups",
+        "com.apple.developer.healthkit",
+        "com.apple.developer.healthkit.background-delivery",
         SIGN_IN_WITH_APPLE,
     },
 }
@@ -179,7 +189,7 @@ def check_profile(
     profile: dict,
     *,
     bundle_id: str = BUNDLE_ID,
-    required_entitlements: dict[str, list[str]] = MAIN_REQUIRED_ENTITLEMENTS,
+    required_entitlements: dict[str, list[str] | bool] = MAIN_REQUIRED_ENTITLEMENTS,
     now: datetime | None = None,
 ) -> None:
     """Validate a current App Store profile and its target entitlements."""
@@ -205,6 +215,10 @@ def check_profile(
         raise TestFlightError("The App Store profile has expired; regenerate it in the Apple Developer account")
     for key, required in required_entitlements.items():
         actual = entitlements.get(key)
+        if isinstance(required, bool):
+            if actual is not required:
+                raise TestFlightError(f"The profile must grant {key} = {str(required).lower()}")
+            continue
         if key == "aps-environment" and actual != "production":
             raise TestFlightError("The App Store profile must grant aps-environment=production")
         if actual is None:
@@ -454,7 +468,7 @@ def check_signed_bundle(
     *,
     bundle_id: str,
     application_identifier: str,
-    required_entitlements: dict[str, list[str]],
+    required_entitlements: dict[str, list[str] | bool],
     build: str,
     require_encryption_declaration: bool = False,
 ) -> None:
@@ -466,6 +480,12 @@ def check_signed_bundle(
         raise TestFlightError(f"The archived build number is {info.get('CFBundleVersion')!r}, not {build}")
     if require_encryption_declaration and info.get("ITSAppUsesNonExemptEncryption") is not False:
         raise TestFlightError("Info.plist must declare ITSAppUsesNonExemptEncryption = false")
+    if "NSHealthUpdateUsageDescription" in info:
+        raise TestFlightError("Info.plist must not declare NSHealthUpdateUsageDescription; HealthKit is read-only")
+    if bundle_id == BUNDLE_ID:
+        health_usage = info.get("NSHealthShareUsageDescription")
+        if not isinstance(health_usage, str) or not health_usage.strip():
+            raise TestFlightError("Info.plist must declare a non-empty NSHealthShareUsageDescription")
     if entitlements.get("application-identifier") != application_identifier:
         raise TestFlightError("The bundle is not signed for " + application_identifier)
     if entitlements.get("get-task-allow"):
@@ -487,6 +507,10 @@ def check_signed_bundle(
             )
     for key, required in required_entitlements.items():
         actual = entitlements.get(key, [])
+        if isinstance(required, bool):
+            if actual is not required:
+                raise TestFlightError(f"The signed bundle must carry {key} = {str(required).lower()}")
+            continue
         if key == "aps-environment" and actual != "production":
             raise TestFlightError("The signed app must carry aps-environment=production")
         actual_values = {actual} if isinstance(actual, str) else set(actual)
@@ -547,6 +571,35 @@ def check_privacy_manifest(bundle: Path) -> None:
         raise TestFlightError(f"{bundle.name}'s PrivacyInfo.xcprivacy is incomplete")
 
 
+HEALTH_COLLECTED_DATA_TYPE = {
+    "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeHealth",
+    "NSPrivacyCollectedDataTypeLinked": True,
+    "NSPrivacyCollectedDataTypeTracking": False,
+    "NSPrivacyCollectedDataTypePurposes": ["NSPrivacyCollectedDataTypePurposeAppFunctionality"],
+}
+
+
+def check_health_privacy_declaration(bundle: Path) -> None:
+    """The main app declares Health data for its HealthKit sync, exactly once."""
+    privacy = plistlib.loads((bundle / "PrivacyInfo.xcprivacy").read_bytes())
+    collected = privacy.get("NSPrivacyCollectedDataTypes")
+    health = [
+        entry
+        for entry in (collected if isinstance(collected, list) else [])
+        if isinstance(entry, dict)
+        and entry.get("NSPrivacyCollectedDataType") == "NSPrivacyCollectedDataTypeHealth"
+    ]
+    # Compare types too: a plist integer 1 must not pass as the boolean true.
+    if len(health) != 1 or health[0] != HEALTH_COLLECTED_DATA_TYPE or any(
+        type(health[0][key]) is not bool
+        for key in ("NSPrivacyCollectedDataTypeLinked", "NSPrivacyCollectedDataTypeTracking")
+    ):
+        raise TestFlightError(
+            f"{bundle.name}'s PrivacyInfo.xcprivacy must declare HealthKit data once as "
+            "linked, not tracking, for app functionality"
+        )
+
+
 def verify_archive(archive: Path, *, build: str) -> dict:
     app = archived_app(archive)
     extensions = archived_extensions(app)
@@ -559,6 +612,7 @@ def verify_archive(archive: Path, *, build: str) -> dict:
         )
     for bundle in (app, *extensions.values()):
         check_privacy_manifest(bundle)
+    check_health_privacy_declaration(app)
     bundles = [
         (
             app,

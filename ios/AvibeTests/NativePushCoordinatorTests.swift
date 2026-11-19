@@ -2019,6 +2019,25 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertEqual(store.installation?.installationSecret.count, 32)
     }
 
+    func testHealthRequestNotificationOpensOnlyItsStatusLandingPath() {
+        var taps: [PushNotificationTap] = []
+        var recoveries = 0
+        let coordinator = makeCoordinator(
+            store: InMemoryPushKeychainStore(), management: ManagementRecorder(),
+            onTap: { taps.append($0) }, onTapRecovery: { recoveries += 1 }
+        )
+        coordinator.handleNotificationTap(userInfo: [
+            "kind": "health.request", "account_id": Self.accountA.id,
+            "instance_origin": Self.instanceOrigin,
+            "url": "/mobile/health/request-1",
+        ])
+        XCTAssertEqual(taps, [PushNotificationTap(
+            accountID: Self.accountA.id, instanceOrigin: Self.instanceOrigin,
+            url: "/mobile/health/request-1"
+        )])
+        XCTAssertEqual(recoveries, 0)
+    }
+
     func testInvalidNotificationTapUsesInstanceRecovery() {
         var taps = 0
         var recoveries = 0

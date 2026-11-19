@@ -1339,6 +1339,46 @@ workflow refuses an expired profile, or one without Associated Domains, before
 it builds. The profile was last regenerated on 2026-11-07, after Associated
 Domains was enabled.
 
+## Apple Health
+
+The instance conversation and encrypted health-request notifications are the
+entry points. The configured instance main frame can call
+`health.connect({requestId, pairingCode})`; native consent names the destination,
+read-only data groups, automatic synchronization, Agent/model access, and how to
+stop. Its response contains only `state`. Every other `health.*` bridge method
+is unsupported, including on Show pages. Health data never returns through the
+WebView bridge or notification service extension.
+
+The main app reads steps, activity, workouts and sleep. It backfills 30 days
+and refreshes the most recent eight calendar days on foreground activation and
+HealthKit observer delivery. Sleep uses the local 18:00 boundary and interval
+unions. Empty results do not identify denied HealthKit read permission. Device
+credentials and the random installation identifier use private, nonsynchronizing
+ThisDeviceOnly Keychain items. Logout deletes the credential, stops observation,
+cancels uploads and removes local sync state; the non-authenticating installation
+identifier remains for repeat-pairing identification.
+
+The protected, backup-excluded outbox uses monotonic persisted sequence numbers
+and one background URLSession upload at a time. Payload and execution dependencies
+commit together. An upload acknowledgement removes the outbox reference and
+releases its value-free request result in one state write. A reclaimed request
+uses its recorded result with the new lease token rather than querying again;
+an interrupted query without a durable payload is resumed. Redirects and cookies
+are disabled for device requests. Revocation or loss of instance eligibility
+clears the connection; invalid payloads and unsupported contracts suspend sync
+until a new explicit connection. Retry-After applies to device requests.
+
+Both HealthKit entitlements and the localized read-purpose description belong
+only to the main app. The archive checker requires boolean grants and rejects
+HealthKit entitlements on extensions and any Health write-purpose description.
+For this Health sync feature, the main app's privacy manifest declares Health data
+as linked, not used for tracking, and for app functionality, and the archive
+checker requires exactly that declaration.
+Changing Apple App ID capabilities or provisioning profiles, signing an archive,
+physical-device validation and TestFlight distribution require separate owner
+approval. Unsigned simulator builds and synthetic-data tests do not establish
+physical-device authorization, locked-device access, or background wake latency.
+
 ## Sharing a Show from the iPhone App
 
 Open the Show, then its share control. **Share link** passes the existing private,

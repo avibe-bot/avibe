@@ -17,6 +17,29 @@ extension Notification.Name {
 final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
+    static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+    @MainActor static let healthSync = HealthSyncCoordinator()
+
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == HealthBackgroundUploader.identifier,
+              let uploader = Self.healthSync.backgroundUploader else { completionHandler(); return }
+        uploader.systemCompletion = completionHandler
+        uploader.reconnect()
+        Task { @MainActor in await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
+    }
+
+    /// Read when a launch or background-session resume actually runs, as
+    /// AppModel.bootstrap does; a constant would overwrite a foreground state
+    /// that an earlier resume already applied.
+    @MainActor private static var applicationIsForeground: Bool {
+        UIApplication.shared.applicationState != .background
+    }
+
     /// The tag the instance gives the test notification sent from Settings
     /// (`/api/web-push/test`); the notification service extension carries a
     /// push's tag into `threadIdentifier`.
@@ -60,6 +83,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         Task { @MainActor in
             ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
+            if !Self.isRunningTests { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }
         return true
     }
@@ -133,7 +157,10 @@ struct AvibeApp: App {
             engine: DirectIrohBinding(),
             fetchRendezvous: source.fetch
         )
-        let model = AppModel(directTransport: transport)
+        let model = AppModel(
+            directTransport: transport,
+            healthSync: AvibeAppDelegate.isRunningTests ? nil : AvibeAppDelegate.healthSync
+        )
         source.appModel = model
         directRendezvousSource = source
         _appModel = StateObject(wrappedValue: model)
@@ -142,6 +169,7 @@ struct AvibeApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .modifier(HealthConsentHost(health: AvibeAppDelegate.healthSync))
                 .environmentObject(appModel)
                 .task {
                     // App Shortcuts (AppShortcuts.swift) reach the model here.

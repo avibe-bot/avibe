@@ -22,6 +22,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let showInstances: () -> Void
     let showSignIn: () -> Void
     let instanceName: () -> String?
+    let healthConnect: HealthConnectAction
     let instanceID: () -> String?
     let deviceID: () -> String?
     let directStatus: DirectStatusProvider?
@@ -60,6 +61,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -96,6 +98,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
@@ -132,6 +135,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             instanceID: instanceID,
             deviceID: deviceID,
             directStatus: directStatus,
+            healthConnect: healthConnect,
             directLoadGate: directLoadGate,
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,

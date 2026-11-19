@@ -862,6 +862,8 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
     entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
     assert entitlements == {
         "aps-environment": "development",
+        "com.apple.developer.healthkit": True,
+        "com.apple.developer.healthkit.background-delivery": True,
         "com.apple.developer.associated-domains": [
             "webcredentials:avibe.bot",
             "webcredentials:sandbox.avibe.bot",
