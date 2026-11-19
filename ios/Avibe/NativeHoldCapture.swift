@@ -41,15 +41,13 @@ final class NativeHoldCapture {
         var engineMs: Int
     }
 
-    /// About 100 ms of 16 kHz Int16: how much audio each event after the
-    /// take's first carries (the first goes at once, so the page knows when
-    /// the microphone began).
-    static let batchBytes = 3_200
-
     /// A take, from its start until its page has heard its end.
+    @MainActor
     private final class Take {
         let id: String
         weak var webView: WKWebView?
+        /// The document the take was started from, when it goes to a page.
+        let origin: WebOrigin?
         /// Whether the audio goes to `webView`'s page, which may go away.
         let toPage: Bool
         let deliver: (Event) -> Void
@@ -59,8 +57,17 @@ final class NativeHoldCapture {
         init(id: String, webView: WKWebView?, toPage: Bool, deliver: @escaping (Event) -> Void) {
             self.id = id
             self.webView = webView
+            self.origin = webView?.url.flatMap { WebOrigin(url: $0, requiresHTTPS: false) }
             self.toPage = toPage
             self.deliver = deliver
+        }
+
+        /// Whether the page that started the take is still the one shown:
+        /// not deallocated, and not navigated to another origin.
+        var pageIsPresent: Bool {
+            guard toPage else { return true }
+            guard let url = webView?.url else { return false }
+            return WebOrigin(url: url, requiresHTTPS: false) == origin
         }
 
         func receive(_ data: Data) {
@@ -70,7 +77,7 @@ final class NativeHoldCapture {
                 return
             }
             pending.append(data)
-            if pending.count >= NativeHoldCapture.batchBytes { flush() }
+            if pending.count >= nativeHoldBatchBytes { flush() }
         }
 
         func flush() {
@@ -139,12 +146,19 @@ final class NativeHoldCapture {
             end(reason: "replaced")
         }
         guard !VoiceCaptureAudioState.active, closing[newTake] == nil else { return .failure(.busy) }
+        let origin = webView?.url.flatMap { WebOrigin(url: $0, requiresHTTPS: false) }
         let take = Take(
             id: newTake,
             webView: webView,
             toPage: deliver == nil,
             deliver: deliver ?? { [weak webView] event in
-                webView?.evaluateJavaScript(Self.eventScript(take: newTake, event: event))
+                // Only into the document that started it: never another page.
+                guard let webView, let url = webView.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin
+                else {
+                    return
+                }
+                webView.evaluateJavaScript(Self.eventScript(take: newTake, event: event))
             }
         )
         running = take
@@ -153,7 +167,7 @@ final class NativeHoldCapture {
                 onPCM: { [weak self, weak take] data in
                     guard let self, let take else { return }
                     if self.running === take {
-                        guard !take.toPage || take.webView != nil else {
+                        guard take.pageIsPresent else {
                             self.end(reason: "gone")
                             return
                         }
@@ -190,6 +204,12 @@ final class NativeHoldCapture {
         end(reason: "gone")
     }
 
+    /// An Action Button take is about to set the session: a hold's take
+    /// ends first (its page hears `action_button`).
+    func yieldToActionButton() {
+        end(reason: "action_button")
+    }
+
     private func end(reason: String?) {
         guard let take = running else { return }
         running = nil
@@ -220,6 +240,11 @@ final class NativeHoldCapture {
         return "window.dispatchEvent(new CustomEvent(\"avibe:native:voice.capture\", { detail: \(json) }));"
     }
 }
+
+/// About 100 ms of 16 kHz Int16: how much audio each event after a take's
+/// first carries (the first goes at once, so the page knows when the
+/// microphone began).
+let nativeHoldBatchBytes = 3_200
 
 /// The session and input a hold's take records with.
 @MainActor
@@ -316,7 +341,9 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
     ) throws -> NativeHoldCapture.Timings {
         let session = AVAudioSession.sharedInstance()
         do {
-            if session.category != .playAndRecord { try Self.configure() }
+            // Every time: an Action Button take or WebKit may have left the
+            // session mixable, ducking, or without the speaker and headsets.
+            try Self.configure()
         } catch {
             throw NativeHoldCapture.StartError.failed("category:\((error as NSError).code)")
         }
@@ -384,6 +411,8 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
             engine.stop()
         }
         engine = nil
+        // An Action Button take that has the session now keeps it.
+        guard !VoiceCaptureAudioState.active else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 

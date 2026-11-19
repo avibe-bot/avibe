@@ -208,6 +208,8 @@ describe('ShowPageVoiceDictation', () => {
     expect(options?.stream.getTracks()).toEqual([]);
     // How long the press waited for the take: press to first audio is this plus the capture's.
     expect(options?.trace?.toEvent('sent').pressMs).toBeGreaterThanOrEqual(260);
+    // No microphone of the page's was asked for: the App's capture settles it.
+    expect(options?.trace?.toEvent('sent').micMs).toBeUndefined();
     dictation.abort();
   });
 

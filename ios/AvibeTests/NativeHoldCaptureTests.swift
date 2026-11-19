@@ -109,6 +109,36 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(audio.calls, ["start", "stop"])
     }
 
+    func testATakeEndsWhenItsPageGoesOrTheActionButtonTakesTheMicrophone() throws {
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        let page = WKWebView()
+        var events: [NativeHoldCapture.Event] = []
+        _ = try capture.start(take: "one", webView: page) { events.append($0) }.get()
+        capture.stop(webView: WKWebView())
+        XCTAssertEqual(capture.currentTake, "one", "another page's going is not this take's")
+        capture.stop(webView: page)
+        drain()
+        XCTAssertEqual(events, [.ended(reason: "gone")])
+
+        events = []
+        _ = try capture.start(take: "two", webView: nil) { events.append($0) }.get()
+        capture.yieldToActionButton()
+        drain()
+        XCTAssertEqual(events, [.ended(reason: "action_button")])
+        XCTAssertEqual(audio.calls, ["start", "stop", "start", "stop"])
+    }
+
+    func testAudioForAPageThatIsNoLongerShownEndsTheTake() throws {
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        // A page with no document of the take's origin (here, none at all).
+        _ = try capture.start(take: "one", webView: WKWebView()).get()
+        audio.onPCM?(Data([1, 0]))
+        XCTAssertNil(capture.currentTake)
+        XCTAssertEqual(audio.calls, ["start", "stop"])
+    }
+
     func testNoTakeStartsWithoutThePermissionOrWhileTheActionButtonRecords() {
         let audio = FakeAudio()
         let capture = makeCapture(audio)

@@ -117,6 +117,46 @@ describe('NativePcmCapture', () => {
     expect(on.onError.mock.invocationCallOrder[0]).toBeLessThan(on.onStopped.mock.invocationCallOrder[0]);
   });
 
+  it('records why the App ended a take, apart from a release', async () => {
+    const trace = new VoiceCaptureTrace('hold');
+    const capture = new NativePcmCapture(handlers(), 5_000, trace);
+    await capture.start();
+    emit({ pcm: pcm([1, 2, 3]) });
+    emit({ ended: true, reason: 'route' });
+    expect(trace.toEvent('interrupted').attempts[0]).toMatchObject({ kind: 'native', end: 'error', nativeEnd: 'route' });
+
+    const other = new VoiceCaptureTrace('hold');
+    install();
+    const second = new NativePcmCapture(handlers(), 5_000, other);
+    await second.start();
+    emit({ ended: true, reason: 'something new' });
+    expect(other.toEvent('interrupted').attempts[0]).toMatchObject({ end: 'error', nativeEnd: 'other' });
+  });
+
+  it('paces the loudness of a 100 ms chunk out one reading per 32 ms, not in a burst', async () => {
+    vi.useFakeTimers();
+    const on = handlers();
+    const capture = new NativePcmCapture(on, 5_000);
+    await capture.start();
+    emit({ pcm: pcm(new Array(1_600).fill(8_192)) });
+    expect(on.onLevel).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(31);
+    expect(on.onLevel).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(on.onLevel).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(32);
+    expect(on.onLevel).toHaveBeenCalledTimes(3);
+    vi.advanceTimersByTime(320);
+    expect(on.onLevel).toHaveBeenCalledTimes(3);
+    // None is left to come after the take.
+    emit({ pcm: pcm(new Array(1_600).fill(8_192)) });
+    capture.stop();
+    emit({ ended: true });
+    const after = on.onLevel.mock.calls.length;
+    vi.advanceTimersByTime(320);
+    expect(on.onLevel).toHaveBeenCalledTimes(after);
+  });
+
   it('ends on its own when the App never answers the stop', async () => {
     vi.useFakeTimers();
     const on = handlers();
@@ -137,7 +177,11 @@ describe('NativePcmCapture', () => {
       const trace = new VoiceCaptureTrace('hold');
       const capture = new NativePcmCapture(handlers(), 5_000, trace);
       await expect(capture.start()).rejects.toMatchObject({ name });
-      expect(trace.toEvent('failed').attempts[0]).toMatchObject({ kind: 'native', mic: name, end: 'error' });
+      const event = trace.toEvent('failed');
+      expect(event.attempts[0]).toMatchObject({ kind: 'native', mic: name, end: 'error' });
+      // The take's own microphone answer is the App's: a refused start is no microphone.
+      expect(event).toMatchObject({ mic: name, captureClass: 'no_microphone' });
+      expect(event.micMs).toBeGreaterThanOrEqual(0);
       expect(listeners).toHaveLength(0);
     }
   });

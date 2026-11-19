@@ -9,7 +9,7 @@ import {
   type NativeVoiceCaptureEvent,
 } from './native';
 import { VOICE_LEVEL_INTERVAL_MS } from './voiceActivity';
-import type { VoiceCaptureAttempt, VoiceCaptureTrace } from './voiceCaptureTrace';
+import type { VoiceCaptureAttempt, VoiceCaptureTrace, VoiceNativeEnd } from './voiceCaptureTrace';
 import {
   VOICE_CAPTURE_STOP_TIMEOUT_MS,
   type VoicePcmCapture,
@@ -28,6 +28,14 @@ export const emptyVoiceStream = (): MediaStream => (
     ? new MediaStream()
     : { getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream
 );
+
+const NATIVE_ENDS = new Set<VoiceNativeEnd>(['interrupted', 'route', 'background', 'gone', 'replaced', 'action_button']);
+const nativeEnd = (reason: string | undefined): VoiceNativeEnd => (
+  NATIVE_ENDS.has(reason as VoiceNativeEnd) ? reason as VoiceNativeEnd : 'other'
+);
+
+/** Readings held back to be paced out: a chunk's worth, about 100 ms. */
+const MAX_QUEUED_LEVELS = 8;
 
 const newTakeId = (): string =>
   `h${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
@@ -64,6 +72,8 @@ export class NativePcmCapture implements VoicePcmCapture {
   private stopTimer: ReturnType<typeof setTimeout> | null = null;
   private levelSum = 0;
   private levelCount = 0;
+  private levels: number[] = [];
+  private levelTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private stopping = false;
   private stopped = false;
@@ -84,18 +94,23 @@ export class NativePcmCapture implements VoicePcmCapture {
     this.attempt = attempt;
     if (attempt) attempt.sampleRate = NATIVE_CAPTURE_SAMPLE_RATE;
     const requestedAt = performance.now();
+    // The take's microphone is the App's: its start is what the trace's `micMs` and `mic` say.
+    const traceRequestedAt = this.trace?.mark() ?? 0;
     try {
       await nativeVoiceCaptureStart(this.take);
     } catch (error) {
+      const failure = Object.assign(new Error('native voice capture did not start'), { name: bridgeErrorName(error) });
+      this.trace?.micSettled(traceRequestedAt, failure);
       if (attempt) {
         attempt.micMs = Math.round(performance.now() - requestedAt);
-        attempt.mic = bridgeErrorName(error);
+        attempt.mic = failure.name;
         this.trace?.ended(attempt, 'error', null);
       }
       this.release();
       this.stopped = true;
-      throw Object.assign(new Error('native voice capture did not start'), { name: bridgeErrorName(error) });
+      throw failure;
     }
+    this.trace?.micSettled(traceRequestedAt);
     if (attempt) {
       attempt.micMs = Math.round(performance.now() - requestedAt);
       attempt.mic = 'ok';
@@ -129,7 +144,12 @@ export class NativePcmCapture implements VoicePcmCapture {
     if (event.ended) {
       if (!this.stopping) {
         this.stopping = true;
-        this.handlers.onError(new Error(`native voice capture ended: ${event.reason ?? 'unknown'}`));
+        const reason = nativeEnd(event.reason);
+        if (this.attempt) {
+          this.attempt.nativeEnd = reason;
+          this.trace?.ended(this.attempt, 'error', null);
+        }
+        this.handlers.onError(new Error(`native voice capture ended: ${reason}`));
       }
       this.finish();
     }
@@ -144,17 +164,36 @@ export class NativePcmCapture implements VoicePcmCapture {
       this.levelSum += value * value;
       this.levelCount += 1;
       if (this.levelCount >= LEVEL_SAMPLES) {
-        if (this.attempt) this.trace?.level(this.attempt);
-        this.handlers.onLevel(Math.sqrt(this.levelSum / this.levelCount));
+        this.queueLevel(Math.sqrt(this.levelSum / this.levelCount));
         this.levelSum = 0;
         this.levelCount = 0;
       }
     }
   }
 
+  /** The App sends about 100 ms at a time: its readings are paced out one per
+   *  `VOICE_LEVEL_INTERVAL_MS`, as the page's own capture gives them, not in a burst. */
+  private queueLevel(rms: number): void {
+    this.levels.push(rms);
+    if (this.levels.length > MAX_QUEUED_LEVELS) this.levels.shift();
+    if (!this.levelTimer) this.nextLevel();
+  }
+
+  private nextLevel(): void {
+    const rms = this.levels.shift();
+    if (rms === undefined || this.stopped) {
+      this.levelTimer = null;
+      return;
+    }
+    if (this.attempt) this.trace?.level(this.attempt);
+    this.handlers.onLevel?.(rms);
+    this.levelTimer = setTimeout(() => this.nextLevel(), VOICE_LEVEL_INTERVAL_MS);
+  }
+
   private finish(): void {
     if (this.stopped) return;
     this.stopped = true;
+    // An attempt the App ended itself is already `error`; `ended` keeps the first.
     if (this.attempt) {
       this.trace?.ended(this.attempt, this.attempt.chunks > 0 ? 'rendered' : 'stopped', null);
     }
@@ -165,6 +204,9 @@ export class NativePcmCapture implements VoicePcmCapture {
   private release(): void {
     if (this.stopTimer) clearTimeout(this.stopTimer);
     this.stopTimer = null;
+    if (this.levelTimer) clearTimeout(this.levelTimer);
+    this.levelTimer = null;
+    this.levels = [];
     this.unsubscribe?.();
     this.unsubscribe = null;
   }

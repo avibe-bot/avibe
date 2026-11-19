@@ -137,3 +137,9 @@ struct NotificationReconcile: Equatable {
         )
     }
 }
+
+/// NativeHoldCapture's check for an Action Button take, which the fixture
+/// never records.
+enum VoiceCaptureAudioState {
+    nonisolated(unsafe) static var active = false
+}

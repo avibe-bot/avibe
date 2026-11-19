@@ -2621,6 +2621,8 @@ extension WebViewController: WKNavigationDelegate {
         guard acceptsRuntimeCallback(from: webView) else {
             return
         }
+        // A new document: the one that held a take is gone.
+        NativeHoldCapture.shared.stop(webView: webView)
         retainedWebViewFactory?.resetForNavigationCommit(in: webView)
         if isPrimaryWebView(webView) {
             if navigation !== cachedNavigation, cachedNavigation != nil {

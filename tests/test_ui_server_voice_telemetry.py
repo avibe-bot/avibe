@@ -310,7 +310,8 @@ def test_voice_telemetry_keeps_a_take_the_ios_app_recorded(caplog):
                 "levels": 120,
                 "trackStart": "none",
                 "trackEnd": "none",
-                "end": "rendered",
+                "end": "error",
+                "nativeEnd": "route",
             }
         ],
     )
@@ -321,6 +322,9 @@ def test_voice_telemetry_keeps_a_take_the_ios_app_recorded(caplog):
     _, metric = _logged_metric(caplog)
     assert metric["pressMs"] == 262
     assert metric["attempts"] == trace["attempts"]
+    bad = _capture_trace(attempts=[{"kind": "native", "nativeEnd": "the user said hi"}])
+    response = client.post("/api/asr/telemetry", json=bad, headers=csrf_headers(client))
+    assert response.status_code == 400
 
 
 def test_voice_telemetry_rejects_a_malformed_capture_trace():

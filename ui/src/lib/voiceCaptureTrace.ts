@@ -163,7 +163,11 @@ export type VoiceCaptureAttempt = {
   /** How it ended: frames came, none came in the render window, its clock stood still, the
    *  context never rendered, the take stopped first, or it failed. */
   end?: 'rendered' | 'no_frames' | 'stalled' | 'not_running' | 'stopped' | 'error';
+  /** A take the App recorded and ended itself: why (ios/Avibe/NativeHoldCapture.swift). */
+  nativeEnd?: VoiceNativeEnd;
 };
+
+export type VoiceNativeEnd = 'interrupted' | 'route' | 'background' | 'gone' | 'replaced' | 'action_button' | 'other';
 
 export type VoiceCaptureTraceEvent = {
   event: 'capture_trace';

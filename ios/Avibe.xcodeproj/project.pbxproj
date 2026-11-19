@@ -102,6 +102,7 @@
 		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		910000000000000000000008 /* FixtureMobile in Resources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000003 /* FixtureMobile */; };
 		91000000000000000000000D /* NativeBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
+		910000000000000000000153 /* NativeHoldCapture.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000034 /* NativeHoldCapture.swift */; };
 		91000000000000000000000F /* NativeBadge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
 		91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000006 /* FixtureNativeBridgeSupport.swift */; };
@@ -1070,6 +1071,7 @@
 			files = (
 				910000000000000000000001 /* SheetFixtureApp.swift in Sources */,
 				91000000000000000000000D /* NativeBridge.swift in Fixture Sources */,
+				910000000000000000000153 /* NativeHoldCapture.swift in Fixture Sources */,
 				8C1000000000000000000002 /* ShowShareCoordinator.swift in Fixture Sources */,
 				91000000000000000000000F /* NativeBadge.swift in Fixture Sources */,
 				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,

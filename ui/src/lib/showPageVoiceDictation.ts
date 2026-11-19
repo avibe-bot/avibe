@@ -215,7 +215,8 @@ export class ShowPageVoiceDictation {
         this.trace.micSettled(requestedAt, error);
         throw error;
       }
-      this.trace.micSettled(requestedAt);
+      // The App's capture settles its own microphone (lib/nativeVoiceCapture).
+      if (!this.input.nativeCapture) this.trace.micSettled(requestedAt);
       if (this.abortController.signal.aborted || !captureClaim.isCurrent()) {
         stream.getTracks().forEach((track) => track.stop());
         throw cancelledError();

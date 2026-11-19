@@ -13622,6 +13622,8 @@ _VOICE_CAPTURE_ATTEMPT_ENUMS = {
     "trackEnd": _VOICE_TRACK_STATES,
     "end": {"rendered", "no_frames", "stalled", "not_running", "stopped", "error"},
     "engine": {"healthy", "stalled", "unknown"},
+    # Why the iOS App ended a take it recorded (ios/Avibe/NativeHoldCapture.swift).
+    "nativeEnd": {"interrupted", "route", "background", "gone", "replaced", "action_button", "other"},
 }
 _VOICE_CAPTURE_ATTEMPT_INTS = {
     "atMs",
