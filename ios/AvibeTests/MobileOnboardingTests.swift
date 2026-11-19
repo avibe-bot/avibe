@@ -1581,6 +1581,20 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? String
         XCTAssertEqual(provider, MobileAccountError.forbidden.code)
         XCTAssertTrue(transport.providerStarts.isEmpty)
+        let providers = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.providers');
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(providers, MobileAccountError.forbidden.code)
         XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
     }
 
