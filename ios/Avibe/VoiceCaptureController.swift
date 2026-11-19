@@ -586,10 +586,16 @@ final class VoiceCaptureController {
             if foregroundFallback, !attempts.contains(where: { $0.step == .liveActivity }) {
                 // Try 3 in the App. Nothing is left active, and the island
                 // of a refused try goes at once; the notice waits for try 3.
-                if let activity { await activity.end(nil, dismissal: .immediate) }
+                // Published before the await: an account change meanwhile
+                // clears it, and the recheck below gives the press up.
                 audio.discard()
                 pendingForeground = attempts
                 pendingForegroundAt = environment.now()
+                if let activity { await activity.end(nil, dismissal: .immediate) }
+                guard generation == startGeneration, pendingForeground != nil else {
+                    pendingForeground = nil
+                    return .stopped
+                }
                 record("start: background tries refused; continuing in the App")
                 return .needsForeground
             }
