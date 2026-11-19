@@ -789,6 +789,15 @@ class MessageHandler(BaseHandler):
                 # reach the next Turn. Here, before the shared model validation.
                 effective_model = recorded.get("model")
                 effective_reasoning_effort = recorded.get("reasoning_effort")
+                # Except a model or effort the list dropped, which its Session just moved off.
+                if succession is not None and succession.model and effective_model == succession.model[0]:
+                    effective_model = succession.model[1]
+                if (
+                    succession is not None
+                    and succession.reasoning_effort
+                    and effective_reasoning_effort == succession.reasoning_effort[0]
+                ):
+                    effective_reasoning_effort = succession.reasoning_effort[1]
                 system_prompt = recorded.get("system_prompt")
                 # A setting the Session's row does not name stays what the Turn was accepted with.
                 inherited_model, inherited_reasoning_effort = effective_model, effective_reasoning_effort
