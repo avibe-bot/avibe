@@ -134,7 +134,7 @@ from storage.background import (
     resolve_run_at,
     task_schedule_generation,
 )
-from storage.models import agent_sessions, scope_settings, scopes
+from storage.models import agent_runs as agent_runs_table, agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
 from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 from storage.session_delegations import has_dispatch_pair
@@ -8377,8 +8377,25 @@ class ScheduledTaskService:
 
         with store.engine.connect() as conn:
             delivery = delivery_store.get_delivery(conn, delivery_id)
-        carry = delivery_store.turn_carry(delivery) if delivery is not None else None
-        return str(carry.get("original_id") or delivery_id) if carry else None
+            if delivery is None or delivery_store.turn_carry(delivery) is None or not delivery.get("turn_id"):
+                return None
+            # Callbacks to one Session from one terminal Turn coalesce into one
+            # (``_enqueue_callback_run``): name every input of that Turn it was
+            # waiting on, not just this Run's (#4010 review).
+            recipient = str(run.get("callback_session_id") or "").strip()
+            inputs: list[str] = []
+            for row in delivery_store.deliveries_for_turn(conn, str(delivery["turn_id"])):
+                carry = delivery_store.turn_carry(row)
+                if carry is None or row.get("turn_id") != delivery["turn_id"]:
+                    continue
+                if str(row["id"]) != delivery_id:
+                    sibling = conn.execute(
+                        select(agent_runs_table.c.callback_session_id).where(agent_runs_table.c.delivery_id == row["id"])
+                    ).scalar_one_or_none()
+                    if not recipient or str(sibling or "").strip() != recipient:
+                        continue
+                inputs.append(str(carry.get("original_id") or row["id"]))
+        return ", ".join(dict.fromkeys(inputs)) or None
 
     def _fallback_callback_result(self, run: dict[str, Any], *, status: str) -> str:
         parts: list[str] = []

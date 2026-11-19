@@ -22,8 +22,9 @@ from storage.message_deliveries import (
 )
 from storage.models import agent_sessions, message_deliveries, messages, session_turns
 
-#: How many Turns of carried inputs may run between a failure and the press on its Retry.
-_CARRY_TURN_LOOKBACK = 8
+#: A bound on the read, far above what can run between a failure and its Retry: carried
+#: inputs run at most three Turns in a row before they park, in at most a few segments.
+_CARRY_TURN_LOOKBACK = 64
 
 
 class RetryUnavailable(ValueError):
@@ -144,8 +145,10 @@ def _validate_boundary(
         # A Turn that only ran inputs another Turn's end carried (``turn_carry``)
         # does not make this failure stale: a press that releases parked inputs
         # lets them run first, in their own Turn, and must still count.
-        initial = deliveries.initial_deliveries_for_turn(conn, candidate)
-        if candidate == turn_id or not initial or not all(deliveries.turn_carry(row) for row in initial):
+        # Every input it took, steers included: a person's message merged into it
+        # is newer work than this failure (#4010 review).
+        taken = [row for row in deliveries.deliveries_for_turn(conn, candidate) if row.get("turn_id") == candidate]
+        if candidate == turn_id or not taken or not all(deliveries.turn_carry(row) for row in taken):
             break
     if latest != turn_id:
         raise RetryUnavailable("retry_stale")
