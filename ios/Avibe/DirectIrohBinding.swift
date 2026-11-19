@@ -50,6 +50,10 @@ struct DirectIrohBinding: DirectIrohEngine {
         func close() async {
             try? await endpoint.close()
         }
+
+        var localFamilies: DirectAddressFamilies? {
+            DirectAddressFamilies(socketAddresses: endpoint.addr().directAddresses())
+        }
     }
 
     private final class Live: DirectIrohConnection, @unchecked Sendable {
@@ -77,6 +81,16 @@ struct DirectIrohBinding: DirectIrohEngine {
 
         func close() {
             try? connection.close(errorCode: 0, reason: Data())
+        }
+
+        var selectedPath: DirectPathKind? {
+            guard let path = connection.paths().first(where: \.isSelected) else {
+                return nil
+            }
+            if path.isRelay {
+                return .relay
+            }
+            return path.isIp ? DirectPathKind.family(ofSocketAddress: path.remoteAddr) : nil
         }
     }
 

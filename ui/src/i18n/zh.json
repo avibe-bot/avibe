@@ -3146,7 +3146,14 @@
       "certificate": "证书有效期至 {{date}}",
       "detail": "{{certificate}} · {{page}}",
       "pageDirect": "本页当前连接：直连",
-      "pageOther": "本页当前连接：未走直连"
+      "pageOther": "本页当前连接：未走直连",
+      "device": "本设备直连：{{state}}",
+      "deviceWithPath": "本设备直连：{{state}} · {{path}}",
+      "deviceInUse": "使用中",
+      "deviceOn": "已开启",
+      "pathRelay": "中继",
+      "pathIpv4": "直连 IPv4",
+      "pathIpv6": "直连 IPv6"
     }
   },
   "models": {

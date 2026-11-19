@@ -312,6 +312,8 @@ final class DirectIrohTransport {
     private var debounceTimer: (any DirectIrohTimer)?
     private var stableTimer: (any DirectIrohTimer)?
     private var spacingTimer: (any DirectIrohTimer)?
+    /// The last attempts, oldest first (`DirectPathDiagnostics`).
+    private var attempts: [DirectDialAttempt] = []
     /// The live path. Whenever this is cleared or replaced, the path's
     /// authority is revoked.
     private var session: Session? {
@@ -403,6 +405,8 @@ final class DirectIrohTransport {
         stopWork()
         self.selection = selection
         self.report = report
+        // The history speaks for one selection (one instance, one account).
+        attempts.removeAll()
         failures = 0
         pageRetries = 0
         // Path generations are compared within one selection only: nothing
@@ -423,6 +427,7 @@ final class DirectIrohTransport {
         stopWork()
         selection = nil
         report = nil
+        attempts.removeAll()
         network.stop()
     }
 
@@ -960,16 +965,52 @@ final class DirectIrohTransport {
             }
             return .success(Link(endpoint: endpoint, connection: connection))
         } catch {
+            // Read before the endpoint closes: what this device could offer
+            // is the diagnosis of a failed attempt.
+            let local = endpoint.localFamilies
             Task {
                 await endpoint.close()
             }
-            return .failure(error)
+            return .failure(DialFailure(underlying: error, local: local))
         }
+    }
+
+    /// A dial that failed after its endpoint was bound, with what the
+    /// endpoint could offer.
+    private struct DialFailure: Error {
+        let underlying: Error
+        let local: DirectAddressFamilies?
+    }
+
+    /// Records how an attempt ended, for `pathDiagnostics` and the log.
+    /// Families and counts only: no address, key, or identity.
+    private func recordAttempt(_ offer: DirectRendezvousOffer, local: DirectAddressFamilies?, path: DirectPathKind?) {
+        let attempt = DirectDialAttempt(
+            offered: DirectAddressFamilies(socketAddresses: offer.addresses.map(\.socketAddress)),
+            offeredRelay: offer.relay != nil,
+            local: local,
+            path: path
+        )
+        attempts.append(attempt)
+        if attempts.count > DirectPathDiagnostics.attemptLimit {
+            attempts.removeFirst(attempts.count - DirectPathDiagnostics.attemptLimit)
+        }
+        let localText = local.map { "ipv4=\($0.ipv4) ipv6=\($0.ipv6)" } ?? "unknown"
+        Self.logger.info(
+            """
+            Direct transport attempt: offered ipv4=\(attempt.offered.ipv4, privacy: .public) \
+            ipv6=\(attempt.offered.ipv6, privacy: .public) relay=\(attempt.offeredRelay, privacy: .public) \
+            local \(localText, privacy: .public) result=\(path?.rawValue ?? "failed", privacy: .public)
+            """
+        )
     }
 
     private func dialDidFinish(_ outcome: Result<Link, Error>, lease accepted: Lease) {
         let offer = accepted.offer
         guard case .success(let link) = outcome else {
+            if case .failure(let failure) = outcome {
+                recordAttempt(offer, local: (failure as? DialFailure)?.local, path: nil)
+            }
             Self.logger.info("Direct transport: no path to the instance")
             dropLease()
             scheduleRetry()
@@ -983,6 +1024,7 @@ final class DirectIrohTransport {
             authority: DirectIrohAuthority(deadline: accepted.deadline, clock: uptime)
         )
         self.session = session
+        recordAttempt(offer, local: link.endpoint.localFamilies, path: link.connection.selectedPath)
         watchClose(of: session)
         stableTimer?.cancel()
         stableTimer = scheduler.schedule(after: timing.stableSeconds) { [weak self] in
@@ -1337,6 +1379,13 @@ extension DirectPathReport {
 extension DirectIrohByteStream: DirectByteStream {}
 
 extension DirectIrohTransport: DirectTransporting {
+    /// The path the usable session's connection runs on now, read from the
+    /// binding, and the last attempts.
+    var pathDiagnostics: DirectPathDiagnostics {
+        let current = session.flatMap { $0.isUsable ? $0.link.connection.selectedPath : nil }
+        return DirectPathDiagnostics(current: current, attempts: attempts)
+    }
+
     func select(
         _ target: DirectTarget,
         report: @escaping @MainActor (DirectPathReport) -> Void

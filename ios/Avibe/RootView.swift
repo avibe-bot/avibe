@@ -397,6 +397,7 @@ private struct BrowserScreen: View {
                         instanceID: { instance.id },
                         deviceID: { appModel.systemScheduleDeviceID },
                         directStatus: appModel.directStatusProvider,
+                        directHandover: appModel.directHandoverProvider,
                         healthConnect: appModel.connectHealth,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,

@@ -4995,6 +4995,78 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testAHandOverActsOnlyWhileTheHostsPathIsUsableAndOnlyForTheSoleDocument() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        let target = try XCTUnwrap(transport.selections.last)
+
+        // Before the path is usable nothing is closed.
+        let early = await handover(app, instance, sole: true)
+        XCTAssertEqual(early, .skipped(.notUsable))
+
+        try await eventually {
+            if app.mobileSessionCoordinator.isCurrentRuntime(runtime) {
+                transport.report(.usable(generation: "g1"), for: target)
+            }
+            return self.directStatus(app, self.instance)?.preferred == .direct
+        }
+        // Another document of the store has the host loaded, or the App
+        // cannot tell: skipped.
+        let unknown = await handover(app, instance, sole: nil)
+        XCTAssertEqual(unknown, .skipped(.otherDocuments))
+        let shared = await handover(app, instance, sole: false)
+        XCTAssertEqual(shared, .skipped(.otherDocuments))
+        // The sole document: done, here with no public relay to close.
+        let sole = await handover(app, instance, sole: true)
+        XCTAssertEqual(sole, .done(closed: 0, kept: 0))
+        // Another host is not the selected instance's.
+        let elsewhere = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
+        let other = await handover(app, elsewhere, sole: true)
+        XCTAssertEqual(other, .skipped(.notUsable))
+
+        // Lost: not usable any more.
+        transport.report(.lost, for: target)
+        try await eventually { self.directStatus(app, self.instance)?.preferred == .tunnel }
+        let lost = await handover(app, instance, sole: true)
+        XCTAssertEqual(lost, .skipped(.notUsable))
+    }
+
+    @MainActor
+    func testTheWebViewRegistryTellsTheSoleDocumentOfAHost() async throws {
+        let registry = DirectWebViewRegistry()
+        let store = WKWebsiteDataStore.nonPersistent()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = store
+        let page = WKWebView(frame: .zero, configuration: configuration)
+        // Not registered: the App cannot tell.
+        XCTAssertNil(registry.isSoleDocument(page, host: "instance-one.example"))
+        registry.register(page)
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-one.example"), true)
+
+        // Another WebView of the same store with no page yet: cannot tell.
+        let second = WKWebViewConfiguration()
+        second.websiteDataStore = store
+        let other = WKWebView(frame: .zero, configuration: second)
+        registry.register(other)
+        XCTAssertNil(registry.isSoleDocument(page, host: "instance-one.example"))
+        other.loadHTMLString("<p>x</p>", baseURL: URL(string: "https://instance-one.example/"))
+        try await eventually { other.url != nil }
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-one.example"), false)
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-two.example"), true)
+
+        // A WebView of another store does not count.
+        let elsewhere = WKWebViewConfiguration()
+        elsewhere.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        let foreign = WKWebView(frame: .zero, configuration: elsewhere)
+        registry.register(foreign)
+        foreign.loadHTMLString("<p>y</p>", baseURL: URL(string: "https://instance-two.example/"))
+        try await eventually { foreign.url != nil }
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-two.example"), true)
+        withExtendedLifetime((page, other, foreign)) {}
+    }
+
+    @MainActor
     func testALateControllerForAnOlderRuntimeLeavesTheNewerSelectionAlone() async throws {
         let transport = StandInDirectTransport()
         let app = try await makeApp(directTransport: transport)
@@ -5452,13 +5524,72 @@ final class DirectPathAppTests: XCTestCase {
             #"{"capability":1,"advertised":1,"status":["direct",7,2,3],"refused":["invalid_argument","invalid_argument","invalid_argument"]}"#
         )
         XCTAssertEqual(askedFor, instance)
-        // The whole surface: one call, and nothing that takes an address,
-        // starts a probe, or accepts a rendezvous answer.
+        // The whole surface: a status, and a hand-over that takes nothing.
+        // Nothing takes an address, starts a probe, or accepts a rendezvous
+        // answer.
         XCTAssertEqual(
             NativeBridgeMethod.allCases
                 .map(\.rawValue)
                 .filter { $0.hasPrefix("direct.") },
-            ["direct.status"]
+            ["direct.status", "direct.handover"]
+        )
+    }
+
+    @MainActor
+    func testDirectHandoverIsVersionTwoTakesNoParametersAndPassesTheSoleDocument() async throws {
+        var asked: [(WebOrigin, Bool?)] = []
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in
+                    reply(DirectPathStatus(preferred: .direct, sequence: 1, closure: 0))
+                },
+                directHandover: { origin, sole, reply in
+                    asked.append((origin, sole))
+                    reply(.done(closed: 2, kept: 1))
+                }
+            )
+        )
+        DirectWebViewRegistry.shared.register(webView)
+        let loader = PageLoader()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML(
+            "<!doctype html><title>instance</title>",
+            baseURL: instance.url,
+            in: webView
+        )
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const answer = await window.avibeNative.call("direct.handover");
+            let refused = "accepted";
+            try {
+              await window.avibeNative.call("direct.handover", {host: "x"});
+            } catch (error) {
+              refused = error.code;
+            }
+            return JSON.stringify({
+              capability: window.avibeNative.capabilities.direct,
+              answer: [answer.closed, answer.kept],
+              refused
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(
+            result as? String,
+            #"{"capability":2,"answer":[2,1],"refused":"invalid_argument"}"#
+        )
+        XCTAssertEqual(asked.count, 1)
+        XCTAssertEqual(asked.first?.0, instance)
+        // Other WebViews of the shared default store may be alive in this
+        // test process; whatever the registry says is passed on unchanged.
+        XCTAssertEqual(
+            asked.first?.1,
+            DirectWebViewRegistry.shared.isSoleDocument(webView, host: instance.host)
         )
     }
 
@@ -5871,6 +6002,18 @@ final class DirectPathAppTests: XCTestCase {
         return try XCTUnwrap(
             JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
+    }
+
+    /// What `direct.handover()` answers for `origin`, through the provider
+    /// the App gives its WebViews; nil without a direct transport.
+    @MainActor
+    private func handover(_ app: AppModel, _ origin: WebOrigin, sole: Bool?) async -> DirectHandoverOutcome? {
+        guard let provider = app.directHandoverProvider else {
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            provider(origin, sole) { continuation.resume(returning: $0) }
+        }
     }
 
     /// What `direct.status()` answers for `origin`, through the provider

@@ -336,6 +336,7 @@ final class WebViewFactory {
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
+    private let directHandover: DirectHandoverProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -377,6 +378,7 @@ final class WebViewFactory {
         instanceID: instanceID,
         deviceID: deviceID,
         directStatus: directStatus,
+        directHandover: directHandover,
         healthConnect: healthConnect,
         showShare: showShare,
         pushStatus: { [weak self] vapidPublicKey, origin in
@@ -442,6 +444,7 @@ final class WebViewFactory {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        directHandover: DirectHandoverProvider? = nil,
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -475,6 +478,7 @@ final class WebViewFactory {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.directHandover = directHandover
         self.healthConnect = healthConnect
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
@@ -503,6 +507,7 @@ final class WebViewFactory {
         outerScrollLockControllers[ObjectIdentifier(webView)] =
             OuterScrollLockController(webView: webView)
         FormAccessoryBar.hide(in: webView)
+        DirectWebViewRegistry.shared.register(webView)
         return webView
     }
 
@@ -666,6 +671,7 @@ final class WebViewController: UIViewController {
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
+    private let directHandover: DirectHandoverProvider?
     /// Whether this runtime's WebView may be loaded now; `nil` without a
     /// direct transport, which loads as before.
     private let directLoadGate: DirectLoadGateProvider?
@@ -763,6 +769,7 @@ final class WebViewController: UIViewController {
                 return self.deviceID()
             },
             directStatus: directStatus,
+            directHandover: directHandover,
             healthConnect: { [weak self] requestID, pairingCode, origin in
                 guard let self, !self.isInvalidatedForAccountTransition else { return "failed" }
                 return await self.healthConnect(requestID, pairingCode, origin)
@@ -861,6 +868,7 @@ final class WebViewController: UIViewController {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        directHandover: DirectHandoverProvider? = nil,
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
@@ -898,6 +906,7 @@ final class WebViewController: UIViewController {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.directHandover = directHandover
         self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy

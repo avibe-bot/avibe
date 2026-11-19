@@ -28,8 +28,9 @@ import {
 import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
-import { liveStreamVia, subscribeLiveStreamVia } from '../lib/liveStreamVia';
-import { remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import { liveStreamVia, subscribeLiveStreamVia, type LiveStreamVia } from '../lib/liveStreamVia';
+import { deviceDirectLine, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import { onNativeDirectPreference, readNativeDirectPath, type NativeDirectPathSnapshot } from '../lib/native';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
@@ -967,6 +968,7 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
   const { t, i18n } = useTranslation();
   const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
   const [now] = useState(() => Date.now());
+  const devicePath = useNativeDirectPath(pageVia);
   const lines = remoteAccessDirectLines(direct, pageVia, now);
   if (!lines) return null;
   // Written like other Settings dates: the page's own locale.
@@ -977,6 +979,12 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
     })
     : null;
   const page = lines.pageKey ? t(lines.pageKey) : null;
+  const device = deviceDirectLine(devicePath, pageVia);
+  const deviceText = device
+    ? device.pathKey
+      ? t('remoteAccess.direct.deviceWithPath', { state: t(device.stateKey), path: t(device.pathKey) })
+      : t('remoteAccess.direct.device', { state: t(device.stateKey) })
+    : null;
   const detail = certificate && page
     ? t('remoteAccess.direct.detail', { certificate, page })
     : certificate ?? page;
@@ -987,6 +995,27 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
         <Badge variant={lines.variant}>{t(lines.stateKey)}</Badge>
       </div>
       {detail && <div className="mt-1.5 text-[12px] text-muted">{detail}</div>}
+      {deviceText && <div className="mt-0.5 text-[12px] text-muted">{deviceText}</div>}
     </div>
   );
 };
+
+/** The App's own direct path, read for display; re-read when it changes. */
+function useNativeDirectPath(pageVia: LiveStreamVia): NativeDirectPathSnapshot | null {
+  const [snapshot, setSnapshot] = useState<NativeDirectPathSnapshot | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const read = () => {
+      void readNativeDirectPath().then((next) => {
+        if (alive) setSnapshot(next);
+      });
+    };
+    read();
+    const stop = onNativeDirectPreference(read);
+    return () => {
+      alive = false;
+      stop();
+    };
+  }, [pageVia]);
+  return snapshot;
+}

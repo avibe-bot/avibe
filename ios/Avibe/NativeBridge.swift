@@ -38,29 +38,35 @@ struct NativeShellMetadata: Equatable {
     let userAgentVersion: String
     /// Whether this shell offers `direct` (docs/plans/ios-app.md section 4).
     let direct: Bool
+    /// Whether it also answers `direct.handover`: `direct` version 2.
+    let directHandover: Bool
 
     init(
         shellVersion: String,
         userAgentVersion: String,
-        direct: Bool = false
+        direct: Bool = false,
+        directHandover: Bool = false
     ) {
         self.shellVersion = shellVersion
         self.userAgentVersion = userAgentVersion
         self.direct = direct
+        self.directHandover = direct && directHandover
     }
 
-    func withDirect(_ direct: Bool) -> NativeShellMetadata {
+    func withDirect(_ direct: Bool, handover: Bool = false) -> NativeShellMetadata {
         NativeShellMetadata(
             shellVersion: shellVersion,
             userAgentVersion: userAgentVersion,
-            direct: direct
+            direct: direct,
+            directHandover: handover
         )
     }
 
     var capabilities: [String: Int] {
         var capabilities = Self.capabilities
         if direct {
-            capabilities["direct"] = 1
+            // Version 2 adds `direct.handover`.
+            capabilities["direct"] = directHandover ? 2 : 1
         }
         return capabilities
     }
@@ -106,6 +112,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case appShowInstances = "app.showInstances"
     case badgeSet = "badge.set"
     case directStatus = "direct.status"
+    case directHandover = "direct.handover"
     case healthConnect = "health.connect"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
@@ -266,6 +273,7 @@ enum NativeBridgeConfiguration {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        directHandover: DirectHandoverProvider? = nil,
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         showShare: ShowShareCoordinator? = nil,
         pushStatus: @escaping @MainActor (
@@ -328,7 +336,7 @@ enum NativeBridgeConfiguration {
     ) -> WKWebViewConfiguration {
         // `direct` exists only with a provider: a shell with no direct
         // transport neither advertises it nor answers `direct.status`.
-        let metadata = metadata.withDirect(directStatus != nil)
+        let metadata = metadata.withDirect(directStatus != nil, handover: directHandover != nil)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
         let controller = WKUserContentController()
@@ -346,6 +354,7 @@ enum NativeBridgeConfiguration {
             instanceID: instanceID,
             deviceID: deviceID,
             directStatus: directStatus,
+            directHandover: directHandover,
             healthConnect: healthConnect,
             showShare: showShare,
             pushStatus: pushStatus,
@@ -621,6 +630,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
+    private let directHandover: DirectHandoverProvider?
     private let showShare: ShowShareCoordinator?
     private let pushStatus: @MainActor (
         String?,
@@ -676,6 +686,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         instanceID: @escaping () -> String?,
         deviceID: @escaping () -> String?,
         directStatus: DirectStatusProvider?,
+        directHandover: DirectHandoverProvider?,
         healthConnect: @escaping HealthConnectAction,
         showShare: ShowShareCoordinator?,
         pushStatus: @escaping @MainActor (
@@ -731,6 +742,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.directHandover = directHandover
         self.healthConnect = healthConnect
         self.showShare = showShare
         self.pushStatus = pushStatus
@@ -1265,6 +1277,44 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         return
                     }
                     self.reply(replyHandler, result: status.jsonObject)
+                }
+            }
+        case .directHandover:
+            guard let directHandover else {
+                // `direct` version 1, or no direct transport.
+                reply(replyHandler, error: .unsupported)
+                return
+            }
+            guard request.params.isEmpty else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument("direct.handover does not accept parameters.")
+                )
+                return
+            }
+            let instanceOrigin = policy.instanceOrigin
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                guard
+                    let sourceWebView,
+                    let url = sourceWebView.url,
+                    WebOrigin(url: url, requiresHTTPS: false) == instanceOrigin
+                else {
+                    self.reply(replyHandler, error: .failed("The page is no longer this instance's."))
+                    return
+                }
+                // Relays of another document's connections are never closed
+                // for this one: only the sole live document of the store with
+                // this host loaded may hand over.
+                let sole = DirectWebViewRegistry.shared.isSoleDocument(
+                    sourceWebView,
+                    host: instanceOrigin.host
+                )
+                directHandover(instanceOrigin, sole) { [weak self] outcome in
+                    self?.reply(replyHandler, result: outcome.jsonObject)
                 }
             }
         case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck,

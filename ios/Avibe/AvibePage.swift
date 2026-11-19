@@ -135,6 +135,7 @@ final class AvibePageViewController: UIViewController, WKNavigationDelegate,
         configuration.applicationNameForUserAgent = userAgentSuffix
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init(nibName: nil, bundle: nil)
+        DirectWebViewRegistry.shared.register(webView)
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false

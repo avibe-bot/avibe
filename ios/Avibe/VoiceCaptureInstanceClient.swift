@@ -341,6 +341,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             forIdentifier: target.storeIdentifier
         )
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        DirectWebViewRegistry.shared.register(webView)
         webView.navigationDelegate = self
         self.webView = webView
         let url = target.origin.url.appending(path: "api/csrf-token")
