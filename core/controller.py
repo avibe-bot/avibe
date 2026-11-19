@@ -2300,7 +2300,9 @@ class Controller:
             # The thread whose SQLite write transactions are counted (#2710).
             loop_writers.bind_loop_thread()
             # Names whatever blocks this loop while it blocks; see core/loop_watchdog.py.
-            self._loop_watchdog = EventLoopWatchdog(self._loop)
+            from core.gc_census import configured as configured_heap_census
+
+            self._loop_watchdog = EventLoopWatchdog(self._loop, census=configured_heap_census(self))
             self._loop_watchdog.start()
             self._schedule_model_hub_snapshot_reconcile()
             self.show_git_checkpoint_service.start()
