@@ -264,6 +264,45 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
       consoleError.mockRestore();
     });
 
+    it('keeps the owner\'s shell across repeated unreachable checks, and answers a refusal already received', async () => {
+      api.getAuthSession.mockResolvedValueOnce(owner);
+      api.getConfig.mockResolvedValueOnce({ mode: 'self_host', setup_state: { needs_setup: false } });
+      const first = mountRoutes();
+      expect(await screen.findByText('protected shell')).toBeTruthy();
+      first.unmount();
+
+      inTheApp();
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const down = Object.assign(new Error('Request failed: /api/config (530)'), { status: 530 });
+      // The session answers, then the config read and the retried session
+      // read both cannot reach the instance; and again on the recheck.
+      api.getAuthSession
+        .mockResolvedValueOnce(owner).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce(owner).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      api.getConfig.mockRejectedValueOnce(down).mockRejectedValueOnce(down);
+      const app = mountRoutes();
+      await act(async () => undefined);
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      await act(async () => { window.dispatchEvent(new Event('online')); });
+      await act(async () => undefined);
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      expect(screen.queryByText('setup wizard')).toBeNull();
+      app.unmount();
+
+      // A refusal already received is answered, even if the retry then
+      // cannot reach the instance.
+      await confirmOnce();
+      api.getAuthSession.mockReset();
+      api.getConfig.mockReset();
+      api.getAuthSession.mockResolvedValueOnce(owner).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      api.getConfig.mockRejectedValueOnce(Object.assign(new Error('Request failed: /api/config (404)'), { status: 404 }));
+      mountRoutes();
+      expect(await screen.findByText('setup wizard')).toBeTruthy();
+      consoleError.mockRestore();
+    });
+
     it('still goes to setup in a browser, without a replayed shell, and on a definite refusal', async () => {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
       const failure = new TypeError('Failed to fetch');

@@ -533,7 +533,17 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession)
                 .catch((failure: unknown) => { retryFailure = failure; return null; });
             if (superseded()) return;
-            if (!authCheck && keepsReplayWhenUnreachable && isUnreachable(retryFailure)) {
+            if (
+                !authCheck
+                && keepsReplayWhenUnreachable
+                // Both the first failure and the retry: an answer already
+                // received (a refusal, a missing config) is never overridden.
+                && isUnreachable(error)
+                && isUnreachable(retryFailure)
+            ) {
+                // The session-success path may have settled it already.
+                provisionalRef.current = true;
+                setProvisional(true);
                 setAwaitingReconnect(true);
                 return;
             }
