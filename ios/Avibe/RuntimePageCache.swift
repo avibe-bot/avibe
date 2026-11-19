@@ -14,6 +14,7 @@ struct RuntimeCachedPage: Codable, Equatable {
     /// the transfer rather than the document (see `transferHeaders`).
     let headers: [String: String]
     let body: Data
+    let capturedAt: Date
 
     func response() -> HTTPURLResponse? {
         HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)
@@ -76,7 +77,22 @@ enum RuntimePageCapture {
             return nil
         }
         let kept = fetched.filter { !transferHeaders.contains($0.key.lowercased()) }
-        return RuntimeCachedPage(url: url, headers: kept, body: body)
+        return RuntimeCachedPage(url: url, headers: kept, body: body, capturedAt: Date())
+    }
+
+    /// Whether a fresh response to the same URL is still the stored page:
+    /// status 200, the same bytes and the same security headers. If not,
+    /// the entry is dropped and the next launch loads live.
+    static func matches(
+        _ page: RuntimeCachedPage,
+        status: Int,
+        fetched: [String: String],
+        body: Data
+    ) -> Bool {
+        guard status == 200, body == page.body else { return false }
+        let stored = lowercased(page.headers)
+        let fresh = lowercased(fetched)
+        return securityHeaders.allSatisfy { stored[$0] == fresh[$0] }
     }
 
     private static func lowercased(_ headers: [String: String]) -> [String: String] {
@@ -89,12 +105,16 @@ enum RuntimePageCapture {
 struct RuntimePageCacheAccess {
     let load: @MainActor () -> RuntimeCachedPage?
     let store: @MainActor (RuntimeCachedPage) -> Void
+    var remove: @MainActor () -> Void = {}
 }
 
 /// Files under Application Support, protected until the first unlock after
 /// a restart, never backed up.
 @MainActor
 final class RuntimePageCache {
+    /// How long a stored page is used before a launch loads live again.
+    static let maximumAge: TimeInterval = 24 * 60 * 60
+
     private let directory: URL
     private let fileManager = FileManager.default
 

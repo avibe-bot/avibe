@@ -482,24 +482,6 @@
         }
       }
     },
-    "runtime.open.cached_timeout.body" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Showing what was here last" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示的是上次的内容" } }
-      }
-    },
-    "runtime.open.cached_timeout.retry" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
-      }
-    },
-    "runtime.open.cached_timeout.title.named" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Can't reach %@ right now" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时连不上 %@" } }
-      }
-    },
     "runtime.open.phase.authenticating.named" : {
       "localizations" : {
         "en" : {

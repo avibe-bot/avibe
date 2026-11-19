@@ -2256,33 +2256,19 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(app.mayReload(runtime))
     }
 
-    /// An open showing the instance's last page from the cache: the page is
-    /// on screen and the open waits for the instance to answer. Out of time,
-    /// the page stays (no return to the list) with a banner offering Retry,
-    /// which opens the instance again live, skipping the cache once. A late
-    /// answer clears the banner.
+    /// An open whose page loaded from the cache stays covered (the loading
+    /// layer) until the instance answers for this session, which ends the
+    /// open. Without an answer the open ends as any open does: back to the
+    /// list with the timeout notice. A stored page is used for at most a
+    /// day.
     @MainActor
-    func testACachedPageThatCannotConnectKeepsItsContentWithRetry() async throws {
+    func testACachedPageStaysCoveredUntilItsInstanceAnswers() async throws {
         let timing = RuntimeOpenManualTiming()
         let app = try await makeApp(directTransport: nil, runtimeOpenTiming: timing)
+        defer { app.runtimePageCache.removeAll() }
         let runtime = try await select("instance-1", in: app)
         let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
-        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: runtime))
-        let page = RuntimeCachedPage(
-            url: runtime.instance.url,
-            headers: ["Content-Type": "text/html"],
-            body: Data("<!doctype html>".utf8)
-        )
-        access.store(page)
-        defer { app.runtimePageCache.removeAll() }
 
-        for stage in [RuntimeNavigationStage.started, .committed] {
-            app.handleRuntimeNavigation(
-                RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
-                attemptID: attempt.id,
-                runtime: runtime
-            )
-        }
         app.handleRuntimeNavigation(
             RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true),
             attemptID: attempt.id,
@@ -2291,39 +2277,40 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached)
         XCTAssertEqual(
             BrowserOverlay(attemptPhase: .showingCached, directFault: false),
-            .showingCached
+            .loading
         )
-
-        timing.advance(by: .seconds(8))
-        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
-        timing.advance(by: .seconds(52))
-        // The content stays: no return to the list.
-        XCTAssertEqual(app.route, .browser(runtime))
-        XCTAssertEqual(app.runtimeOpenAttempt?.id, attempt.id)
+        app.runtimeCachedPageConnected(attemptID: attempt.id, runtime: runtime)
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
-        XCTAssertNil(app.runtimeOpenNotice)
-        XCTAssertEqual(app.runtimeCachedPageNotice?.instanceID, "instance-1")
+        XCTAssertEqual(app.route, .browser(runtime))
 
-        // Retry opens it again live, skipping the cache once.
-        XCTAssertTrue(app.retryRuntimeCachedPage())
-        XCTAssertNil(app.runtimeCachedPageNotice)
-        let retried = try XCTUnwrap(app.runtimeOpenAttempt)
-        XCTAssertGreaterThan(retried.id, attempt.id)
-        XCTAssertNil(try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).load())
-        XCTAssertEqual(try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).load(), page)
-
-        // Shown from the cache again and out of time: a late answer from the
-        // instance clears the banner.
+        // Opened again from the cache, and the instance never answers.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let other = try await waitForBrowser("instance-2", in: app)
+        let second = try XCTUnwrap(app.runtimeOpenAttempt)
         app.handleRuntimeNavigation(
             RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true),
-            attemptID: retried.id,
-            runtime: runtime
+            attemptID: second.id,
+            runtime: other
         )
         timing.advance(by: .seconds(60))
-        XCTAssertNotNil(app.runtimeCachedPageNotice)
-        app.runtimeCachedPageConnected(attemptID: retried.id, runtime: runtime)
-        XCTAssertNil(app.runtimeCachedPageNotice)
-        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertEqual(app.runtimeOpenNotice?.lastPhase, .showingCached)
+
+        // A day-old page is not used, and is removed.
+        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: runtime))
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
+        app.runtimePageCache.store(
+            RuntimeCachedPage(
+                url: runtime.instance.url,
+                headers: ["Content-Type": "text/html"],
+                body: Data("<!doctype html>".utf8),
+                capturedAt: Date().addingTimeInterval(-(RuntimePageCache.maximumAge + 60))
+            ),
+            accountID: "account-1",
+            origin: origin
+        )
+        XCTAssertNil(access.load())
+        XCTAssertNil(app.runtimePageCache.page(accountID: "account-1", origin: origin))
     }
 
     /// An account's pages are removed when it signs out.
@@ -2334,7 +2321,8 @@ final class DirectPathAppTests: XCTestCase {
         let page = RuntimeCachedPage(
             url: runtime.instance.url,
             headers: ["Content-Type": "text/html"],
-            body: Data("<!doctype html>".utf8)
+            body: Data("<!doctype html>".utf8),
+            capturedAt: Date()
         )
         try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).store(page)
         let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
@@ -3192,7 +3180,8 @@ final class DirectPathAppTests: XCTestCase {
                     ("Content-Type", "application/octet-stream"),
                     ("Content-Disposition", "attachment; filename=fixture.bin"),
                 ],
-                body: Data("fixture".utf8)
+                body: Data("fixture".utf8),
+                capturedAt: Date()
             )
         }
         let url = try await server.start()
@@ -3725,21 +3714,6 @@ final class DirectPathAppTests: XCTestCase {
                 key: "runtime.open.timeout.last_stage",
                 en: "Stopped while %@. Your account and data are unaffected.",
                 zhHans: "停在“%@”这一步。账号和数据不受影响。"
-            ),
-            (
-                key: "runtime.open.cached_timeout.title.named",
-                en: "Can't reach %@ right now",
-                zhHans: "暂时连不上 %@"
-            ),
-            (
-                key: "runtime.open.cached_timeout.body",
-                en: "Showing what was here last",
-                zhHans: "显示的是上次的内容"
-            ),
-            (
-                key: "runtime.open.cached_timeout.retry",
-                en: "Retry",
-                zhHans: "重试"
             ),
         ]
 

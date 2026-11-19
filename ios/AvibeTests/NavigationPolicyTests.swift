@@ -4923,7 +4923,7 @@ extension NavigationPolicyTests {
         for (label, csp, inlineRuns) in [("with CSP", Optional(Self.shellCSP), false), ("without CSP", nil, true)] {
             var headers = ["Content-Type": "text/html; charset=utf-8"]
             if let csp { headers["Content-Security-Policy"] = csp }
-            let page = RuntimeCachedPage(url: Self.unreachableInstance.url, headers: headers, body: Data(Self.cachedShell.utf8))
+            let page = RuntimeCachedPage(url: Self.unreachableInstance.url, headers: headers, body: Data(Self.cachedShell.utf8), capturedAt: Date())
             var finished: [RuntimeNavigationEvent] = []
             let controller = WebViewController(
                 instanceOrigin: Self.unreachableInstance,
@@ -4954,7 +4954,8 @@ extension NavigationPolicyTests {
         let page = RuntimeCachedPage(
             url: Self.unreachableInstance.url,
             headers: ["Content-Type": "text/html; charset=utf-8"],
-            body: Data("<!doctype html><title>Workbench</title>".utf8)
+            body: Data("<!doctype html><title>Workbench</title>".utf8),
+            capturedAt: Date()
         )
         var finished = false
         var instancesShown = 0
@@ -4984,19 +4985,30 @@ extension NavigationPolicyTests {
     }
 
     /// The cached page asks the instance for its session. A signed-in
-    /// answer ends the open; one that needs sign-in loads the instance
-    /// live, which signs in natively as any first load does.
+    /// answer ends the open, and the instance's page as it is now is
+    /// compared with the one shown: if it changed, the stored entry is
+    /// dropped (the next launch loads live). An answer that needs sign-in
+    /// loads the instance live, which signs in natively as any first load
+    /// does.
     @MainActor
     func testTheCachedPageConnectsOrLoadsLiveForSignIn() async throws {
-        for (name, signedIn) in [("signed in", true), ("sign-in needed", false)] {
+        let cached = "<!doctype html><title>cached</title>"
+        let rows: [(name: String, signedIn: Bool, served: String, drops: Bool)] = [
+            ("signed in, page current", true, cached, false),
+            ("signed in, page changed", true, "<!doctype html><title>new build</title>", true),
+            ("sign-in needed", false, cached, false),
+        ]
+        for row in rows {
             let documents = LockedCounter()
+            let signedIn = row.signedIn
+            let served = row.served
             let server = try LocalHTTPServer { request in
                 switch request.path {
                 case "/api/session":
                     return .json(signedIn ? #"{"authenticated":true}"# : #"{"remote":true,"authenticated":false}"#)
                 case "/":
                     _ = documents.next()
-                    return .html("<!doctype html><title>live</title>")
+                    return .html(served)
                 default:
                     return .status(404)
                 }
@@ -5007,15 +5019,19 @@ extension NavigationPolicyTests {
             let page = RuntimeCachedPage(
                 url: origin.url,
                 headers: ["Content-Type": "text/html; charset=utf-8"],
-                body: Data("<!doctype html><title>cached</title>".utf8)
+                body: Data(cached.utf8),
+                capturedAt: Date()
             )
             var connected = 0
+            var removed = 0
             var events: [RuntimeNavigationEvent] = []
             let controller = WebViewController(
                 instanceOrigin: origin,
                 websiteDataStore: .nonPersistent(),
                 runtimeNavigationChanged: { events.append($0) },
-                pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+                pageCache: RuntimePageCacheAccess(
+                    load: { page }, store: { _ in }, remove: { removed += 1 }
+                ),
                 cachedPageConnected: { connected += 1 },
                 didStartLoading: {},
                 didFinishLoading: {},
@@ -5024,15 +5040,27 @@ extension NavigationPolicyTests {
             let window = host(controller)
             defer { window.isHidden = true }
 
-            if signedIn {
+            if row.signedIn {
                 try await waitUntil { connected == 1 }
-                XCTAssertEqual(documents.count, 0, name)
+                // The comparison's own fetch of the root URL.
+                try await waitUntil { documents.count >= 1 }
+                if row.drops {
+                    try await waitUntil { removed == 1 }
+                } else {
+                    let clock = ContinuousClock()
+                    let settled = clock.now.advanced(by: .seconds(2))
+                    while clock.now < settled, removed == 0 {
+                        try await Task.sleep(for: .milliseconds(50))
+                    }
+                    XCTAssertEqual(removed, 0, row.name)
+                }
+                XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
             } else {
-                try await waitUntil { documents.count == 1 }
+                try await waitUntil { documents.count >= 1 }
                 try await waitUntil { events.contains { $0.stage == .finished && !$0.fromCache } }
-                XCTAssertEqual(connected, 0, name)
+                XCTAssertEqual(connected, 0, row.name)
             }
-            XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache }, name)
+            XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache }, row.name)
         }
     }
 }

@@ -635,6 +635,12 @@ final class WebViewController: UIViewController {
     private var cachedNavigation: WKNavigation?
     /// Whether the primary WebView has had a live document of the instance.
     private var hasLoadedLive = false
+    /// The cache serves only a runtime's first load (not a reload after the
+    /// web content process ended).
+    private var hasUsedCache = false
+    /// The page shown from the cache, to compare with the instance's own
+    /// once it answers.
+    private var shownCachedPage: RuntimeCachedPage?
     /// The live navigation response's headers, for the capture after it.
     private var liveDocumentHeaders: [String: String]?
     private var cachedPageProbe: Task<Void, Never>?
@@ -1043,7 +1049,7 @@ final class WebViewController: UIViewController {
         switch directLoadGate?() ?? .open {
         case .open:
             hasPendingAutoLoad = false
-            if !hasLoadedLive, loadCachedPage() {
+            if !hasLoadedLive, !hasUsedCache, loadCachedPage() {
                 return
             }
             retainedWebView?.load(URLRequest(url: instanceOrigin.url))
@@ -1067,6 +1073,8 @@ final class WebViewController: UIViewController {
         else {
             return false
         }
+        hasUsedCache = true
+        shownCachedPage = page
         var request = URLRequest(url: instanceOrigin.url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         cachedNavigation = webView.loadSimulatedRequest(
@@ -1118,14 +1126,17 @@ final class WebViewController: UIViewController {
                 switch answer ?? 0 {
                 case 1:
                     self.cachedPageConnected()
+                    self.checkCachedPageIsCurrent(in: webView)
                     return
                 case 2:
+                    // A live load, through the direct-path load gate as every
+                    // load the shell starts.
                     self.cachedNavigation = nil
                     self.hasLoadedLive = true
                     self.runtimeNavigationChanged(
                         RuntimeNavigationEvent(stage: .started, destination: .instance)
                     )
-                    webView.load(URLRequest(url: self.instanceOrigin.url))
+                    self.loadConfiguredInstance()
                     return
                 default:
                     try? await Task.sleep(for: .seconds(3))
@@ -1150,45 +1161,77 @@ final class WebViewController: UIViewController {
         }
         liveDocumentHeaders = nil
         Task { @MainActor [weak self, weak webView] in
-            guard let webView else { return }
-            let result = try? await webView.callAsyncJavaScript(
-                """
-                const response = await fetch(location.href, {
-                  cache: 'no-store', credentials: 'same-origin'
-                });
-                const bytes = new Uint8Array(await response.arrayBuffer());
-                let binary = '';
-                for (let i = 0; i < bytes.length; i += 0x8000) {
-                  binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-                }
-                return {
-                  status: response.status,
-                  headers: Object.fromEntries(response.headers.entries()),
-                  body: btoa(binary)
-                };
-                """,
-                contentWorld: Self.pageCacheWorld
-            ) as? [String: Any]
+            guard let webView, let self else { return }
+            let result = try? await self.fetchOwnResponse(in: webView)
             guard
-                let self,
                 !self.isInvalidatedForAccountTransition,
                 let result,
-                let status = result["status"] as? Int,
-                let headers = result["headers"] as? [String: String],
-                let encoded = result["body"] as? String,
-                let body = Data(base64Encoded: encoded),
                 let page = RuntimePageCapture.capture(
                     url: self.instanceOrigin.url,
                     live: live,
-                    status: status,
-                    fetched: headers,
-                    body: body
+                    status: result.status,
+                    fetched: result.headers,
+                    body: result.body
                 )
             else {
                 return
             }
             pageCache.store(page)
         }
+    }
+
+    /// Once the instance answered for a cached page: its response to the same
+    /// URL now. Anything different from what was shown (bytes, status or a
+    /// security header) drops the entry, so the next launch loads live and
+    /// captures the current page.
+    private func checkCachedPageIsCurrent(in webView: WKWebView) {
+        guard let shown = shownCachedPage, let pageCache else { return }
+        Task { @MainActor [weak self, weak webView] in
+            guard let webView, let self else { return }
+            guard let fresh = try? await self.fetchOwnResponse(in: webView) else { return }
+            guard !self.isInvalidatedForAccountTransition else { return }
+            if !RuntimePageCapture.matches(
+                shown, status: fresh.status, fetched: fresh.headers, body: fresh.body
+            ) {
+                pageCache.remove()
+            }
+        }
+    }
+
+    /// The instance's response to its root URL, fetched from the page's own
+    /// origin and cookies in an isolated world: status, headers and bytes.
+    private func fetchOwnResponse(
+        in webView: WKWebView
+    ) async throws -> (status: Int, headers: [String: String], body: Data)? {
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const response = await fetch(url, {
+              cache: 'no-store', credentials: 'same-origin'
+            });
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            let binary = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+              binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            }
+            return {
+              status: response.status,
+              headers: Object.fromEntries(response.headers.entries()),
+              body: btoa(binary)
+            };
+            """,
+            arguments: ["url": instanceOrigin.url.absoluteString],
+            contentWorld: Self.pageCacheWorld
+        ) as? [String: Any]
+        guard
+            let result,
+            let status = result["status"] as? Int,
+            let headers = result["headers"] as? [String: String],
+            let encoded = result["body"] as? String,
+            let body = Data(base64Encoded: encoded)
+        else {
+            return nil
+        }
+        return (status, headers, body)
     }
 
     /// The load gate may have changed. A held automatic load is decided
@@ -2466,7 +2509,8 @@ extension WebViewController: WKNavigationDelegate {
                 RuntimeNavigationEvent(
                     stage: .started,
                     destination: primaryNavigationDestination
-                        ?? runtimeDestination(in: webView)
+                        ?? runtimeDestination(in: webView),
+                    fromCache: navigation != nil && navigation === cachedNavigation
                 )
             )
             didStartLoading()
@@ -2487,7 +2531,8 @@ extension WebViewController: WKNavigationDelegate {
             runtimeNavigationChanged(
                 RuntimeNavigationEvent(
                     stage: .committed,
-                    destination: runtimeDestination(in: webView)
+                    destination: runtimeDestination(in: webView),
+                    fromCache: navigation != nil && navigation === cachedNavigation
                 )
             )
             blockedBackForwardNavigation = false
