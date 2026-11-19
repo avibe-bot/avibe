@@ -102,7 +102,7 @@
 		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		910000000000000000000008 /* FixtureMobile in Resources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000003 /* FixtureMobile */; };
 		91000000000000000000000D /* NativeBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
-		910000000000000000000153 /* NativeHoldCapture.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000034 /* NativeHoldCapture.swift */; };
+		910000000000000000000153 /* NativeHoldCapture.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000034 /* NativeHoldCapture.swift */; };
 		910000000000000000000154 /* NavigationPolicy.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		91000000000000000000000F /* NativeBadge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
@@ -118,7 +118,7 @@
 		16000000000000000000000003 /* VoiceCaptureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000003 /* VoiceCaptureController.swift */; };
 		16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */; };
 		16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000005 /* VoiceCaptureRecorder.swift */; };
-		16000000000000000000000034 /* NativeHoldCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000034 /* NativeHoldCapture.swift */; };
+		1B0000000000000000000034 /* NativeHoldCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000034 /* NativeHoldCapture.swift */; };
 		16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
 		16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000001 /* VoiceCaptureActivity.swift */; };
 		16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000012 /* Localizable.xcstrings */; };
@@ -131,7 +131,7 @@
 		16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
 		16000000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
 		16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000030 /* VoiceCaptureTests.swift */; };
-		16000000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000035 /* NativeHoldCaptureTests.swift */; };
+		1B0000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000035 /* NativeHoldCaptureTests.swift */; };
 		16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000031 /* VoiceCaptureAlert.swift */; };
 		1A0000000000000000000000 /* HealthDataReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000000 /* HealthDataReader.swift */; };
 		1A0000000000000000000001 /* HealthDeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000001 /* HealthDeviceStore.swift */; };
@@ -288,7 +288,7 @@
 		26000000000000000000000003 /* VoiceCaptureController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureController.swift; sourceTree = "<group>"; };
 		26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureInstanceClient.swift; sourceTree = "<group>"; };
 		26000000000000000000000005 /* VoiceCaptureRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureRecorder.swift; sourceTree = "<group>"; };
-		26000000000000000000000034 /* NativeHoldCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCapture.swift; sourceTree = "<group>"; };
+		2B0000000000000000000034 /* NativeHoldCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCapture.swift; sourceTree = "<group>"; };
 		26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureLiveActivity.swift; sourceTree = "<group>"; };
 		26000000000000000000000011 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		26000000000000000000000012 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
@@ -298,7 +298,7 @@
 		26000000000000000000000015 /* VoiceCapture.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = VoiceCapture.xcstrings; sourceTree = "<group>"; };
 		26000000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		26000000000000000000000030 /* VoiceCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureTests.swift; sourceTree = "<group>"; };
-		26000000000000000000000035 /* NativeHoldCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCaptureTests.swift; sourceTree = "<group>"; };
+		2B0000000000000000000035 /* NativeHoldCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCaptureTests.swift; sourceTree = "<group>"; };
 		26000000000000000000000031 /* VoiceCaptureAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureAlert.swift; sourceTree = "<group>"; };
 		2A0000000000000000000000 /* HealthDataReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataReader.swift; sourceTree = "<group>"; };
 		2A0000000000000000000001 /* HealthDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDeviceStore.swift; sourceTree = "<group>"; };
@@ -428,7 +428,7 @@
 				26000000000000000000000003 /* VoiceCaptureController.swift */,
 				26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */,
 				26000000000000000000000005 /* VoiceCaptureRecorder.swift */,
-				26000000000000000000000034 /* NativeHoldCapture.swift */,
+				2B0000000000000000000034 /* NativeHoldCapture.swift */,
 				26000000000000000000000031 /* VoiceCaptureAlert.swift */,
 				26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */,
 				26000000000000000000000033 /* VoiceCaptureBanner.swift */,
@@ -472,7 +472,7 @@
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
 				26000000000000000000000030 /* VoiceCaptureTests.swift */,
-				26000000000000000000000035 /* NativeHoldCaptureTests.swift */,
+				2B0000000000000000000035 /* NativeHoldCaptureTests.swift */,
 				8C1000000000000000000012 /* ShowShareTests.swift */,
 				8C1000000000000000000013 /* ShowShareForegroundTests.swift */,
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
@@ -997,7 +997,7 @@
 				16000000000000000000000003 /* VoiceCaptureController.swift in Sources */,
 				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
 				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
-				16000000000000000000000034 /* NativeHoldCapture.swift in Sources */,
+				1B0000000000000000000034 /* NativeHoldCapture.swift in Sources */,
 				16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */,
 				16000000000000000000000032 /* VoiceCaptureFailureNotification.swift in Sources */,
 				16000000000000000000000033 /* VoiceCaptureBanner.swift in Sources */,
@@ -1026,7 +1026,7 @@
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
 				16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */,
-				16000000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */,
+				1B0000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */,
 				8C1000000000000000000003 /* ShowShareTests.swift in Sources */,
 				8C1000000000000000000004 /* ShowShareForegroundTests.swift in Sources */,
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
