@@ -1,21 +1,26 @@
 // Shipped 2026-11-19: a run-status dot before every name in the Desktop instance list, carrying the
 // App's approved semantics (`mobile-app/status-dots/*`, `ui/src/mobile/InstanceList.tsx`) across.
-// Drawn with the shipped `InstanceSwitcherView`; the dot is the shipped `StatusDot` and its accessible
-// label the shipped `desktopClient.online`. No new component, token, copy, or backend field.
+// Drawn with the shipped `InstanceSwitcherView`; the dot is the shipped `StatusDot`, centred on the
+// letters of the name's first line (`LineGlyph`). No new token, copy, or backend field.
 //
-// One rule decides the tone, in this order:
+// The current row (「正在使用」) follows the connection, as the sidebar's bottom row does, with the
+// bottom row's labels (Max, 2026-11-19 09:26):
+//   switching or opening  → connecting (gold)   「连接中」
+//   remote_unreachable    → stopped   (grey)    「当前实例已断开」; the row reads 「离线 · …」
+//   otherwise             → running   (green)   「当前实例已连接」 — this computer, or a connected
+//                                                remote whether or not the catalog lists it
+// Every other row follows the catalog, labelled 「在线」 only when green:
 //   opening            → connecting (gold)  — only the row this computer is opening right now
-//   offline            → stopped   (grey)   — the catalog says unavailable, or the current remote
-//                                             is unreachable; the row already reads 「离线 · …」
-//   available === true → running   (green)  — the catalog last reported it reachable
-//   otherwise          → no dot              — the column keeps its width so names stay aligned
-// This computer's row always opens, so it is never offline: green when its catalog entry reports
-// it reachable, no dot when the entry is missing or reports it unavailable.
+//   available === false → stopped  (grey)   — the row already reads 「离线 · …」
+//   available === true  → running  (green)
+//   otherwise           → no dot           — the column keeps its width so names stay aligned
+// This computer among the other rows always opens, so it is never grey: green when its catalog
+// entry reports it reachable, no dot when the entry is missing or reports it unavailable.
 //
 // The list's ordinary states already draw the dot in their own frames: green, grey and shared in
 // `desktop/instances/instances-*`, gold in `switching-*`, an unreachable current remote in `offline-*`,
 // a shared current or offline instance in `current-shared-*` / `offline-shared-*`. These frames hold
-// only the rows that draw no dot, which no other frame shows.
+// the rows whose dot no other frame decides.
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
 import { InstanceSwitcherView, type InstanceSwitcherViewProps } from '@/desktop/InstanceSwitcherView';
@@ -51,26 +56,26 @@ function frame(name: string, title: string, lang: Lang, props: InstanceSwitcherV
   };
 }
 
-/** This computer is in the catalog but reports it unavailable: the row still opens, so no grey and no 「离线」. */
-const localUnavailable = (lang: Lang): InstanceSwitcherViewProps => {
+const studio = { kind: 'remote', name: 'Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' } as const;
+
+/** The list's own fixture with this computer's catalog entry changed, optionally while on Studio. */
+const variant = (lang: Lang, local: 'unavailable' | 'unlisted', onStudio: boolean): InstanceSwitcherViewProps => {
   const props = propsFor('instances', lang);
-  return { ...props, state: { ...props.state, catalog: { ...props.state.catalog, instances: props.state.catalog.instances.map((item) => item.id === 'local' ? { ...item, available: false } : item) } } };
+  const instances = local === 'unlisted' ? props.state.catalog.instances.filter((item) => item.id !== 'local')
+    : props.state.catalog.instances.map((item) => item.id === 'local' ? { ...item, available: false } : item);
+  const studioItem = props.state.catalog.instances.find((item) => item.id === 'studio') ?? null;
+  return { ...props, state: { ...props.state, catalog: { ...props.state.catalog, instances },
+    ...(onStudio ? { connection: { status: 'remote_connected' as const, committed: studio, pending: null }, current_instance: studioItem } : {}) } };
 };
 
-/** This computer is not in the catalog at all: no fact about it, so no dot. */
-const localUnlisted = (lang: Lang): InstanceSwitcherViewProps => {
-  const props = propsFor('instances', lang);
-  return { ...props, state: { ...props.state, catalog: { ...props.state.catalog, instances: props.state.catalog.instances.filter((item) => item.id !== 'local') } } };
-};
-
-/** A committed remote the catalog does not list: native proves identity, nothing proves reach. */
+/** A connected remote the catalog does not list: native proves identity, the connection proves reach. */
 const currentUnlisted = (lang: Lang): InstanceSwitcherViewProps => {
   const props = propsFor('instances', lang);
   return {
     ...props,
     state: {
       ...props.state,
-      connection: { status: 'remote_connected', committed: { kind: 'remote', name: 'Studio', instance_id: 'studio', canonical_origin: 'https://studio-app.avibe.bot' }, pending: null },
+      connection: { status: 'remote_connected', committed: studio, pending: null },
       current_instance: null,
       catalog: { ...props.state.catalog, instances: props.state.catalog.instances.filter((item) => item.id !== 'studio') },
     },
@@ -78,9 +83,10 @@ const currentUnlisted = (lang: Lang): InstanceSwitcherViewProps => {
 };
 
 const scenarios: [string, string, (lang: Lang) => InstanceSwitcherViewProps][] = [
-  ['local-unavailable', '本机在目录里但报不可用：本机仍可打开，不画灰点，点列仍占位', localUnavailable],
-  ['local-unlisted', '本机不在目录里：不画点，点列仍占位，名称照常对齐', localUnlisted],
-  ['current-unlisted', '当前远端不在目录里：同样不画点，身份由原生证明，可达性无来源', currentUnlisted],
+  ['current-local-unlisted', '正在使用本机、本机不在目录里：按连接画绿', (lang) => variant(lang, 'unlisted', false)],
+  ['local-unavailable', '正在使用 Studio，本机在目录里但报不可用：本机仍可打开，不画灰点，点列仍占位', (lang) => variant(lang, 'unavailable', true)],
+  ['local-unlisted', '正在使用 Studio，本机不在目录里：不画点，点列仍占位，名称照常对齐', (lang) => variant(lang, 'unlisted', true)],
+  ['current-unlisted', '当前远端不在目录里但连着：按连接画绿，不判离线', currentUnlisted],
 ];
 
 const designFrames = frames([

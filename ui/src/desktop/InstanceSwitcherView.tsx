@@ -36,13 +36,25 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   const blocked = busy || !!pendingId;
   const localItem = localInstanceId ? state.catalog.instances.find((item) => item.id === localInstanceId) : null;
   const others = state.catalog.instances.filter((item) => currentRemote ? item.id !== current.instance_id : item.id !== localInstanceId);
+  // The current row's dot is the connection's, as the sidebar's bottom row shows it: connected,
+  // unreachable, or switching. Every other row's dot is the catalog's (`catalogDot`).
+  const currentDot = (opening = false): Dot => state.connection.status === 'switching' || opening ? { tone: 'connecting', label: t('desktopClient.connecting') }
+    : unreachable ? { tone: 'stopped', label: t('desktopClient.disconnected') } : { tone: 'running', label: t('desktopClient.connected') };
+  const catalogDot = (opening: boolean, available: boolean | undefined): Dot | null => opening ? { tone: 'connecting' }
+    : available === false ? { tone: 'stopped' } : available ? { tone: 'running', label: t('desktopClient.online') } : null;
   const detail = (item: Instance) => [!item.available && t('desktopClient.offline'), item.relationship === 'shared' && (item.owner_email ? t('desktopClient.sharedBy', { owner: item.owner_email }) : t('desktopClient.shared')), item.host].filter(Boolean).join(' · ');
-  // This computer always opens, so its row is never offline: a catalog entry that reports it
-  // reachable draws the green dot, anything else leaves the dot column empty rather than grey.
-  const local = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')} detail={localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected} available={localItem?.available} disabled={blocked} onClick={selected ? onCancel : onLocal} />;
-  const remoteRow = (item: Instance, selected = false) => <InstanceRow key={item.id} id={item.id} name={selected ? current.name : item.name} detail={detail(selected && unreachable ? { ...item, available: false } : item)} relationship={item.relationship} selected={selected}
-    offline={!item.available || (selected && unreachable)} opening={pendingId === item.id} available={item.available} disabled={blocked}
-    error={failure?.instanceId === item.id ? failure.message : null} onClick={() => selected && failure?.instanceId !== item.id ? onCancel() : onSelect(item.id)} />;
+  // This computer always opens, so its row is never offline: listed among the others, a catalog
+  // entry that reports it reachable draws the green dot, and anything else leaves the column empty.
+  const local = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')} detail={localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected}
+    dot={selected ? currentDot() : catalogDot(false, localItem?.available ? true : undefined)} disabled={blocked} onClick={selected ? onCancel : onLocal} />;
+  // The current remote reads offline only when the connection says so; its catalog entry, if any, does not decide.
+  const remoteRow = (item: Instance, selected = false) => {
+    const opening = pendingId === item.id;
+    const offline = selected ? unreachable : !item.available;
+    return <InstanceRow key={item.id} id={item.id} name={selected ? current.name : item.name} detail={detail({ ...item, available: !offline })} relationship={item.relationship} selected={selected}
+      offline={offline} opening={opening} dot={selected ? currentDot(opening) : catalogDot(opening, item.available)} disabled={blocked}
+      error={failure?.instanceId === item.id ? failure.message : null} onClick={() => selected && failure?.instanceId !== item.id ? onCancel() : onSelect(item.id)} />;
+  };
   return <div data-instance-switcher className="mx-auto w-full max-w-2xl pt-6">
     <div className="mb-6 flex items-center justify-between gap-4"><h1 className="text-2xl font-semibold tracking-tight">{t('desktopClient.instancesTitle')}</h1>
       <Button variant="ghost" size="icon" aria-label={t('desktopClient.refreshInstances')} disabled={blocked} onClick={onRefresh}><RefreshCw className={cn('size-4', state.catalog.status === 'loading' && 'animate-spin')} /></Button>
@@ -51,8 +63,7 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
     <div data-instance-list aria-busy={!!pendingId} className="relative space-y-6">
       <section aria-label={t('desktopClient.currentlyUsing')}><h2 className="mb-2 text-sm font-medium text-muted">{t('desktopClient.currentlyUsing')}</h2>
         <div className="overflow-hidden rounded-xl border border-mint/40 bg-surface">
-          {/* A committed remote the catalog does not list has no reachability fact: no dot unless it is unreachable. */}
-          {!currentRemote ? local(true) : currentItem ? remoteRow(currentItem, true) : <InstanceRow id={current.instance_id} name={current.name} detail={current.canonical_origin} selected offline={unreachable} disabled={blocked} onClick={onCancel} />}
+          {!currentRemote ? local(true) : currentItem ? remoteRow(currentItem, true) : <InstanceRow id={current.instance_id} name={current.name} detail={current.canonical_origin} selected offline={unreachable} dot={currentDot()} disabled={blocked} onClick={onCancel} />}
         </div>
       </section>
       <section aria-label={t('desktopClient.otherInstances')}><h2 className="mb-2 text-sm font-medium text-muted">{t('desktopClient.otherInstances')}</h2>
@@ -83,28 +94,23 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   </div>;
 }
 
-/** The run-status dot, the App's (`ui/src/mobile/InstanceList.tsx`): gold while this row opens, grey
- * when it reads offline, green when the catalog last reported it reachable, and none without that
- * fact. Being the current row is not being online. */
+/** The run-status dot, the App's (`ui/src/mobile/InstanceList.tsx`): gold while connecting, grey
+ * when offline, green when reachable; a row without that fact has none. Its label is what a screen
+ * reader hears for it (none where the row's text already says it). */
+type Dot = { tone: 'running' | 'stopped' | 'connecting'; label?: string };
+
 /** The name's type, which the dot's column shares so both start on the same baseline. */
 const NAME_TYPE = 'text-sm font-semibold';
 
-function dotTone(opening: boolean, offline: boolean, available: boolean | undefined) {
-  if (opening) return 'connecting' as const;
-  if (offline) return 'stopped' as const;
-  return available === true ? 'running' as const : null;
-}
-
-function InstanceRow({ id, name, detail, relationship, selected = false, offline = false, opening = false, available, disabled, error, onClick }: {
-  id: string; name: string; detail: string; relationship?: 'owner' | 'shared'; selected?: boolean; offline?: boolean; opening?: boolean; available?: boolean; disabled: boolean; error?: string | null; onClick: () => void;
+function InstanceRow({ id, name, detail, relationship, selected = false, offline = false, opening = false, dot, disabled, error, onClick }: {
+  id: string; name: string; detail: string; relationship?: 'owner' | 'shared'; selected?: boolean; offline?: boolean; opening?: boolean; dot: Dot | null; disabled: boolean; error?: string | null; onClick: () => void;
 }) {
   const { t } = useTranslation();
-  const tone = dotTone(opening, offline, available);
   const icon = relationship === 'shared' ? <UsersRound className="size-5" /> : relationship === 'owner' ? <Laptop className="size-5" /> : <Globe className="size-5" />;
   const content = <><span data-instance-icon={relationship ?? 'unknown'} className={cn('grid size-10 shrink-0 place-items-center rounded-xl', selected && !offline ? 'bg-mint-soft text-mint-ink' : 'bg-field text-muted')}>{icon}</span>
     <span className="flex min-w-0 flex-1 items-start gap-2">
       {/* A fixed column centred on the name's first line, kept when empty so names align. */}
-      <LineGlyph text={name} className={cn('w-2', NAME_TYPE)}>{tone && <StatusDot tone={tone} label={tone === 'running' ? t('desktopClient.online') : undefined} />}</LineGlyph>
+      <LineGlyph text={name} className={cn('w-2', NAME_TYPE)}>{dot && <StatusDot tone={dot.tone} label={dot.label} />}</LineGlyph>
       <span className="min-w-0 flex-1"><span className={cn('block break-words [overflow-wrap:anywhere]', NAME_TYPE, offline && 'text-muted')}>{name}</span><span className="mt-1 block break-words text-xs font-normal leading-5 text-muted [overflow-wrap:anywhere]">{detail}</span>
         {opening && <span role="status" className="mt-1 block text-xs text-gold-ink">{t('desktopClient.opening')}</span>}
         {error && <span role="alert" className="mt-2 block break-words text-sm font-normal leading-6 text-destructive-ink [overflow-wrap:anywhere]">{error}</span>}

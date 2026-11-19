@@ -481,7 +481,10 @@ for (const lang of ['en', 'zh'] as const) test(`A5 current shared snapshot and r
   await expect(row).toHaveCount(1);
   await expect(row.locator('[data-instance-icon="shared"]')).toBeVisible();
   await expect(row).toContainText(current.owner_email!);
-  await expect(row.getByRole('button')).toBeDisabled();
+  // The current row reads offline from the connection only, not from native's stale `available`.
+  if (lang === 'zh') await expect(row.getByRole('button')).toBeDisabled();
+  else await expect(row.getByRole('button')).toBeEnabled();
+  await expect(row.locator('[data-status-indicator]')).toHaveClass(lang === 'zh' ? /bg-muted/ : /bg-mint/);
   await expect(page.locator('[data-other-instances]')).not.toContainText(current.name);
   await expect(page.locator('[data-instance-id="local"]')).toContainText(lang === 'en' ? 'This computer' : '本机');
   await page.screenshot({ animations: 'disabled', path: info.outputPath('a5-current-snapshot.png') });
