@@ -394,8 +394,8 @@ the main Bot acts on the user's computer.
   made before), whether another App was playing audio and where sound goes,
   in `metadata.capture_attempt`, for example
   `3 [background warm pid=812 start=1795104000 age=95.2 byPress=0 scene=1 presses=2 session=0 launch=background prevEnd=- otherAudio=0 silenceHint=0 out=Speaker bgTries=2] (0 sessionActivate 561015905)`.
-  `metadata.capture_timing` gives each step's milliseconds from the press:
-  `island=`, `session=`, `record=`, `audio=` (the recorder's first audio), and
+  `metadata.capture_timing` gives each step's milliseconds from the press (its reservation, after the leftover check):
+  `island=`, `session=`, `record=`, `audio=` (the recorder's first audio, or `none` if it stopped without), and
   for a press that came forward `refused=`, `front=`, `frontIsland=`,
   `frontSession=`, `frontRecord=`.
 - The microphone permission is checked before anything else; a missing one

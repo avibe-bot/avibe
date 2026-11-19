@@ -188,19 +188,29 @@ final class VoiceCaptureRecorder {
         }
     }
 
-    /// When the recorder first had audio, for the press's timing.
+    /// When the recorder first had audio, for the press's timing; until
+    /// then, whether the watch gave up (`firstAudioLate`).
     private(set) var firstAudioAt: Date?
+    private(set) var firstAudioLate = false
 
-    private func watchFirstAudio(_ recorder: VoiceCaptureRecordingEngine) {
+    /// Watches for the recorder's first audio: every 5 ms for the first
+    /// second, then every 100 ms until the take stops.
+    func watchFirstAudio(_ recorder: VoiceCaptureRecordingEngine, poll: Duration = .milliseconds(5)) {
         firstAudioAt = nil
+        firstAudioLate = false
         Task { @MainActor [weak self, weak recorder] in
-            for _ in 0..<300 {
-                guard let self, let recorder, recorder.isRecording else { return }
+            var polls = 0
+            while true {
+                guard let self, let recorder, recorder.isRecording else {
+                    self?.firstAudioLate = self?.firstAudioAt == nil
+                    return
+                }
                 if recorder.currentTime > 0 {
                     self.firstAudioAt = Date()
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(5))
+                polls += 1
+                try? await Task.sleep(for: polls < 200 ? poll : poll * 20)
             }
         }
     }

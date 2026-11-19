@@ -679,6 +679,29 @@ final class VoiceCaptureTests: XCTestCase {
         )
     }
 
+    /// The real recorder's watch: a late first audio is caught, and a take
+    /// that stops with none says so.
+    func testTheRecorderWatchesForItsFirstAudio() async throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "takes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
+        let recorder = VoiceCaptureRecorder(url: url, session: FakeSession(), permission: { true }, makeEngine: { _ in FakeEngine() })
+        let late = FakeEngine()
+        late.silentPolls = 250
+        recorder.watchFirstAudio(late, poll: .microseconds(10))
+        for _ in 0..<2_000 where recorder.firstAudioAt == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(recorder.firstAudioAt, "found after the fast second")
+
+        let never = FakeEngine()
+        never.silentPolls = .max
+        recorder.watchFirstAudio(never, poll: .microseconds(10))
+        try await Task.sleep(for: .milliseconds(20))
+        never.recording = false
+        for _ in 0..<500 where !recorder.firstAudioLate { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertTrue(recorder.firstAudioLate)
+        XCTAssertNil(recorder.firstAudioAt)
+    }
+
     /// Each step's time from the press rides along for device numbers.
     func testTheMessageCarriesEachStepsTimeFromThePress() async {
         let world = World()
@@ -1373,6 +1396,7 @@ private final class FakeAudio: VoiceCaptureAudio {
     }
 
     var firstAudioAt: Date?
+    var firstAudioLate = false
 
     func start() throws {
         log("record")
@@ -1434,8 +1458,14 @@ private final class FakeSession: VoiceCaptureAudioSession {
 
 private final class FakeEngine: VoiceCaptureRecordingEngine {
     var records = true
-    var currentTime: TimeInterval { 1 }
-    var isRecording: Bool { records }
+    /// Polls of `currentTime` before it turns positive (0: at once).
+    var silentPolls = 0
+    var recording: Bool?
+    var currentTime: TimeInterval {
+        if silentPolls > 0 { silentPolls -= 1; return 0 }
+        return 1
+    }
+    var isRecording: Bool { recording ?? records }
     func record() -> Bool { records }
     func stop() {}
 }

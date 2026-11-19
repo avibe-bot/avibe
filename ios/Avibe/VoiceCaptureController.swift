@@ -30,6 +30,8 @@ protocol VoiceCaptureAudio: AnyObject {
     func start() throws
     /// When the recorder first had audio (nil until then, or unknown).
     var firstAudioAt: Date? { get }
+    /// Recording stopped with no audio seen.
+    var firstAudioLate: Bool { get }
     /// Stops and returns the take's length in seconds.
     @discardableResult func stop() -> TimeInterval
     func discard()
@@ -253,11 +255,15 @@ final class VoiceCaptureController {
         marks.append("\(step)=\(Int(environment.now().timeIntervalSince(pressAt) * 1000))")
     }
 
-    /// The intent brought Avibe forward.
-    func markInFront() { mark("front") }
+    /// The intent brought Avibe forward (for its own press only).
+    func markInFront(reservation press: UUID? = nil) {
+        guard press == nil || press == reservation else { return }
+        mark("front")
+    }
 
     private func timing(of take: Take) -> String {
-        let audio = take.audio.firstAudioAt.map { ["audio=\(Int($0.timeIntervalSince(take.pressAt) * 1000))"] } ?? []
+        let audio = take.audio.firstAudioAt.map { ["audio=\(Int($0.timeIntervalSince(take.pressAt) * 1000))"] }
+            ?? ["audio=none"]
         return (take.marks + audio).joined(separator: " ")
     }
 
