@@ -19,7 +19,7 @@ final class ProbeUITests: XCTestCase {
                 XCUIDevice.shared.press(.home)
                 sleep(2)
             }
-            for variant in ["A", "B", "C", "D", "E"] {
+            for variant in ["A", "B", "C", "D", "E", "F"] {
                 let probe = XCUIApplication(bundleIdentifier: "bot.avibe.sample.\(variant.lowercased())")
                 for launch in ["warm", "cold"] {
                     if launch == "warm" {
@@ -28,8 +28,11 @@ final class ProbeUITests: XCTestCase {
                         XCUIDevice.shared.press(.home)
                         sleep(2)
                     } else {
+                        // Not running when the shortcut fires: the intent
+                        // launches the process.
                         probe.terminate()
                         sleep(2)
+                        note("cold check: probe state before the press \(probe.state.rawValue) (1 = not running)")
                     }
                     note("RUN \(condition) \(variant) \(launch) at \(Date().timeIntervalSince1970) probe state \(probe.state.rawValue)")
                     run(variant: variant, label: "\(condition)-\(variant)-\(launch)")

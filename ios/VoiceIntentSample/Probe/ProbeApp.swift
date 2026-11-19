@@ -12,14 +12,36 @@ let probeVariant = "B"
 let probeVariant = "D"
 #elseif VARIANT_E
 let probeVariant = "E"
+#elseif VARIANT_F
+let probeVariant = "F"
 #else
 let probeVariant = "C"
 #endif
 
+final class ProbeAppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        ProbeLog.record(
+            "didFinishLaunching state=\(ProbeRun.appState()) options=\(options?.keys.map(\.rawValue) ?? [])"
+        )
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in ProbeLog.record("didBecomeActive") }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { _ in ProbeLog.record("didEnterBackground") }
+        return true
+    }
+}
+
 @main
 struct ProbeApp: App {
+    @UIApplicationDelegateAdaptor(ProbeAppDelegate.self) var delegate
+
     init() {
-        ProbeLog.record("launch variant=\(probeVariant) state=\(ProbeRun.appState())")
+        ProbeLog.record("launch variant=\(probeVariant) (App.init; applicationState here is not meaningful)")
         AVAudioApplication.requestRecordPermission { granted in
             ProbeLog.record("microphone permission \(granted)")
         }
@@ -33,14 +55,17 @@ struct ProbeApp: App {
 }
 
 /// A: AudioRecordingIntent only. B: the same, the App has the audio
-/// background mode. C: also a LiveActivityIntent. D: C after a 1.5 s wait
-/// (Avibe's consent request). E: C with the session before the island.
-#if VARIANT_C || VARIANT_D || VARIANT_E
+/// background mode. C: also a LiveActivityIntent. D and F: C after a 1.5 s
+/// and a 4 s wait (Avibe's consent request). E: C with the session before
+/// the island.
+#if VARIANT_C || VARIANT_D || VARIANT_E || VARIANT_F
 struct ProbeIntent: AudioRecordingIntent, LiveActivityIntent {
     #if VARIANT_D
     static let title: LocalizedStringResource = "Record D"
     #elseif VARIANT_E
     static let title: LocalizedStringResource = "Record E"
+    #elseif VARIANT_F
+    static let title: LocalizedStringResource = "Record F"
     #else
     static let title: LocalizedStringResource = "Record C"
     #endif
@@ -92,6 +117,11 @@ struct ProbeShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
             shortTitle: "Record E", systemImageName: "mic"
+        )
+        #elseif VARIANT_F
+        AppShortcut(
+            intent: ProbeIntent(), phrases: ["Record in \(.applicationName)"],
+            shortTitle: "Record F", systemImageName: "mic"
         )
         #else
         AppShortcut(
@@ -161,7 +191,10 @@ enum ProbeRun {
         )
         #if VARIANT_D
         try? await Task.sleep(for: .milliseconds(1500))
-        ProbeLog.record("waited 1.5s")
+        ProbeLog.record("waited 1.5s state=\(appState())")
+        #elseif VARIANT_F
+        try? await Task.sleep(for: .seconds(4))
+        ProbeLog.record("waited 4s state=\(appState())")
         #endif
         #if VARIANT_E
         let active = activateSession(session)

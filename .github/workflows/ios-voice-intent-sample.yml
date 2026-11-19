@@ -75,7 +75,7 @@ jobs:
           security list-keychains -d user -s "$work/probe.keychain-db" $(security list-keychains -d user | tr -d '"')
           identity="$(security find-identity -v -p codesigning "$work/probe.keychain-db" | awk '/Apple Development/{print $2; exit}')"
           [ -n "$identity" ] || { security find-identity -p codesigning "$work/probe.keychain-db"; echo "no Apple Development identity" >&2; exit 1; }
-          for app in ProbeA ProbeB ProbeC ProbeD ProbeE Helper; do
+          for app in ProbeA ProbeB ProbeC ProbeD ProbeE ProbeF Helper; do
             bundle="$products/$app.app"
             for appex in "$bundle"/PlugIns/*.appex; do
               codesign --force --sign "$identity" --keychain "$work/probe.keychain-db" --timestamp=none "$appex"
@@ -95,10 +95,10 @@ jobs:
           echo "SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
           xcrun simctl bootstatus "$simulator_id" -b
           products="$RUNNER_TEMP/SampleDerived/Build/Products/Debug-iphonesimulator"
-          for app in ProbeA ProbeB ProbeC ProbeD ProbeE Helper; do
+          for app in ProbeA ProbeB ProbeC ProbeD ProbeE ProbeF Helper; do
             xcrun simctl install "$simulator_id" "$products/$app.app"
           done
-          for id in a b c d e helper; do
+          for id in a b c d e f helper; do
             xcrun simctl privacy "$simulator_id" grant microphone "bot.avibe.sample.$id" || true
           done
 
@@ -118,7 +118,7 @@ jobs:
           set -uo pipefail
           out="$RUNNER_TEMP/evidence"; mkdir -p "$out/attachments"
           cp "$RUNNER_TEMP/signing.txt" "$out/" 2>/dev/null || true
-          for id in a b c d e helper; do
+          for id in a b c d e f helper; do
             container="$(xcrun simctl get_app_container "$SIMULATOR_ID" "bot.avibe.sample.$id" data 2>/dev/null)"
             cp "$container/Library/Caches/probe.log" "$out/probe-$id.log" 2>/dev/null || echo "(no log)" > "$out/probe-$id.log"
           done
@@ -128,7 +128,16 @@ jobs:
           gzip -f "$out/system-full.log" || true
           xcrun xcresulttool export attachments --path "$RUNNER_TEMP/Sample.xcresult" --output-path "$out/attachments" > /dev/null 2>&1 || true
           cat "$out/signing.txt" 2>/dev/null || true
-          for id in a b c d e helper; do echo "== probe $id"; cat "$out/probe-$id.log"; done
+          for id in a b c d e f helper; do echo "== probe $id"; cat "$out/probe-$id.log"; done
+          echo "== other-audio gate: navigating presses must see isOtherAudioPlaying=true"
+          helper_start="$(grep -m1 'helper playing' "$out/probe-helper.log" | cut -c1-24)"
+          echo "helper started at ${helper_start:-never}; ticks:"; grep -c 'helper tick playing=true' "$out/probe-helper.log" || true
+          for id in a b c d e f; do
+            awk -v t="$helper_start" '$0 > t && /press variant/' "$out/probe-$id.log" | sed "s/^/[$id after helper] /"
+          done | tee "$out/navigating-presses.txt"
+          if [ -n "$helper_start" ] && grep -q 'otherAudio=false' "$out/navigating-presses.txt"; then
+            echo "OTHER-AUDIO GATE: FAILED (some navigating press saw no other audio)" | tee -a "$out/navigating-presses.txt"
+          fi
           echo "== system (requiresValidBundle / errors)"
           grep -E 'requiresValidBundle|Unable to run App Shortcut|Target is not foreground|cannot|!int|!pla|!rec|visibility' "$out/system.log" | tail -60 || true
 
