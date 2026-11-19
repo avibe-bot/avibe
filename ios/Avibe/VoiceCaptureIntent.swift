@@ -50,6 +50,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
                 do {
                     try await continueInForeground(alwaysConfirm: false)
                     let before = controller.lastFailure
+                    let notices = controller.noticeCount
                     switch await controller.startInForeground() {
                     case .started:
                         VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.text("voiceCapture.startedInApp")))
@@ -62,6 +63,9 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
                         // the notice is not shown in front, so say it here.
                         if let failure = controller.lastFailure, failure != before {
                             VoiceCaptureAlert.present(.recordingFailed, failure: failure)
+                        } else if controller.noticeCount != notices, let reason = controller.lastNoticeReason {
+                            // Its own status check refused (offline, …).
+                            VoiceCaptureAlert.present(reason)
                         }
                     }
                     return .result()

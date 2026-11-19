@@ -853,12 +853,19 @@ final class VoiceCaptureController {
         }
     }
 
+    /// Every short notice shown, for the alert in front, where the island is
+    /// not drawn (try 3's own checks).
+    private(set) var noticeCount = 0
+    private(set) var lastNoticeReason: VoiceCaptureAttributes.Reason?
+
     /// A short notice for a press that never recorded.
     private func showNotice(
         phase: VoiceCaptureAttributes.Phase,
         reason: VoiceCaptureAttributes.Reason,
         errorCode: Int? = nil
     ) {
+        noticeCount += 1
+        lastNoticeReason = reason
         let now = environment.now()
         failedStartAt = now
         var notice = VoiceCaptureAttributes.ContentState(
