@@ -5844,13 +5844,39 @@ def test_a_stale_run_of_retries_from_another_activation_is_ignored(tmp_path: Pat
         **watch.metadata, LIFETIME_STARTED_AT_METADATA_KEY: "new-activation",
         "watch_retrying_since": {"activation": "old-activation", "since": "2026-01-01T00:00:00+00:00"},
     }
-    stored = store.get_watch(watch.id)
-    stored.metadata = watch.metadata
-    monkeypatch.setattr(store, "get_watch", lambda _id: stored)
     extras = service._retrying_notice(watch, 75, datetime.now(timezone.utc).isoformat())
     assert "prompt" not in extras
     assert extras["metadata_updates"]["watch_retrying_since"]["activation"] == "new-activation"
-    # A Watch paused while its check ran gets no notice from that check.
-    watch.metadata["watch_retrying_since"] = {"activation": "new-activation", "since": "2026-01-01T00:00:00+00:00"}
-    stored.enabled = False
-    assert service._retrying_notice(watch, 75, datetime.now(timezone.utc).isoformat()) == {}
+
+
+
+def test_a_pause_while_the_check_ran_refuses_its_retrying_notice_on_sqlite(tmp_path: Path, monkeypatch) -> None:
+    """Two store instances, as in production: a pause from the other one lands while
+    this cycle's check runs; the stamp and the notice are refused together (#4015 review)."""
+    import core.watches as watches_module
+
+    store = ManagedWatchStore()
+    other = ManagedWatchStore()
+    request_store = TaskExecutionStore()
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor="paused_meanwhile")
+    watch = store.add_watch(
+        name="Paused meanwhile", session_key="", session_id=session_id, session_policy="existing",
+        command=[sys.executable, "wait.py"], shell_command=None, prefix=None, cwd=None, mode="forever",
+        timeout_seconds=5, lifetime_timeout_seconds=0, retry_exit_codes=[75], retry_delay_seconds=0,
+        post_to=None, deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(config=SimpleNamespace(language="en")), store=store,
+        request_store=request_store, runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    monkeypatch.setattr(watches_module, "WATCH_RETRY_NOTICE_SECONDS", 0)
+    snapshot = store.get_watch(watch.id)  # what the cycle read before its check
+    other.maybe_reload()
+    other.set_enabled(watch.id, False)    # the pause lands while the check runs
+    committed = service._commit_cycle_result(
+        snapshot, exit_code=75, error=None, retrying_started_at="2026-01-01T00:00:00+00:00",
+    )
+    assert committed is False
+    assert not [run for run in request_store.list_pending() if "has been retrying" in run.prompt]
+    store.maybe_reload()
+    assert store.get_watch(watch.id).enabled is False

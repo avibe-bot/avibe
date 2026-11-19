@@ -1167,8 +1167,14 @@ class ManagedWatchStore:
         pause: bool = False,
         metadata_updates: Optional[dict[str, Any]] = None,
         queued_run: Optional[dict[str, Any]] = None,
+        require_activation: Optional[str] = None,
     ) -> bool:
         """Stamp a cycle's outcome; ``False`` means the store refused the write.
+
+        ``require_activation``: refuse unless the Watch, as reloaded here, is still
+        enabled in that activation (``watch_lifetime_started_at``). The decision and
+        the guarded write then see the same row, so a pause or a re-arm that landed
+        while the check ran cannot receive that check's retrying notice.
 
         ``queued_run`` is the completion-hook outbox row this stamp AUTHORISES. Passing
         it makes the stamp and the hook ONE transaction (HFR-269): both land or neither
@@ -1182,6 +1188,11 @@ class ManagedWatchStore:
             self.maybe_reload()
             watch = self.get_watch(watch_id)
             if watch is None:
+                return False
+            if require_activation is not None and (
+                not watch.enabled
+                or str((watch.metadata or {}).get(LIFETIME_STARTED_AT_METADATA_KEY) or "") != require_activation
+            ):
                 return False
             expect = self._read_state(watch)
             candidate = replace(watch)
@@ -2956,14 +2967,10 @@ class ManagedWatchService:
         same ordering as every other Watch hook there (HFR-267). The notice id is
         stable per activation, so a replayed commit cannot queue it twice.
         """
-        stored = self.store.get_watch(watch.id)
-        if stored is None or not stored.enabled or (stored.metadata or {}).get(
-            LIFETIME_STARTED_AT_METADATA_KEY
-        ) != (watch.metadata or {}).get(LIFETIME_STARTED_AT_METADATA_KEY):
-            # Paused, or resumed into a new activation, while this check ran: its run of
-            # retries says nothing about the Watch now (#4015 review).
-            return {}
-        metadata = stored.metadata or {}
+        # The activation this check ran in, read before it ran. The commit requires it
+        # (``mark_cycle_result(require_activation=...)``): a pause or a re-arm that
+        # landed meanwhile refuses the stamp and its notice together (#4015 review).
+        metadata = watch.metadata or {}
         activation = str(metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
         recorded = metadata.get(RETRYING_SINCE_METADATA_KEY)
         since = (
@@ -2973,6 +2980,7 @@ class ManagedWatchService:
         ) or cycle_started_at
         extras: dict[str, Any] = {
             "metadata_updates": {RETRYING_SINCE_METADATA_KEY: {"activation": activation, "since": since}},
+            "require_activation": activation,
         }
         try:
             elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
@@ -3055,6 +3063,7 @@ class ManagedWatchService:
         pause: bool,
         metadata_updates: Optional[dict[str, Any]],
         follow_up_fence: bool = True,
+        require_activation: Optional[str] = None,
     ) -> bool:
         updates = dict(metadata_updates or {})
         if request is not None and follow_up_fence:
@@ -3085,6 +3094,7 @@ class ManagedWatchService:
                 pause=pause,
                 metadata_updates=updates,
                 queued_run=queued_run,
+                **({"require_activation": require_activation} if require_activation is not None else {}),
             ),
             guarded=True,
         ):
@@ -3149,6 +3159,9 @@ class ManagedWatchService:
             prompt = extras.get("prompt", prompt)
             follow_up_fence = extras.get("follow_up_fence", follow_up_fence)
             request_id = extras.get("request_id", request_id)
+            require_activation = extras.get("require_activation")
+        else:
+            require_activation = None
         request = self._hook_request(
             watch,
             event_detected=event_detected,
@@ -3170,6 +3183,7 @@ class ManagedWatchService:
             pause=pause,
             metadata_updates=metadata_updates,
             follow_up_fence=follow_up_fence,
+            require_activation=require_activation,
         )
 
     async def _commit_cycle_result_async(
