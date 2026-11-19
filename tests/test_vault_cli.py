@@ -950,7 +950,9 @@ def test_withdraw_reads_the_session_as_the_card_and_callback_do_and_commits_an_o
     table = vault_service.vault_requests
     with cli._open_vault_engine().begin() as conn:
         # The shape the Web intake writes when only ``delivery.session_id`` is given.
-        conn.execute(table.update().where(table.c.id == delivery_only).values(requester=json.dumps({"source": "web"})))
+        # A legacy empty container where the Session would be reads as none, as the card and callback read it.
+        conn.execute(table.update().where(table.c.id == delivery_only).values(
+            requester=json.dumps({"source": "web", "session_id": []})))
         conn.execute(table.update().where(table.c.id == overdue).values(expires_at="2000-01-01T00:00:00+00:00"))
 
     withdraw = lambda request_id: cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))  # noqa: E731

@@ -1993,27 +1993,29 @@ def withdraw_request(conn: Connection, request_id: str, *, session_id: str | Non
     is not pending (being signed, decided or expired) stays as it is. The Session withdrew it itself,
     so it is not woken with the outcome. Only the row's small columns are read, never its payload.
     """
-    def scalar(column, path: str):
-        return func.json_extract(_safe_request_json(column), path)
-
+    # The Session the request belongs to, in ``_request_session_id``'s order and typing, read as
+    # typed scalars (``_summary_request_session_id``) so a signing payload is never loaded.
+    session_columns = []
+    for label, column, path in (
+        ("requester", vault_requests.c.requester, "$.session_id"),
+        ("delivery", vault_requests.c.delivery, "$.session_id"),
+        ("card", vault_requests.c.delivery, "$.card.session_id"),
+    ):
+        safe = _safe_request_json(column)
+        session_columns += [
+            func.json_type(safe, path).label(f"_session_{label}_type"),
+            func.json_quote(func.json_extract(safe, path)).label(f"_session_{label}_json"),
+        ]
     row = conn.execute(
         select(
             vault_requests.c.id, vault_requests.c.status, vault_requests.c.expires_at,
-            vault_requests.c.request_type, vault_requests.c.secret_name,
-            # The Session the request belongs to, in ``_request_session_id``'s order, read as
-            # scalars so a signing payload in ``delivery`` is never loaded.
-            scalar(vault_requests.c.requester, "$.session_id").label("requester_session"),
-            scalar(vault_requests.c.delivery, "$.session_id").label("delivery_session"),
-            scalar(vault_requests.c.delivery, "$.card.session_id").label("card_session"),
+            vault_requests.c.request_type, vault_requests.c.secret_name, *session_columns,
         ).where(vault_requests.c.id == request_id)
     ).mappings().first()
     if row is None:
         raise RequestNotFoundError(request_id)
     row = dict(row)
-    owner = next(
-        (str(value) for value in (row["requester_session"], row["delivery_session"], row["card_session"]) if value),
-        None,
-    )
+    owner = _summary_request_session_id(row)
     if not session_id or not owner or owner != str(session_id):
         raise RequestNotYoursError(request_id)
     if row.get("status") != "pending":
@@ -2026,7 +2028,8 @@ def withdraw_request(conn: Connection, request_id: str, *, session_id: str | Non
     if expires_at is not None and expires_at <= datetime.now(timezone.utc):
         # Already past its deadline: it expires as any overdue request does, and that is committed;
         # the caller reports it was not withdrawn.
-        _expire_pending_request_rows(conn, [row])
+        if _expire_pending_request_rows(conn, [row]) != 1:
+            raise InvalidRequestError("request is not pending")
         return {**outcome, "withdrawn": False}
     withdrawn = _expire_pending_request_rows(
         conn, [row], reason="request-withdrawn", delivery_extra={"session_id": str(session_id)},
