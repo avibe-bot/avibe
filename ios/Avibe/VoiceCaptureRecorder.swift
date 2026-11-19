@@ -9,8 +9,8 @@ import Foundation
 enum VoiceCaptureSessionCandidate: Int, CaseIterable, Hashable {
     /// `.record`, mode `.default`, no options (non-mixable).
     case exclusiveRecord = 1
-    /// `.playAndRecord`, mode `.default`, `.mixWithOthers` (mixable;
-    /// `mixWithOthers` is not allowed with `.record`).
+    /// `.playAndRecord`, mode `.default`, `.mixWithOthers` + `.duckOthers`
+    /// (mixable, other audio ducked; neither is allowed with `.record`).
     case mixablePlayAndRecord = 2
 }
 
@@ -41,7 +41,7 @@ struct SystemAudioSession: VoiceCaptureAudioSession {
         case .exclusiveRecord:
             try session.setCategory(.record, mode: .default, options: [])
         case .mixablePlayAndRecord:
-            try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers])
+            try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .duckOthers])
         }
     }
 

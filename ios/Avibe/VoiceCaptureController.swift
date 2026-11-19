@@ -163,10 +163,8 @@ final class VoiceCaptureController {
 
     /// Where a try's island comes relative to its session.
     enum Island {
-        /// The island, then the session (the 26.1 order).
+        /// The island, then the session.
         case first
-        /// The session, then a fresh island (an earlier try's is ended).
-        case freshAfterSession
         /// Keep an island an earlier try started, else one after the session.
         case keep
     }
@@ -174,13 +172,12 @@ final class VoiceCaptureController {
     /// One way of trying: its number in the notice and message metadata, the
     /// session set-up it uses, and where its island comes.
     typealias Try = (number: Int, candidate: VoiceCaptureSessionCandidate, island: Island)
-    /// 0: the 26.1 setup (island, then `.record`); 1: `.record` before a
-    /// fresh island; 2: mixable. The owner's 35.1 press refused 1 and 2
-    /// under a `LiveActivityIntent`; 26.1 started with 0 under a plain
-    /// `AudioRecordingIntent`.
-    static let backgroundTries: [Try] = [
-        (0, .exclusiveRecord, .first), (1, .exclusiveRecord, .freshAfterSession), (2, .mixablePlayAndRecord, .keep),
-    ]
+    /// 0: the island, then `.record`; 1: mixable, under the same island,
+    /// for when another App holds audio (cannotInterruptOthers). The sample
+    /// (11-19) showed only an intent that is also a `LiveActivityIntent`
+    /// starts its island from the background, warm and cold, with order and
+    /// a delay of up to 4 s not mattering on the Simulator.
+    static let backgroundTries: [Try] = [(0, .exclusiveRecord, .first), (1, .mixablePlayAndRecord, .keep)]
     /// In front, the ordinary non-mixable session.
     static let foregroundTry: Try = (3, .exclusiveRecord, .first)
 
@@ -576,17 +573,6 @@ final class VoiceCaptureController {
         var recorded: Int?
         var islandError: Error?
         tryLoop: for (number, candidate, island) in tries {
-            if island == .freshAfterSession, let current = activity {
-                // This try puts the session before a fresh island.
-                activity = nil
-                await current.end(nil, dismissal: .immediate)
-                guard generation == startGeneration else {
-                    // The account changed meanwhile: give the press up.
-                    instance.close()
-                    audio.discard()
-                    return .stopped
-                }
-            }
             if island == .first, activity == nil {
                 do {
                     activity = try requestListeningIsland(startedAt)
@@ -1006,6 +992,23 @@ enum VoiceCaptureLaunch {
         @unknown default: state = "unknown"
         }
         let cold = !everActive && (launchedAt.map { Date().timeIntervalSince($0) < 10 } ?? false)
-        return "\(state) \(cold ? "cold" : "warm")"
+        let session = AVAudioSession.sharedInstance()
+        let route = session.currentRoute
+        return "\(state) \(cold ? "cold" : "warm") " + audioContext(
+            otherAudio: session.isOtherAudioPlaying,
+            silenceHint: session.secondaryAudioShouldBeSilencedHint,
+            inputs: route.inputs.map(\.portType.rawValue),
+            outputs: route.outputs.map(\.portType.rawValue)
+        )
+    }
+
+    /// Whether another App holds audio (navigation prompts, music) and the
+    /// current route, for the message metadata.
+    nonisolated static func audioContext(
+        otherAudio: Bool, silenceHint: Bool, inputs: [String], outputs: [String]
+    ) -> String {
+        func ports(_ names: [String]) -> String { names.isEmpty ? "-" : names.joined(separator: ",") }
+        return "otherAudio=\(otherAudio ? 1 : 0) silenceHint=\(silenceHint ? 1 : 0) "
+            + "in=\(ports(inputs)) out=\(ports(outputs))"
     }
 }
