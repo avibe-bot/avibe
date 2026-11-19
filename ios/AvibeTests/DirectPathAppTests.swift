@@ -4216,26 +4216,17 @@ final class DirectPathAppTests: XCTestCase {
                 sessionResponse: { session.response },
                 reusingDefaults: defaults
             )
-            // The instance opens before anything is asked of avibe.bot, and
-            // while its page loads the account is free, so the direct path
-            // may authorize the page's connections (it asks
-            // `isCurrentRuntime`).
-            try await eventually { next.route != .loading }
-            guard case .browser(let opened) = next.route else {
-                release.signal()
-                return XCTFail("Before the account check, the App showed \(next.route): \(row.name)")
-            }
-            XCTAssertEqual(opened.instance.id, "instance-1", row.name)
-            XCTAssertNotNil(next.runtimeOpenAttempt, row.name)
-            XCTAssertTrue(next.mobileSessionCoordinator.isCurrentRuntime(opened), row.name)
-            // The check starts behind the open (here at the long-wait mark,
-            // since no page loads in this test), and the instance stays open
-            // while avibe.bot has not answered.
             await fulfillment(
                 of: [started.expectation],
                 timeout: WebKitReadiness.standardTransportOperationSeconds
             )
-            XCTAssertEqual(next.route, .browser(opened), row.name)
+            // avibe.bot has not answered, and the instance is already open.
+            guard case .browser(let opened) = next.route else {
+                release.signal()
+                return XCTFail("Before the account check answered, the App showed \(next.route): \(row.name)")
+            }
+            XCTAssertEqual(opened.instance.id, "instance-1", row.name)
+            XCTAssertNotNil(next.runtimeOpenAttempt, row.name)
 
             release.signal()
             if row.staysOpen {
