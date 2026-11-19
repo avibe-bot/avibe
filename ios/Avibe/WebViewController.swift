@@ -1104,6 +1104,10 @@ final class WebViewController: UIViewController {
                 // answered that sign-in is needed. 0: no answer.
                 let answer = try? await webView.callAsyncJavaScript(
                     """
+                    // Under the cover nothing the user does can move the
+                    // page: a moved path is the Web UI's own redirect (for
+                    // example to setup after its session read failed).
+                    if (location.pathname !== '/') return 0;
                     try {
                       const response = await fetch('/api/session', {
                         cache: 'no-store', credentials: 'same-origin'
