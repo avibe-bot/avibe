@@ -219,12 +219,12 @@ final class NativeHoldCaptureTests: XCTestCase {
         )
     }
 
-    func testTheConverterTurnsTheInputInto16kHzMonoInt16() throws {
+    func testTheConverterTurnsTheInputInto16kHzMonoInt16AndLosesNone() throws {
         let input = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
         let converter = try XCTUnwrap(NativeHoldPCMConverter(input: input))
         var samples: [Int16] = []
-        // Two buffers in a row, as the input's tap delivers them.
-        for part in 0..<2 {
+        // Two seconds in 100 ms buffers, as the input's tap delivers them.
+        for part in 0..<20 {
             let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: input, frameCapacity: 4_800))
             buffer.frameLength = 4_800
             for index in 0..<4_800 {
@@ -233,10 +233,12 @@ final class NativeHoldCaptureTests: XCTestCase {
             }
             let data = try XCTUnwrap(converter.convert(buffer))
             samples += data.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+            // The resampler holds a little back (about 15 ms, never more than
+            // 50 ms) and gives it with the next buffer: nothing is lost.
+            let behind = (part + 1) * 1_600 - samples.count
+            XCTAssertGreaterThanOrEqual(behind, 0, "buffer \(part)")
+            XCTAssertLessThan(behind, 800, "buffer \(part)")
         }
-        // 0.2 s at 16 kHz, give or take the resampler's latency.
-        XCTAssertGreaterThan(samples.count, 3_000)
-        XCTAssertLessThanOrEqual(samples.count, 3_200)
         let peak = samples.map { abs(Int($0)) }.max() ?? 0
         XCTAssertGreaterThan(peak, 12_000)
         XCTAssertLessThan(peak, 20_000)
