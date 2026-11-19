@@ -224,14 +224,15 @@ def test_every_bot_keeps_the_brief_and_user_message_rules_once(bot):
 
 @pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
 def test_every_bot_always_passes_a_model_and_effort(bot):
-    """Owner-approved wording 2026-11-19 (bots.md D9): every brief names both, chosen from the Agent's models."""
+    """Owner-approved wording 2026-11-19 (bots.md D9): a run that starts a Session names both; the CLI refuses them
+    for `--session-id` and `--bot`, so the rule is scoped to starting a Session."""
     shared = _blocks(enabled_agents=_ROSTER, bot=bot)["bot-harness-prompt"]
     assert (
-        "Always pass both `--model` and `--reasoning-effort`, choosing from `vibe agent models <agent>`, and when work"
-        " under way needs another model, switch the Session that holds it with `vibe session update` instead of"
+        "When you start a Session, always pass both `--model` and `--reasoning-effort`, choosing from"
+        " `vibe agent models <agent>`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of"
         " starting over; the `choose-model` Skill helps, and what the user has told you comes first."
     ) in shared
-    assert "a model that suits the work" not in shared
+    assert "a model that suits the work" not in shared and "Always pass" not in shared
 
 
 def test_bot_harness_prompt_teaches_read_receipts():
