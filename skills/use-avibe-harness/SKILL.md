@@ -39,7 +39,7 @@ A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and 
 To pick the Agent, model, and effort for new work, load the `choose-model` Skill.
 
 ### Reporting
-Dispatch inputs name how to report. When the Turn that took a dispatch ends without writing back and the recipient has no pending input, Avibe sends one read receipt with that Turn's last reply, even if the recipient armed a Task or Watch or delegated onward. Two dispatches to the same Session that both end silently before the receipt goes out get one receipt, with the later Turn's reply; read the recipient's record for the earlier one. Failures, cancellations, and interruptions still notify immediately. `--sync` waits inline; read results with `vibe runs show`.
+Dispatch inputs name how to report. A dispatched Turn ending silently gets one read receipt with its last reply despite any armed Task, Watch or delegate; two at once share one. Failures, cancellations, and interruptions still notify immediately. `--sync` waits inline; read results with `vibe runs show`.
 
 Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation or receipt, does not re-arm a pair, and closes a reverse pair. It rejects `--sync` and forks/new Sessions; it does not change delivery. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
 
