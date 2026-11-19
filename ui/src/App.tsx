@@ -462,7 +462,6 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (superseded()) return;
-            unreachableChecksRef.current = 0;
             provisionalRef.current = false;
             setProvisional(false);
             setAuthorizationSession(session);
@@ -497,6 +496,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && !session.capabilities.can_manage_instance
             ) {
                 recordBootSession(session, Date.now(), bootGeneration);
+                unreachableChecksRef.current = 0;
                 setGuardStatus('ready');
                 return null;
             }
@@ -516,6 +516,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                     return;
                 }
                 recordBootSession(session, Date.now(), bootGeneration);
+                unreachableChecksRef.current = 0;
                 setGuardStatus('ready');
             });
         }).catch(async (error) => {

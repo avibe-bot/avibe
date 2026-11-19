@@ -219,7 +219,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
       ['no network', new TypeError('Failed to fetch')],
       ['a down tunnel (530)', Object.assign(new Error('Request failed: /api/session (530)'), { status: 530 })],
       ['a server error (503)', Object.assign(new Error('Request failed: /api/session (503)'), { status: 503 })],
-    ])('keeps the replayed shell on %s and checks again on reconnect', async (_name, failure) => {
+    ])('AUTH-SETUP-187 keeps the replayed shell on %s and checks again on reconnect', async (_name, failure) => {
       await confirmOnce();
       inTheApp();
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -241,7 +241,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
       consoleError.mockRestore();
     });
 
-    it('keeps the owner\'s replayed shell when only the setup check could not reach the instance', async () => {
+    it('AUTH-SETUP-188 keeps the owner\'s replayed shell when only the setup check could not reach the instance', async () => {
       api.getAuthSession.mockResolvedValueOnce(owner);
       api.getConfig.mockResolvedValueOnce({ mode: 'self_host', setup_state: { needs_setup: false } });
       const first = mountRoutes();
@@ -264,7 +264,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
       consoleError.mockRestore();
     });
 
-    it('keeps the owner\'s shell across repeated unreachable checks, and answers a refusal already received', async () => {
+    it('AUTH-SETUP-188 keeps the owner\'s shell across repeated unreachable checks, and answers a refusal already received', async () => {
       api.getAuthSession.mockResolvedValueOnce(owner);
       api.getConfig.mockResolvedValueOnce({ mode: 'self_host', setup_state: { needs_setup: false } });
       const first = mountRoutes();
@@ -303,7 +303,7 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
       consoleError.mockRestore();
     });
 
-    it('still goes to setup in a browser, without a replayed shell, and on a definite refusal', async () => {
+    it('AUTH-SETUP-189 still goes to setup in a browser, without a replayed shell, and on a definite refusal', async () => {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
       const failure = new TypeError('Failed to fetch');
 
