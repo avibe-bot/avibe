@@ -635,6 +635,33 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.lastNoticeReason, .offline)
     }
 
+    /// An account change while a refused try's island is being ended
+    /// cancels the press: it never goes on in the App.
+    func testAnAccountChangeWhileTheIslandEndsCancelsTheWaitingPress() async {
+        let world = World()
+        world.startErrors = [
+            .exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187),
+            .mixablePlayAndRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187),
+        ]
+        let controller = world.controller()
+        var cancelled = false
+        let original = world.events.count
+        _ = original
+        world.onActivityRequested = { activity in
+            activity.onEnd = {
+                guard !cancelled else { return }
+                cancelled = true
+                _ = controller.cancelForAccountTransition()
+            }
+        }
+        _ = await controller.toggle(foregroundFallback: true)
+        XCTAssertTrue(cancelled)
+        world.startErrors = [:]
+        let after = await controller.startInForeground()
+        XCTAssertEqual(after, .stopped)
+        XCTAssertNotEqual(controller.phase, .listening)
+    }
+
     func testTheInAppLineReadsPlainly() throws {
         let path = try XCTUnwrap(Bundle.main.path(forResource: "zh-Hans", ofType: "lproj"))
         XCTAssertEqual(
@@ -897,6 +924,7 @@ private final class World {
     var startErrors: [VoiceCaptureSessionCandidate: Error] = [:]
     /// The order things happened in: prepareN, activity, record.
     var events: [String] = []
+    var onActivityRequested: ((FakeActivity) -> Void)?
     var takeFileFails = false
     var leftoverAudioDiscarded = 0
     var now: () -> Date = Date.init
@@ -927,6 +955,7 @@ private final class World {
                 let activity = FakeActivity(state)
                 self.activities.append(activity)
                 self.events.append("activity")
+                self.onActivityRequested?(activity)
                 return activity
             },
             existingActivities: { (self.leftovers + self.activities).filter { $0.ended == nil } },
@@ -1038,6 +1067,8 @@ private final class FakeActivity: VoiceCaptureActivityHandle {
     var states: [VoiceCaptureAttributes.ContentState]
     var ended: VoiceCaptureAttributes.ContentState?
     var endedImmediately = false
+    /// Runs while `end` is suspended (an account change landing then).
+    var onEnd: (() -> Void)?
 
     var currentState: VoiceCaptureAttributes.ContentState? {
         ended == nil ? states.last : nil
@@ -1050,6 +1081,7 @@ private final class FakeActivity: VoiceCaptureActivityHandle {
     func update(_ state: VoiceCaptureAttributes.ContentState) async { states.append(state) }
 
     func end(_ state: VoiceCaptureAttributes.ContentState?, dismissal: ActivityUIDismissalPolicy) async {
+        onEnd?()
         ended = state ?? states.last
         // Cancel ends with no final state (gone at once); an ending that
         // says something carries one.
