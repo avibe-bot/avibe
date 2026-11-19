@@ -139,7 +139,7 @@ def _validate_boundary(
         .where(session_turns.c.session_id == session_id)
         .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
         .limit(_CARRY_TURN_LOOKBACK)
-    ).scalars():
+    ).scalars().all():
         latest = candidate
         # A Turn that only ran inputs another Turn's end carried (``turn_carry``)
         # does not make this failure stale: a press that releases parked inputs
@@ -166,7 +166,7 @@ def _validate_boundary(
         .where(message_deliveries.c.session_id == session_id)
         .where(message_deliveries.c.id.not_in(exclude_ids))
         .where(message_deliveries.c.state.not_in(("accepted", "retired")))
-    )
+    ).all()
     # Inputs parked behind a failing model wait for exactly this: the next start.
     if any(
         policy_for(row.state).ordering != "terminal"

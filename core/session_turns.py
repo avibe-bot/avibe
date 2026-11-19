@@ -5234,7 +5234,7 @@ class SessionTurnManager:
         for run in conn.execute(
             select(agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json)
             .where(agent_runs.c.id.in_(parked))
-        ).mappings():
+        ).mappings().all():
             sender = str(run["callback_session_id"] or "").strip()
             if not sender or sender == session_id:
                 continue

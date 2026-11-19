@@ -443,9 +443,11 @@ def ordering_head(
     if not head or not waiting_for_external_input(head):
         return head
     # A parked input may not block an older, independently runnable input.
+    # Read the rows out before deciding: an early return must not leave a cursor
+    # (and its SQLite read lock) open on a pooled connection.
     for candidate in conn.execute(select(message_deliveries).where(
         message_deliveries.c.session_id == session_id, or_(*predicates),
-    ).order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)).mappings():
+    ).order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)).mappings().all():
         row = dict(candidate)
         if row["state"] != "queued" or can_start_carried_batch(conn, session_id, [row]):
             return row
@@ -1780,7 +1782,7 @@ def materialize_acceptance(
         .values(message_id=delivery_id)
     )
     if target_turn.get("state") == "terminal":
-        carry_accepted_inputs(conn, target_turn, [accepted], late=True)
+        carry_accepted_inputs(conn, target_turn, [accepted])
     return accepted
 
 
@@ -1870,7 +1872,7 @@ def materialize_steer_acceptance(
             .values(message_id=message_id)
         )
     if target_turn.get("state") == "terminal":
-        carry_accepted_inputs(conn, target_turn, accepted, late=True)
+        carry_accepted_inputs(conn, target_turn, accepted)
     return accepted
 
 
@@ -2153,15 +2155,8 @@ def _carry_reason(turn: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_replay(conn: Connection, turn: dict[str, Any]) -> bool:
-    """Whether this Turn already is a Retry or a carry: its inputs had their one replay."""
-    return any(
-        failure_retry_binding(row) is not None or turn_carry(row) is not None
-        for row in initial_deliveries_for_turn(conn, str(turn["id"]))
-    )
-
-
 def waiting_for_external_input(delivery: dict[str, Any]) -> bool:
+    """Parked: carried after its third failing successor, it waits for new work."""
     return bool((turn_carry(delivery) or {}).get("wait_for_input"))
 
 
@@ -2184,7 +2179,7 @@ def can_start_carried_batch(conn: Connection, session_id: str, rows: list[dict[s
     queued = conn.execute(select(message_deliveries.c.delivery_history_json).where(
         message_deliveries.c.session_id == session_id, message_deliveries.c.state == "queued",
         insertion > boundary,
-    )).scalars()
+    )).scalars().all()
     return any(not turn_carry({"delivery_history_json": history}) for history in queued)
 
 
@@ -2211,9 +2206,7 @@ def _rebind_runs(conn: Connection, run_ids: list[str], delivery_id: str, *, sour
         ))
 
 
-def carry_accepted_inputs(
-    conn: Connection, turn: dict[str, Any], rows: list[dict[str, Any]], *, late: bool = False,
-) -> dict[str, Any]:
+def carry_accepted_inputs(conn: Connection, turn: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Under the terminal writer: what a failed or stopped Turn accepted is not lost.
 
     Provider failures carry Harness inputs, including the initiating one. A Stop
@@ -2291,7 +2284,7 @@ def run_ids_carried_from(conn: Connection, run_ids: Iterable[str], turn_id: str)
     carried: set[str] = set()
     for run_id, delivery_id in conn.execute(
         select(agent_runs.c.id, agent_runs.c.delivery_id).where(agent_runs.c.id.in_(normalized))
-    ):
+    ).all():
         delivery = get_delivery(conn, str(delivery_id or "")) if delivery_id else None
         if delivery is not None and (turn_carry(delivery) or {}).get("source_turn_id") == turn_id:
             carried.add(str(run_id))
