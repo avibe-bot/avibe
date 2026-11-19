@@ -497,6 +497,22 @@
         }
       }
     },
+    "voiceCapture.startedInApp" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't start recording in the background this time, so it started in the App."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这次没能在后台开始录音，已在 App 里开始。"
+          }
+        }
+      }
+    },
     "voiceCapture.step.liveActivity" : {
       "localizations" : {
         "en" : {

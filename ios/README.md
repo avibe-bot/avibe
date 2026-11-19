@@ -367,8 +367,12 @@ the main Bot acts on the user's computer.
   方案2 `.playAndRecord` with `.mixWithOthers` (mixable; a mixable background
   recording can instead be refused with cannotStartRecording, 561145187).
   Activating a session records nothing; recording starts only once the Live
-  Activity is up. The message carries which one recorded in
-  `metadata.capture_attempt` (for example `2 (1 sessionActivate 560557684)`).
+  Activity is up. If both are refused and the intent can bring Avibe forward
+  (iOS 26), try 3 runs in the App: it records at once, nothing to tap, and one
+  line says 这次没能在后台开始录音，已在 App 里开始。; the second press sends as
+  usual. The message carries which try recorded and every refused one before
+  it in `metadata.capture_attempt` (for example
+  `3 (1 sessionActivate 560557684; 2 sessionActivate 560557684)`).
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is

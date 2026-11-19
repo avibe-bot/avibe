@@ -38,7 +38,28 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         let controller = VoiceCaptureController.shared
-        let outcome = await controller.toggle()
+        var canComeForward = false
+        if #available(iOS 26.0, *) {
+            canComeForward = systemContext.currentMode.canContinueInForeground
+        }
+        let outcome = await controller.toggle(foregroundFallback: canComeForward)
+        if outcome == .needsForeground {
+            // Both background tries were refused: try 3 records in the App
+            // at once, with one line saying why it opened.
+            if #available(iOS 26.0, *) {
+                do {
+                    try await continueInForeground(alwaysConfirm: false)
+                    if await controller.startInForeground() == .started {
+                        VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.text("voiceCapture.startedInApp")))
+                    }
+                    return .result()
+                } catch {
+                    // The system declined; the notice names the tries.
+                }
+            }
+            controller.foregroundUnavailable()
+            return .result()
+        }
         guard case .needsApp(let reason) = outcome else {
             return .result()
         }

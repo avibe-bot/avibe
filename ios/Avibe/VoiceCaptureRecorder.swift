@@ -124,18 +124,21 @@ final class VoiceCaptureRecorder {
         AVAudioApplication.shared.recordPermission == .granted
     }
 
-    /// Whether this take activated the audio session. The session is
-    /// active only while a take records (the background `audio` mode keeps
-    /// the App running for that, and nothing else), and every way a take
-    /// ends goes through `stop()`, which deactivates it.
+    /// Whether this take activated the audio session. The session is active
+    /// from `prepare` (just before the Live Activity) while the take records
+    /// (the background `audio` mode keeps the App running for that, and
+    /// nothing else); every way a take or a refused try ends goes through
+    /// `stop()`, which deactivates it.
     private var sessionActive = false
 
     func start() throws {
         guard permission() else {
             throw Failure.permission
         }
-        if !sessionActive {
-            try prepare(.exclusiveRecord)
+        // The controller prepares a candidate's session first (before the
+        // Live Activity); recording never sets one up on its own.
+        guard sessionActive else {
+            throw StartFailure(step: .sessionActivate, underlying: Failure.start)
         }
         do {
             let recorder = try makeEngine(url)
