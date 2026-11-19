@@ -810,5 +810,52 @@ def test_a_carried_message_gets_its_own_native_identity(managers):
         ).all()
     assert [row.id for row in rows] == [report.delivery_id, accepted]
     assert rows[0].native_message_id == "agent_run:run_x"
-    assert rows[1].native_message_id == f"agent_run:run_x~carry:{turn_id}"
+    # No synthetic identity that could be read as a Run id or a reaction target.
+    assert rows[1].native_message_id is None
     assert json.loads(rows[1].metadata_json)["carried_native_message_id"] == "agent_run:run_x"
+
+
+
+def test_a_late_receipt_during_shutdown_leaves_the_carry_for_startup(managers):
+    manager, other, engine, _, starts = managers
+    manager.controller.shutdown_requested = True
+
+    async def exercise():
+        turn_id, _ = await _activate(manager)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def accept(*_):
+            entered.set()
+            await release.wait()
+            return steer_result(SteerOutcome.ACCEPTED)
+
+        manager._steer = accept
+        receipt = asyncio.create_task(manager.deliver(DeliveryRequest(
+            session_id="ses_fsm", priority="p1", content="late report", source="harness", author="harness",
+            message_type="harness",
+        ), context=_context()))
+        await entered.wait()
+        other._terminalize_durable_turn(turn_id, "failed", settled_by="service_shutdown",
+                                        evidence_kind="service_shutdown", resume_successors=False)
+        release.set()
+        await receipt
+        await asyncio.sleep(0.2)
+
+    asyncio.run(exercise())
+    assert [text for _, text in starts].count("late report") == 0
+    with engine.connect() as conn:
+        assert _texts(conn) == ["late report"]
+
+
+def test_resubmitting_a_carried_agent_run_reports_its_carry_not_a_duplicate(managers):
+    """Ingress idempotency: replaying ``agent_run:R`` finds the first Delivery, but R lives
+    on in its carry; answering "duplicate" would let the executor settle R (#4010 review)."""
+    manager, _, engine, _, _ = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    report = _merge(manager, "report")
+    _run(engine, "run-r", report)
+    with engine.begin() as conn:
+        _end(conn, turn_id, stopped=True)
+        carry = store.list_queued(conn, "ses_fsm")[0]
+        assert store.turn_carry(store.get_delivery(conn, carry["id"]))["original_id"] == report
+        assert _run_delivery(conn, "run-r") == carry["id"]

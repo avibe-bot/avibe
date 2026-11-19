@@ -3766,11 +3766,17 @@ class SessionTurnManager:
                     terminal_target,
                 )
             self._publish_materialized_delivery(delivery_id)
-            if carried_late:
-                # The Turn and its queue drain are over: start the carried input now
-                # rather than leave it for the next input (#4010 review).
+            if (
+                (carried_late or terminal_target is not None)
+                and getattr(self.controller, "shutdown_requested", False) is not True
+                and str((terminal_target or {}).get("backend") or "") not in self._draining_backends
+            ):
+                # The Turn and its queue drain are over. A receipt landing now may have
+                # queued a carry, or cleared the fence that held later inputs: resume the
+                # queue rather than leave it for the next input. A shutdown keeps it for
+                # startup recovery (#4010 review).
                 asyncio.create_task(
-                    self._resume_post_terminal(session_id), name=f"late-carry-resume:{session_id}",
+                    self._resume_post_terminal(session_id), name=f"late-receipt-resume:{session_id}",
                 )
             return DeliveryResult(
                 delivery_id,

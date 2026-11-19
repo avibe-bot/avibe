@@ -2322,12 +2322,13 @@ def carry_accepted_inputs(
             snapshot = _json_object(envelope[0])
             metadata = _json_object(snapshot.get("metadata_json"))
             metadata[TURN_CARRY_METADATA_KEY] = reason
-            # Its Message is new: a native identity (``agent_run:<id>``, an IM message
-            # id) is unique per Message, so the carry gets its own and keeps the first.
+            # Its Message is new, and a native identity (``agent_run:<id>``, an IM
+            # message id) belongs to one Message: the carry has none. The original is
+            # kept for provenance only, never read as a Run id or a reaction target.
             native = str(snapshot.get("native_message_id") or "").strip()
             if native:
                 metadata.setdefault("carried_native_message_id", native)
-                snapshot["native_message_id"] = f"{native}~carry:{turn_id}"
+            snapshot["native_message_id"] = None
             snapshot["metadata_json"] = _canonical_json(metadata)
             carried_id = str(row["id"]) + "~carry"
             # The original's time keeps its place in the queue, ahead of later inputs.

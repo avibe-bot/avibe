@@ -467,6 +467,14 @@ def create_app(
                             .where(agent_runs.c.id == execution_id)
                             .limit(1)
                         ).mappings().first()
+                        if run_owner is not None and run_owner["delivery_id"] not in (None, existing["id"]):
+                            # A failed or stopped Turn carried this input on: the Run now
+                            # belongs to its carry, which answers for the original (#4010).
+                            current = message_deliveries.get_delivery(conn, str(run_owner["delivery_id"]))
+                            if current is not None and (
+                                message_deliveries.turn_carry(current) or {}
+                            ).get("original_id") == existing["id"]:
+                                existing = current
                         if (
                             run_owner is not None
                             and normalize_run_status(run_owner["status"])
