@@ -476,20 +476,28 @@ final class VoiceCaptureTests: XCTestCase {
         let controller = world.controller()
         let outcome = await controller.toggle()
         XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["activity", "prepare1", "prepare2", "record"])
+        // Try 1 puts the session before a fresh island; try 2 is mixable.
+        XCTAssertEqual(world.events, ["activity", "prepare1", "prepare1", "prepare2", "activity", "record"])
         XCTAssertTrue(world.failureNotices.isEmpty, "it records: no failure notice")
+        XCTAssertNotNil(world.activities.first?.ended, "try 0's island is ended before try 1")
         world.audio?.duration = 2
         _ = await controller.toggle()
-        XCTAssertEqual(world.instance.captures.first ?? nil, "2 [background warm] (0 sessionActivate 560557684)")
+        XCTAssertEqual(
+            world.instance.captures.first ?? nil,
+            "2 [background warm] (0 sessionActivate 560557684; 1 sessionActivate 560557684)"
+        )
     }
 
-    func testARecorderRefusedOnTheFirstSessionTriesTheSecondUnderTheSameIsland() async {
+    func testARecorderRefusedOnTheExclusiveSessionTriesOneThenTwo() async {
         let world = World()
         world.startErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
         let outcome = await world.controller().toggle()
         XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["activity", "prepare1", "record", "stop", "prepare2", "record"])
-        XCTAssertEqual(world.activities.count, 1)
+        XCTAssertEqual(
+            world.events,
+            ["activity", "prepare1", "record", "stop", "prepare1", "activity", "record", "stop", "prepare2", "record"]
+        )
+        XCTAssertEqual(world.activities.count, 2)
     }
 
     /// A cold press: the island cannot start from the background, so the
@@ -529,10 +537,10 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(outcome, .stopped)
         XCTAssertEqual(world.failureNotices.count, 1)
         let attempts = world.failureNotices.first?.attempts ?? []
-        XCTAssertEqual(attempts.map(\.candidate), [0, 2])
-        XCTAssertEqual(attempts.map(\.step), [.sessionActivate, .recorder])
-        XCTAssertEqual(attempts.map(\.error), ["560557684", "561145187"])
-        XCTAssertEqual(world.activities.first?.ended?.attempts, attempts)
+        XCTAssertEqual(attempts.map(\.candidate), [0, 1, 2])
+        XCTAssertEqual(attempts.map(\.step), [.sessionActivate, .sessionActivate, .recorder])
+        XCTAssertEqual(attempts.map(\.error), ["560557684", "560557684", "561145187"])
+        XCTAssertEqual(world.activities.last?.ended?.attempts, attempts)
         XCTAssertNil(world.audio?.prepared, "no session left active")
     }
 
@@ -562,7 +570,7 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()  // the second press sends as usual
         XCTAssertEqual(
             world.instance.captures.first ?? nil,
-            "3 [background warm] (0 sessionActivate 560557684; 2 sessionActivate 560557684)"
+            "3 [background warm] (0 sessionActivate 560557684; 1 sessionActivate 560557684; 2 sessionActivate 560557684)"
         )
     }
 
@@ -574,7 +582,7 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle(foregroundFallback: true)
         controller.foregroundUnavailable()
         XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 2])
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1, 2])
         let next = await controller.toggle(foregroundFallback: true)
         XCTAssertNotEqual(next, .busy)
     }
@@ -588,7 +596,7 @@ final class VoiceCaptureTests: XCTestCase {
         let inApp = await controller.startInForeground()
         XCTAssertEqual(inApp, .stopped)
         XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 2, 3])
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1, 2, 3])
     }
 
     /// A press left waiting (a locked phone unlocked much later) never
@@ -607,7 +615,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(late, .stopped)
         XCTAssertNotEqual(controller.phase, .listening)
         XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 2])
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1, 2])
     }
 
     func testAnAbandonedWaitDoesNotBlockTheNextPress() async {
