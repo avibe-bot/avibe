@@ -136,6 +136,27 @@ def test_deleting_a_removed_bots_agent_archives_its_session_over_http(client, mo
         assert get_session(conn, "ses_gone")["status"] == "archived"
         assert get_session(conn, "ses_kept")["status"] == "active"
 
+    # A controller that commits the archive and then loses its reply: the Web answers 503, the reply says archived.
+    async def committed_then_lost(session_id):
+        with create_sqlite_engine().begin() as conn:
+            archive_session(conn, session_id)
+        raise internal_client.InternalServerTimeout("reply lost")
+
+    monkeypatch.setattr(internal_client, "archive_session", committed_then_lost)
+    deleted = client.delete("/api/agents/kept", headers=csrf_headers(client))
+    assert deleted.get_json()["bot_session"] == {"id": "ses_kept", "archived": True}
+
+    # One the controller never reached is reported kept.
+    with BotService() as service:
+        service.remove_bot(service.create_bot(display_name="Down").handle)
+
+    async def unavailable(session_id):
+        raise internal_client.InternalServerUnavailable("down")
+
+    monkeypatch.setattr(internal_client, "archive_session", unavailable)
+    deleted = client.delete("/api/agents/down", headers=csrf_headers(client))
+    assert (deleted.status_code, deleted.get_json()["bot_session"]) == (200, {"id": "ses_down", "archived": False})
+
 
 def test_the_main_bots_avatar_is_refused_over_http_in_the_readers_language(client):
     from PIL import Image

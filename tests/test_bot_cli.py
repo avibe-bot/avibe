@@ -287,10 +287,16 @@ def test_agent_remove_archives_a_removed_bots_session_through_the_service(home, 
     assert (code, payload["bot_session"]) == (0, {"id": "ses_later", "archived": False})
     assert "ses_later" in payload["hint"]
 
-    async def dropped(session_id):
-        raise RuntimeError("connection dropped after the request was sent")
+    async def committed_then_dropped(session_id):
+        from storage.db import create_sqlite_engine
+        from storage.workbench_sessions_service import archive_session
 
-    monkeypatch.setattr(internal_client, "archive_session", dropped)
+        with create_sqlite_engine().begin() as conn:
+            archive_session(conn, session_id)
+        raise internal_client.InternalServerUnavailable("reply rejected after the archive committed")
+
+    monkeypatch.setattr(internal_client, "archive_session", committed_then_dropped)
     code, payload = _run(monkeypatch, capsys, "agent", "remove", "lost")
-    # The Agent is deleted; a Session archive that may have committed is unconfirmed, never "kept".
-    assert (code, payload["removed_agent"], payload["bot_session"]) == (0, "lost", {"id": "ses_lost", "archived": None})
+    # The Agent is deleted, and what is stored says the Session was archived although its reply was lost.
+    assert (code, payload["removed_agent"], payload["bot_session"]) == (0, "lost", {"id": "ses_lost", "archived": True})
+    assert "reply was lost" in payload["warnings"][0]

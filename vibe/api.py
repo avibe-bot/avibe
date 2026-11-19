@@ -2430,6 +2430,24 @@ def deleted_bot_session_id(agent: Any) -> Optional[str]:
     return f"{BOT_SESSION_ID_PREFIX}{handle}" if handle else None
 
 
+def session_is_archived(session_id: str) -> bool:
+    """Whether ``session_id`` is archived as stored: the answer after an archive whose reply was lost."""
+    from sqlalchemy import select
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine()
+    try:
+        with engine.connect() as conn:
+            status = conn.execute(
+                select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
+            ).scalar_one_or_none()
+    finally:
+        engine.dispose()
+    return status == "archived"
+
+
 def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
