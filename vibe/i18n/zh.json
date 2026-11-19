@@ -117,6 +117,9 @@
       "truncated": "…（已截断）"
     },
     "watch": {
+      "retryingNotice": "Watch {id} 已连续重试 {elapsed}（最近退出码：{code}），仍在运行。",
+      "elapsedHours": "{hours} 小时 {minutes} 分钟",
+      "elapsedMinutes": "{minutes} 分钟",
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",
       "unknownSupervisorFailure": "未知的监控进程错误。",
