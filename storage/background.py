@@ -1902,6 +1902,10 @@ WATCH_HOOK_OUTCOME_METADATA_KEY = "watch_hook_outcome"
 WATCH_HOOK_OUTCOME_EVENT = "event"
 WATCH_HOOK_OUTCOME_WAITER_FAILURE = "waiter_failure"
 WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR = "circuit_repair"
+#: A Watch that has kept retrying for long says so once (``core.watches``).
+WATCH_HOOK_OUTCOME_RETRYING = "retrying"
+#: The activation a Watch's retrying notice was sent for: once per activation.
+WATCH_RETRY_NOTICE_ACTIVATION_METADATA_KEY = "watch_retry_notice_activation"
 # Durable Watch admission state. These values move with the Agent Run outbox row,
 # so the definition owns them instead of the in-memory supervisor.
 WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY = "watch_follow_up_run_id"

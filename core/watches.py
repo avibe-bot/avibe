@@ -55,8 +55,10 @@ from storage.background import (
     WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
     WATCH_HOOK_OUTCOME_METADATA_KEY,
+    WATCH_HOOK_OUTCOME_RETRYING,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     WATCH_LIFETIME_STARTED_AT_METADATA_KEY as LIFETIME_STARTED_AT_METADATA_KEY,
+    WATCH_RETRY_NOTICE_ACTIVATION_METADATA_KEY as RETRY_NOTICE_ACTIVATION_METADATA_KEY,
     WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY as RECENT_EVENT_TIMESTAMPS_METADATA_KEY,
     WATCH_TARGET_KIND_JOB,
     WATCH_TARGET_METADATA_KEY,
@@ -2638,7 +2640,10 @@ class ManagedWatchService:
         from storage.resource_access_service import HARNESS_ACCESS_FORBIDDEN_CODE
 
         lifetime_started: float | None = None
-        self._watch_started_at[watch_id] = _utc_now_iso()
+        # When this run of consecutive retries began (monotonic), or None.
+        retrying_since: float | None = None
+        activation = _utc_now_iso()
+        self._watch_started_at[watch_id] = activation
         self._runtime_state_dirty = True
         self._write_runtime_state()
 
@@ -2748,6 +2753,15 @@ class ManagedWatchService:
             if not self._owns_service_instance():
                 return
 
+            # Consecutive "still waiting" cycles: anything else ends the run of retries.
+            if result.exit_code in set(watch.retry_exit_codes) or (
+                (result.timed_out or result.exit_code == 124) and 124 in set(watch.retry_exit_codes)
+            ):
+                if retrying_since is None:
+                    retrying_since = asyncio.get_running_loop().time()
+            else:
+                retrying_since = None
+
             if result.exit_code == 0:
                 if not await self._commit_success_cycle_async(watch, result):
                     return
@@ -2812,6 +2826,7 @@ class ManagedWatchService:
                         exit_code=124,
                         error=None,
                         disable=False,
+                        **self._retrying_notice(watch, 124, retrying_since, activation),
                     ):
                         return
                     await self._sleep_before_retry(
@@ -2841,6 +2856,7 @@ class ManagedWatchService:
                     exit_code=result.exit_code,
                     error=None,
                     disable=False,
+                    **self._retrying_notice(watch, result.exit_code, retrying_since, activation),
                 ):
                     return
                 await self._sleep_before_retry(
@@ -2934,6 +2950,31 @@ class ManagedWatchService:
             stderr=self._localize_watch_worker_error(result.stderr.strip()),
             timed_out=False,
         )
+
+    def _retrying_notice(
+        self, watch: ManagedWatch, exit_code: Optional[int], retrying_since: float | None, activation: str,
+    ) -> dict[str, Any]:
+        """One notice, once per activation, when a Watch has retried for an hour.
+
+        A waiter that keeps returning "still waiting" while its own check is wrong is
+        silent for hours (11-18: five hours "waiting on Apple"). Carried by the retry
+        commit it already makes: no timer, and no extra run of the check.
+        """
+        if retrying_since is None:
+            return {}
+        elapsed = asyncio.get_running_loop().time() - retrying_since
+        if elapsed < WATCH_RETRY_NOTICE_SECONDS:
+            return {}
+        if (watch.metadata or {}).get(RETRY_NOTICE_ACTIVATION_METADATA_KEY) == activation:
+            return {}
+        return {
+            "hook_outcome": WATCH_HOOK_OUTCOME_RETRYING,
+            "prompt": (
+                f"Watch {watch.id} has been retrying for {_format_elapsed(elapsed)} "
+                f"(last exit code: {exit_code}). It is still running."
+            ),
+            "metadata_updates": {RETRY_NOTICE_ACTIVATION_METADATA_KEY: activation},
+        }
 
     def _hook_request(
         self,
@@ -3523,6 +3564,16 @@ def _failure_hook_body(watch: ManagedWatch, *, exit_code: int, error_text: str) 
         f"Review the error below, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.\n"
         f"Error: {error_text}"
     )
+
+
+#: How long a Watch may keep retrying before it says so, once per activation.
+WATCH_RETRY_NOTICE_SECONDS = 3600
+
+
+def _format_elapsed(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min" if hours else f"{minutes} min"
 
 
 def _build_prompt(prefix: Optional[str], body: Optional[str]) -> str:

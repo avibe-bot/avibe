@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Run durable `vibe watch` waits for PR reviews, CI, files or external signals, then resume the Agent in the right Session.
-version: 0.20.3
+version: 0.20.4
 ---
 
 # Background Watch Hook
@@ -16,7 +16,7 @@ acts. A success candidate is not merge authorization.
 | Waiter exit | Meaning |
 | --- | --- |
 | `0` | One **new** reportable event; summary on stdout |
-| `75` (or configured retry code) | Still waiting; no Agent turn |
+| `75` (or configured retry code) | Still waiting; no Agent turn (after an hour of consecutive retries, one notice per activation) |
 | `64` plus `avibe-watch: no-event` on stderr | Quiet completed cycle: retire once, re-arm forever |
 | `124` or other terminal failure | Notify the Agent and stop |
 

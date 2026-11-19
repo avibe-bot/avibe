@@ -5693,3 +5693,55 @@ def test_a_watch_read_never_waits_for_a_writer_holding_sqlite_and_never_sees_its
     assert waited < 0.05, f"a watch read waited {waited:.2f}s for a writer holding SQLite"
     assert read_enabled == (True, [True]), "a reader saw the writer's unwritten edit"
     assert store.get_watch(watch.id).enabled is False, "the landed write was never published"
+
+
+@pytest.mark.parametrize("retry_code", [75, 124])
+def test_a_watch_retrying_for_long_says_so_once_per_activation(tmp_path: Path, monkeypatch, retry_code: int) -> None:
+    """11-18: a Watch sat "waiting on Apple" for five hours while its own check was
+    wrong. After an hour of consecutive retries it says so once, from the retry it
+    already commits; a new activation may say so again; any other outcome resets."""
+    import core.watches as watches_module
+    from core.watches import _FollowUpSlot
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    watch = store.add_watch(
+        name="Apple status", session_key="slack::channel::C123", command=[sys.executable, "wait.py"],
+        shell_command=None, prefix=None, cwd=None, mode="forever", timeout_seconds=5, lifetime_timeout_seconds=0,
+        retry_exit_codes=[75, 124], retry_delay_seconds=0, post_to=None, deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(config=SimpleNamespace(language="en")), store=store,
+        request_store=request_store, runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    monkeypatch.setattr(watches_module, "WATCH_RETRY_NOTICE_SECONDS", 0.05)
+    outcomes = iter([retry_code] * 3 + [NO_EVENT_EXIT_CODE] + [retry_code] * 8)
+
+    async def fake_run_cycle(*args, **kwargs):
+        code = next(outcomes, None)
+        if code is None:
+            service._running = False
+            code = retry_code
+        await asyncio.sleep(0.03)
+        stderr = NO_EVENT_MARKER if code == NO_EVENT_EXIT_CODE else "not ready"
+        return _CycleResult(exit_code=code, stdout="", stderr=stderr, timed_out=code == 124)
+
+    async def ready(*args, **kwargs):
+        return _FollowUpSlot(state="ready")
+
+    monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+    monkeypatch.setattr(service, "_wait_for_follow_up_slot", ready)
+    service._running = True
+    service._requires_service_lease = False
+    asyncio.run(service._run_watch(watch.id))
+    first = [request.prompt for request in request_store.list_pending()]
+    # The first streak (3 retries) crosses the hour; the quiet cycle resets it; the
+    # second streak crosses it again, but this activation already said so: one notice.
+    assert len(first) == 1
+    assert first[0].startswith(f"Watch {watch.id} has been retrying for ")
+    assert first[0].endswith(f"(last exit code: {retry_code}). It is still running.")
+    # A new activation (a restart or a resume) may say so again, once.
+    outcomes = iter([retry_code] * 6)
+    service._running = True
+    asyncio.run(service._run_watch(watch.id))
+    assert len(request_store.list_pending()) == len(first) + 1
