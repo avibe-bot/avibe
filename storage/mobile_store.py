@@ -460,6 +460,12 @@ class MobileStore:
             return {"requests": result}
 
     def result(self, device: dict, request_id: str, payload: dict) -> dict:
+        outcome = self._record_result(device, request_id, payload)
+        if outcome.pop("recorded", False):
+            publish_mobile_schedule_changed()  # A terminal may owe a continuation: deliver now.
+        return outcome
+
+    def _record_result(self, device: dict, request_id: str, payload: dict) -> dict:
         now = _now()
         with self.transaction() as conn:
             self._ensure_active(conn, device["id"])
@@ -494,7 +500,7 @@ class MobileStore:
                 (payload["outcome"], _json(payload["result"]) if "result" in payload else None,
                  payload.get("error", {}).get("code"), now, request_id),
             )
-            return {"state": payload["outcome"]}
+            return {"state": payload["outcome"], "recorded": True}
 
     def show_request(self, request_id: str) -> dict:
         with self.transaction() as conn:
@@ -517,10 +523,10 @@ class MobileStore:
 
     def cancel_request(self, request_id: str, *, consume_callback: bool = False) -> None:
         with self.transaction() as conn:
-            conn.execute(
+            canceled = conn.execute(
                 "UPDATE requests SET state='canceled',ended_at=? WHERE id=? AND state IN ('queued','claimed')",
                 (_now(), request_id),
-            )
+            ).rowcount
             if consume_callback:
                 conn.execute(
                     "UPDATE requests SET callback_state='consumed',waiter_id=NULL,waiter_until=NULL "
@@ -528,6 +534,8 @@ class MobileStore:
                     (request_id,),
                 )
             conn.execute("DELETE FROM pairings WHERE request_id=?", (request_id,))
+        if canceled and not consume_callback:
+            publish_mobile_schedule_changed()
 
     def finish_wait(self, request_id: str, waiter_id: str, *, consumed: bool) -> bool:
         with self.transaction() as conn:
@@ -535,8 +543,10 @@ class MobileStore:
                 "UPDATE requests SET callback_state=?,waiter_id=NULL,waiter_until=NULL "
                 "WHERE id=? AND waiter_id=? AND callback_state='pending'",
                 ("consumed" if consumed else "pending", request_id, waiter_id),
-            )
-            return updated.rowcount == 1
+            ).rowcount == 1
+        if updated and not consumed:
+            publish_mobile_schedule_changed()  # The released continuation may already be owed.
+        return updated
 
     def arm_wait(self, request_id: str, waiter_id: str, seconds: float) -> bool:
         with self.transaction() as conn:

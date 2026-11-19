@@ -35,6 +35,18 @@ These retention rules concern active mobile storage; they do not erase
 conversation transcripts, model contexts/caches, historical backups or
 provider-side copies. No system backup configuration is changed.
 
+Delivery and listing follow pairing (#3989). Commits that can owe a
+continuation (a device result, a cancellation, a released waiter, pair or
+revoke) publish the existing `mobile-health` scheduling hint, and the
+controller delivers on it. A sweep that runs once a minute while a device is
+paired (or a continuation is owed) handles what no commit announces: expiry, a
+crashed waiter, a lost hint, cleanup and eligibility. Controller startup
+delivers anything still owed. An instance with no paired device and nothing
+owed has no Health job. The built-in `use-mobile-health` Skill declares
+`requires: mobile-device`, so it appears in Agent Skill catalogs only while a
+device is paired; it stays loadable by name, and `vibe --help` still lists
+`mobile`. A pairing change applies the next time a prompt is built.
+
 ## Verification
 
 Use only synthetic values, fake native push, fake control-plane responses, and
