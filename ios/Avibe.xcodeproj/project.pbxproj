@@ -26,6 +26,7 @@
 		100000000000000000000003 /* NavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		100000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* RootView.swift */; };
 		100000000000000000000005 /* WebOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
+		3C0000000000000000000001 /* RuntimePageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C0000000000000000000002 /* RuntimePageCache.swift */; };
 		100000000000000000000006 /* WebViewContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* WebViewContainer.swift */; };
 		100000000000000000000007 /* WebViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* WebViewController.swift */; };
 		100000000000000000000008 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Localizable.xcstrings */; };
@@ -200,6 +201,7 @@
 		200000000000000000000003 /* NavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicy.swift; sourceTree = "<group>"; };
 		200000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		200000000000000000000005 /* WebOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebOrigin.swift; sourceTree = "<group>"; };
+		3C0000000000000000000002 /* RuntimePageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimePageCache.swift; sourceTree = "<group>"; };
 		200000000000000000000006 /* WebViewContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewContainer.swift; sourceTree = "<group>"; };
 		200000000000000000000007 /* WebViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewController.swift; sourceTree = "<group>"; };
 		200000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -409,6 +411,7 @@
 				2000000000000000000000A3 /* PushCrypto.swift */,
 				2000000000000000000000A4 /* PushKeychainStore.swift */,
 				200000000000000000000004 /* RootView.swift */,
+				3C0000000000000000000002 /* RuntimePageCache.swift */,
 				200000000000000000000005 /* WebOrigin.swift */,
 				200000000000000000000006 /* WebViewContainer.swift */,
 				200000000000000000000007 /* WebViewController.swift */,
@@ -974,6 +977,7 @@
 				1000000000000000000000AE /* NotificationService.swift in Sources */,
 				1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */,
 				100000000000000000000004 /* RootView.swift in Sources */,
+				3C0000000000000000000001 /* RuntimePageCache.swift in Sources */,
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
 				100000000000000000000006 /* WebViewContainer.swift in Sources */,
 				100000000000000000000007 /* WebViewController.swift in Sources */,

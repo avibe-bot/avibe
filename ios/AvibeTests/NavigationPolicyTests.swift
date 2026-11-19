@@ -4792,3 +4792,247 @@ final class FormAccessoryBarTests: XCTestCase {
         XCTAssertEqual(VoiceConsentMarker(result: true), .other)
     }
 }
+
+// MARK: The instance's last page from the cache (cold-start plan, step 2)
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+extension NavigationPolicyTests {
+    private static let cachedShell = """
+        <!doctype html><html><head><title>Workbench</title>
+        <script>window.inlineRan = true;</script></head>
+        <body><p>served</p></body></html>
+        """
+    private static let shellCSP = "default-src 'self'; script-src 'self'"
+    /// An instance origin nothing listens on: the cached page's own
+    /// requests fail at once and never leave the machine.
+    private static let unreachableInstance = WebOrigin(
+        url: URL(string: "http://127.0.0.1:9")!, requiresHTTPS: false
+    )!
+
+    @MainActor
+    private func primaryWebView(of controller: WebViewController) throws -> WKWebView {
+        try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
+    }
+
+    @MainActor
+    private func waitUntil(
+        _ condition: @MainActor () async throws -> Bool,
+        timeout: Duration = WebKitReadiness.webContentLaunch
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if try await condition() { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("The condition did not become true within \(timeout).")
+        throw CancellationError()
+    }
+
+    /// After a live load, the page fetches its own URL once more and that
+    /// response is kept only when its status is 200 and every security
+    /// header equals the live navigation response's: a changed CSP, a
+    /// missing Permissions-Policy or a failed fetch keeps nothing. What is
+    /// kept is the served bytes and the instance's own headers, minus the
+    /// transfer ones.
+    @MainActor
+    func testALiveLoadKeepsItsPageOnlyWhenItsSecurityHeadersMatch() async throws {
+        let rows: [(name: String, second: [(String, String)], status: Int, keeps: Bool)] = [
+            ("same headers", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true),
+            ("CSP changed", [("Content-Security-Policy", "default-src *"), ("Permissions-Policy", "camera=()")], 200, false),
+            ("Permissions-Policy dropped", [("Content-Security-Policy", Self.shellCSP)], 200, false),
+            ("not 200", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 503, false),
+        ]
+        for row in rows {
+            let documents = LockedCounter()
+            let second = row.second
+            let status = row.status
+            let server = try LocalHTTPServer { request in
+                guard request.path == "/" else { return .status(404) }
+                let first = documents.next() == 1
+                return LocalHTTPResponse(
+                    status: first ? 200 : status,
+                    headers: [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store, private")]
+                        + (first
+                            ? [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")]
+                            : second),
+                    body: Data(Self.cachedShell.utf8)
+                )
+            }
+            let baseURL = try await server.start()
+            defer { server.stop() }
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            var stored: [RuntimeCachedPage] = []
+            var finished: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: origin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { if $0.stage == .finished { finished.append($0) } },
+                pageCache: RuntimePageCacheAccess(load: { nil }, store: { stored.append($0) }),
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+
+            try await waitUntil { documents.count >= 2 }
+            XCTAssertEqual(finished.map(\.fromCache), [false], row.name)
+            if row.keeps {
+                try await waitUntil { !stored.isEmpty }
+                let page = try XCTUnwrap(stored.first, row.name)
+                XCTAssertEqual(page.body, Data(Self.cachedShell.utf8), row.name)
+                XCTAssertEqual(page.headers.first { $0.key.lowercased() == "content-security-policy" }?.value, Self.shellCSP, row.name)
+                XCTAssertEqual(page.headers.first { $0.key.lowercased() == "permissions-policy" }?.value, "camera=()", row.name)
+                XCTAssertNil(page.headers.first { $0.key.lowercased() == "content-length" }, row.name)
+                XCTAssertEqual(page.url, origin.url, row.name)
+            } else {
+                // The capture's fetch has been answered; what remains is
+                // local. Give it the same bound a keeping row needs.
+                let clock = ContinuousClock()
+                let settled = clock.now.advanced(by: .seconds(2))
+                while clock.now < settled, stored.isEmpty {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                XCTAssertTrue(stored.isEmpty, row.name)
+            }
+        }
+    }
+
+    /// A cached page loads as the instance's own document with the headers
+    /// it was served with: its CSP is enforced exactly as on the live load
+    /// (the inline script is blocked with it and runs without it), its
+    /// origin is the instance's, and the open hears it as from the cache.
+    @MainActor
+    func testACachedPageEnforcesTheCSPItWasServedWith() async throws {
+        for (label, csp, inlineRuns) in [("with CSP", Optional(Self.shellCSP), false), ("without CSP", nil, true)] {
+            var headers = ["Content-Type": "text/html; charset=utf-8"]
+            if let csp { headers["Content-Security-Policy"] = csp }
+            let page = RuntimeCachedPage(url: Self.unreachableInstance.url, headers: headers, body: Data(Self.cachedShell.utf8))
+            var finished: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: Self.unreachableInstance,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { if $0.stage == .finished { finished.append($0) } },
+                pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+            let webView = try primaryWebView(of: controller)
+            try await waitUntil { !finished.isEmpty }
+
+            XCTAssertEqual(finished.map(\.fromCache), [true], label)
+            let ran = try await webView.evaluateJavaScript("window.inlineRan === true") as? Bool
+            XCTAssertEqual(ran, inlineRuns, label)
+            let origin = try await webView.evaluateJavaScript("location.origin") as? String
+            XCTAssertEqual(origin, Self.unreachableInstance.serialized, label)
+        }
+    }
+
+    /// Before the instance answers, the cached page is the instance's page
+    /// for the shell: switching instances works from it.
+    @MainActor
+    func testTheCachedPageSwitchesInstancesBeforeConnecting() async throws {
+        let page = RuntimeCachedPage(
+            url: Self.unreachableInstance.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data("<!doctype html><title>Workbench</title>".utf8)
+        )
+        var finished = false
+        var instancesShown = 0
+        var accountShown = 0
+        let controller = WebViewController(
+            instanceOrigin: Self.unreachableInstance,
+            websiteDataStore: .nonPersistent(),
+            showAccount: { accountShown += 1 },
+            showInstances: { instancesShown += 1 },
+            runtimeNavigationChanged: { if $0.stage == .finished { finished = true } },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+        let webView = try primaryWebView(of: controller)
+        try await waitUntil { finished }
+
+        _ = try await webView.callAsyncJavaScript(
+            "await window.avibeNative.call('app.showInstances'); await window.avibeNative.call('app.showAccount');",
+            contentWorld: .page
+        )
+        XCTAssertEqual(instancesShown, 1)
+        XCTAssertEqual(accountShown, 1)
+    }
+
+    /// The cached page asks the instance for its session. A signed-in
+    /// answer ends the open; one that needs sign-in loads the instance
+    /// live, which signs in natively as any first load does.
+    @MainActor
+    func testTheCachedPageConnectsOrLoadsLiveForSignIn() async throws {
+        for (name, signedIn) in [("signed in", true), ("sign-in needed", false)] {
+            let documents = LockedCounter()
+            let server = try LocalHTTPServer { request in
+                switch request.path {
+                case "/api/session":
+                    return .json(signedIn ? #"{"authenticated":true}"# : #"{"remote":true,"authenticated":false}"#)
+                case "/":
+                    _ = documents.next()
+                    return .html("<!doctype html><title>live</title>")
+                default:
+                    return .status(404)
+                }
+            }
+            let baseURL = try await server.start()
+            defer { server.stop() }
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            let page = RuntimeCachedPage(
+                url: origin.url,
+                headers: ["Content-Type": "text/html; charset=utf-8"],
+                body: Data("<!doctype html><title>cached</title>".utf8)
+            )
+            var connected = 0
+            var events: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: origin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { events.append($0) },
+                pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+                cachedPageConnected: { connected += 1 },
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+
+            if signedIn {
+                try await waitUntil { connected == 1 }
+                XCTAssertEqual(documents.count, 0, name)
+            } else {
+                try await waitUntil { documents.count == 1 }
+                try await waitUntil { events.contains { $0.stage == .finished && !$0.fromCache } }
+                XCTAssertEqual(connected, 0, name)
+            }
+            XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache }, name)
+        }
+    }
+}
