@@ -4102,7 +4102,9 @@ final class DirectPathAppTests: XCTestCase {
     ) async throws -> (runtime: MobileRuntimeContext, page: RuntimePage) {
         let before = arrivals ?? notifications.providerPatches.arrivals
         try open()
-        // A launch reads the session first (a restore opens only then).
+        // A launch checks the session first and restores only then, unless
+        // it opens first with the last confirmed session (a relaunch), in
+        // which case this returns at once and the check runs behind the open.
         try await waitForTheBootstrap(of: app)
         try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
@@ -4165,6 +4167,100 @@ final class DirectPathAppTests: XCTestCase {
     // it waits until that update is in flight: the race where the update
     // starts first (from recovery, or a late view update). The update keeps
     // the selection, so the registration is accepted either way.
+
+    /// A cold start with the last good account and its selected instance on
+    /// this device opens that instance at once, while avibe.bot's answer is
+    /// still on its way: the account check runs behind the open. Its answer
+    /// then decides as a refresh does. The same account keeps the instance
+    /// open, and so does a failed check (offline opens what it can). A signed-out
+    /// session or another account closes it and leaves the account. An owed
+    /// second factor closes it but keeps the selection for after the factor.
+    @MainActor
+    func testAColdStartOpensTheLastInstanceBeforeTheAccountIsChecked() async throws {
+        let otherAccount = LocalHTTPResponse.json("""
+            {"account":{"id":"account-2","email":"other@example.com"},"instances":[
+            {"id":"instance-1","name":"One","host":"instance-one.example",
+             "url":"https://instance-one.example","relationship":"owner",
+             "owner_email":"other@example.com","available":true}]}
+            """)
+        let secondFactor = LocalHTTPResponse(
+            status: 403,
+            headers: [("Content-Type", "application/json")],
+            body: Data("""
+                {"error":"two_factor_required","email":"max@example.com",
+                 "gate":"challenge","methods":["totp"]}
+                """.utf8)
+        )
+        let rows: [(name: String, answer: LocalHTTPResponse?, staysOpen: Bool, account: String?, keepsSelection: Bool)] = [
+            ("same account", nil, true, "account-1", true),
+            ("network failure", .status(500), true, "account-1", true),
+            ("signed out", .status(401), false, nil, false),
+            ("other account", otherAccount, false, nil, false),
+            ("second factor", secondFactor, false, nil, true),
+        ]
+        for row in rows {
+            let first = try await makeApp(directTransport: nil)
+            _ = try await select("instance-1", in: first)
+            let defaults = try XCTUnwrap(appDefaults)
+
+            let session = SessionAnswerOverride()
+            let started = FixtureEvent(description: "session read: \(row.name)")
+            let release = DispatchSemaphore(value: 0)
+            session.hold(
+                row.answer ?? Self.signedInSessionAnswer,
+                started: started,
+                release: release
+            )
+            let next = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { session.response },
+                reusingDefaults: defaults
+            )
+            await fulfillment(
+                of: [started.expectation],
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
+            )
+            // avibe.bot has not answered, and the instance is already open.
+            guard case .browser(let opened) = next.route else {
+                release.signal()
+                return XCTFail("Before the account check answered, the App showed \(next.route): \(row.name)")
+            }
+            XCTAssertEqual(opened.instance.id, "instance-1", row.name)
+            XCTAssertNotNil(next.runtimeOpenAttempt, row.name)
+
+            release.signal()
+            if row.staysOpen {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    next.mobileSessionCoordinator.isCurrentRuntime(opened)
+                }
+                XCTAssertEqual(next.route, .browser(opened), row.name)
+            } else {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    next.route == .onboarding(.instances)
+                }
+                XCTAssertFalse(next.mobileSessionCoordinator.isSelectedRuntime(opened), row.name)
+            }
+            XCTAssertEqual(next.mobileSessionCoordinator.currentAccount?.id, row.account, row.name)
+            XCTAssertEqual(
+                defaults.data(forKey: Self.selectionKey) != nil,
+                row.keepsSelection,
+                row.name
+            )
+        }
+    }
+
+    /// The control plane's ordinary signed-in answer for account-1.
+    private static var signedInSessionAnswer: LocalHTTPResponse {
+        .json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-1","name":"One","host":"instance-one.example",
+             "url":"https://instance-one.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true},
+            {"id":"instance-2","name":"Two","host":"instance-two.example",
+             "url":"https://instance-two.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true}]}
+            """)
+    }
 
     @MainActor
     func testColdStartRestoresLastInstanceWithNotificationsOn() async throws {

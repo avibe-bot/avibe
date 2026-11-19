@@ -1240,6 +1240,29 @@ final class AppModel: ObservableObject {
         let launch = Self.coldStartSignposter.beginInterval("bootstrap")
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
         await websiteDataStore.sweepOrphans()
+        // Open first: with the last session avibe.bot confirmed and its
+        // selected instance on this device, open that instance now and check
+        // the session behind it. The check's answer decides as a refresh
+        // does (another account, a signed-out session, or the instance gone
+        // closes the runtime; a failed check keeps it).
+        // A launch from a notification tap or a shortcut opens what it
+        // names, against a session checked first, as before.
+        if
+            pendingInstanceOpen == nil,
+            let restored = sessionCoordinator.restoreLastGoodSession(),
+            let runtime = sessionCoordinator.restorableRuntime(from: restored)
+        {
+            Self.coldStartSignposter.emitEvent("opened before the session check")
+            openRuntime(runtime)
+            let check = Self.coldStartSignposter.beginInterval("session check")
+            let checked = try? await sessionCoordinator.refresh()
+            Self.coldStartSignposter.endInterval("session check", check)
+            settleOpenFirst(runtime, checked: checked)
+            // A tap or shortcut that arrived meanwhile waited for the
+            // check, so it opens against the answered session.
+            await completeBootstrap()
+            return
+        }
         sessionCoordinator.activateAccountSurface()
         do {
             let restore = Self.coldStartSignposter.beginInterval("session restore")
@@ -1260,6 +1283,35 @@ final class AppModel: ObservableObject {
             // confirms signed-out or a different account.
             route = .onboarding(.instances)
         }
+        await completeBootstrap()
+    }
+
+    /// After an open-first's session check: push work the open started was
+    /// held off by the check (the account was busy), so it resumes now; and
+    /// a confirmed list that shows the instance unavailable ends an open
+    /// that has not loaded, as a check-first launch would not have opened it.
+    private func settleOpenFirst(
+        _ runtime: MobileRuntimeContext,
+        checked: MobileSessionState?
+    ) {
+        guard sessionCoordinator.isCurrentRuntime(runtime) else {
+            return
+        }
+        nativePushCoordinator.resumeAfterAccountActivation()
+        guard
+            case .signedIn(let snapshot, _) = checked,
+            let listed = snapshot.instances.first(where: { $0.id == runtime.instance.id }),
+            !listed.available,
+            let attempt = runtimeOpenAttempt,
+            attempt.runtime == runtime,
+            attempt.phase != .documentLoaded
+        else {
+            return
+        }
+        cancelRuntimeOpen(attemptID: attempt.id)
+    }
+
+    private func completeBootstrap() async {
         hasCompletedBootstrap = true
         // Navigation requested before bootstrap is delivered before Health
         // restoration, which may wait on the network and HealthKit.
