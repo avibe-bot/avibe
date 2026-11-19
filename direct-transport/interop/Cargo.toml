@@ -9,6 +9,7 @@ name = "relay_fixture"
 path = "fixture.rs"
 
 [dev-dependencies]
+futures-core = { version = "=0.3.34", default-features = false }
 iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
 iroh-relay = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
 serde = { version = "=1.0.229", features = ["derive"] }

@@ -388,6 +388,28 @@ async def test_stream_log_budget_pairs_and_summarizes_across_windows(caplog):
 
 
 @pytest.mark.asyncio
+async def test_path_budget_reserves_terminal_ipv6_evidence(caplog):
+    supervisor = DirectTransportSupervisor("unused", RecordingIngress(), RecordingRendezvous())
+    supervisor._endpoint_id = ENDPOINT_ONE
+    supervisor._path_reports = True
+    caplog.set_level(logging.INFO, logger="vibe.direct_transport")
+    rows = [dict.fromkeys(("open", "rx_bytes", "tx_bytes", "challenge_tx", "challenge_rx", "response_tx", "response_rx"), 0) for _ in range(4)]
+    msg = dict(type="path_report", ordinal=1, phase="open", selected="relay", partial=False, families=rows)
+    supervisor._handle_path_report(msg)
+    for _ in range(59):
+        supervisor._handle_path_report({**msg, "phase": "change"})
+    rows[2]["rx_bytes"] = 17
+    supervisor._handle_path_report({**msg, "phase": "close"})
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("direct path ")]
+    assert len(lines) == 60 and "phase=close" in lines[-1] and "ipv6.rx_bytes=17" in lines[-1]
+    reader = asyncio.StreamReader()
+    reader.feed_data(json.dumps({**msg, "endpoint_id": PEER}).encode() + b"\n")
+    reader.feed_eof()
+    await supervisor._drain_stderr(reader)
+    assert PEER not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar, caplog):
     """Protect the sole data door and the peer label passed to ingress."""
     path, events, env = sidecar
