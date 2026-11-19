@@ -30,7 +30,9 @@ redirect, CORS-type, parse, identity and hash failures and unavailable Web Crypt
 fail closed as `sandbox_integrity_failed`. A download that fails, or does not
 finish within 60 seconds (its own bound, separate from RPC timeouts), fails closed
 as retryable `sandbox_unreachable`: nothing was verified or opened, and a retry
-verifies afresh. No live manifest can become the expected pin. There is no opt-out,
+verifies afresh. When the browser reports the device offline at that moment it is
+`sandbox_offline` instead, equally retryable, so an offline device is told so
+rather than that its network is slow (3.2.8). No live manifest can become the expected pin. There is no opt-out,
 mutable/latest fallback, standard-tier downgrade or successful trust cache.
 
 An approval gesture synchronously reserves only `about:blank`. After its own

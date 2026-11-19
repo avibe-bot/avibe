@@ -126,6 +126,17 @@ describe('fail-closed local release authority', () => {
     await expect(promise).resolves.toBeTruthy();
   });
 
+  it('reports a download that fails while the device is offline as offline, still retryable', async () => {
+    const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    try {
+      vi.mocked(fetch).mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+      await expect(getVaultSandboxClient()).rejects.toMatchObject({ code: 'sandbox_offline', retryable: true });
+      expect(document.querySelector('iframe')).toBeNull();
+    } finally {
+      onLine.mockRestore();
+    }
+  });
+
   it('gives the download a full minute, then reports it unreachable', async () => {
     vi.useFakeTimers();
     vi.mocked(fetch).mockImplementation((_input, init) => new Promise((_done, fail) => {

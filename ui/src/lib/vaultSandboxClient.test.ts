@@ -435,6 +435,7 @@ describe('VaultSandboxClient in a desktop shell that runs passkey steps', () => 
     ['the request expired, as it would in a browser', 'context_expired'],
     ['the request was invalid, as it would be in a browser', 'invalid_context'],
     ['this Avibe and the sandbox disagree, as they would in a browser', 'sandbox_integrity_failed'],
+    ['the device is offline, as it would be in a browser', 'sandbox_offline'],
     ['the vault has no passkey, as in a browser', 'passkey_not_configured'],
   ])('stays in the app when %s', async (_label, code) => {
     const page = await freshPage('in-app');
