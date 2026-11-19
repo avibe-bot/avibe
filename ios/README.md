@@ -357,22 +357,21 @@ the main Bot acts on the user's computer.
   one starts a new take. A listening or sending Live Activity also goes stale
   on its own 90 seconds past the five-minute cap, and a stale one is drawn as
   interrupted, so no timer runs on for a take nobody holds.
-- Order of a start, after the instance agreed: the audio session goes
-  active first, then the Live Activity, then the recorder. The owner's 33.1
-  press showed a non-mixable session activated after the Live Activity
-  refused with cannotInterruptOthers (560557684): a `LiveActivityIntent`'s
-  launch counts as in front only until its Live Activity begins (seen in
-  another App's device logs, not documented by Apple). Two session set-ups
-  are tried in order within one press: 方案1 `.record` (non-mixable), then
-  方案2 `.playAndRecord` with `.mixWithOthers` (mixable; a mixable background
-  recording can instead be refused with cannotStartRecording, 561145187).
-  Activating a session records nothing; recording starts only once the Live
-  Activity is up. If both are refused and the intent can bring Avibe forward
-  (iOS 26), try 3 runs in the App: it records at once, nothing to tap, and one
-  line says 这次没能在后台开始录音，已在 App 里开始。; the second press sends as
-  usual. The message carries which try recorded and every refused one before
-  it in `metadata.capture_attempt` (for example
-  `3 (1 sessionActivate 560557684; 2 sessionActivate 560557684)`).
+- Tries of one press, after the instance agreed, in order (each refusal is
+  kept): 0, the 26.1 setup (the island, then a `.record` session, then the
+  recorder); 1, a `.record` session before a fresh island; 2, `.playAndRecord`
+  with `.mixWithOthers` (mixable); 3, in the App. The intent is an
+  `AudioRecordingIntent` only: 26.1, declared that way, started in the
+  background on the owner's phone, while 35.1, also a `LiveActivityIntent`,
+  was refused at activation for both session types (560557684, 561015905).
+  A cold press, whose island cannot start from the background, goes straight
+  to try 3. Activating a session records nothing; recording starts only once
+  an island is up. Try 3 (iOS 26, when the intent can bring Avibe forward)
+  records at once with nothing to tap and one line, 正在录音，再长按一次侧边键发送;
+  the second press sends as usual. The message carries which try recorded,
+  the App's state at the press, and every refused try before it in
+  `metadata.capture_attempt`, for example
+  `3 [background cold] (0 liveActivity ActivityAuthorizationError 3)`.
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is

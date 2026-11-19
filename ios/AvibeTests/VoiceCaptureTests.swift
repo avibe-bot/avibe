@@ -293,7 +293,8 @@ final class VoiceCaptureTests: XCTestCase {
         world.recorderStartError = NSError(domain: NSOSStatusErrorDomain, code: 561145187)
         let outcome = await world.controller().toggle()
         XCTAssertEqual(outcome, .stopped)
-        let shown = world.activities.first?.ended
+        // The last try's island carries the line (try 1 starts a fresh one).
+        let shown = world.activities.last?.ended
         XCTAssertEqual(shown?.phase, .failed)
         XCTAssertEqual(shown?.reason, .recordingFailed)
         XCTAssertEqual(shown?.errorCode, 561145187)
@@ -305,8 +306,8 @@ final class VoiceCaptureTests: XCTestCase {
         let world = World()
         world.recorderStartError = VoiceCaptureRecorder.Failure.start
         _ = await world.controller().toggle()
-        XCTAssertEqual(world.activities.first?.ended?.reason, .recordingFailed)
-        XCTAssertNil(world.activities.first?.ended?.errorCode)
+        XCTAssertEqual(world.activities.last?.ended?.reason, .recordingFailed)
+        XCTAssertNil(world.activities.last?.ended?.errorCode)
     }
 
     func testADoubledRunAfterAnyFailureNoticeShowsOneNotice() async {
@@ -336,15 +337,17 @@ final class VoiceCaptureTests: XCTestCase {
         world.now = { clock }
         let controller = world.controller()
         _ = await controller.toggle()
+        let islands = world.activities.count
         clock = clock.addingTimeInterval(0.4)
         let second = await controller.toggle()
         XCTAssertEqual(second, .stopped)
-        XCTAssertEqual(world.activities.count, 1, "one notice")
+        XCTAssertEqual(world.activities.count, islands, "nothing more for the same press")
+        XCTAssertEqual(world.failureNotices.count, 1, "one notice")
 
         // A press a moment later is a new try.
         clock = clock.addingTimeInterval(2)
         _ = await controller.toggle()
-        XCTAssertEqual(world.activities.count, 2)
+        XCTAssertGreaterThan(world.activities.count, islands)
     }
 
     func testAnIslandThatCannotStartRecordsNothingAndSaysWhy() async {
@@ -806,8 +809,8 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(notice?.reason, .recordingFailed)
         XCTAssertEqual(notice?.failedStep, .sessionActivate)
         XCTAssertEqual(notice?.errorCode, 561145187)
-        XCTAssertEqual(world.activities.first?.ended?.failedStep, .sessionActivate)
-        XCTAssertEqual(world.activities.first?.ended?.errorCode, 561145187)
+        XCTAssertEqual(world.activities.last?.ended?.failedStep, .sessionActivate)
+        XCTAssertEqual(world.activities.last?.ended?.errorCode, 561145187)
     }
 
     /// No island at all: the notification is still posted.
