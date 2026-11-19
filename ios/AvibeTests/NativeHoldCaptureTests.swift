@@ -282,7 +282,9 @@ final class NativeHoldCaptureTests: XCTestCase {
             )
             XCTAssertEqual(result as? String, expected, base)
         }
-        XCTAssertEqual(audio.calls, ["prepare", "start", "stop"])
+        // Both instance documents may ready the session (it starts nothing);
+        // only the one that asks for consent first records.
+        XCTAssertEqual(audio.calls, ["prepare", "prepare", "start", "stop"])
     }
 
     func testThePageHearsItsTakeAsEvents() async throws {
