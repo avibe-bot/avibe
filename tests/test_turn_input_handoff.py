@@ -5,7 +5,6 @@ Turn dies on a model error or is stopped, the message used to end with it: its
 sender waited, or resent it by hand.
 """
 import asyncio
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -89,6 +88,76 @@ def _start_next(conn):
     return turn_id
 
 
+@pytest.mark.parametrize("cancel_one", [False, True])
+def test_manager_stop_dispatches_surviving_reports_once(managers, cancel_one):
+    from core.session_turns import Turn
+
+    manager, _, engine, _, starts = managers
+
+    async def exercise():
+        turn_id, ctx = await _activate(manager, text="long work")
+        manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+        for name in ("first", "second"):
+            accepted = await manager.deliver(DeliveryRequest(
+                session_id="ses_fsm", priority="p1", content=name, source="harness", author="harness", message_type="harness",
+            ), context=_context())
+            _run(engine, name, accepted.delivery_id)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(task=holder, context=ctx, logical_turn_id=turn_id)
+        try:
+            stopped = await manager.cancel("ses_fsm", **({"agent_run_id": "first"} if cancel_one else {}))
+            assert stopped["ok"], stopped
+            terminal = manager._terminalize_durable_turn(turn_id, "canceled", settled_by="stopped", evidence_kind="terminal_result")
+            with engine.connect() as conn:
+                ended = store.get_turn(conn, turn_id)
+                assert ended["settled_by"] == "stopped", (stopped, terminal, ended["settled_by"])
+            assert not manager._terminalize_durable_turn(turn_id, "completed", settled_by="terminal_result", evidence_kind="terminal_result")["changed"]
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+            manager.in_flight.pop("ses_fsm", None)
+        await manager._resume_post_terminal("ses_fsm")
+        # A Run cancellation can already have scheduled the owning runner.
+        # Join its dispatch rather than closing the test loop underneath it.
+        for _ in range(30):
+            if len(starts) > 1:
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(exercise())
+    expected = "second" if cancel_one else "first\nsecond"
+    with engine.connect() as conn:
+        observed = [(r.id, r.status, r.cancel_requested, r.delivery_id) for r in conn.execute(select(agent_runs))]
+        queue = store.list_queued(conn, "ses_fsm")
+    assert [text for _, text in starts] == ["long work", STOP_LINE + "\n\n" + expected], (observed, queue)
+
+
+def test_late_acceptance_of_report_after_stop_queues_one_copy(managers):
+    manager, other, engine, _, _ = managers
+
+    async def exercise():
+        turn_id, _ = await _activate(manager)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def accept(*_):
+            entered.set()
+            await release.wait()
+            return steer_result(SteerOutcome.ACCEPTED)
+
+        manager._steer = accept
+        receipt = asyncio.create_task(manager.deliver(DeliveryRequest(
+            session_id="ses_fsm", priority="p1", content="late report", source="harness", author="harness", message_type="harness",
+        ), context=_context()))
+        await entered.wait()
+        other._terminalize_durable_turn(turn_id, "canceled", settled_by="stopped", evidence_kind="terminal_result", resume_successors=False)
+        release.set()
+        assert (await receipt).state == "accepted"
+
+    asyncio.run(exercise())
+    with engine.connect() as conn:
+        assert _texts(conn) == ["late report"]
+
+
 def test_a_stopped_turn_carries_what_other_sessions_sent_and_nothing_else(managers):
     manager, _, engine, _, _ = managers
     turn_id, _ = asyncio.run(_activate(manager, text="selected work"))
@@ -126,65 +195,34 @@ def test_a_failure_that_will_repeat_carries_the_reports_and_not_its_request(mana
         shown = conn.execute(
             select(messages.c.content_text).where(messages.c.id == store.get_turn(conn, successor)["initial_delivery_id"])
         ).scalar_one()
-        assert shown == f"{FAILED_LINE}\n\ncollateral report"
+        assert shown == "The previous Turn failed before answering the user's last message and before handling the messages below.\n\ncollateral report"
         # The carried input had its one replay: a second failure sends nothing again.
         _end(conn, successor, kind=kind)
         assert _texts(conn) == []
 
 
 @pytest.mark.parametrize("kind", ["server", "network", "overloaded", "stalled"])
-def test_a_failure_that_can_pass_presses_its_own_retry_once_and_sends_no_text_again(managers, kind):
+def test_provider_failure_parks_after_three_successors_without_losing_sender_run(managers, kind):
     manager, _, engine, _, _ = managers
-    turn_id, _ = asyncio.run(_activate(manager, text="initial request"))
-    report = _merge(manager, "collateral report")
+    turn_id, _ = asyncio.run(_activate(manager, text="human request"))
+    original = _merge(manager, "report")
+    _run(engine, "run-report", original)
     with engine.begin() as conn:
-        initial = store.get_turn(conn, turn_id)["initial_delivery_id"]
-    _run(engine, "run-initial", initial)
-    _run(engine, "run-report", report)
-    _run(engine, "run-called-off", report, cancel_requested=1)
-    with engine.begin() as conn:
-        before = conn.execute(select(messages.c.id)).scalars().all()
-        retry_id = _end(conn, turn_id, kind=kind)["automatic_retry_delivery_id"]
-        retry = store.get_delivery(conn, retry_id)
-        # The Turn's own Retry, as a person's press reserves it: the notice names it.
-        notice = conn.execute(select(messages.c.content_json).where(messages.c.type == "notify")).scalar_one()
-        assert json.loads(notice)["failure_retry"] == {"delivery_id": retry_id}
-        assert store.failure_retry_binding(retry)["source_turn_id"] == turn_id
-        assert retry["dispatch_text"] == "continue"
-        assert _texts(conn) == []  # nothing waits as text; the continuation is still a reservation
-        assert _run_delivery(conn, "run-initial") == _run_delivery(conn, "run-report") == retry_id
-        assert _run_delivery(conn, "run-called-off") == report
-        assert sorted(conn.execute(select(messages.c.id)).scalars().all()) == sorted(before + [])
-    asyncio.run(manager.deliver(
-        DeliveryRequest(session_id="ses_fsm", priority="p3", content="continue", delivery_id=retry_id),
-        context=_context(),
-    ))
-    with engine.begin() as conn:
-        continued = store.get_delivery(conn, retry_id)["turn_id"]
-        assert continued and continued != turn_id
-        # The continued Turn fails too: no second Retry, and no text either.
-        assert "automatic_retry_delivery_id" not in _end(conn, continued, kind=kind)
-        assert _texts(conn) == []
-        assert _run_delivery(conn, "run-report") == retry_id
+        for attempt in range(4):
+            _end(conn, turn_id, kind=kind)
+            queue = store.list_queued(conn, "ses_fsm")
+            assert len(queue) == 1
+            carried = store.get_delivery(conn, queue[0]["id"])
+            assert _run_delivery(conn, "run-report") == carried["id"]
+            assert store.turn_carry(carried)["original_id"] == original
+            assert store.can_start_carried_batch(conn, "ses_fsm", [carried]) == (attempt < 3)
+            if attempt < 3:
+                turn_id = _start_next(conn)
+        store.enqueue_queued(conn, scope_id=None, session_id="ses_fsm", text="new work")
+        assert store.can_start_carried_batch(conn, "ses_fsm", [carried])
 
 
-def test_a_retry_the_notice_cannot_offer_still_carries_the_reports(managers):
-    manager, _, engine, _, _ = managers
-    turn_id, _ = asyncio.run(_activate(manager, text="initial request"))
-    report = _merge(manager, "collateral report")
-    with engine.begin() as conn:
-        initial = store.get_turn(conn, turn_id)["initial_delivery_id"]
-    _run(engine, "run-initial", initial)
-    _run(engine, "run-report", report)
-    with engine.begin() as conn:
-        assert "automatic_retry_delivery_id" not in _end(conn, turn_id, kind="overloaded", notice=False)
-        assert _texts(conn) == ["collateral report"]
-        assert _run_delivery(conn, "run-report") == store.list_queued(conn, "ses_fsm")[0]["id"]
-        # The request's own Run stays with the ended Turn, which settles it.
-        assert _run_delivery(conn, "run-initial") == initial
-
-
-@pytest.mark.parametrize("kind,carried", [("overloaded", {"run-initial", "run-report"}), ("auth", {"run-report"})])
+@pytest.mark.parametrize("kind,carried", [("overloaded", {"run-report"}), ("auth", {"run-report"})])
 def test_the_failing_turn_does_not_settle_a_run_that_goes_on(managers, kind, carried):
     from storage.background import SQLiteBackgroundTaskStore
 

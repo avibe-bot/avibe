@@ -1669,6 +1669,7 @@ def materialize_start_acceptance(
             history_event={
                 "kind": "start",
                 "attempt_id": turn.get("start_attempt_id"),
+                **_carry_envelope(row),
                 "turn_id": turn_id,
                 "outcome": "accepted",
                 "evidence": evidence,
@@ -2071,6 +2072,7 @@ TURN_CARRY_LINES = {
         "Do not resume the stopped work unless one of them asks for it."
     ),
     "failed": "The previous Turn failed before handling the messages below.",
+    "failed_user": "The previous Turn failed before answering the user's last message and before handling the messages below.",
 }
 _STOP_SETTLEMENTS = frozenset({"stopped", "agent_run_canceled"})
 
@@ -2128,6 +2130,24 @@ def _is_replay(conn: Connection, turn: dict[str, Any]) -> bool:
     )
 
 
+def waiting_for_external_input(delivery: dict[str, Any]) -> bool:
+    return bool((turn_carry(delivery) or {}).get("wait_for_input"))
+
+
+def can_start_carried_batch(conn: Connection, session_id: str, rows: list[dict[str, Any]]) -> bool:
+    """A parked report does not itself wake its Session, even after restart.
+
+    A fresh queued input authorizes FIFO dispatch. Keep the normal segment
+    boundary: a held report must not inherit the new sender's permissions.
+    """
+    if not any(waiting_for_external_input(row) for row in rows):
+        return True
+    queued = conn.execute(select(message_deliveries.c.delivery_history_json).where(
+        message_deliveries.c.session_id == session_id, message_deliveries.c.state == "queued",
+    )).scalars()
+    return any(not turn_carry({"delivery_history_json": history}) for history in queued)
+
+
 def _carriable_run_ids(conn: Connection, delivery: dict[str, Any]) -> list[str] | None:
     """The live Runs of an input, or ``None`` when one of them was called off."""
     rows = list(conn.execute(
@@ -2156,22 +2176,21 @@ def carry_accepted_inputs(
 ) -> dict[str, Any]:
     """Under the terminal writer: what a failed or stopped Turn accepted is not lost.
 
-    A failure that can pass by itself presses the Turn's own Retry once: nothing is
-    sent again, and the Runs of its inputs settle with the continued Turn. Otherwise
-    the inputs other Sessions, Tasks and Watches merged into the Turn are queued
-    again as text, once, opened by ``TURN_CARRY_LINES``; the stopped or failing
-    request itself is not. A Turn that already is a replay carries nothing it
-    received that way, so a failing input cannot loop.
+    Provider failures carry Harness inputs, including the initiating one. A Stop
+    or other failure carries collateral inputs only. Repeated provider failures
+    park the input without asking its sender to submit it again.
     """
     turn_id = str(turn["id"])
     reason = _carry_reason(turn)
-    retry: dict[str, Any] | None = None
     provenance = _json_object(turn.get("terminal_evidence_json")).get("output_provenance")
     kind = provenance.get("error_kind") if isinstance(provenance, Mapping) else None
-    if reason == "failed" and kind in TRANSIENT_FAILURE_KINDS:
-        from core.backend_failure_retry import automatic_retry
-
-        retry = automatic_retry(conn, turn, create=not late)
+    provider_failed = reason == "failed" and kind in TRANSIENT_FAILURE_KINDS
+    if reason == "failed":
+        initial = get_delivery(conn, turn["initial_delivery_id"])
+        if initial and initial.get("message_id"):
+            user_started = conn.execute(select(messages.c.author).where(messages.c.id == initial["message_id"])).scalar() == "user"
+            if user_started:
+                reason = "failed_user"
     for row in sorted(rows, key=lambda item: (item.get("turn_position") or 0, str(item["id"]))):
         if row["state"] != "accepted" or row.get("turn_id") != turn_id:
             continue
@@ -2179,16 +2198,15 @@ def carry_accepted_inputs(
         envelope = next(
             (event.pop(_CARRY_ENVELOPE_KEY) for event in history["events"] if _CARRY_ENVELOPE_KEY in event), None
         )
-        run_ids = _carriable_run_ids(conn, row)
-        if retry is not None:
-            if run_ids:
-                _rebind_runs(conn, run_ids, str(retry["id"]), source_turn_id=turn_id)
-        elif envelope is not None and reason is not None and run_ids is not None:
+        prior = turn_carry(row) or {}
+        eligible = provider_failed or (row["id"] != turn["initial_delivery_id"] and not prior)
+        if envelope is not None and reason is not None and eligible and (run_ids := _carriable_run_ids(conn, row)) is not None:
+            depth = int(prior.get("depth", 0)) + 1 if provider_failed else 1
             snapshot = _json_object(envelope[0])
             metadata = _json_object(snapshot.get("metadata_json"))
             metadata[TURN_CARRY_METADATA_KEY] = reason
             snapshot["metadata_json"] = _canonical_json(metadata)
-            carried_id = new_delivery_id()
+            carried_id = str(row["id"]) + "~carry"
             # The original's time keeps its place in the queue, ahead of later inputs.
             insert_delivery(
                 conn, delivery_id=carried_id, session_id=str(row["session_id"]), priority="p3", state="queued",
@@ -2202,7 +2220,8 @@ def carry_accepted_inputs(
                 conn, carried_id, expected_version=int(carried["version"]), expected_states=("queued",), values={},
                 history_event={
                     "kind": TURN_CARRY_HISTORY_KIND, "source_turn_id": turn_id,
-                    "original_id": str(row["id"]), "reason": reason,
+                    "original_id": prior.get("original_id", row["id"]), "reason": reason,
+                    "depth": depth, "wait_for_input": provider_failed and depth > 3,
                 },
             )
             _rebind_runs(conn, run_ids, carried_id, source_turn_id=turn_id)
@@ -2210,7 +2229,7 @@ def carry_accepted_inputs(
             conn.execute(update(message_deliveries).where(message_deliveries.c.id == row["id"]).values(
                 delivery_history_json=_canonical_json(history),
             ))
-    return {"automatic_retry_delivery_id": str(retry["id"])} if retry is not None else {}
+    return {}
 
 
 def runs_carried_from_turn(
@@ -2226,11 +2245,7 @@ def runs_carried_from_turn(
     turn = get_turn(conn, turn_id)
     if turn is None:
         return set()
-    retried = (
-        turn["state"] != "terminal"
-        and provenance.get("error_kind") in TRANSIENT_FAILURE_KINDS
-        and not _is_replay(conn, turn)
-    )
+    provider_failed = provenance.get("error_kind") in TRANSIENT_FAILURE_KINDS
     carried: set[str] = set()
     for run in run_rows:
         delivery = get_delivery(conn, str(run["delivery_id"] or "")) if run["delivery_id"] else None
@@ -2241,7 +2256,8 @@ def runs_carried_from_turn(
             carried.add(str(run["id"]))
         elif turn["state"] != "terminal" and delivery.get("turn_id") == turn_id and delivery["state"] == "accepted":
             events = _history(delivery["delivery_history_json"])["events"]
-            if retried or any(_CARRY_ENVELOPE_KEY in event for event in events):
+            eligible = provider_failed or (delivery["id"] != turn["initial_delivery_id"] and not source)
+            if eligible and any(_CARRY_ENVELOPE_KEY in event for event in events):
                 carried.add(str(run["id"]))
     return carried
 

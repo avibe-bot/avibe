@@ -2102,6 +2102,8 @@ class SessionTurnManager:
                     conn, session_id, str(delivery["id"]), reason=reason
                 )
             return None
+        if not delivery_store.can_start_carried_batch(conn, session_id, deliveries):
+            return None
         if not explicit_retry and any(
             delivery_store.requires_explicit_start_retry(delivery)
             for delivery in deliveries
@@ -4813,8 +4815,9 @@ class SessionTurnManager:
         text = str(turn.get("dispatch_text") or "")
         if source == SOURCE_HUMAN:
             stored = "\n".join(str(row.get("dispatch_text") or "") for row in deliveries if row.get("dispatch_text"))
-            if stored and text.endswith(stored):
-                text = text[: -len(stored)] + _segment_dispatch_text(deliveries)
+            segment_text = _segment_dispatch_text(deliveries)
+            if stored and text.endswith(stored) and not text.endswith(segment_text):
+                text = text[: -len(stored)] + segment_text
         if source == SOURCE_SCHEDULED:
             # Keep the raw prompt until MessageHandler parses an explicit
             # ``subagent: prompt`` prefix. The handler prepares structured
