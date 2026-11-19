@@ -6689,6 +6689,13 @@ class SQLiteBackgroundTaskStore:
             }
             turn_id = str(terminal_provenance.get("turn_id") or "").strip()
             settles_failed_now = normalize_run_status(terminal_status) == "failed"
+            if turn_id and settles_failed_now:
+                from storage.message_deliveries import runs_awaiting_input_handoff
+
+                carried = runs_awaiting_input_handoff(conn, turn_id, rows.values(), terminal_provenance)
+                loaded_run_ids = [run_id for run_id in loaded_run_ids if run_id not in carried]
+                if _durable_activity_blockers is not None:
+                    _durable_activity_blockers.difference_update(carried)
             # Project notice ownership in the same order as the terminal writes below.
             # A callback child whose earlier parent will acquire a notice is removed
             # before the remaining candidates use their stable lexical tie-breaker.

@@ -2059,6 +2059,44 @@ def terminalize_turn(
     return {"changed": settled is not None, "turn": settled or turn}
 
 
+def _carry_candidate(delivery, turn, outcome, settled_by, provenance) -> bool:
+    if delivery["state"] != "accepted" or delivery_has_history_event(delivery, kind="terminal_carry"):
+        return False
+    collateral = delivery["id"] != turn["initial_delivery_id"]
+    if settled_by == "stopped":
+        return collateral
+    # An unclassified failure, including an ambiguous rate/quota error, is
+    # never permission to replay the initiating request automatically.
+    return outcome == "failed" and (collateral or provenance.get("error_kind") in {
+        "server", "network", "overloaded", "stalled",
+    })
+
+
+def runs_awaiting_input_handoff(conn, turn_id, run_rows, provenance) -> set[str]:
+    """Exclude these Runs from the *old* failure writer, not from the successor.
+
+    Called under the same writer lock as the output it filters. A late output
+    may observe the new queue binding rather than the old accepted Delivery.
+    """
+    turn = get_turn(conn, turn_id)
+    if not turn:
+        return set()
+    awaiting = set()
+    for run in run_rows:
+        if run.get("cancel_requested") or not run.get("delivery_id"):
+            continue
+        row = get_delivery(conn, run["delivery_id"])
+        if not row:
+            continue
+        events = _history(row["delivery_history_json"])["events"]
+        if any(e.get("kind") == "terminal_carry" and e.get("source_turn_id") == turn_id for e in events):
+            awaiting.add(run["id"])
+        elif (row.get("turn_id") == turn_id and any("handoff" in e for e in events)
+              and _carry_candidate(row, turn, "failed", None, provenance)):
+            awaiting.add(run["id"])
+    return awaiting
+
+
 def _finish_accepted_inputs(conn: Connection, turn: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     """Consume the temporary per-input envelopes under the terminal writer lock.
 
@@ -2066,8 +2104,7 @@ def _finish_accepted_inputs(conn: Connection, turn: dict[str, Any], rows: list[d
     claim moves. A carry is never itself a new original input.
     """
     evidence = _json_object(turn.get("terminal_evidence_json"))
-    transient = (evidence.get("output_provenance") or {}).get("error_kind") in {"server", "network", "overloaded", "stalled"}
-    failed = turn["terminal_outcome"] == "failed"
+    provenance = evidence.get("output_provenance") or {}
     stopped = turn.get("settled_by") == "stopped"
     for row in rows:
         if row["state"] != "accepted":
@@ -2077,9 +2114,7 @@ def _finish_accepted_inputs(conn: Connection, turn: dict[str, Any], rows: list[d
         if envelope is None:
             continue
         original = row["id"]
-        carried = delivery_has_history_event(row, kind="terminal_carry")
-        collateral = original != turn["initial_delivery_id"]
-        candidate = not carried and ((failed and (collateral or transient)) or (stopped and collateral))
+        candidate = _carry_candidate(row, turn, turn["terminal_outcome"], turn.get("settled_by"), provenance)
         run_ids = agent_run_ids_for_delivery(conn, row) if candidate else []
         canceled = bool(run_ids and conn.execute(select(agent_runs.c.id).where(
             agent_runs.c.id.in_(run_ids), agent_runs.c.cancel_requested == 1,

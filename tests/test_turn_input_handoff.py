@@ -60,3 +60,38 @@ def test_failure_carries_transient_primary_but_always_protects_collateral(manage
         store.terminalize_turn(conn, successor, outcome="failed", settled_by="terminal_result",
                                evidence_kind="terminal_result", evidence=evidence)
         assert not store.list_queued(conn, "ses_fsm")
+
+
+def test_failed_output_does_not_settle_carried_run_before_or_after_terminal(managers):
+    from pathlib import Path
+    from sqlalchemy import select
+    from storage.background import SQLiteBackgroundTaskStore
+    from storage.models import agent_runs
+
+    manager, _, engine, _, _ = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    with engine.begin() as conn:
+        initial = store.get_turn(conn, turn_id)["initial_delivery_id"]
+        conn.execute(agent_runs.insert().values(
+            id="carried", run_type="agent_run", session_id="ses_fsm", status="running",
+            created_at=store.utc_now_iso(), updated_at=store.utc_now_iso(), delivery_id=initial,
+            cancel_requested=0, metadata_json="{}",
+        ))
+    background = SQLiteBackgroundTaskStore(Path(engine.url.database))
+    provenance = {"turn_id": turn_id, "error_kind": "overloaded"}
+    try:
+        for phase in ("before", "after"):
+            if phase == "after":
+                with engine.begin() as conn:
+                    store.terminalize_turn(conn, turn_id, outcome="failed", settled_by="terminal_result",
+                                           evidence_kind="terminal_result", evidence={"output_provenance": provenance})
+            background.record_turn_terminal_outputs(["carried"], output_id="terminal", text="overload",
+                                                    terminal_status="failed", provenance=provenance)
+            with engine.connect() as conn:
+                row = conn.execute(select(agent_runs).where(agent_runs.c.id == "carried")).mappings().one()
+                assert row["status"] == "running", phase
+                assert row["completed_at"] is None
+                if phase == "after":
+                    assert row["delivery_id"] == store.list_queued(conn, "ses_fsm")[0]["id"]
+    finally:
+        background.close()
