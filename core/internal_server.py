@@ -798,6 +798,16 @@ def create_app(
                 )
         return submission if delivery_owner_transferred else route
 
+    @app.post("/internal/diagnostics/warm-gc-census")
+    async def _arm_warm_gc_census():
+        import os
+
+        watchdog = getattr(controller, "_loop_watchdog", None)
+        if watchdog is None:
+            raise HTTPException(status_code=503, detail="watchdog_unavailable")
+        armed = watchdog.arm_warm_census(controller)
+        return {"armed": armed, "controller_pid": os.getpid()}
+
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
         from vibe.desktop_runtime import desktop_runtime_id

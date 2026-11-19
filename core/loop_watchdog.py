@@ -94,6 +94,24 @@ class EventLoopWatchdog:
         self._gc_callback = self._observe_gc
         self._census = census
         self._census_due = False
+        self._census_claimed = census is not None
+        self._watchdog_birth = self._answered_at
+        self._warm_since = None
+        self._trigger_candidates = -1
+        self._trigger_uptime = 0.0
+
+    def arm_warm_census(self, controller) -> bool:
+        # Called on the controller loop; idempotent even after the sample fires.
+        if self._census_claimed:
+            return False
+        from core.gc_census import sample_controller
+
+        self._census_claimed = True
+        self._warm_since = max(self._watchdog_birth + 7200, self._monotonic())
+        self._census = lambda: sample_controller(controller, trigger_candidates=self._trigger_candidates,
+                                                trigger_uptime_s=round(self._trigger_uptime, 3),
+                                                sample_uptime_s=round(self._monotonic() - self._watchdog_birth, 3))
+        return True
 
     def _observe_gc(self, phase: str, info: dict[str, int]) -> None:
         if phase == "start":
@@ -102,7 +120,10 @@ class EventLoopWatchdog:
             started_at, self._gc_started_at = self._gc_started_at, None
             if started_at is None:
                 return
-            if self._census is not None and info['generation'] == 2 and _active_requests == 0:
+            if (self._census is not None and info['generation'] == 2 and _active_requests == 0
+                    and (self._warm_since is None or started_at >= self._warm_since)):
+                self._trigger_candidates = info.get('candidates', -1)
+                self._trigger_uptime = self._monotonic() - self._watchdog_birth
                 self._census_due = True  # scalar signal only; no object enumeration in a collector callback
             duration = self._monotonic() - started_at
             if duration > GC_SLOW_SECONDS:
