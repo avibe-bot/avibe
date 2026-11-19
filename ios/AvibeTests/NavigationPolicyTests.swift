@@ -5140,7 +5140,11 @@ extension NavigationPolicyTests {
                 _ = documents.next()
                 return .html("<!doctype html><title>live</title>")
             case "/no-content":
-                return .status(204)
+                return LocalHTTPResponse(
+                    status: 204,
+                    headers: [("Content-Type", "text/html; charset=utf-8")],
+                    body: Data()
+                )
             default:
                 return .status(404)
             }
@@ -5180,7 +5184,8 @@ extension NavigationPolicyTests {
         }
         XCTAssertEqual(documents.count, 0)
         XCTAssertEqual(connected, 0)
-        XCTAssertEqual(try await webView.evaluateJavaScript("document.title") as? String, "cached")
+        let title = try await webView.evaluateJavaScript("document.title") as? String
+        XCTAssertEqual(title, "cached")
 
         reachable.set(true)
         try await waitUntil { connected == 1 }

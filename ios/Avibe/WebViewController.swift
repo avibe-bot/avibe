@@ -1140,6 +1140,9 @@ final class WebViewController: UIViewController {
                 guard let self, self.cachedNavigation != nil else { return }
                 switch answer {
                 case 1:
+                    // Connected: from here, navigations are the ordinary
+                    // live ones.
+                    self.cachedPageUncovered = false
                     if let webView = self.retainedWebView {
                         self.cachedPageConnected()
                         self.checkCachedPageIsCurrent(in: webView)
@@ -1157,8 +1160,14 @@ final class WebViewController: UIViewController {
                     self.cachedNavigation = nil
                     self.cachedPageUncovered = false
                     self.hasLoadedLive = true
+                    // From an uncovered page this replaces it as a restart
+                    // does: covered at once, with a fresh budget, and its
+                    // failure shown.
                     self.runtimeNavigationChanged(
-                        RuntimeNavigationEvent(stage: .started, destination: .instance)
+                        RuntimeNavigationEvent(
+                            stage: keepsShell ? .restarting : .started,
+                            destination: .instance
+                        )
                     )
                     self.loadConfiguredInstance()
                     return

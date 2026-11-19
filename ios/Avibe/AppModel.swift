@@ -1800,13 +1800,21 @@ final class AppModel: ObservableObject {
         }
         guard
             runtimeIdentity == attemptID,
-            let attempt = runtimeOpenAttempt,
-            attempt.id == attemptID,
-            attempt.runtime == runtime,
+            runtimeOpenAttempt?.id == attemptID,
+            runtimeOpenAttempt?.runtime == runtime,
             route.runtime == runtime,
-            sessionCoordinator.isSelectedRuntime(runtime),
-            !expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID)
+            sessionCoordinator.isSelectedRuntime(runtime)
         else {
+            return
+        }
+        // Out of time: the open ends, unless a page shown uncovered stays
+        // (`.cachedUnreachable`), which still takes this event (a live
+        // document replacing it must not leave the banner over it).
+        if expireRuntimeOpenAttemptIfNeeded(attemptID: attemptID),
+           runtimeOpenAttempt?.phase != .cachedUnreachable {
+            return
+        }
+        guard let attempt = runtimeOpenAttempt, attempt.id == attemptID else {
             return
         }
 
