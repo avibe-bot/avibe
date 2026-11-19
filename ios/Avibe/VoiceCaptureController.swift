@@ -12,7 +12,9 @@ protocol VoiceCaptureInstance: AnyObject {
     func mainBotMessagesPath() async throws -> String
     /// `capture` records which session candidate recorded this take (and
     /// which were refused first), in the message's metadata only.
-    func postMessage(_ text: String, to sessionPath: String, capture: String?) async throws
+    /// `timing`: milliseconds from the press to each step (device numbers
+    /// for the first-words question), in the metadata only.
+    func postMessage(_ text: String, to sessionPath: String, capture: String?, timing: String?) async throws
     func close()
     var releaseBarrier: WebsiteDataStoreReleaseBarrier? { get }
 }
@@ -26,6 +28,8 @@ protocol VoiceCaptureAudio: AnyObject {
     func prepare(_ candidate: VoiceCaptureSessionCandidate) throws
     /// Starts recording on the prepared session.
     func start() throws
+    /// When the recorder first had audio (nil until then, or unknown).
+    var firstAudioAt: Date? { get }
     /// Stops and returns the take's length in seconds.
     @discardableResult func stop() -> TimeInterval
     func discard()
@@ -238,6 +242,25 @@ final class VoiceCaptureController {
     }
 
 
+    /// When the press arrived, and its steps since (ms): the island, the
+    /// session, the recorder, and for a press that came forward, the
+    /// refusal and Avibe being in front. Sent as `capture_timing`.
+    private var pressAt: Date?
+    private var marks: [String] = []
+
+    private func mark(_ step: String) {
+        guard let pressAt else { return }
+        marks.append("\(step)=\(Int(environment.now().timeIntervalSince(pressAt) * 1000))")
+    }
+
+    /// The intent brought Avibe forward.
+    func markInFront() { mark("front") }
+
+    private func timing(of take: Take) -> String {
+        let audio = take.audio.firstAudioAt.map { ["audio=\(Int($0.timeIntervalSince(take.pressAt) * 1000))"] } ?? []
+        return (take.marks + audio).joined(separator: " ")
+    }
+
     /// The background try a press made before it came forward.
     private var backgroundAttempt: VoiceCaptureAttributes.Attempt?
     /// When the reserved press arrived: a press that waits longer than
@@ -339,6 +362,9 @@ final class VoiceCaptureController {
         /// Recorded in the background (not in front): the process may then
         /// end after it is sent, behind the switch.
         let inBackground: Bool
+        /// The press's steps, ms from the press (see `mark`).
+        let marks: [String]
+        let pressAt: Date
         var endedAt: Date?
         /// Kept once transcribed, so Retry does not transcribe again.
         var text: String?
@@ -439,6 +465,8 @@ final class VoiceCaptureController {
         reservedGeneration = generation
         reservation = UUID()
         reservedAt = environment.now()
+        pressAt = environment.now()
+        marks = []
         backgroundAttempt = nil
         pressContext = environment.pressContext() + " bgTries=\(backgroundActivations)"
         return nil
@@ -659,6 +687,7 @@ final class VoiceCaptureController {
         let activity: VoiceCaptureActivityHandle
         do {
             activity = try requestListeningIsland(startedAt)
+            mark(inFront ? "frontIsland" : "island")
         } catch {
             audio.discard()
             if !inFront, foregroundFallback {
@@ -675,7 +704,9 @@ final class VoiceCaptureController {
         do {
             if !inFront { backgroundActivations += 1 }
             try audio.prepare(inFront ? .exclusiveRecord : .mixableBackground)
+            mark(inFront ? "frontSession" : "session")
             try audio.start()
+            mark(inFront ? "frontRecord" : "record")
         } catch {
             record("start: try \(number) refused \((error as NSError).domain) \((error as NSError).code) \(error)")
             _ = audio.stop()
@@ -706,7 +737,8 @@ final class VoiceCaptureController {
         let consent = Task { await Self.refusal(from: instance) }
         state = .listening(Take(
             id: id, instance: instance, audio: audio, activity: activity, startedAt: startedAt,
-            capture: capture, consent: consent, inBackground: !inFront
+            capture: capture, consent: consent, inBackground: !inFront,
+            marks: marks, pressAt: pressAt ?? startedAt
         ))
         consentWatch = Task { [weak self] in
             // A transient failure is not a no: the take records on, and its
@@ -738,6 +770,7 @@ final class VoiceCaptureController {
         generation startGeneration: Int
     ) async -> Outcome {
         backgroundAttempt = attempt
+        mark("refused")
         if let island { await island.end(nil, dismissal: .immediate) }
         guard generation == startGeneration, case .preparing = state else {
             // The account changed meanwhile.
@@ -944,7 +977,7 @@ final class VoiceCaptureController {
             let path = try await take.instance.mainBotMessagesPath()
             guard generation == deliverGeneration else { return }
             posted = true
-            try await take.instance.postMessage(text, to: path, capture: take.capture)
+            try await take.instance.postMessage(text, to: path, capture: take.capture, timing: timing(of: take))
             guard generation == deliverGeneration else { return }
             record("deliver: sent")
             state = .idle

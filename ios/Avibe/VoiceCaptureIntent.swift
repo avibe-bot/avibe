@@ -59,6 +59,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
                 do {
                     try await continueInForeground(alwaysConfirm: false)
                     inFront = true
+                    controller.markInFront()
                 } catch {
                     // The system declined.
                 }

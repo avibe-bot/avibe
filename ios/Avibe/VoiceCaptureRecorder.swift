@@ -162,6 +162,7 @@ final class VoiceCaptureRecorder {
             let recorder = try makeEngine(url)
             guard recorder.record() else { throw Failure.start }
             self.recorder = recorder
+            watchFirstAudio(recorder)
         } catch {
             deactivateSession()
             throw StartFailure(step: .recorder, underlying: error)
@@ -184,6 +185,23 @@ final class VoiceCaptureRecorder {
             sessionActive = true
         } catch {
             throw StartFailure(step: step, underlying: error)
+        }
+    }
+
+    /// When the recorder first had audio, for the press's timing.
+    private(set) var firstAudioAt: Date?
+
+    private func watchFirstAudio(_ recorder: VoiceCaptureRecordingEngine) {
+        firstAudioAt = nil
+        Task { @MainActor [weak self, weak recorder] in
+            for _ in 0..<300 {
+                guard let self, let recorder, recorder.isRecording else { return }
+                if recorder.currentTime > 0 {
+                    self.firstAudioAt = Date()
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
         }
     }
 

@@ -394,6 +394,10 @@ the main Bot acts on the user's computer.
   made before), whether another App was playing audio and where sound goes,
   in `metadata.capture_attempt`, for example
   `3 [background warm pid=812 start=1795104000 age=95.2 byPress=0 scene=1 presses=2 session=0 launch=background prevEnd=- otherAudio=0 silenceHint=0 out=Speaker bgTries=2] (0 sessionActivate 561015905)`.
+  `metadata.capture_timing` gives each step's milliseconds from the press:
+  `island=`, `session=`, `record=`, `audio=` (the recorder's first audio), and
+  for a press that came forward `refused=`, `front=`, `frontIsland=`,
+  `frontSession=`, `frontRecord=`.
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is
