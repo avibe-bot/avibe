@@ -943,7 +943,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             management: recorder
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
 
         XCTAssertEqual(
             recorder.requests.map(\.method),
@@ -956,6 +956,9 @@ final class NativePushCoordinatorTests: XCTestCase {
                 "/api/push/apns/installations/\(store.installation!.installationID.uuidString)/revoke",
             ]
         )
+        // The create carries no reason; the bulk revoke names the sign-out.
+        XCTAssertEqual(Self.jsonBody(recorder.requests[1])?["reason"] as? String, "signed_out")
+        XCTAssertNil(store.installation?.pendingBulkRevokeReason)
         XCTAssertNil(try store.loadRecord(kid: pending.kid))
         XCTAssertNil(store.installation?.pendingBulkRevokeThroughGeneration)
     }
@@ -994,7 +997,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             management: recorder
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
 
         XCTAssertEqual(recorder.requests.map(\.method), ["PUT"])
         XCTAssertEqual(
@@ -1032,7 +1035,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             account: account
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
         coordinator.resumeAfterAccountActivation()
         account.value = Self.accountB
         _ = try await coordinator.subscribe(
@@ -1712,7 +1715,7 @@ final class NativePushCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(
             recorder.requests.map(\.path),
-            ["/api/push/apns/registrations/\(target.kid)"]
+            ["/api/push/apns/registrations/\(target.kid)?reason=notifications_off"]
         )
         XCTAssertNil(try store.loadRecord(kid: target.kid))
         XCTAssertNotNil(try store.loadRecord(kid: "a-other-account"))
@@ -1769,9 +1772,9 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertEqual(
             recorder.requests.map(\.path),
             [
-                "/api/push/apns/registrations/removed-1",
-                "/api/push/apns/registrations/removed-2",
-                "/api/push/apns/registrations/removed-3",
+                "/api/push/apns/registrations/removed-1?reason=instance_removed",
+                "/api/push/apns/registrations/removed-2?reason=instance_removed",
+                "/api/push/apns/registrations/removed-3?reason=instance_removed",
             ]
         )
         // The first one failing does not hold back the others.
@@ -1785,11 +1788,40 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertEqual(try store.loadRecord(kid: "other-account")?.state, .active)
         XCTAssertEqual(try store.loadRecord(kid: "stale-generation")?.state, .active)
 
-        // Called again with the same list: the pending one is retried.
+        XCTAssertEqual(pending.revokeReason, PushRevokeReason.instanceRemoved.rawValue)
+
+        // Called again with the same list: the pending one is retried, with its first reason.
         recorder.responseHandler = { _ in Self.successResponse }
         await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
+        XCTAssertEqual(recorder.requests.last?.path, "/api/push/apns/registrations/removed-1?reason=instance_removed")
         XCTAssertNil(try store.loadRecord(kid: "removed-1"))
         XCTAssertEqual(try store.loadRecord(kid: "listed")?.state, .active)
+    }
+
+    /// A revoke staged by an App from before reasons is retried as
+    /// `unspecified`, never guessed (docs/plans/ios-push-relay-contract.md).
+    func testARevokeStagedBeforeReasonsIsSentAsUnspecified() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        try store.saveRecord(makeRecord(
+            kid: "legacy-pending",
+            state: .retiring,
+            pendingRevoke: true,
+            bindGeneration: 1
+        ))
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
+
+        XCTAssertEqual(
+            recorder.requests.map(\.path),
+            ["/api/push/apns/registrations/legacy-pending?reason=unspecified"]
+        )
+        XCTAssertNil(try store.loadRecord(kid: "legacy-pending"))
     }
 
     func testUnsubscribeRetriesThePersistedConcretePendingRevoke()
@@ -1812,7 +1844,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         recorder.responseHandler = { request in
             XCTAssertEqual(
                 request.path,
-                "/api/push/apns/registrations/cleanup-target"
+                "/api/push/apns/registrations/cleanup-target?reason=notifications_off"
             )
             attempts += 1
             return attempts == 1
@@ -1880,7 +1912,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
 
         let logout = Task {
-            await coordinator.prepareForLogout(throughBindGeneration: 1)
+            await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
         }
         try await recorder.waitForRequestCount(1)
         XCTAssertEqual(recorder.requests.first?.method, "POST")
@@ -1967,7 +1999,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             notificationCenter: notificationCenter
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
 
         XCTAssertEqual(
             notificationCenter.removedDelivered,
@@ -2014,6 +2046,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             request.path,
             "/api/push/apns/installations/\(oldID.uuidString)/revoke"
         )
+        XCTAssertEqual(Self.jsonBody(request)?["reason"] as? String, "reinstalled")
         XCTAssertEqual(store.orphanedInstallations.count, 0)
         XCTAssertNotEqual(store.installation?.installationID, oldID)
         XCTAssertEqual(store.installation?.installationSecret.count, 32)
@@ -2186,6 +2219,14 @@ final class NativePushCoordinatorTests: XCTestCase {
             return "\(request.method) registration"
         }
         return "\(request.method) \(request.path.split(separator: "/").last ?? "")"
+    }
+
+    private static func jsonBody(
+        _ request: ManagementRecorder.RecordedRequest
+    ) -> [String: Any]? {
+        request.body
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) }
+            .flatMap { $0 as? [String: Any] }
     }
 
     private static func deviceToken(

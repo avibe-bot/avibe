@@ -1882,7 +1882,7 @@ final class MobileOnboardingTests: XCTestCase {
                 events.append("account.transition")
                 return []
             },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 events.append("push.logout")
                 _ = try? await coordinator.pushManagementRequest(
                     PushManagementRequest(
@@ -1972,7 +1972,7 @@ final class MobileOnboardingTests: XCTestCase {
             transports: transports,
             // `AppModel.openRuntime` resumes push registration on every open.
             onOpen: { _ in push.resumeAfterAccountActivation() },
-            onPreparePushLogout: { await push.prepareForLogout() }
+            onPreparePushLogout: { reason in await push.prepareForLogout(reason: reason) }
         )
         push = NativePushCoordinator(
             keychain: keychain,
@@ -2131,7 +2131,7 @@ final class MobileOnboardingTests: XCTestCase {
             defaults: defaults,
             transports: transports,
             onOpen: { _ in push.resumeAfterAccountActivation() },
-            onPreparePushLogout: { await push.prepareForLogout() },
+            onPreparePushLogout: { reason in await push.prepareForLogout(reason: reason) },
             onReconcileInstancePush: { live, accountID in
                 await push.revokeRegistrations(outside: live, accountID: accountID)
             }
@@ -2218,7 +2218,7 @@ final class MobileOnboardingTests: XCTestCase {
             let coordinator = makeCoordinator(
                 defaults: defaults,
                 transports: [first, owing] + (0..<3).map { _ in FakeMobileAuthTransport() },
-                onPreparePushLogout: { pushLogouts += 1 }
+                onPreparePushLogout: { _ in pushLogouts += 1 }
             )
             coordinator.activateAccountSurface()
             _ = try await coordinator.bootstrap()
@@ -2239,7 +2239,7 @@ final class MobileOnboardingTests: XCTestCase {
             let relaunched = makeCoordinator(
                 defaults: defaults,
                 transports: [relaunchTransport] + (0..<3).map { _ in FakeMobileAuthTransport() },
-                onPreparePushLogout: { relaunchLogouts += 1 }
+                onPreparePushLogout: { _ in relaunchLogouts += 1 }
             )
             relaunched.activateAccountSurface()
             let answer2 = try await relaunched.bootstrap()
@@ -2265,7 +2265,7 @@ final class MobileOnboardingTests: XCTestCase {
         let coordinator = makeCoordinator(
             defaults: makeDefaults(),
             transports: [unknown] + (0..<3).map { _ in FakeMobileAuthTransport() },
-            onPreparePushLogout: { pushLogouts += 1 }
+            onPreparePushLogout: { _ in pushLogouts += 1 }
         )
         coordinator.activateAccountSurface()
         let answer4 = try await coordinator.bootstrap()
@@ -2273,6 +2273,64 @@ final class MobileOnboardingTests: XCTestCase {
         let answer5 = try await coordinator.refresh()
         XCTAssertEqual(answer5, .twoFactorRequired(requirement))
         XCTAssertEqual(pushLogouts, 0)
+    }
+
+    /// Each account-level push revoke names why (docs/plans/ios-push-relay-contract.md,
+    /// revoke reasons): the person signed out, avibe.bot answered 401, or a different
+    /// account signed in. The relay records it for diagnosis only.
+    func testEachAccountPushRevokeNamesItsReason() async throws {
+        // Signed out in the App.
+        do {
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            var reasons: [PushRevokeReason] = []
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try await coordinator.logout()
+            XCTAssertEqual(reasons, [.signedOut])
+        }
+        // avibe.bot answered the session read 401.
+        do {
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            var reasons: [PushRevokeReason] = []
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            transport.session = nil
+            _ = try await coordinator.refresh()
+            XCTAssertEqual(reasons, [.sessionExpired])
+        }
+        // A different account signed in.
+        do {
+            let defaults = makeDefaults()
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1")
+            let previous = makeCoordinator(defaults: defaults, transports: [first])
+            previous.activateAccountSurface()
+            _ = try await previous.bootstrap()
+            _ = try previous.selectInstance(id: instance.id)
+            let other = FakeMobileAuthTransport()
+            other.session = snapshot(accountID: "account-2")
+            var reasons: [PushRevokeReason] = []
+            let relaunched = makeCoordinator(
+                defaults: defaults,
+                transports: [other] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            relaunched.activateAccountSurface()
+            _ = try await relaunched.bootstrap()
+            XCTAssertEqual(reasons, [.accountChanged])
+        }
     }
 
     /// A launch whose session check fails (no network, a timeout, a 503 or
@@ -2315,7 +2373,7 @@ final class MobileOnboardingTests: XCTestCase {
                 transitions += 1
                 return []
             },
-            onPreparePushLogout: { pushLogouts += 1 }
+            onPreparePushLogout: { _ in pushLogouts += 1 }
         )
         relaunched.activateAccountSurface()
         do {
@@ -2406,7 +2464,7 @@ final class MobileOnboardingTests: XCTestCase {
                 defaults: makeDefaults(),
                 transports: [first] + later,
                 onOpen: { runtime = $0 },
-                onPreparePushLogout: { pushLogouts += 1 },
+                onPreparePushLogout: { _ in pushLogouts += 1 },
                 onReconcileInstancePush: { live, accountID in
                     reconciles.append((live, accountID))
                     guard let weakCoordinator, let runtime else { return }
@@ -2486,7 +2544,7 @@ final class MobileOnboardingTests: XCTestCase {
             let coordinator = makeCoordinator(
                 defaults: defaults,
                 transports: [first] + owing,
-                onPreparePushLogout: { pushLogouts += 1 },
+                onPreparePushLogout: { _ in pushLogouts += 1 },
                 onReconcileInstancePush: { live, _ in reconciles.append(live) }
             )
             coordinator.activateAccountSurface()
@@ -2509,7 +2567,7 @@ final class MobileOnboardingTests: XCTestCase {
                 let relaunched = makeCoordinator(
                     defaults: defaults,
                     transports: relaunch,
-                    onPreparePushLogout: { pushLogouts += 1 },
+                    onPreparePushLogout: { _ in pushLogouts += 1 },
                     onReconcileInstancePush: { live, _ in reconciles.append(live) }
                 )
                 relaunched.activateAccountSurface()
@@ -2555,7 +2613,7 @@ final class MobileOnboardingTests: XCTestCase {
             let updated = makeCoordinator(
                 defaults: defaults,
                 transports: [owing, signingIn] + (0..<3).map { _ in FakeMobileAuthTransport() },
-                onPreparePushLogout: { pushLogouts += 1 }
+                onPreparePushLogout: { _ in pushLogouts += 1 }
             )
             updated.activateAccountSurface()
             let answer7 = try await updated.bootstrap()
@@ -2592,7 +2650,7 @@ final class MobileOnboardingTests: XCTestCase {
         let coordinator = makeCoordinator(
             defaults: makeDefaults(),
             transports: transports,
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 cleanups += 1
                 if cleanups == 1 {
                     oldCleanup.fulfill()
@@ -2674,7 +2732,7 @@ final class MobileOnboardingTests: XCTestCase {
                 FakeMobileAuthTransport(),
             ],
             onOpen: { runtime = $0 },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 duringPushLogout.append(coordinator.isSelectedRuntime(runtime!))
             }
         )
@@ -3149,7 +3207,7 @@ final class MobileOnboardingTests: XCTestCase {
         let other = makeCoordinator(
             defaults: defaults,
             transports: [otherTransport, FakeMobileAuthTransport()],
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushLogoutCalls += 1
             }
         )
@@ -3170,7 +3228,7 @@ final class MobileOnboardingTests: XCTestCase {
         let coordinator = makeCoordinator(
             defaults: defaults,
             transports: [transport, FakeMobileAuthTransport()],
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushLogoutCalls += 1
             }
         )
@@ -3196,7 +3254,7 @@ final class MobileOnboardingTests: XCTestCase {
         let coordinator = makeCoordinator(
             defaults: defaults,
             transports: [transport, FakeMobileAuthTransport()],
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushLogoutCalls += 1
             }
         )
@@ -3532,7 +3590,7 @@ final class MobileOnboardingTests: XCTestCase {
                         + (0..<4).map { _ in FakeMobileAuthTransport() },
                     onCreateTransport: { created += 1 },
                     onOpen: { opened = $0 },
-                    onPreparePushLogout: {
+                    onPreparePushLogout: { _ in
                         cleanupStarted.fulfill()
                         await self.fulfillment(of: [allowCleanup], timeout: 30)
                     }
@@ -3615,7 +3673,7 @@ final class MobileOnboardingTests: XCTestCase {
             let coordinator = makeCoordinator(
                 defaults: makeDefaults(),
                 transports: [first, refreshTransport, FakeMobileAuthTransport()],
-                onPreparePushLogout: {
+                onPreparePushLogout: { _ in
                     cleanupStarted.fulfill()
                     await self.fulfillment(of: [allowCleanup], timeout: 30)
                 }
@@ -3668,7 +3726,7 @@ final class MobileOnboardingTests: XCTestCase {
                 defaults: makeDefaults(),
                 transports: [original, replacement, FakeMobileAuthTransport()],
                 onCreateTransport: { created += 1 },
-                onPreparePushLogout: {
+                onPreparePushLogout: { _ in
                     started.fulfill()
                     await self.fulfillment(of: [release], timeout: 30)
                 }
@@ -3822,7 +3880,7 @@ final class MobileOnboardingTests: XCTestCase {
                 let coordinator = makeCoordinator(
                     defaults: defaults, websiteDataStore: store,
                     transports: [first, fetch, replacement, FakeMobileAuthTransport()],
-                    onPreparePushLogout: {
+                    onPreparePushLogout: { _ in
                         cleanup.fulfill()
                         await self.fulfillment(of: [releaseCleanup], timeout: 30)
                     }
@@ -3882,7 +3940,7 @@ final class MobileOnboardingTests: XCTestCase {
             defaults: makeDefaults(),
             transports: [initial, oldRefresh, replacement, newRefresh]
                 + (0..<3).map { _ in FakeMobileAuthTransport() },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 cleanups += 1
                 if cleanups == 1 {
                     oldCleanup.fulfill()
@@ -3946,7 +4004,7 @@ final class MobileOnboardingTests: XCTestCase {
                     transports: [first, refresh, replacement, FakeMobileAuthTransport()],
                     onCreateTransport: { created += 1 },
                     onOpen: { runtime = $0 },
-                    onPreparePushLogout: {
+                    onPreparePushLogout: { _ in
                         pushLogoutCalls += 1
                         guard let callbackCoordinator else {
                             return XCTFail("Missing push logout coordinator: \(name)")
@@ -4800,7 +4858,7 @@ final class MobileOnboardingTests: XCTestCase {
             defaults: defaults,
             websiteDataStore: store,
             transports: [transport, replacement],
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushLogoutCalls += 1
             }
         )
@@ -5355,7 +5413,7 @@ final class MobileOnboardingTests: XCTestCase {
                     guard forward else { return }
                     if case .authenticated = event { authentications += 1 }
                     health.coordinator.accountEvent(event)
-                }, onPreparePushLogout: {
+                }, onPreparePushLogout: { _ in
                     cleanups += 1
                     if cleanups == 1 {
                         started.fulfill()
@@ -5457,7 +5515,7 @@ final class MobileOnboardingTests: XCTestCase {
             onHealthAccountEvent: { event in
                 if case .signedOut = event { transitionEvents.append("health_revoked") }
             },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 transitionEvents.append("push_cleanup_started")
                 cleanupStarted.fulfill()
                 await self.fulfillment(of: [releaseCleanup], timeout: 30)
@@ -5503,7 +5561,7 @@ final class MobileOnboardingTests: XCTestCase {
                 return []
             },
             onDetachActiveOwner: { false },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushCleanupCalls += 1
                 cleanupStarted.fulfill()
                 await self.fulfillment(of: [releaseCleanup], timeout: 30)
@@ -5705,7 +5763,7 @@ final class MobileOnboardingTests: XCTestCase {
                 detachCount += 1
                 return true
             },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 cleanupStarted.fulfill()
                 await self.fulfillment(of: [releaseCleanup], timeout: 30)
             }
@@ -5746,7 +5804,7 @@ final class MobileOnboardingTests: XCTestCase {
         onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
-        onPreparePushLogout: @escaping @MainActor () async -> Void = {},
+        onPreparePushLogout: @escaping @MainActor (PushRevokeReason) async -> Void = { _ in },
         onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in }
     ) -> MobileSessionCoordinator {
         var queue = transports

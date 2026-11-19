@@ -494,6 +494,12 @@ final class NativePushCoordinator {
         }
     }
 
+    /// The single revoke, with its reason as the one query parameter.
+    private static func revokePath(kid: String, reason: String?) -> String {
+        let reason = reason.flatMap(PushRevokeReason.init(rawValue:)) ?? .unspecified
+        return "/api/push/apns/registrations/\(kid)?reason=\(reason.rawValue)"
+    }
+
     func unsubscribe(
         instanceOrigin: String
     ) async throws -> NativePushRevokeOutcome {
@@ -540,13 +546,17 @@ final class NativePushCoordinator {
             vapidKeyHash: record.vapidKeyHash,
             state: .retiring,
             pendingRevoke: true,
-            replacementRegistrationIDs: []
+            replacementRegistrationIDs: [],
+            // A retry of an earlier pending revoke keeps its first reason.
+            revokeReason: record.pendingRevoke
+                ? record.revokeReason
+                : PushRevokeReason.notificationsOff.rawValue
         )
         try keychain.saveRecord(pendingRecord)
         do {
             let response = try await request(
                 method: "DELETE",
-                path: "/api/push/apns/registrations/\(pendingRecord.kid)",
+                path: Self.revokePath(kid: pendingRecord.kid, reason: pendingRecord.revokeReason),
                 installation: installation,
                 body: nil
             )
@@ -618,7 +628,8 @@ final class NativePushCoordinator {
                 vapidKeyHash: record.vapidKeyHash,
                 state: .retiring,
                 pendingRevoke: true,
-                replacementRegistrationIDs: []
+                replacementRegistrationIDs: [],
+                revokeReason: PushRevokeReason.instanceRemoved.rawValue
             ))
         }
         // Also retries revokes an earlier pass left pending.
@@ -662,15 +673,22 @@ final class NativePushCoordinator {
         resumeTokenWaiters(with: NativePushError.unavailable)
     }
 
-    func prepareForLogout(throughBindGeneration: Int64) async {
+    func prepareForLogout(
+        throughBindGeneration: Int64,
+        reason: PushRevokeReason
+    ) async {
         _ = try? await enqueueMutation {
             await self.prepareForLogoutNow(
-                throughBindGeneration: throughBindGeneration
+                throughBindGeneration: throughBindGeneration,
+                reason: reason
             )
         }
     }
 
-    private func prepareForLogoutNow(throughBindGeneration: Int64) async {
+    private func prepareForLogoutNow(
+        throughBindGeneration: Int64,
+        reason: PushRevokeReason
+    ) async {
         guard !isFrozen else { return }
         isFrozen = true
         guard var installation = try? loadOrCreateInstallation() else {
@@ -685,6 +703,7 @@ final class NativePushCoordinator {
             return
         }
         installation.pendingBulkRevokeThroughGeneration = throughBindGeneration
+        installation.pendingBulkRevokeReason = reason.rawValue
         try? keychain.saveInstallation(installation)
         advanceAccountGeneration()
         let notificationKids = (try? keychain.listRecords())
@@ -701,7 +720,8 @@ final class NativePushCoordinator {
             )) == true
         installation.accountID = nil
         zeroAccountKeys(
-            throughBindGeneration: throughBindGeneration
+            throughBindGeneration: throughBindGeneration,
+            reason: reason
         )
         await Self.removeNotifications(
             forKids: notificationKids,
@@ -719,14 +739,15 @@ final class NativePushCoordinator {
         do {
             try await sendPendingBulkRevoke(
                 installation: installation,
-                throughBindGeneration: throughBindGeneration
+                throughBindGeneration: throughBindGeneration,
+                reason: reason.rawValue
             )
         } catch {
             // The persisted bulk revoke remains for the next execution opportunity.
         }
     }
 
-    func prepareForLogout() async {
+    func prepareForLogout(reason: PushRevokeReason) async {
         _ = try? await enqueueMutation {
             guard let installation = try? self.loadOrCreateInstallation(),
                   installation.bindGeneration > 0
@@ -736,7 +757,8 @@ final class NativePushCoordinator {
                 return
             }
             await self.prepareForLogoutNow(
-                throughBindGeneration: installation.bindGeneration
+                throughBindGeneration: installation.bindGeneration,
+                reason: reason
             )
         }
     }
@@ -916,7 +938,7 @@ final class NativePushCoordinator {
             do {
                 let response = try await request(
                     method: "DELETE",
-                    path: "/api/push/apns/registrations/\(record.kid)",
+                    path: Self.revokePath(kid: record.kid, reason: record.revokeReason),
                     installation: installation,
                     body: nil
                 )
@@ -1293,6 +1315,7 @@ final class NativePushCoordinator {
                 installation: installation,
                 body: [
                     "through_bind_generation": orphan.throughBindGeneration,
+                    "reason": PushRevokeReason.reinstalled.rawValue,
                 ]
             )
             if (200..<300).contains(response.statusCode)
@@ -1324,19 +1347,25 @@ final class NativePushCoordinator {
         )
         try await sendPendingBulkRevoke(
             installation: installation,
-            throughBindGeneration: through
+            throughBindGeneration: through,
+            reason: installation.pendingBulkRevokeReason
         )
     }
 
     private func sendPendingBulkRevoke(
         installation: PushInstallationState,
-        throughBindGeneration: Int64
+        throughBindGeneration: Int64,
+        reason: String?
     ) async throws {
+        let reason = reason.flatMap(PushRevokeReason.init(rawValue:)) ?? .unspecified
         let response = try await request(
             method: "POST",
             path: "/api/push/apns/installations/\(installation.installationID.uuidString)/revoke",
             installation: installation,
-            body: ["through_bind_generation": throughBindGeneration]
+            body: [
+                "through_bind_generation": throughBindGeneration,
+                "reason": reason.rawValue,
+            ]
         )
         guard (200..<300).contains(response.statusCode) else {
             throw Self.managementError(response)
@@ -1346,6 +1375,7 @@ final class NativePushCoordinator {
             == throughBindGeneration
         {
             current.pendingBulkRevokeThroughGeneration = nil
+            current.pendingBulkRevokeReason = nil
             try keychain.saveInstallation(current)
         }
         for record in try keychain.listRecords()
@@ -1355,7 +1385,10 @@ final class NativePushCoordinator {
         }
     }
 
-    private func zeroAccountKeys(throughBindGeneration: Int64) {
+    private func zeroAccountKeys(
+        throughBindGeneration: Int64,
+        reason: PushRevokeReason
+    ) {
         guard let records = try? keychain.listRecords() else {
             return
         }
@@ -1376,7 +1409,11 @@ final class NativePushCoordinator {
                 vapidKeyHash: record.vapidKeyHash,
                 state: state,
                 pendingRevoke: pendingRevoke,
-                replacementRegistrationIDs: record.replacementRegistrationIDs
+                replacementRegistrationIDs: record.replacementRegistrationIDs,
+                // One already pending keeps its own first reason.
+                revokeReason: record.pendingRevoke
+                    ? record.revokeReason
+                    : (pendingRevoke ? reason.rawValue : nil)
             )
             try? keychain.saveRecord(cleared)
         }

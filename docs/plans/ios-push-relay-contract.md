@@ -195,6 +195,7 @@ installation ID begins again at generation `1`.
 | `vapid_key_sha256` | 64-character lowercase hex | SHA-256 of the decoded 65-byte uncompressed P-256 VAPID public key. |
 | `created_at` | UTC timestamp | Write once. |
 | `revoked_at` | Nullable UTC timestamp | Write once; the only transition is active to revoked. |
+| `revoke_reason` | Nullable text enum | Why it was revoked (section 5.4.1), written once with `revoked_at`; null when none was given. Diagnostic only. |
 
 A revoked row is never reactivated. Its endpoint continues to return `410`.
 The relay retains rows for Phase 1; automatic installation or registration
@@ -671,6 +672,38 @@ Both routes may return `401 installation_credential_required` or
 also returns `400 invalid_bind_generation` or `invalid_json`, `413
 request_too_large`, and `409 stale_generation` using the current-generation
 shape from section 5.3.
+
+#### 5.4.1 Revoke reasons
+
+So a "my notifications stopped" report can be traced, the App says why it
+revokes, in the request it already makes: the single revoke as one query
+parameter (`DELETE …/registrations/<registration_id>?reason=<reason>`), the
+bulk revoke as `"reason": "<reason>"` beside `through_bind_generation`. It is
+a closed enum, never free text, and adds no identifier or request:
+
+| Reason | App call site |
+| --- | --- |
+| `signed_out` | The person signs out in the App (account logout). |
+| `session_expired` | avibe.bot answers the session read `401` (refresh, cold start, or a lapsed first factor). |
+| `account_changed` | A different account signed in (session read, cold start, or a second factor passed for another account). |
+| `instance_removed` | The instance left the account's list (`revokeRegistrations(outside:)`). |
+| `notifications_off` | The instance page turned notifications off (`push.unsubscribe`). |
+| `reinstalled` | The bulk revoke of an installation an earlier install of the App left (orphaned). |
+| `unspecified` | A revoke staged before reasons existed, retried; never a guess. |
+
+The relay itself records `replaced` when a create's `replaces_registration_ids`
+revokes a row and `rebound` when a newer account bind revokes older
+generations; the App never sends those.
+
+The field is optional: an App from before reasons omits it, and the routes
+behave exactly as before, recording null. Any other value, a repeated query
+parameter, a non-string, or a relay-only value is recorded as `unspecified`
+and the revoke proceeds: once the body is accepted, the reason is diagnostic
+and never fails or blocks a revoke. A body the relay rejects as a whole keeps
+its existing answer (`400 invalid_json`, `413 request_too_large`). The reason is written once with `revoked_at`; a retry, or a later
+bulk revoke, never changes a row's first reason, and revoke semantics and
+idempotency are unchanged. Each accepted revoke logs one structured line with
+the scope (`registration` or `installation`) and the reason only.
 
 ### 5.5 Deliver encrypted Web Push
 
