@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -2947,18 +2948,30 @@ class ManagedWatchService:
         A waiter that keeps returning "still waiting" while its own check is wrong is
         silent for hours (11-18: five hours "waiting on Apple"). Carried by the retry
         commit it already makes: no timer, and no extra run of the check. Both facts
-        are durable, so a store retry or a supervisor restart neither loses the run of
-        retries nor says it twice; the run starts when its first retrying cycle did.
+        are durable and belong to the activation (``watch_lifetime_started_at``) that
+        ran the check: a store retry or a supervisor restart neither loses nor repeats
+        them, and a stale cycle cannot lend them to a newer activation. The notice has
+        a stable id per activation, so a split store that lost it re-sends that one.
         """
         metadata = watch.metadata or {}
-        since = str(metadata.get(RETRYING_SINCE_METADATA_KEY) or "") or cycle_started_at
-        extras: dict[str, Any] = {"metadata_updates": {RETRYING_SINCE_METADATA_KEY: since}}
+        activation = str(metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
+        recorded = metadata.get(RETRYING_SINCE_METADATA_KEY)
+        since = (
+            str(recorded.get("since") or "")
+            if isinstance(recorded, dict) and recorded.get("activation") == activation
+            else ""
+        ) or cycle_started_at
+        extras: dict[str, Any] = {
+            "metadata_updates": {RETRYING_SINCE_METADATA_KEY: {"activation": activation, "since": since}},
+        }
         try:
             elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
         except ValueError:
             return extras
-        activation = str(metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
-        if elapsed < WATCH_RETRY_NOTICE_SECONDS or metadata.get(RETRY_NOTICE_ACTIVATION_METADATA_KEY) == activation:
+        notice_id = "wrn" + hashlib.sha256(f"{watch.id}\0{activation}".encode()).hexdigest()[:9]
+        if elapsed < WATCH_RETRY_NOTICE_SECONDS:
+            return extras
+        if metadata.get(RETRY_NOTICE_ACTIVATION_METADATA_KEY) == activation and self.request_store.get_run(notice_id):
             return extras
         extras["metadata_updates"][RETRY_NOTICE_ACTIVATION_METADATA_KEY] = activation
         extras.update(
@@ -2967,6 +2980,7 @@ class ManagedWatchService:
                 "harness.watch.retryingNotice", id=watch.id, elapsed=self._elapsed_text(elapsed), code=exit_code,
             ),
             follow_up_fence=False,
+            request_id=notice_id,
         )
         return extras
 
@@ -3085,6 +3099,7 @@ class ManagedWatchService:
         prefix: Optional[str] = None,
         body: Optional[str] = None,
         follow_up_fence: bool = True,
+        request_id: Optional[str] = None,
     ) -> bool:
         """Record a cycle's outcome and queue the hook it authorises, as ONE decision.
 
@@ -3123,6 +3138,8 @@ class ManagedWatchService:
             prefix=prefix,
             body=body,
         )
+        if request is not None and request_id:
+            request.id = request_id
         return self._persist_cycle_result(
             watch,
             request=request,

@@ -1981,6 +1981,14 @@ def _job_watch_id(conn: Any, job_id: Any) -> Optional[str]:
     return str(existing) if existing is not None else None
 
 
+def _not_a_retrying_notice():
+    """A Watch's retrying notice informs; it fences neither its next cycle nor its
+    next report, read side or write side (#4015 review)."""
+    return func.coalesce(
+        func.json_extract(agent_runs.c.metadata_json, "$.watch_hook_outcome"), ""
+    ) != WATCH_HOOK_OUTCOME_RETRYING
+
+
 def watch_metadata_after_resume(
     metadata: dict[str, Any],
     *,
@@ -4076,6 +4084,7 @@ class SQLiteBackgroundTaskStore:
                 select(agent_runs.c.id)
                 .where(agent_runs.c.definition_id == values["id"])
                 .where(agent_runs.c.run_type == "watch")
+                .where(_not_a_retrying_notice())
                 .where(
                     agent_runs.c.status.in_(
                         _status_query_values("queued")
@@ -5318,8 +5327,7 @@ class SQLiteBackgroundTaskStore:
                 .where(agent_runs.c.definition_id == definition_id)
                 .where(agent_runs.c.run_type == "watch")
                 # A retrying notice informs; it is not a follow-up the next cycle waits on.
-                .where(func.coalesce(func.json_extract(agent_runs.c.metadata_json, "$.watch_hook_outcome"), "")
-                       != WATCH_HOOK_OUTCOME_RETRYING)
+                .where(_not_a_retrying_notice())
                 .where(
                     agent_runs.c.status.in_(
                         _status_query_values("queued")
