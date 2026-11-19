@@ -2342,11 +2342,14 @@ final class DirectPathAppTests: XCTestCase {
                 "\(stage)"
             )
         }
-        // An unmarked page stays covered (the gate).
-        XCTAssertEqual(
-            RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true).cachedKeepsShell,
-            false
+        // Nothing moved (a blocked download or back/forward from the page):
+        // the page stays, the open keeps waiting.
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .cancelled, destination: .instance),
+            attemptID: attempt.id,
+            runtime: runtime
         )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive)
 
         timing.advance(by: .seconds(8))
         XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
@@ -2412,22 +2415,97 @@ final class DirectPathAppTests: XCTestCase {
     func testAMarkedPageFromAnotherStoreIsNeverUsed() async throws {
         let app = try await makeApp(directTransport: nil)
         let runtime = try await select("instance-1", in: app)
+        defer { app.runtimePageCache.removeAll() }
         let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
+        let page = RuntimeCachedPage(
+            url: runtime.instance.url,
+            headers: ["Content-Type": "text/html"],
+            body: Data(#"<meta name="avibe-cached-shell" content="1" />"#.utf8),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+        // The same account and origin, in another store's directory.
         let otherStore = RuntimePageCache(directory: RuntimePageCache.root
             .appendingPathComponent(UUID().uuidString, isDirectory: true))
         defer { otherStore.removeAll() }
-        otherStore.store(
-            RuntimeCachedPage(
-                url: runtime.instance.url,
-                headers: ["Content-Type": "text/html"],
-                body: Data(#"<meta name="avibe-cached-shell" content="1" />"#.utf8),
-                capturedAt: Date(),
-                keepsShellUnreachable: true
-            ),
-            accountID: "account-1",
-            origin: origin
-        )
-        XCTAssertNil(try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).load())
+        otherStore.store(page, accountID: runtime.account.id, origin: origin)
+        XCTAssertEqual(otherStore.page(accountID: runtime.account.id, origin: origin), page)
+        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: runtime))
+        XCTAssertNil(access.load())
+        // The runtime's own store reads it.
+        access.store(page)
+        XCTAssertEqual(access.load(), page)
+    }
+
+    /// A cold start that opened first and shows a marked cached page,
+    /// uncovered: avibe.bot then listing the instance unavailable (asleep,
+    /// offline) leaves the page; the open ends in the "can't reach" banner.
+    /// A covered page's open is ended, as before.
+    @MainActor
+    func testAnUncoveredCachedPageStaysWhenAvibeBotListsTheInstanceUnavailable() async throws {
+        let unavailable = LocalHTTPResponse.json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-1","name":"One","host":"instance-one.example",
+             "url":"https://instance-one.example","relationship":"owner",
+             "owner_email":"max@example.com","available":false}]}
+            """)
+        for marked in [false, true] {
+            let first = try await makeApp(directTransport: nil)
+            _ = try await select("instance-1", in: first)
+            let defaults = try XCTUnwrap(appDefaults)
+
+            let session = SessionAnswerOverride()
+            let started = FixtureEvent(description: "session read, marked: \(marked)")
+            let release = DispatchSemaphore(value: 0)
+            session.hold(unavailable, started: started, release: release)
+            let next = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { session.response },
+                reusingDefaults: defaults
+            )
+            defer { next.runtimePageCache.removeAll() }
+            await fulfillment(
+                of: [started.expectation],
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
+            )
+            guard case .browser(let opened) = next.route, let attempt = next.runtimeOpenAttempt else {
+                release.signal()
+                return XCTFail("The instance did not open first (marked: \(marked))")
+            }
+            next.handleRuntimeNavigation(
+                RuntimeNavigationEvent(
+                    stage: .finished, destination: .instance,
+                    fromCache: true, cachedKeepsShell: marked
+                ),
+                attemptID: attempt.id,
+                runtime: opened
+            )
+            XCTAssertEqual(
+                next.runtimeOpenAttempt?.phase,
+                marked ? .showingCachedLive : .showingCached,
+                "marked: \(marked)"
+            )
+
+            release.signal()
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                next.mobileSessionCoordinator.currentInstances
+                    .first { $0.id == "instance-1" }?.available == false
+            }
+            if marked {
+                // The check has answered; nothing ends the page after it.
+                let clock = ContinuousClock()
+                let quiet = clock.now.advanced(by: .seconds(1))
+                while clock.now < quiet {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                XCTAssertEqual(next.route, .browser(opened))
+                XCTAssertEqual(next.runtimeOpenAttempt?.phase, .showingCachedLive)
+            } else {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    next.route == .onboarding(.instances)
+                }
+            }
+        }
     }
 
     /// An account's pages are removed when it signs out.

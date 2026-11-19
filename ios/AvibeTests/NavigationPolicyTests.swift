@@ -5167,4 +5167,53 @@ extension NavigationPolicyTests {
         XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache })
     }
 
+
+    /// A marked page that had no session to keep falls to the Web UI's setup
+    /// fallback while the instance is unreachable, and would never leave it:
+    /// the App loads the instance live instead of waiting there uncovered.
+    @MainActor
+    func testAMarkedCachedPageAtTheSetupFallbackLoadsLive() async throws {
+        let documents = LockedCounter()
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session":
+                return .status(530)
+            case "/":
+                _ = documents.next()
+                return .html("<!doctype html><title>live</title>")
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let page = RuntimeCachedPage(
+            url: origin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /></head><script>history.replaceState(null, '', '/setup')</script>"#.utf8),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+        var connected = 0
+        var events: [RuntimeNavigationEvent] = []
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            runtimeNavigationChanged: { events.append($0) },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+            cachedPageConnected: { connected += 1 },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+
+        try await waitUntil { documents.count == 1 }
+        XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache && $0.cachedKeepsShell })
+        XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache })
+        XCTAssertEqual(connected, 0)
+    }
+
 }

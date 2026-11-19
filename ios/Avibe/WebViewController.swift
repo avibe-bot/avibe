@@ -1106,58 +1106,39 @@ final class WebViewController: UIViewController {
     /// instance as before. The page stays covered throughout.
     private func probeCachedPage() {
         cachedPageProbe?.cancel()
-        guard let webView = retainedWebView else { return }
+        guard retainedWebView != nil else { return }
         // A page whose bytes declare that they keep their shell while the
         // instance cannot be reached is on screen uncovered: its instance is
         // asked until it answers, and the page itself waits out an outage.
         // Any other cached page is covered and asked once.
         let keepsShell = shownCachedPage?.keepsShell == true
-        cachedPageProbe = Task { @MainActor [weak self, weak webView] in
-            while true {
-                guard let self, let webView, self.cachedNavigation != nil else { return }
-                // 1: the instance answered for a signed-in reader. 2: it
-                // answered that sign-in is needed. 0: no answer.
-                let answer = try? await webView.callAsyncJavaScript(
-                    """
-                    // Under the cover nothing the user does can move the
-                    // page: a moved path is the Web UI's own redirect (for
-                    // example to setup after its session read failed). An
-                    // uncovered page is the user's to move.
-                    if (!keepsShell && location.pathname !== '/') return 0;
-                    try {
-                      const response = await fetch('/api/session', {
-                        cache: 'no-store', credentials: 'same-origin'
-                      });
-                      if (response.status === 401 || response.status === 403) return 2;
-                      if (!response.ok) return 0;
-                      const session = await response.json().catch(() => null);
-                      if (session && session.authenticated === false) return 2;
-                      return 1;
-                    } catch (error) {
-                      return 0;
-                    }
-                    """,
-                    arguments: ["keepsShell": keepsShell],
-                    contentWorld: Self.pageCacheWorld
-                ) as? Int
-                guard !Task.isCancelled, self.cachedNavigation != nil else { return }
-                switch answer ?? 0 {
-                case 1:
-                    self.cachedPageConnected()
-                    self.checkCachedPageIsCurrent(in: webView)
-                    return
-                case 0 where keepsShell:
-                    // Not reachable yet: the page stays; ask again.
-                    try? await Task.sleep(for: .seconds(3))
+        cachedPageProbe = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let answer = await self?.askCachedPageInstance(keepsShell: keepsShell)
+                guard let answer, !Task.isCancelled else { return }
+                if answer == 0, keepsShell {
+                    // Not reachable yet: the page stays; ask again. Nothing
+                    // is held across the wait.
+                    do { try await Task.sleep(for: .seconds(3)) } catch { return }
                     continue
+                }
+                guard let self, self.cachedNavigation != nil else { return }
+                switch answer {
+                case 1:
+                    if let webView = self.retainedWebView {
+                        self.cachedPageConnected()
+                        self.checkCachedPageIsCurrent(in: webView)
+                    }
+                    return
                 default:
-                    // Sign-in needed, or (covered) no answer: a live load,
-                    // through the direct-path load gate as every load the
-                    // shell starts. A covered Web UI cannot wait out an
-                    // unreachable instance (its own session read would send
-                    // it to setup), so it is used only when its instance
-                    // answers at once; otherwise the open goes on as before
-                    // this cache existed.
+                    // Sign-in needed, the Web UI's own setup fallback, or
+                    // (covered) no answer: a live load, through the
+                    // direct-path load gate as every load the shell starts.
+                    // A covered Web UI cannot wait out an unreachable
+                    // instance (its own session read would send it to
+                    // setup), so it is used only when its instance answers
+                    // at once; otherwise the open goes on as before this
+                    // cache existed.
                     self.cachedNavigation = nil
                     self.hasLoadedLive = true
                     self.runtimeNavigationChanged(
@@ -1168,6 +1149,43 @@ final class WebViewController: UIViewController {
                 }
             }
         }
+    }
+
+    /// One question to the instance from the cached page. 1: it answered
+    /// for a signed-in reader. 2: it answered that sign-in is needed. 3: the
+    /// page went to its setup fallback (it had no session to keep). 0: no
+    /// answer. nil: the page is gone.
+    private func askCachedPageInstance(keepsShell: Bool) async -> Int? {
+        guard cachedNavigation != nil, let webView = retainedWebView else { return nil }
+        let answer = try? await webView.callAsyncJavaScript(
+            """
+            // Under the cover nothing the user does can move the page: a
+            // moved path is the Web UI's own redirect (for example to setup
+            // after its session read failed). An uncovered page is the
+            // user's to move, except to the setup fallback, which a page
+            // without a session to keep falls to and never leaves.
+            if (keepsShell) {
+              if (location.pathname === '/setup') return 3;
+            } else if (location.pathname !== '/') {
+              return 0;
+            }
+            try {
+              const response = await fetch('/api/session', {
+                cache: 'no-store', credentials: 'same-origin'
+              });
+              if (response.status === 401 || response.status === 403) return 2;
+              if (!response.ok) return 0;
+              const session = await response.json().catch(() => null);
+              if (session && session.authenticated === false) return 2;
+              return 1;
+            } catch (error) {
+              return 0;
+            }
+            """,
+            arguments: ["keepsShell": keepsShell],
+            contentWorld: Self.pageCacheWorld
+        ) as? Int
+        return answer ?? 0
     }
 
     /// After a live load of the instance's root document: the page fetches
@@ -1565,6 +1583,7 @@ final class WebViewController: UIViewController {
         hasPendingAutoLoad = false
         cachedPageProbe?.cancel()
         cachedPageProbe = nil
+        cachedNavigation = nil
         primaryNavigationInProgress = false
         blockedBackForwardNavigation = false
         accountFallbackWorkItem?.cancel()

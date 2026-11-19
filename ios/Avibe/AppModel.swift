@@ -1357,7 +1357,11 @@ final class AppModel: ObservableObject {
             !listed.available,
             let attempt = runtimeOpenAttempt,
             attempt.runtime == runtime,
-            attempt.phase != .documentLoaded
+            attempt.phase != .documentLoaded,
+            // A page shown uncovered from the cache stays: its shell waits
+            // out the outage, and the open ends in the "can't reach" banner.
+            attempt.phase != .showingCachedLive,
+            attempt.phase != .cachedUnreachable
         else {
             return
         }
@@ -1859,8 +1863,12 @@ final class AppModel: ObservableObject {
                 attemptID: attemptID
             )
         case .cancelled:
+            // Nothing moved; a page on screen (live, or uncovered from the
+            // cache) stays as it is.
             guard attempt.phase != .documentLoaded,
-                  attempt.phase != .failed
+                  attempt.phase != .failed,
+                  attempt.phase != .showingCachedLive,
+                  attempt.phase != .cachedUnreachable
             else {
                 return
             }
