@@ -72,6 +72,7 @@ class EventLoopWatchdog:
         *,
         stall_seconds: float = STALL_SECONDS,
         poll_seconds: float = POLL_SECONDS,
+        census: Callable[[], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._loop = loop
@@ -91,6 +92,8 @@ class EventLoopWatchdog:
         self._gc_started_at: float | None = None
         self._gc_reports: deque[tuple[float, float, int, int, int, int, int, int, tuple[int, ...]]] = deque(maxlen=_MAX_GC_REPORTS)
         self._gc_callback = self._observe_gc
+        self._census = census
+        self._census_due = False
 
     def _observe_gc(self, phase: str, info: dict[str, int]) -> None:
         if phase == "start":
@@ -99,6 +102,8 @@ class EventLoopWatchdog:
             started_at, self._gc_started_at = self._gc_started_at, None
             if started_at is None:
                 return
+            if self._census is not None and info['generation'] == 2 and _active_requests == 0:
+                self._census_due = True  # scalar signal only; no object enumeration in a collector callback
             duration = self._monotonic() - started_at
             if duration > GC_SLOW_SECONDS:
                 self._gc_reports.append((
@@ -168,6 +173,11 @@ class EventLoopWatchdog:
                 if recovered:
                     logger.info("Event loop answered again after a %.1fs stall", answered_at - previous_silent_since)
                 self._report_gc()
+                if self._census_due and self._census is not None and not _active_requests:
+                    census, self._census = self._census, None
+                    self._census_due = False
+                    census()
+                    del census
             except Exception:
                 # Diagnostics must not end the watchdog or echo exception text,
                 # which can contain private filenames or values.
