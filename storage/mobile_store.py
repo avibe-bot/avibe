@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -83,9 +83,32 @@ def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+def mobile_store_path() -> Path:
+    return paths.get_state_dir() / "mobile" / "mobile.sqlite3"
+
+
+def has_paired_device() -> bool:
+    """Never initialize, migrate or acquire a writer lock for a scheduling hint."""
+    path = mobile_store_path()
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if path.parent.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return False
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=0.1)) as conn:
+        return conn.execute("SELECT 1 FROM devices WHERE revoked_at IS NULL LIMIT 1").fetchone() is not None
+
+
+def publish_pairing_changed() -> None:
+    from core.inbox_events import publish_definitions_updated
+
+    publish_definitions_updated(definition_type="mobile-health")
+
+
 class MobileStore:
     def __init__(self, path: Path | None = None):
-        self.path = path or paths.get_state_dir() / "mobile" / "mobile.sqlite3"
+        self.path = path or mobile_store_path()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.path.parent.is_symlink() or not self.path.parent.is_dir():
             raise MobileError("private_storage_unavailable", 503)
@@ -286,8 +309,9 @@ class MobileStore:
             conn.execute("UPDATE requests SET device_id=?,metrics=? WHERE id=?",
                          (device_id, _json(names), request["id"]))
             conn.execute("DELETE FROM pairings WHERE request_id=?", (request["id"],))
-            return {"device_id": device_id, "credential": credential,
-                    "instance": {"id": identity["id"], "name": identity["name"]}}
+        publish_pairing_changed()
+        return {"device_id": device_id, "credential": credential,
+                "instance": {"id": identity["id"], "name": identity["name"]}}
 
     @staticmethod
     def _revoke_device(conn, device_id: str, now: str):
@@ -320,6 +344,8 @@ class MobileStore:
                 conn.execute("UPDATE devices SET last_seen=? WHERE id=?", (now, row["id"]))
                 device = dict(row)
         if refusal:
+            if row is not None and not row["revoked_at"]:
+                publish_pairing_changed()
             raise refusal
         return device
 
@@ -575,6 +601,7 @@ class MobileStore:
                              (now,))
             conn.execute("DELETE FROM pairings")
             self._audit(conn, "health.revoke", caller=caller, session_id=session_id)
+        publish_pairing_changed()
         return {"purged": True}
 
     @staticmethod
@@ -594,8 +621,9 @@ class MobileStore:
         now = _now()
         with self.transaction() as conn:
             self._expire(conn, now)
-            for row in conn.execute("SELECT id FROM devices WHERE revoked_at IS NULL AND last_seen<=?",
-                                    (_after(now, days=-60),)).fetchall():
+            expired = conn.execute("SELECT id FROM devices WHERE revoked_at IS NULL AND last_seen<=?",
+                                   (_after(now, days=-60),)).fetchall()
+            for row in expired:
                 self._revoke_device(conn, row["id"], now)
             self._trim_days(conn, now)
             conn.execute("DELETE FROM pairings WHERE expires_at<=?", (now,))
@@ -604,6 +632,8 @@ class MobileStore:
             conn.execute("DELETE FROM requests WHERE ended_at<=?", (_after(now, days=-7),))
             conn.execute("DELETE FROM accesses WHERE at<=?", (_after(now, days=-90),))
             conn.execute("DELETE FROM push_attempts WHERE at<=?", (_after(now, hours=-1),))
+        if expired:
+            publish_pairing_changed()
 
     def status(self) -> dict:
         self.cleanup()

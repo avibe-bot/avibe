@@ -12351,23 +12351,45 @@ def test_hfr_477_consumed_terminal_outcome_belongs_to_the_consuming_run(
     assert task.id in {item["id"] for item in compact.items}
 
 
-def test_mobile_maintenance_survives_task_reconcile_and_uses_service_lifecycle(tmp_path: Path) -> None:
-    """Private mobile cleanup belongs to the controller's existing scheduler."""
+@pytest.mark.parametrize("initial", ["absent", "empty", "revoked", "paired"])
+def test_mobile_maintenance_follows_pairing_lifecycle(tmp_path: Path, monkeypatch, initial) -> None:
+    from core import inbox_events
+    from storage.mobile_store import MobileStore
+    from tests.test_mobile_health import pair_device
+
+    monkeypatch.setattr(inbox_events, "is_controller_process", lambda: True)
+    mobile_dir = paths.get_state_dir() / "mobile"
+    mobile = None if initial == "absent" else MobileStore()
+    if initial in {"paired", "revoked"}:
+        pair_device(mobile)
+        if initial == "revoked":
+            mobile.revoke()
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     service = ScheduledTaskService(controller=SimpleNamespace(platform_settings_managers={}), store=store)
     service.scheduler = _StubScheduler()
+    job_id = "mobile-health-maintenance"
 
     async def exercise():
         service.start()
-        job = service.scheduler.get_job("mobile-health-maintenance")
-        assert job is not None
-        service.reconcile_jobs()
-        assert service.scheduler.get_job(job.id) is job
-        # No mobile DB means no policy/network access and no callbacks to wake.
-        assert not (paths.get_state_dir() / "mobile" / "mobile.sqlite3").exists()
-        await job.func(*job.args)
-        assert not (paths.get_state_dir() / "mobile" / "mobile.sqlite3").exists()
-        await service.stop()
+        try:
+            assert (service.scheduler.get_job(job_id) is not None) == (initial == "paired")
+            if initial == "absent":
+                assert not mobile_dir.exists()
+            devices = mobile or MobileStore()
+            first, _ = await asyncio.to_thread(pair_device, devices, installation="other")
+            await asyncio.sleep(0)
+            job = service.scheduler.get_job(job_id)
+            assert job is not None
+            service.reconcile_jobs()
+            assert service.scheduler.get_job(job_id) is job
+            if initial == "paired":
+                await asyncio.to_thread(devices.revoke, device_id=first["device_id"])
+                assert service.scheduler.get_job(job_id) is job
+            await asyncio.to_thread(devices.revoke)
+            await asyncio.sleep(0)
+            assert service.scheduler.get_job(job_id) is None
+        finally:
+            await service.stop()
         assert service.scheduler.shutdown_calls == 1 and not service._running
 
     asyncio.run(exercise())

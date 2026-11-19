@@ -4309,6 +4309,7 @@ class ScheduledTaskService:
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
         self._notice_drain_task: Optional["asyncio.Task[Any]"] = None
+        self._mobile_subscription: int | None = None
         self._mobile_policy_check_at = 0.0
         self._job_signatures: Dict[str, tuple[Any, ...]] = {}
         # Logical Task id -> the physical APScheduler job generation. One-shot
@@ -5079,10 +5080,17 @@ class ScheduledTaskService:
         else:
             self._register_request_recovery()
         try:
-            self.scheduler.add_job(
-                self._mobile_maintenance, "interval", seconds=2, id="mobile-health-maintenance",
-                replace_existing=True, coalesce=True, max_instances=1, args=[],
-            )
+            from core.inbox_events import DEFINITIONS_UPDATED_EVENT, bus
+
+            loop = asyncio.get_running_loop()
+
+            def pairing_changed(event, data):
+                if event == DEFINITIONS_UPDATED_EVENT and data == {"definition_type": "mobile-health"}:
+                    loop.call_soon_threadsafe(self._reconcile_mobile_job)
+
+            # Subscribe before reading: a concurrent commit cannot fall between the two.
+            self._mobile_subscription = bus.subscribe_callback(pairing_changed)
+            self._reconcile_mobile_job()
             self.scheduler.start()
         except BaseException:
             self._begin_stop()
@@ -5102,6 +5110,27 @@ class ScheduledTaskService:
             self.audit_definition_bindings()
         except Exception as exc:
             logger.error("Harness definition binding audit failed: %s", exc, exc_info=True)
+
+    def _reconcile_mobile_job(self) -> None:
+        from storage.mobile_store import has_paired_device
+
+        if self._mobile_subscription is None:
+            return  # A hint queued before teardown.
+        try:
+            paired = has_paired_device()
+        except Exception:
+            logger.warning("mobile maintenance code=pairing_probe_failed", exc_info=True)
+            return
+        job_id = "mobile-health-maintenance"
+        job = self.scheduler.get_job(job_id)
+        if paired and job is None:
+            self._mobile_policy_check_at = 0.0
+            self.scheduler.add_job(
+                self._mobile_maintenance, "interval", seconds=2, id=job_id,
+                replace_existing=True, coalesce=True, max_instances=1, args=[],
+            )
+        elif not paired and job is not None:
+            self.scheduler.remove_job(job_id)
 
     async def _mobile_maintenance(self) -> None:
         from core.handlers.mobile_health import maintenance_pass
@@ -5561,6 +5590,11 @@ class ScheduledTaskService:
         cancel_reconcile: bool = True,
     ) -> asyncio.Task[None] | None:
         self._running = False
+        if self._mobile_subscription is not None:
+            from core.inbox_events import bus
+
+            bus.unsubscribe(self._mobile_subscription)
+            self._mobile_subscription = None
         request_recovery_stop = self._begin_runtime_work_unregistration()
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:

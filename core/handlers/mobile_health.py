@@ -7,7 +7,7 @@ import logging
 import time
 
 from core.mobile_health_contract import MobileError, PHONE_ERRORS, TERMINAL
-from storage.mobile_store import MobileStore
+from storage.mobile_store import MobileStore, mobile_store_path, publish_pairing_changed
 
 logger = logging.getLogger(__name__)
 
@@ -178,9 +178,9 @@ def deliver_callbacks(store: MobileStore, request_store) -> bool:
 
 
 def maintenance_pass(request_store, *, check_eligibility: bool = False) -> bool:
-    from config import paths
-    path = paths.get_state_dir() / "mobile" / "mobile.sqlite3"
+    path = mobile_store_path()
     if not path.exists():
+        publish_pairing_changed()  # Store removed outside the normal revoke flow.
         return False
     store = MobileStore(path)
     if check_eligibility:
