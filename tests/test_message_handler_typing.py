@@ -1440,6 +1440,76 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
 
+    async def test_session_on_a_retired_model_or_effort_moves_to_the_successor_once(self):
+        """A Session whose stored model or effort left its backend's Model Hub list carries on with its Agent's
+        default model and the nearest effort the model still offers, and says so once, instead of every message
+        being refused until someone switches it by hand. A Turn rerun after the restart that brought the new list
+        moves too; a row the user switched meanwhile (the move's compare-and-set misses) keeps its own values."""
+        from config.v2_config import ModelHubBackendModelConfig, ModelHubConfig
+
+        moved_model = (
+            "Model gpt-6-astra is no longer in the Codex model list, so this Session now uses gpt-5.4."
+        )
+        cases = (
+            # row, stored model, stored effort, resumed, CAS lands -> request model, effort, (model pair, effort pair), notice
+            ("run", "gpt-6-astra", "high", False, True, "gpt-5.4", "high", (("gpt-6-astra", "gpt-5.4"), None), moved_model),
+            ("web", "gpt-6-astra", "high", False, True, "gpt-5.4", "high", (("gpt-6-astra", "gpt-5.4"), None), moved_model),
+            ("run", "gpt-6-astra", "high", True, True, "gpt-5.4", "high", (("gpt-6-astra", "gpt-5.4"), None), moved_model),
+            (
+                "run", "gpt-5.4", "ultra", False, True, "gpt-5.4", "high", (None, ("ultra", "high")),
+                "Reasoning effort ultra is no longer offered for gpt-5.4, so this Session now uses high.",
+            ),
+            ("run", "gpt-6-astra", "high", False, False, "gpt-6-astra", "high", (("gpt-6-astra", "gpt-5.4"), None), None),
+            ("run", "gpt-5.4", "low", False, True, "gpt-5.4", "low", None, None),
+        )
+        for row_kind, stored_model, stored_effort, resumed, lands, model, effort, moved, notice in cases:
+            with self.subTest(row=row_kind, stored_model=stored_model, stored_effort=stored_effort, resumed=resumed, lands=lands):
+                hub = ModelHubConfig()
+                hub.agents["codex"].models = [
+                    ModelHubBackendModelConfig(id="gpt-5.4", reasoning_efforts=["low", "medium", "high", "xhigh"]),
+                ]
+                controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+                controller.model_hub_service = types.SimpleNamespace(store=types.SimpleNamespace(load=lambda: hub))
+                sessions_store = Mock()
+                sessions_store.is_message_in_processed_set.return_value = False
+                sessions_store.try_add_to_processed_set.return_value = True
+                sessions_store.succeed_retired_session_route = Mock(return_value=lands)
+                controller.settings_manager.sessions = SessionsFacade(sessions_store)
+                handler = MessageHandler(controller)
+                handler.set_session_handler(_StubSessionHandler())
+                row = {"agent_id": "agent-default", "agent_backend": "codex", "model": stored_model, "reasoning_effort": stored_effort}
+                payload = (
+                    {"agent_run_target": {"agent_session_id": "ses_wb", **row}}
+                    if row_kind == "run"
+                    else {"agent_session_target": {"id": "ses_wb", **row}}
+                )
+                if resumed:
+                    payload |= {
+                        "vibey_resume": True,
+                        "vibey_execution": {"model": stored_model, "reasoning_effort": stored_effort},
+                    }
+                context = MessageContext(
+                    user_id="U1", channel_id="ses_wb", message_id="m1", platform="avibe", platform_specific=payload,
+                )
+
+                await handler.handle_user_message(context, "hello")
+
+                _agent_name, request = controller.agent_service.requests[0]
+                self.assertEqual((request.vibe_agent_model, request.vibe_agent_reasoning_effort), (model, effort))
+                if moved is None:
+                    sessions_store.succeed_retired_session_route.assert_not_called()
+                else:
+                    sessions_store.succeed_retired_session_route.assert_called_once_with(
+                        "ses_wb",
+                        expected_route={"model": stored_model, "agent_id": "agent-default", "agent_backend": "codex"},
+                        model=moved[0],
+                        reasoning_effort=moved[1],
+                    )
+                notices = [item for item in controller.im_client.sent_messages if isinstance(item, tuple) and notice in item]
+                self.assertEqual(len(notices), 0 if notice is None else 1, controller.im_client.sent_messages)
+                if notice is None:
+                    self.assertFalse(any("no longer" in str(item) for item in controller.im_client.sent_messages))
+
     async def test_dispatch_records_what_the_session_inherits_apart_from_its_own_row(self):
         """A backend that follows its Session during a Turn resolves a setting the row stops naming to what the
         Session inherits. That is the Agent's default, never the row's own values, which the run target carries

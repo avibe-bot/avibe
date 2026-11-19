@@ -1256,6 +1256,10 @@
     }
   },
   "turn": {
+    "retiredRoute": {
+      "model": "Model {old} is no longer in the {backend} model list, so this Session now uses {new}.",
+      "effort": "Reasoning effort {old} is no longer offered for {model}, so this Session now uses {new}."
+    },
     "interrupted": {
       "backendRefresh": "⚠️ This turn was interrupted — its Agent runtime had to be replaced while it was still running, for example by a credential migration. Send the request again if the work still needs doing.",
       "backendDisabled": "⏹ This turn was stopped because {agent} was turned off. Turn it on again in Settings, then send the request again if the work still needs doing.",
