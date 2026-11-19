@@ -386,3 +386,35 @@ def test_a_retry_press_is_not_blocked_or_made_stale_by_parked_inputs(managers):
         # ...and the press still counts afterwards.
         assert admission_denial(conn, store.get_delivery(conn, retry["id"])) is None
         assert store.claimable_fifo_head(conn, "ses_fsm")["id"] == retry["id"]
+
+
+def test_the_stopped_runner_does_not_cancel_the_runs_it_carried_on(managers):
+    """The runner settles every Run its context names as ``canceled`` after a Stop
+    (``_settle_turn_owned_agent_runs``); a carried report's Run is not its to end."""
+    from storage.background import SQLiteBackgroundTaskStore
+    from types import SimpleNamespace
+
+    manager, _, engine, _, _ = managers
+    turn_id, ctx = asyncio.run(_activate(manager, text="long work"))
+    report = _merge(manager, "report")
+    with engine.begin() as conn:
+        initial = store.get_turn(conn, turn_id)["initial_delivery_id"]
+    _run(engine, "run-work", initial)
+    _run(engine, "run-report", report)
+    background = SQLiteBackgroundTaskStore(Path(engine.url.database))
+    settled = []
+
+    def settle(run_ids, settled_by, **_options):
+        settled.append(sorted(run_ids))
+        return []
+
+    manager.controller.scheduled_task_service = SimpleNamespace(settle_agent_runs_without_result=settle)
+    try:
+        with engine.begin() as conn:
+            _end(conn, turn_id, stopped=True)
+        ctx.platform_specific["turn_token"] = turn_id
+        ctx.platform_specific["accepted_agent_run_ids"] = ["run-work", "run-report"]
+        manager._settle_turn_owned_agent_runs(ctx, "stopped")
+    finally:
+        background.close()
+    assert settled == [["run-work"]]

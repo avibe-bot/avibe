@@ -2283,6 +2283,21 @@ def carry_accepted_inputs(
     return {"parked_run_ids": parked_run_ids, "exhausted_input_ids": exhausted_input_ids}
 
 
+def run_ids_carried_from(conn: Connection, run_ids: Iterable[str], turn_id: str) -> set[str]:
+    """The Runs whose inputs this Turn's end carried on: no longer this Turn's to settle."""
+    normalized = sorted({str(run_id) for run_id in run_ids if str(run_id or "").strip()})
+    if not normalized or not turn_id:
+        return set()
+    carried: set[str] = set()
+    for run_id, delivery_id in conn.execute(
+        select(agent_runs.c.id, agent_runs.c.delivery_id).where(agent_runs.c.id.in_(normalized))
+    ):
+        delivery = get_delivery(conn, str(delivery_id or "")) if delivery_id else None
+        if delivery is not None and (turn_carry(delivery) or {}).get("source_turn_id") == turn_id:
+            carried.add(str(run_id))
+    return carried
+
+
 def runs_carried_from_turn(
     conn: Connection, turn_id: str, run_rows: Iterable[Mapping[str, Any]], provenance: Mapping[str, Any],
 ) -> set[str]:

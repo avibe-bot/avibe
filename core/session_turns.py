@@ -1069,6 +1069,12 @@ class SessionTurnManager:
         """
 
         run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
+        turn_id = str((getattr(context, "platform_specific", None) or {}).get("turn_token") or "").strip()
+        if run_ids and turn_id and settled_by in SETTLEMENTS_WITHOUT_RESULT and self._durable_schema_available():
+            # A Stop's end carried the reports merged into the Turn on to the next
+            # one; their Runs go with them rather than ending ``canceled`` here.
+            with self._sqlite_engine().connect() as conn:
+                run_ids = set(run_ids) - delivery_store.run_ids_carried_from(conn, run_ids, turn_id)
         self._settle_agent_run_ids(run_ids, settled_by)
 
     def _reconcile_terminal_agent_runs(self) -> None:
