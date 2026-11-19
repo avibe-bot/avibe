@@ -457,6 +457,7 @@ def create_app(
                 if existing is not None and existing["session_id"] != session_id:
                     return "duplicate"
                 if existing is not None and existing["state"] != "reserved":
+                    resolved_carry = False
                     if execution_id:
                         run_owner = conn.execute(
                             select(
@@ -475,6 +476,7 @@ def create_app(
                                 message_deliveries.turn_carry(current) or {}
                             ).get("original_id") == existing["id"]:
                                 existing = current
+                                resolved_carry = True
                         if (
                             run_owner is not None
                             and normalize_run_status(run_owner["status"])
@@ -498,6 +500,7 @@ def create_app(
                                 )
                             if (
                                 legacy_send_now
+                                and not resolved_carry
                                 and existing_state == "queued"
                                 and existing.get("priority") == "p3"
                                 and message_deliveries.delivery_has_history_event(

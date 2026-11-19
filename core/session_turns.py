@@ -3654,11 +3654,9 @@ class SessionTurnManager:
                     saved = accepted_rows[0]
                     materialized = True
                     target_turn = delivery_store.get_turn(conn, target_turn_id)
-                    if (
-                        accepted_run_ids
-                        and target_turn is not None
-                        and target_turn["state"] == "terminal"
-                    ):
+                    # A receipt that lands after its Turn ended, with or without Runs:
+                    # it may have queued a carry or cleared the queue's fence (#4010).
+                    if target_turn is not None and target_turn["state"] == "terminal":
                         terminal_target = target_turn
                 if outcome_value == SteerOutcome.UNKNOWN.value:
                     unknown_rows = delivery_store.mark_attempt_receipt_batch(
@@ -3760,7 +3758,7 @@ class SessionTurnManager:
                 run_ids=accepted_run_ids,
                 context=context,
             )
-            if terminal_target is not None:
+            if terminal_target is not None and accepted_run_ids:
                 self._settle_agent_run_ids_from_terminal_turn(
                     accepted_run_ids,
                     terminal_target,

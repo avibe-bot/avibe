@@ -859,3 +859,38 @@ def test_resubmitting_a_carried_agent_run_reports_its_carry_not_a_duplicate(mana
         carry = store.list_queued(conn, "ses_fsm")[0]
         assert store.turn_carry(store.get_delivery(conn, carry["id"]))["original_id"] == report
         assert _run_delivery(conn, "run-r") == carry["id"]
+
+
+
+def test_a_late_receipt_without_runs_still_releases_the_queue_behind_it(managers):
+    """A person's steer accepted after its Turn ended carries nothing, but it was the
+    fence: work queued behind it must start without waiting for more input (#4010 review)."""
+    manager, other, engine, _, starts = managers
+
+    async def exercise():
+        turn_id, _ = await _activate(manager)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def accept(*_):
+            entered.set()
+            await release.wait()
+            return steer_result(SteerOutcome.ACCEPTED)
+
+        manager._steer = accept
+        receipt = asyncio.create_task(manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="my own steer"), context=_context(),
+        ))
+        await entered.wait()
+        with engine.begin() as conn:
+            store.enqueue_queued(conn, scope_id=None, session_id="ses_fsm", text="work behind the fence")
+        other._terminalize_durable_turn(turn_id, "completed", settled_by="terminal_result",
+                                        evidence_kind="terminal_result")
+        release.set()
+        await receipt
+        for _ in range(50):
+            if starts[-1][1] == "work behind the fence":
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(exercise())
+    assert [text for _, text in starts].count("work behind the fence") == 1

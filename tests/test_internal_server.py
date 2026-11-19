@@ -9327,7 +9327,8 @@ def test_a_delivery_outcome_projection_retries_when_another_writer_holds_sqlite(
     }
 
 
-def test_resubmitting_a_carried_agent_run_answers_with_its_carry(monkeypatch, tmp_path):
+@pytest.mark.parametrize("intent", ["queue", "send_now"])
+def test_resubmitting_a_carried_agent_run_answers_with_its_carry(monkeypatch, tmp_path, intent):
     """PR #4010: a failed or stopped Turn carried ``agent_run:R`` on. Replaying R's
     submission finds R's first Delivery by native identity, but R lives on in its carry;
     "duplicate" would let the executor settle R while the carry is still queued."""
@@ -9352,6 +9353,11 @@ def test_resubmitting_a_carried_agent_run_answers_with_its_carry(monkeypatch, tm
         report = _reserve_submission(
             conn, scope_id=scope_id, session_id=session_id, text="report", author="harness", source="harness",
             message_type="harness", native_message_id=f"agent_run:{run_id}",
+        )
+        # As production admission records it: a legacy send-now replay must not re-admit the carry.
+        report = message_deliveries.cas_delivery(
+            conn, report["id"], expected_version=report["version"], expected_states=("reserved",),
+            values={"state": "queued"}, history_event={"kind": "admission", "context": {}},
         )
         turn_id = message_deliveries.new_turn_id()
         message_deliveries.claim_start_batch(
@@ -9391,7 +9397,10 @@ def test_resubmitting_a_carried_agent_run_answers_with_its_carry(monkeypatch, tm
         user_id="workbench", channel_id=session_id, platform="avibe", message_id=f"agent_run:{run_id}",
         platform_specific={"task_trigger_kind": "agent_run", "task_execution_id": run_id},
     )
-    result = asyncio.run(controller.session_turn_gate.submit_scheduled(session_id, ctx, "report"))
+    kwargs = {"delivery_intent": "send_now"} if intent == "send_now" else {}
+    result = asyncio.run(controller.session_turn_gate.submit_scheduled(session_id, ctx, "report", **kwargs))
     assert result != "duplicate"
     assert result.delivery_owner_transferred is True
     assert result.delivery_status == "queued"
+    with engine.connect() as conn:
+        assert message_deliveries.get_delivery(conn, carry["id"])["state"] == "queued"
