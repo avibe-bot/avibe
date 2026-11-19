@@ -23,7 +23,7 @@ struct RuntimeCachedPage: Codable, Equatable {
 
     /// Whether the App may show this page uncovered before its instance
     /// answers.
-    var keepsShell: Bool { keepsShellUnreachable == true }
+    var keepsShell: Bool { false } // mutation: the stored marker is ignored
 
     func response() -> HTTPURLResponse? {
         HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)
