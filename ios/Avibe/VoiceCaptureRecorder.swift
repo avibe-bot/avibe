@@ -1,17 +1,17 @@
 import AVFoundation
 import Foundation
 
-/// The ways a take's audio session is set up, tried in order. A background
-/// start of a non-mixable session can be refused with cannotInterruptOthers
-/// (560557684, the owner's 33.1 press); the mixable one does not interrupt
-/// anyone, though a mixable background recording can be refused with
-/// cannotStartRecording (561145187) instead. Only a device can tell.
+/// How a take's audio session is set up.
 enum VoiceCaptureSessionCandidate: Int, CaseIterable, Hashable {
-    /// `.record`, mode `.default`, no options (non-mixable).
+    /// In front: `.record`, mode `.default`, no options (non-mixable).
     case exclusiveRecord = 1
-    /// `.playAndRecord`, mode `.default`, `.mixWithOthers` + `.duckOthers`
-    /// (mixable, other audio ducked; neither is allowed with `.record`).
-    case mixablePlayAndRecord = 2
+    /// In the background: `.playAndRecord`, mode `.default`, `.mixWithOthers`
+    /// and `.duckOthers`, as the first and only activation. Two projects
+    /// record from the background on an iPhone 17 this way, each press a
+    /// process the press launched (legato spikes/ios-keyboard/FINDINGS.md;
+    /// oliv ios/docs/TESTING.md); a non-mixable session there is refused
+    /// with cannotInterruptOthers.
+    case mixableBackground = 2
 }
 
 /// The audio session a take records in, in the two steps a failure is
@@ -40,7 +40,7 @@ struct SystemAudioSession: VoiceCaptureAudioSession {
         switch candidate {
         case .exclusiveRecord:
             try session.setCategory(.record, mode: .default, options: [])
-        case .mixablePlayAndRecord:
+        case .mixableBackground:
             try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .duckOthers])
         }
     }

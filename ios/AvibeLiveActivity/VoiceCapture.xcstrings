@@ -502,7 +502,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Recording. Long-press the Action Button again to send."
+            "value" : "Recording. Press and hold the side button again to send."
           }
         },
         "zh-Hans" : {
