@@ -47,6 +47,11 @@ own. A Session has none of these; a Bot has all three.
   change backend.
 - Removing the Bot role keeps its Session and directory, hidden everywhere;
   setting it again reconnects them.
+- Deleting a removed Bot's Agent ends the Bot: no Bot can reconnect to its
+  Session, so the owner's deletion (Web or `vibe agent remove`) then archives
+  it through the Session's own archive lifecycle (3.2.8), and one left over
+  from an earlier deletion can be archived like any other. It stays hidden.
+  The directory is kept, as it is someone's memory.
 - While an Agent is a Bot it cannot be archived, deleted, renamed, or moved to
   another backend.
 - Phase 1 Bots are owner-only, as `ses_main` is: other members see no Bot area

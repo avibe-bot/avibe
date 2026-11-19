@@ -6086,18 +6086,41 @@ def vibe_agent_patch(name):
 
 
 @app.route("/api/agents/<name>", methods=["DELETE"])
-def vibe_agent_delete(name):
+async def vibe_agent_delete(name):
     from vibe import api
 
     try:
-        return _vibe_agent_result_response(
-            api.remove_vibe_agent(
-                name,
-                user_context=getattr(g, "authorization_context", None),
-            )
+        result = await asyncio.to_thread(
+            api.remove_vibe_agent,
+            name,
+            user_context=getattr(g, "authorization_context", None),
         )
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
+    bot_session_id = result.pop("bot_session_id", None)
+    context = getattr(g, "authorization_context", None)
+    if result.get("ok") and bot_session_id and getattr(context, "is_instance_owner", False):
+        # No Bot can reconnect to a deleted Agent's Session: it is archived the way its owner would archive it
+        # (a Bot's Session is the owner's, bots.md D1); another member's deletion leaves it as it was.
+        archived = await sessions_archive(bot_session_id)
+        status = archived[1] if isinstance(archived, tuple) and len(archived) > 1 else 200
+        # The Agent is deleted either way. A lost controller reply answers 503 even when the archive committed, so
+        # what is stored decides (None: unread); a kept Session is named so DELETE /api/sessions/{id} can finish it,
+        # since deleting the Agent again cannot.
+        committed = True if status == 200 else await asyncio.to_thread(api.session_is_archived, bot_session_id)
+        result["bot_session"] = {"id": bot_session_id, "archived": committed}
+        if status != 200 and committed:
+            # The archive handler stopped at the lost reply: finish its best-effort follow-ups here.
+            _publish_session_archived(bot_session_id)
+            asyncio.get_running_loop().create_task(_archive_cancel_turn(bot_session_id))
+            # Its revoked Vault grants were not named in the lost reply, so none were released from the agent.
+            result["bot_session"]["vault_grants_released"] = False
+        if status != 200:
+            logger.info(
+                "Archiving the Session %s of the deleted Agent %s answered %s; stored as archived: %s",
+                bot_session_id, name, status, committed,
+            )
+    return _vibe_agent_result_response(result)
 
 
 @app.route("/api/settings", methods=["GET"])
@@ -11753,6 +11776,16 @@ def _is_bot_session(session_id: str) -> bool:
         return False
     with _projects_engine().connect() as conn:
         return is_bot_session(conn, session_id)
+
+
+def _is_reserved_bot_session(session_id: str) -> bool:
+    """Whether a Bot's Session is still reserved from archive: its Bot's Agent was not deleted."""
+    from storage.agent_session_rows import is_bot_session_id, is_reserved_bot_session
+
+    if not is_bot_session_id(session_id):
+        return False
+    with _projects_engine().connect() as conn:
+        return is_reserved_bot_session(conn, session_id)
 #: The send refusal's copy. A SEPARATE key on purpose: "cannot be archived or modified"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
@@ -12176,6 +12209,13 @@ def sessions_archive_preview(session_id: str):
     return jsonify(counts)
 
 
+def _publish_session_archived(session_id: str) -> None:
+    """Tell mounted clients a Session is archived, as the archive handler does after its commit."""
+    from vibe.sse_broker import broker
+
+    broker.publish("session.activity", {"session_id": session_id, "scope_id": None, "event": "archived"})
+
+
 async def _archive_cancel_turn(session_id: str) -> None:
     """Best-effort, background cancel of an in-flight turn for a just-archived
     session — kept off the archive request path so a slow/refused backend
@@ -12290,7 +12330,7 @@ async def sessions_archive(session_id: str):
             RESERVED_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
         )
-    if _is_bot_session(session_id):
+    if _is_reserved_bot_session(session_id):
         return _reserved_session_response(
             MAIN_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
