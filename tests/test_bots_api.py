@@ -150,8 +150,7 @@ def test_deleting_a_removed_bots_agent_archives_its_session_over_http(client, mo
 
     monkeypatch.setattr(internal_client, "cancel_dispatch", cancel_dispatch)
     deleted = client.delete("/api/agents/kept", headers=csrf_headers(client))
-    assert deleted.get_json()["bot_session"] == {"id": "ses_kept", "archived": True}
-    assert "reply was lost" in deleted.get_json()["warnings"][0]
+    assert deleted.get_json()["bot_session"] == {"id": "ses_kept", "archived": True, "vault_grants_released": False}
     assert cancelled == ["ses_kept"]
 
     # One the controller never reached is reported kept.

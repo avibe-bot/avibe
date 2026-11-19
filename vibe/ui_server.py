@@ -6113,10 +6113,8 @@ async def vibe_agent_delete(name):
             # The archive handler stopped at the lost reply: finish its best-effort follow-ups here.
             _publish_session_archived(bot_session_id)
             asyncio.get_running_loop().create_task(_archive_cancel_turn(bot_session_id))
-            result["warnings"] = [
-                f"{bot_session_id} is archived but its reply was lost, so Vault grants it revoked were not released "
-                "from the running agent."
-            ]
+            # Its revoked Vault grants were not named in the lost reply, so none were released from the agent.
+            result["bot_session"]["vault_grants_released"] = False
         if status != 200:
             logger.info(
                 "Archiving the Session %s of the deleted Agent %s answered %s; stored as archived: %s",
