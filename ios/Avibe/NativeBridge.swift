@@ -32,6 +32,7 @@ struct NativeShellMetadata: Equatable {
         "systemSchedule": 1,
         "viewport": 1,
         "voice": 1,
+        "voiceCapture": 1,
     ]
 
     let shellVersion: String
@@ -128,6 +129,9 @@ enum NativeBridgeMethod: String, CaseIterable {
     case systemScheduleCancel = "systemSchedule.cancel"
     case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
+    case voiceCapturePrepare = "voice.capturePrepare"
+    case voiceCaptureStart = "voice.captureStart"
+    case voiceCaptureStop = "voice.captureStop"
     case shareCapabilities = "share.capabilities"
     case sharePresent = "share.present"
 }
@@ -276,6 +280,7 @@ enum NativeBridgeConfiguration {
         directHandover: DirectHandoverProvider? = nil,
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         showShare: ShowShareCoordinator? = nil,
+        voiceCapture: NativeHoldCapture? = nil,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -357,6 +362,7 @@ enum NativeBridgeConfiguration {
             directHandover: directHandover,
             healthConnect: healthConnect,
             showShare: showShare,
+            voiceCapture: voiceCapture,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
             pushUnsubscribe: pushUnsubscribe,
@@ -632,6 +638,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
     private let showShare: ShowShareCoordinator?
+    private let voiceCapture: NativeHoldCapture?
     private let pushStatus: @MainActor (
         String?,
         WebOrigin
@@ -689,6 +696,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         directHandover: DirectHandoverProvider?,
         healthConnect: @escaping HealthConnectAction,
         showShare: ShowShareCoordinator?,
+        voiceCapture: NativeHoldCapture? = nil,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -745,6 +753,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.directHandover = directHandover
         self.healthConnect = healthConnect
         self.showShare = showShare
+        self.voiceCapture = voiceCapture
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
         self.pushUnsubscribe = pushUnsubscribe
@@ -1383,6 +1392,76 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 replyHandler,
                 result: ["state": microphonePermissionState()]
             )
+        case .voiceCapturePrepare, .voiceCaptureStart, .voiceCaptureStop:
+            handleVoiceCapture(request, sourceWebView: sourceWebView, replyHandler: replyHandler)
+        }
+    }
+
+    /// The in-App hold's microphone (NativeHoldCapture): the instance's own
+    /// document only, as `health.connect`.
+    private func handleVoiceCapture(
+        _ request: NativeBridgeRequest,
+        sourceWebView: WKWebView?,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        guard let sourceWebView,
+              let sourceURL = sourceWebView.url,
+              WebOrigin(url: sourceURL, requiresHTTPS: false) == policy.instanceOrigin
+        else {
+            reply(replyHandler, error: .forbidden)
+            return
+        }
+        let capture = voiceCapture ?? .shared
+        switch request.method {
+        case .voiceCapturePrepare:
+            guard request.params.isEmpty else {
+                reply(replyHandler, error: .invalidArgument("voice.capturePrepare takes no parameters."))
+                return
+            }
+            capture.prepare()
+            reply(replyHandler, result: NSNull())
+        case .voiceCaptureStart:
+            guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
+                reply(replyHandler, error: .invalidArgument("voice.captureStart requires take."))
+                return
+            }
+            // The same document gate as WebKit's own microphone
+            // (WebViewController's media capture decision): only a page that
+            // asks each account before speech goes to a third-party AI service.
+            let origin = policy.instanceOrigin
+            sourceWebView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak sourceWebView] result, error in
+                guard let self, let sourceWebView, let url = sourceWebView.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin
+                else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                guard error == nil, VoiceConsentMarker(result: result) == .marked else {
+                    self.reply(replyHandler, error: .failed("consent"))
+                    return
+                }
+                switch capture.start(take: take, webView: sourceWebView) {
+                case .success(let timings):
+                    self.reply(replyHandler, result: [
+                        "sampleRate": 16_000,
+                        "activateMs": timings.activateMs,
+                        "engineMs": timings.engineMs,
+                    ])
+                case .failure(.permission):
+                    self.reply(replyHandler, error: .failed("permission"))
+                case .failure(.busy):
+                    self.reply(replyHandler, error: .failed("busy"))
+                case .failure(.failed(let step)):
+                    self.reply(replyHandler, error: .failed(step))
+                }
+            }
+        default:
+            guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
+                reply(replyHandler, error: .invalidArgument("voice.captureStop requires take."))
+                return
+            }
+            capture.stop(take: take)
+            reply(replyHandler, result: NSNull())
         }
     }
 

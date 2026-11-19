@@ -709,6 +709,9 @@ final class VoiceCaptureController {
         }
         do {
             if !inFront { backgroundActivations += 1 }
+            // A hold in the App gives the microphone up before this take
+            // sets the session, so its end cannot deactivate this take's.
+            NativeHoldCapture.shared.yieldToActionButton()
             try audio.prepare(inFront ? .exclusiveRecord : .mixableBackground)
             mark(inFront ? "frontSession" : "session")
             try audio.start()

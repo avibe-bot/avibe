@@ -957,6 +957,10 @@ const NON_KEY_LITERALS = [
   'share.present',
   'viewport.setOuterScrollLocked',
   'voice.permission',
+  'voice.capture',
+  'voice.capturePrepare',
+  'voice.captureStart',
+  'voice.captureStop',
 
   // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
   // so the server's own message shows when the client has no copy for the code.

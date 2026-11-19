@@ -19,6 +19,8 @@ type Fake = {
     context?: unknown;
     onLevel?: (rms: number) => void;
     onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
+    nativeCapture?: boolean;
+    pressedAt?: number;
   };
   done: Promise<string>;
   resolve: (text: string) => void;
@@ -52,6 +54,8 @@ const native = vi.hoisted(() => ({
   notify: vi.fn(),
   selection: vi.fn(),
   permission: vi.fn(),
+  capture: vi.fn(() => false),
+  prepare: vi.fn(async () => true),
 }));
 
 vi.mock('../../lib/showPageVoiceDictation', () => ({
@@ -120,6 +124,8 @@ vi.mock('../../lib/native', async (importOriginal) => ({
   nativeHapticNotify: native.notify,
   nativeHapticSelection: native.selection,
   nativeVoicePermission: native.permission,
+  hasNativeVoiceCapture: native.capture,
+  nativeVoiceCapturePrepare: native.prepare,
 }));
 
 class PointerEventShim extends MouseEvent {
@@ -196,6 +202,8 @@ beforeEach(() => {
   native.notify.mockReset().mockResolvedValue(true);
   native.selection.mockReset().mockResolvedValue(true);
   native.permission.mockReset().mockResolvedValue(null);
+  native.capture.mockReset().mockReturnValue(false);
+  native.prepare.mockReset().mockResolvedValue(true);
   Object.defineProperty(navigator, 'permissions', {
     configurable: true,
     value: { query: vi.fn(async () => ({ state: pipeline.permission })) },
@@ -212,6 +220,32 @@ afterEach(() => {
 });
 
 describe('useHoldToTalk', () => {
+  it('in the iOS App, readies its microphone on entering and lets the App record an allowed hold', async () => {
+    native.capture.mockReturnValue(true);
+    native.permission.mockResolvedValue('granted');
+    const prewarm = vi.mocked((await import('../../lib/voiceRecording')).prewarmVoiceCapture);
+    prewarm.mockClear();
+    const el = await mount();
+    // Ready on entering, nothing started: no microphone indicator until a hold.
+    expect(native.prepare).toHaveBeenCalledTimes(1);
+    const pressedAt = Date.now();
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The press's start, for the trace: press to first audio is what the hold is judged by.
+    expect(pipeline.takes[0].input.pressedAt).toBe(pressedAt);
+    // The page's own audio context is not warmed for a take the App records.
+    expect(prewarm).not.toHaveBeenCalled();
+  });
+
+  it('records through the page when the App cannot', async () => {
+    native.capture.mockReturnValue(false);
+    const el = await mount();
+    expect(native.prepare).not.toHaveBeenCalled();
+    await holdFor(el);
+    expect(pipeline.takes[0].input.nativeCapture).toBeUndefined();
+  });
+
   it('treats a short press as a tap, inside the release, and opens no microphone', async () => {
     const el = await mount();
     down(el);

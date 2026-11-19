@@ -1830,6 +1830,9 @@ final class MobileOnboardingTests: XCTestCase {
                 "systemSchedule.request",
                 "viewport.setOuterScrollLocked",
                 "voice.permission",
+                "voice.capturePrepare",
+                "voice.captureStart",
+                "voice.captureStop",
             ]
         )
     }
