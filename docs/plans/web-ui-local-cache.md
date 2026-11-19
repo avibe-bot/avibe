@@ -235,7 +235,8 @@ from it while the same checks run in the background:
   network failure, a timeout, or a 5xx such as a down tunnel's 530, on the
   session read and its retry, or on the setup check while the retried session
   answers) is no answer. The shell stays, still provisional, and the check
-  runs again when the network or the page comes back, or after 15 s. Setup,
+  runs again when the network or the page comes back, or after 15 s, then
+  less often (up to every 2 min). Setup,
   login and the other gates still follow only from an answer; without a
   replayed shell nothing changes. The App may show the instance's last page
   from its own cache, so this keeps that page on screen instead of sending it
