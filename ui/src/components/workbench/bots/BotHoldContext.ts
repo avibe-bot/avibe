@@ -38,3 +38,8 @@ export const useBotHold = (): BotHoldValue => useContext(BotHoldContext);
 /** Whether a press is live: the avatar is held, recording, or about to cancel. */
 export const holdIsLive = (phase: HoldPhase | undefined) =>
   phase === 'pressing' || phase === 'listening' || phase === 'recording' || phase === 'armed';
+
+/** Whether the finger moving belongs to the hold (slide up to cancel), not to a scroll: once the
+ *  hold is reached (its ring full), including while the microphone is still opening. */
+export const holdOwnsTouch = (held: HeldBot | null) =>
+  held !== null && (held.phase !== 'pressing' || held.progress >= 1) && holdIsLive(held.phase);

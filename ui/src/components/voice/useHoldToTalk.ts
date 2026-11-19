@@ -497,12 +497,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // The last take's words (kept for its toast) are not this one's.
     setText('');
     setStash('');
-    toPhase('listening');
-    impactFeedback('medium');
     setSeconds(0);
-    clock.current = setInterval(() => {
-      if (mounted.current) setSeconds(Math.floor((Date.now() - current.startedAt) / 1000));
-    }, 250);
     void dictation.done.then((words) => settle(current, words), (error: unknown) => fail(current, error));
     void dictation.start().then(() => {
       if (take.current !== current) {
@@ -513,7 +508,22 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // The take runs from here: setup time is not speech, so it cannot carry a slip past the minimum.
       current.startedAt = Date.now();
       // A release (or the system) may come before the microphone is ready.
-      if (current.ending === 'send' || current.ending === 'system') dictation.finish();
+      if (current.ending === 'send' || current.ending === 'system') {
+        dictation.finish();
+        return;
+      }
+      if (current.ending !== 'none') return;
+      // The speak-now cue (the haptic and the listening card) only now that the microphone is
+      // capturing: on an iPhone it opens about 0.5 s (p90 1 s) after the hold, and words spoken at
+      // an earlier cue were lost (11-20). Until then the press stays as it was, its ring full.
+      // Armed (released now, it cancels): no speak-now cue; the card shows once disarmed.
+      if (!armed.current) {
+        toPhase('listening');
+        impactFeedback('medium');
+      }
+      clock.current = setInterval(() => {
+        if (mounted.current) setSeconds(Math.floor((Date.now() - current.startedAt) / 1000));
+      }, 250);
     }, (error: unknown) => {
       // A macOS alert can take the press before its answer arrives. Keep that
       // answer visible only while the original asking note still owns feedback.
@@ -734,7 +744,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     armed.current = next;
     if (next) selectionFeedback();
     const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
-    toPhase(next ? 'armed' : heard ? 'recording' : 'listening');
+    // Before the microphone is capturing, an unarmed press stays a press (no listening card yet).
+    toPhase(next ? 'armed' : heard ? 'recording' : take.current.started ? 'listening' : 'pressing');
   }, [end, toPhase]);
 
   const onPointerUp = useCallback((event: PointerAt) => {
