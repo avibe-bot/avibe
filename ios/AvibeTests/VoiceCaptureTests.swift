@@ -620,6 +620,21 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertTrue(message.contains("560557684"), message)
     }
 
+    /// Try 3's own status check can fail (offline while the phone waited to
+    /// be unlocked): the controller says so, for the alert in front.
+    func testTryThreesStatusRefusalIsReportedForTheAlert() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        let controller = world.controller()
+        _ = await controller.toggle(foregroundFallback: true)
+        let notices = controller.noticeCount
+        world.instance.statusResult = .failure(VoiceCaptureInstanceClient.Failure.offline)
+        _ = await controller.startInForeground()
+        XCTAssertEqual(controller.noticeCount, notices + 1)
+        XCTAssertEqual(controller.lastNoticeReason, .offline)
+    }
+
     func testTheInAppLineReadsPlainly() throws {
         let path = try XCTUnwrap(Bundle.main.path(forResource: "zh-Hans", ofType: "lproj"))
         XCTAssertEqual(
