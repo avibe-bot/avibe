@@ -1951,7 +1951,7 @@ class MessageHandler(BaseHandler):
                 if isinstance(target, dict) and target.get("model") == old:
                     target["model"] = new
             lines.append(
-                self._t("modelHub.launch.model_succeeded", old=old, new=new, backend=display_name_for_backend(backend))
+                self._t("turn.retiredRoute.model", old=old, new=new, backend=display_name_for_backend(backend))
             )
         if succession.reasoning_effort:
             old, new = succession.reasoning_effort
@@ -1960,7 +1960,7 @@ class MessageHandler(BaseHandler):
             for target in rows:
                 if isinstance(target, dict) and target.get("reasoning_effort") == old:
                     target["reasoning_effort"] = new
-            lines.append(self._t("modelHub.launch.effort_succeeded", old=old, new=new, model=model))
+            lines.append(self._t("turn.retiredRoute.effort", old=old, new=new, model=model))
         try:
             await self.controller.emit_agent_message(context, "notify", "\n".join(lines))
         except Exception:

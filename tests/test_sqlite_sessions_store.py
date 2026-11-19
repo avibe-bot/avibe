@@ -7232,6 +7232,12 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
         # ``model=None`` it passes goes to ``get_or_create_agent_session_row``,
         # i.e. the INSERT path above. Detected only by the ``**values`` heuristic.
         "bind_agent_session": "native bind: neither UPDATE sets a route column",
+        # A retired model or effort moves to its successor: compare-and-set on the stored
+        # non-empty value, so the column keeps its pin state (explicit stays explicit with the
+        # successor, inherited stays inherited); an explicit null never matches the CAS.
+        "succeed_retired_session_route": (
+            "replaces a stored non-empty value with its successor under CAS; the pin state is unchanged"
+        ),
         # Legacy-placeholder relabel: the only route column write here fills an
         # agent_backend / agent_variant that is BLANK or ``"default"`` (the branch is
         # guarded on both being in ``("", "default")``, and is reached only after the
