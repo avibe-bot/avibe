@@ -315,6 +315,18 @@ const WebPushNotificationNavigator = () => {
 // change and reset the layout to a "Loading..." div while the two API
 // calls round-tripped — that made every sidebar click feel like a full
 // page reload because ``<AppShell>`` got unmounted and re-mounted.
+/** A session read that could not reach the instance, as opposed to an
+ * answer from it: a network failure, a timeout, or a 5xx (a down tunnel
+ * answers 530). */
+function isUnreachable(failure: unknown): boolean {
+    if (failure instanceof TypeError) return true;
+    if (failure instanceof Error && (failure.name === 'AbortError' || failure.name === 'TimeoutError')) {
+        return true;
+    }
+    const status = (failure as { status?: unknown } | null)?.status;
+    return typeof status === 'number' && status >= 500;
+}
+
 export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const { getConfig, getAuthSession } = useApi();
     const { t } = useTranslation();
@@ -326,6 +338,9 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // waits for the server as it always has.
     const [bootSession] = useState(() => readBootSession());
     const provisionalRef = useRef(bootSession !== null);
+    // The App's session check could not reach the instance: it runs again
+    // when the network or the page comes back.
+    const [awaitingReconnect, setAwaitingReconnect] = useState(false);
     const [provisional, setProvisional] = useState(bootSession !== null);
     // Bumped by every terminal authorization signal (revoked, login required).
     // A check that started before one can still answer ``ready``; it must not
@@ -495,8 +510,20 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
             if (superseded()) return;
             // The replay stays provisional through the retry: until it answers,
             // nothing has confirmed or replaced the replayed capabilities.
-            const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
+            let retryFailure: unknown = null;
+            const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession)
+                .catch((failure: unknown) => { retryFailure = failure; return null; });
             if (superseded()) return;
+            if (!authCheck && isNativeShell() && isUnreachable(retryFailure)) {
+                // In the iPhone App the page may be the instance's last page
+                // from the App's cache. A session read that cannot reach the
+                // instance (no network, a timeout, a 5xx such as a down
+                // tunnel's 530) is no answer: the last shell stays (still
+                // provisional) and the check runs again when the network or
+                // the page comes back. Setup is only ever an answer.
+                setAwaitingReconnect(true);
+                return;
+            }
             provisionalRef.current = false;
             setProvisional(false);
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
@@ -556,6 +583,22 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // sidebar navigation never re-runs (which would re-mount the
         // shell behind the Loading state).
     }, [authCheckVersion, bypassSetupGuard, setupRedirectExempt, isSetupRoute, getConfig, getAuthSession]);
+
+    // In the App, a check that could not reach the instance runs again when
+    // the network or the page comes back (see the check above).
+    useEffect(() => {
+        if (!awaitingReconnect) return undefined;
+        const recheck = () => {
+            setAwaitingReconnect(false);
+            setAuthCheckVersion((version) => version + 1);
+        };
+        window.addEventListener('online', recheck);
+        const stopReactivation = onPageReactivated(recheck);
+        return () => {
+            window.removeEventListener('online', recheck);
+            stopReactivation();
+        };
+    }, [awaitingReconnect]);
 
     // A route exempt from the setup redirect still needs a session: without one
     // its capabilities would read as denied. When the first probe found none

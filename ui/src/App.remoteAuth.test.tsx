@@ -187,6 +187,78 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     consoleError.mockRestore();
   });
 
+  describe('in the iPhone App, an instance that cannot be reached', () => {
+    const nativeBridge = {
+      contract: 1, platform: 'ios', shellVersion: 'test', capabilities: {},
+      call: vi.fn(), on: vi.fn(() => () => undefined),
+    };
+    const SetupRoute = () => <div>setup wizard</div>;
+    const mountRoutes = () => render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/setup" element={<SetupRoute />} />
+          <Route path="/*" element={<AuthGuard><div>protected shell</div></AuthGuard>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    // The App shows the instance's last page from its cache; a session read
+    // that cannot reach the instance (no network, a timeout, a 5xx such as a
+    // down tunnel's 530) is no answer, so the last shell stays and is checked
+    // again when the network or the page comes back, never torn down to setup.
+    it.each([
+      ['no network', new TypeError('Failed to fetch')],
+      ['a down tunnel (530)', Object.assign(new Error('Request failed: /api/session (530)'), { status: 530 })],
+      ['a server error (503)', Object.assign(new Error('Request failed: /api/session (503)'), { status: 503 })],
+    ])('keeps the last shell on %s and checks again on reconnect', async (_name, failure) => {
+      await confirmOnce();
+      vi.stubGlobal('avibeNative', nativeBridge);
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      api.getAuthSession.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
+      mountRoutes();
+      await act(async () => undefined);
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      expect(screen.queryByText('setup wizard')).toBeNull();
+      expect(readBootSession()).not.toBeNull();
+
+      api.getAuthSession.mockResolvedValueOnce(member);
+      await act(async () => { window.dispatchEvent(new Event('online')); });
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      expect(screen.queryByText('setup wizard')).toBeNull();
+      consoleError.mockRestore();
+    });
+
+    it('still goes to setup in a browser, and on a definite refusal in the App', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // A browser: unchanged.
+      await confirmOnce();
+      const failure = new TypeError('Failed to fetch');
+      api.getAuthSession.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
+      const browser = mountRoutes();
+      expect(await screen.findByText('setup wizard')).toBeTruthy();
+      browser.unmount();
+
+      // The App, with the session read but the instance answering that it
+      // needs setup (a config the instance refuses as missing): unchanged.
+      await confirmOnce();
+      vi.stubGlobal('avibeNative', nativeBridge);
+      api.getAuthSession.mockResolvedValue({
+        ...member, instance_role: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES,
+      });
+      api.getConfig.mockRejectedValue(Object.assign(new Error('Request failed: /api/config (404)'), { status: 404 }));
+      mountRoutes();
+      expect(await screen.findByText('setup wizard')).toBeTruthy();
+      api.getAuthSession.mockReset();
+      api.getConfig.mockReset();
+      consoleError.mockRestore();
+    });
+  });
+
   it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else not for a remote session', () => {
     const day = 24 * 60 * 60 * 1000;
     const nowSeconds = () => Math.floor(Date.now() / 1000);
