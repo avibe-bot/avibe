@@ -59,7 +59,10 @@ const formatEdgeLocation = (location: CloudflareEdgeLocation) => (
   location.location ? `${location.location} (${location.colo})` : location.colo
 );
 
-export const RemoteAccess: React.FC = () => {
+/** `pathsCard`: the connection-paths card above carries the running state, the quality and
+ *  direct, so this card keeps pairing, the avibe.bot link and the tunnel controls
+ *  (ui/design: settings/remote-access-paths/*, proposed). */
+export const RemoteAccess: React.FC<{ pathsCard?: boolean }> = ({ pathsCard = false }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
@@ -501,7 +504,7 @@ export const RemoteAccess: React.FC = () => {
         </Button>
       </div>
 
-      <div className="grid border-b border-border sm:grid-cols-2 lg:grid-cols-4">
+      <div className={`grid border-b border-border sm:grid-cols-2 ${pathsCard ? '' : 'lg:grid-cols-4'}`}>
         <div className="border-b border-border px-5 py-3.5 sm:border-r lg:border-b-0">
           <div className="text-[12px] text-muted">{t('remoteAccess.paired')}</div>
           <div className="mt-1">
@@ -512,18 +515,18 @@ export const RemoteAccess: React.FC = () => {
             )}
           </div>
         </div>
-        <div className="border-b border-border px-5 py-3.5 lg:border-b-0 lg:border-r">
+        {!pathsCard && <div className="border-b border-border px-5 py-3.5 lg:border-b-0 lg:border-r">
           <div className="text-[12px] text-muted">{t('remoteAccess.connector')}</div>
           <div className="mt-1 text-[13px] font-medium text-foreground">{loading ? t('common.loading') : connectorState}</div>
-        </div>
-        <div className="border-b border-border px-5 py-3.5 sm:border-b-0 sm:border-r">
+        </div>}
+        <div className={`px-5 py-3.5 ${pathsCard ? '' : 'border-b border-border sm:border-b-0 sm:border-r'}`}>
           <div className="text-[12px] text-muted">{t('remoteAccess.vibeCloudService')}</div>
           <a className="mt-1 inline-flex text-[13px] font-medium text-cyan-ink" href={VIBE_CLOUD_URL} target="_blank" rel="noreferrer">
             avibe.bot
             <ExternalLink className="ml-1 size-3.5" />
           </a>
         </div>
-        <div className="px-5 py-3.5">
+        {!pathsCard && <div className="px-5 py-3.5">
           <div className="text-[12px] text-muted">{t('remoteAccess.quality')}</div>
           <div className="mt-1 flex min-h-5 items-center gap-2">
             <Badge variant={qualityVariant}>{qualityLabel}</Badge>
@@ -537,10 +540,10 @@ export const RemoteAccess: React.FC = () => {
               </span>
             )}
           </div>
-        </div>
+        </div>}
       </div>
 
-      <RemoteAccessDirectLines direct={status?.direct} />
+      {!pathsCard && <RemoteAccessDirectLines direct={status?.direct} />}
 
       {running && networkPath && (
         <div className="border-b border-border px-5 py-4">
