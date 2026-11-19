@@ -289,6 +289,38 @@ def test_removing_hides_and_setting_again_reconnects(service, home):
     assert (session["agent_name"], session["title"]) == ("scholar", "Scholar")
 
 
+def test_deleting_a_removed_bots_agent_archives_its_session(service):
+    """Once a removed Bot's Agent is deleted no Bot can reconnect to its Session, so the Session is archived with it,
+    and one left over from before can be archived like any other. A Bot whose Agent still exists keeps its Session."""
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import ReservedSessionError, archive_session
+
+    gone = service.create_bot(display_name="Gone")
+    kept = service.create_bot(display_name="Kept")
+    for bot in (gone, kept):
+        service.remove_bot(bot.handle)
+    service.store.archive(gone.agent.name)
+
+    assert _session(gone.session_id)["status"] == "archived"
+    assert _session(kept.session_id)["status"] == "active"
+    with create_sqlite_engine().begin() as conn, pytest.raises(ReservedSessionError):
+        archive_session(conn, kept.session_id)
+
+    # A Session left behind by an Agent deleted before this change is archivable.
+    leftover = service.create_bot(display_name="Leftover")
+    service.remove_bot(leftover.handle)
+    with create_sqlite_engine().begin() as conn:
+        from sqlalchemy import update
+
+        from storage.models import agents
+
+        conn.execute(update(agents).where(agents.c.id == leftover.agent.id).values(archived_at="2026-11-19T00:00:00Z"))
+    assert _session(leftover.session_id)["status"] == "active"
+    with create_sqlite_engine().begin() as conn:
+        archive_session(conn, leftover.session_id)
+    assert _session(leftover.session_id)["status"] == "archived"
+
+
 def test_only_enabled_vibey_agents_can_be_set(service):
     from core.bots import BotError
 

@@ -11753,6 +11753,16 @@ def _is_bot_session(session_id: str) -> bool:
         return False
     with _projects_engine().connect() as conn:
         return is_bot_session(conn, session_id)
+
+
+def _is_reserved_bot_session(session_id: str) -> bool:
+    """Whether a Bot's Session is still reserved from archive: its Bot's Agent was not deleted."""
+    from storage.agent_session_rows import is_bot_session_id, is_reserved_bot_session
+
+    if not is_bot_session_id(session_id):
+        return False
+    with _projects_engine().connect() as conn:
+        return is_reserved_bot_session(conn, session_id)
 #: The send refusal's copy. A SEPARATE key on purpose: "cannot be archived or modified"
 #: is not an answer to "why did my message not send", and the composer's own inert-state
 #: notice has to say the same thing this body says.
@@ -12290,7 +12300,7 @@ async def sessions_archive(session_id: str):
             RESERVED_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",
         )
-    if _is_bot_session(session_id):
+    if _is_reserved_bot_session(session_id):
         return _reserved_session_response(
             MAIN_SESSION_PROTECTED_I18N_KEY,
             code="reserved_session",

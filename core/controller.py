@@ -1787,7 +1787,7 @@ class Controller:
         """Archive one Workbench session through its serialized lifecycle."""
 
         from core.services import sessions as workbench_sessions_service
-        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, is_bot_session, is_bot_session_id
+        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, is_bot_session_id, is_reserved_bot_session
         from storage.db import create_sqlite_engine
 
         if (
@@ -1804,7 +1804,7 @@ class Controller:
                 engine = create_sqlite_engine()
                 try:
                     with engine.connect() as conn:
-                        return is_bot_session(conn, raw_session_id)
+                        return is_reserved_bot_session(conn, raw_session_id)
                 finally:
                     engine.dispose()
 

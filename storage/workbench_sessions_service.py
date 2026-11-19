@@ -44,6 +44,7 @@ from storage.agent_session_rows import (
     create_agent_session_row,
     hidden_bot_session_ids,
     is_bot_session,
+    is_reserved_bot_session,
     new_session_id,
     session_speed,
     normalize_workdir,
@@ -2294,7 +2295,7 @@ def archive_session(
     Checked BEFORE the existence lookup so the answer is the same on every install,
     whether or not the lazily-created row exists yet.
     """
-    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID or is_bot_session(conn, session_id):
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID or is_reserved_bot_session(conn, session_id):
         raise ReservedSessionError(str(session_id))
     context = require_instance_role(authorization_context, "editor")
     existing = conn.execute(
