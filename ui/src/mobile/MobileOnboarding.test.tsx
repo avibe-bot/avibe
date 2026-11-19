@@ -22,6 +22,7 @@ const mobile = vi.hoisted(() => ({
   returnToInstance: vi.fn<() => Promise<null>>(),
   selectInstance: vi.fn(),
   signInWithProvider: vi.fn<(provider: string) => Promise<MobileSessionState>>(),
+  readProviders: vi.fn<() => Promise<{ providers?: ('google' | 'github' | 'apple')[] }>>(),
   signInWithPassword: vi.fn<
     (email: string, password: string) => Promise<MobilePasswordSignInResult>
   >(),
@@ -45,6 +46,7 @@ vi.mock('./bridge', async (importOriginal) => ({
   selectMobileInstance: mobile.selectInstance,
   signInMobileWithPassword: mobile.signInWithPassword,
   signInMobileWithProvider: mobile.signInWithProvider,
+  readMobileProviders: mobile.readProviders,
   verifyMobileOtp: mobile.verifyOtp,
   verifyMobilePasskey: mobile.verifyPasskey,
   verifyMobileSecondFactor: mobile.verifySecondFactor,
@@ -142,6 +144,9 @@ const resetMobileMocks = () => {
   mobile.selectInstance.mockReset();
   mobile.signInWithPassword.mockReset();
   mobile.signInWithProvider.mockReset();
+  mobile.readProviders.mockReset();
+  // Native answered without a list (none ever read): the row stays as the session left it.
+  mobile.readProviders.mockResolvedValue({});
   mobile.signInWithProvider.mockRejectedValue({ code: 'provider_cancelled', message: 'cancelled' });
   mobile.verifyOtp.mockReset();
   mobile.verifyPasskey.mockReset();
@@ -963,6 +968,37 @@ describe('mobile onboarding', () => {
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
     };
+
+    const marks = () => ['Google', 'GitHub', 'Apple']
+      .filter((name) => screen.queryByRole('button', { name: `mobileApp.welcome.continueWith${name}` }));
+
+    it('updates the row in place when Welcome learns a newer list, never passing through none', async () => {
+      const newer = deferred<{ providers?: ('google' | 'github' | 'apple')[] }>();
+      mobile.readProviders.mockReturnValueOnce(newer.promise);
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' });
+      expect(mobile.readProviders).toHaveBeenCalledTimes(1);
+      const seen: string[][] = [];
+      const observer = new MutationObserver(() => seen.push(marks()));
+      observer.observe(document.body, { subtree: true, childList: true });
+      newer.resolve({ providers: ['google', 'github', 'apple'] });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithApple' });
+      observer.disconnect();
+      expect(marks()).toEqual(['Google', 'GitHub', 'Apple']);
+      expect(seen.every((list) => list.length > 0)).toBe(true);
+    });
+
+    it('asks again when the App returns to the foreground on Welcome', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut' });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(marks()).toEqual([]);
+      mobile.readProviders.mockResolvedValueOnce({ providers: ['github'] });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' });
+      expect(marks()).toEqual(['GitHub']);
+    });
 
     it('offers only the sign-ins avibe.bot advertises, and keeps them when an answer names none', async () => {
       render(<MobileOnboarding />);
