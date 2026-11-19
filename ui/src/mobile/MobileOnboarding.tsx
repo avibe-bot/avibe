@@ -58,6 +58,7 @@ import {
   selectMobileInstance,
   signInMobileWithPassword,
   signInMobileWithProvider,
+  readMobileProviders,
   type MobileBridgeError,
   type MobileInstance,
   type MobileSessionState,
@@ -2259,6 +2260,28 @@ function MobileOnboardingScreens() {
     if (next.status === 'signedOut' && next.providers) setProviders(next.providers);
     setSessionState(next);
   }, []);
+  // Welcome asks again when it appears and whenever the App returns to the foreground on it,
+  // so a list avibe.bot changed, or one a slow read missed, replaces the row in place. An answer
+  // without a list keeps the row as it is.
+  const welcomeShown = screen === 'welcome';
+  useEffect(() => {
+    if (!welcomeShown) return undefined;
+    let live = true;
+    const ask = () => {
+      void readMobileProviders().then(({ providers: listed }) => {
+        if (live && Array.isArray(listed)) setProviders(listed);
+      }, () => {});
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') ask();
+    };
+    ask();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      live = false;
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [welcomeShown]);
   const [email, setEmail] = useState('');
   const [emailMode, setEmailMode] = useState<EmailMode>('code');
   const [code, setCode] = useState('');

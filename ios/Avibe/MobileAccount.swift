@@ -568,6 +568,10 @@ final class MobileSessionCoordinator {
     ) -> MobileAuthTransporting
 
     private static let selectionKey = "avibe.mobile.selection"
+    /// The sign-ins avibe.bot last advertised for the App (`mobile_providers`):
+    /// public configuration, not per account, kept so Welcome can show them
+    /// before a fresh read answers (after sign-out, on a cold start).
+    private static let advertisedProvidersKey = "avibe.mobile.advertisedProviders"
     /// The last session avibe.bot confirmed (the account and its instances,
     /// no credentials), so a cold start can open the selected instance before
     /// checking again. It follows `snapshot`: gone whenever that is.
@@ -720,6 +724,8 @@ final class MobileSessionCoordinator {
         onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in }
     ) {
         self.defaults = defaults
+        self.lastAdvertisedProviders = defaults.stringArray(forKey: Self.advertisedProvidersKey)
+            .map { names in MobileSignInProvider.allCases.filter { names.contains($0.rawValue) } }
         self.controlPlane = controlPlane
         self.websiteDataStore = websiteDataStore
         self.transportFactory = transportFactory
@@ -749,6 +755,9 @@ final class MobileSessionCoordinator {
             accountSurfaceLeaseID = UUID()
         }
         ensureTransport()
+        // Every account page that appears refreshes the advertised sign-ins,
+        // signed in or not, so a later sign-out shows a current list at once.
+        _ = readAdvertisedProviders()
     }
 
     func deactivateAccountSurface() {
@@ -926,17 +935,47 @@ final class MobileSessionCoordinator {
         }
     }
 
+    /// The last list avibe.bot advertised, persisted; `nil` until one was read.
+    private(set) var lastAdvertisedProviders: [MobileSignInProvider]?
+    /// The read in flight, shared by everyone who asks meanwhile.
+    private var advertisedProvidersRead: Task<[MobileSignInProvider]?, Never>?
+
+    /// Starts a read of the advertised sign-ins, or joins the one in flight.
+    /// A server answer, however late, becomes the last-known list.
+    private func readAdvertisedProviders() -> Task<[MobileSignInProvider]?, Never> {
+        if let advertisedProvidersRead {
+            return advertisedProvidersRead
+        }
+        guard let transport else {
+            return Task { nil }
+        }
+        let read = Task { @MainActor [weak self] in
+            let providers = await transport.advertisedProviders()
+            guard let self else { return providers }
+            self.advertisedProvidersRead = nil
+            if let providers {
+                self.lastAdvertisedProviders = providers
+                self.defaults.set(providers.map(\.rawValue), forKey: Self.advertisedProvidersKey)
+            }
+            return providers
+        }
+        advertisedProvidersRead = read
+        return read
+    }
+
     /// The providers Welcome may offer: those avibe.bot advertises for the App
-    /// right now, or `nil` when that could not be read within `seconds`. A
-    /// display gate only; the broker still decides each attempt. The read
-    /// never holds up the answer it decorates for longer than `seconds`.
+    /// now when that answers within `seconds`, otherwise the last list it
+    /// advertised (`nil` when none was ever read). A display gate only; the
+    /// broker still decides each attempt. The read never holds up the answer
+    /// it decorates for longer than `seconds`, and a late answer still updates
+    /// the last-known list.
     func advertisedProviders(within seconds: Double) async -> [MobileSignInProvider]? {
-        guard let transport else { return nil }
+        let read = readAdvertisedProviders()
         final class Once { var settled = false }
         let once = Once()
-        return await withCheckedContinuation { continuation in
+        let fresh: [MobileSignInProvider]? = await withCheckedContinuation { continuation in
             Task { @MainActor in
-                let providers = await transport.advertisedProviders()
+                let providers = await read.value
                 guard !once.settled else { return }
                 once.settled = true
                 continuation.resume(returning: providers)
@@ -948,6 +987,7 @@ final class MobileSessionCoordinator {
                 continuation.resume(returning: nil)
             }
         }
+        return fresh ?? lastAdvertisedProviders
     }
 
     /// Whether the signed-in account was created by this generation's provider sign-in, as the

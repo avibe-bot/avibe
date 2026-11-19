@@ -142,6 +142,13 @@ export const signInMobileWithPassword = (
  * `provider_unavailable`, `provider_email_unverified`, `invalid_or_expired`, `rate_limited`
  * (with `retry_after_seconds`), and `network`.
  */
+/**
+ * The sign-ins avibe.bot offers the App: read now when that answers within a few seconds,
+ * otherwise the last list it advertised. Without `providers`, none was ever read.
+ */
+export const readMobileProviders = (): Promise<{ providers?: ('google' | 'github' | 'apple')[] }> =>
+  call('auth.providers');
+
 export const signInMobileWithProvider = (
   provider: 'google' | 'github' | 'apple',
 ): Promise<MobileSessionState> =>

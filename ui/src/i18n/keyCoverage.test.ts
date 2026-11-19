@@ -927,6 +927,7 @@ const NON_KEY_LITERALS = [
   'app.showAccount',
   'app.showInstances',
   'auth.signInWithProvider',
+  'auth.providers',
   'auth.requestOtp',
   'auth.signInWithPassword',
   'auth.verifyOtp',

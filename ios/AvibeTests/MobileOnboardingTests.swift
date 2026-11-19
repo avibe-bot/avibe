@@ -549,6 +549,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.returnToInstance",
                 "app.openPage",
                 "auth.signInWithProvider",
+                "auth.providers",
             ]
         )
         XCTAssertThrowsError(
@@ -1349,21 +1350,140 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     // The advertised list decorates signed-out answers; a slow read never holds them up.
-    func testTheAdvertisedListIsReadWithinItsBoundOrLeftOut() async throws {
+    // P1 (TestFlight 37.1): after signing out, Welcome showed email alone. The
+    // signed-in start never read the list, and the fresh store's first read
+    // took longer than the sign-out answer waits. Welcome must show the
+    // advertised sign-ins at once and keep them current.
+    func testWelcomeAfterSignOutShowsTheAdvertisedSignInsBeforeTheFreshStoreAnswers() async throws {
+        let signedIn = FakeMobileAuthTransport()
+        signedIn.session = snapshot(accountID: "account-1")
+        signedIn.advertised = [.google, .github, .apple]
+        // The store after sign-out is new: its first read is slow.
+        let afterSignOut = FakeMobileAuthTransport()
+        afterSignOut.advertised = [.google, .github, .apple]
+        afterSignOut.advertisedDelay = 6_000_000_000
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [signedIn, afterSignOut, FakeMobileAuthTransport()]
+            ),
+            startScreen: .account
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+
+        let canSignOut = try await waitForJavaScriptValue(in: webView) {
+            Self.enabledButtonScript("Sign out on this device")
+        }
+        XCTAssertTrue(canSignOut)
+        _ = try await webView.evaluateJavaScript(Self.clickButtonScript("Sign out on this device"))
+
+        let shown = try await waitUntil(seconds: 4, in: webView) {
+            Self.welcomeMarksScript(["Continue with Google", "Continue with GitHub", "Continue with Apple"])
+        }
+        XCTAssertTrue(shown, "Welcome after sign-out shows the advertised sign-ins")
+    }
+
+    func testWelcomeOnAColdStartShowsTheLastAdvertisedSignInsWhenTheReadFails() async throws {
+        let defaults = makeDefaults()
+        // What an earlier launch read; this launch's read fails.
+        defaults.set(["github"], forKey: "avibe.mobile.advertisedProviders")
+        // A signed-out start may rotate to a fresh store: every store's read fails.
+        let transports = (0..<3).map { _ in FakeMobileAuthTransport() }
+        transports.forEach { $0.advertised = nil }
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(defaults: defaults, transports: transports)
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+
+        let shown = try await waitUntil(seconds: 4, in: webView) {
+            Self.welcomeMarksScript(["Continue with GitHub"])
+        }
+        XCTAssertTrue(shown)
+        let others = try await webView.evaluateJavaScript(
+            Self.welcomeMarksScript(["Continue with Google"])
+        ) as? Bool
+        XCTAssertEqual(others, false)
+    }
+
+    private static func enabledButtonScript(_ text: String) -> String {
+        """
+        Array.from(document.querySelectorAll('button')).some(b =>
+          b.textContent.trim() === '\(text)' && !b.disabled)
+        """
+    }
+
+    private static func clickButtonScript(_ text: String) -> String {
+        """
+        Array.from(document.querySelectorAll('button'))
+          .find(b => b.textContent.trim() === '\(text)').click()
+        """
+    }
+
+    /// Welcome with exactly these provider marks, by their VoiceOver labels.
+    private static func welcomeMarksScript(_ labels: [String]) -> String {
+        let list = labels.map { "'\($0)'" }.joined(separator: ",")
+        return """
+        (() => {
+          const welcome = Array.from(document.querySelectorAll('button'))
+            .some(b => b.textContent.trim() === 'Continue with email');
+          const marks = Array.from(document.querySelectorAll('button[aria-label^="Continue with"]'))
+            .map(b => b.getAttribute('aria-label'));
+          return welcome && JSON.stringify(marks) === JSON.stringify([\(list)]);
+        })()
+        """
+    }
+
+    /// Polls `script` until it is true or `seconds` pass.
+    private func waitUntil(
+        seconds: Double,
+        in webView: WKWebView,
+        script: () -> String
+    ) async throws -> Bool {
+        try await WebKitReadiness.waitForDocument(in: webView)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .milliseconds(Int(seconds * 1000)))
+        while clock.now < deadline {
+            if try await webView.evaluateJavaScript(script()) as? Bool == true {
+                return true
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
+    func testTheAdvertisedListIsReadWithinItsBoundOrTheLastOneServes() async throws {
+        let defaults = makeDefaults()
+        // Never read, and this read fails: none, so Welcome shows email alone.
+        let failing = FakeMobileAuthTransport()
+        failing.advertised = nil
+        let first = makeCoordinator(defaults: defaults, transports: [failing])
+        first.activateAccountSurface()
+        let none = await first.advertisedProviders(within: 5)
+        XCTAssertNil(none)
+
         let transport = FakeMobileAuthTransport()
         transport.advertised = [.github, .apple]
-        let coordinator = makeCoordinator(defaults: makeDefaults(), transports: [transport])
+        let coordinator = makeCoordinator(defaults: defaults, transports: [transport])
         coordinator.activateAccountSurface()
-
         let quick = await coordinator.advertisedProviders(within: 5)
         XCTAssertEqual(quick, [.github, .apple])
 
+        // A slow read never holds the answer up; the last list serves meanwhile.
+        transport.advertised = [.google]
         transport.advertisedDelay = 5_000_000_000
         let clock = ContinuousClock()
         let started = clock.now
         let slow = await coordinator.advertisedProviders(within: 0.05)
-        XCTAssertNil(slow)
+        XCTAssertEqual(slow, [.github, .apple])
         XCTAssertLessThan(clock.now - started, .seconds(2))
+
+        // The list outlives the process: a later launch whose read fails shows it.
+        let relaunched = makeCoordinator(defaults: defaults, transports: [failing])
+        relaunched.activateAccountSurface()
+        let remembered = await relaunched.advertisedProviders(within: 5)
+        XCTAssertEqual(remembered, [.github, .apple])
     }
 
     func testSignInWithProviderAcceptsOnlyGoogleGitHubOrApple() async throws {
@@ -1462,6 +1582,20 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? String
         XCTAssertEqual(provider, MobileAccountError.forbidden.code)
         XCTAssertTrue(transport.providerStarts.isEmpty)
+        let providers = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.providers');
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(providers, MobileAccountError.forbidden.code)
         XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
     }
 

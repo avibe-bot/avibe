@@ -922,7 +922,14 @@ below.
   transport (without cookies) and added natively to a signed-out session
   answer as `providers` when it answers within 2 s (known names once each,
   in the App's order; a missing or malformed list means none). An answer
-  without it leaves the page's last list, which starts empty: email alone. So the App can ship before the broker
+  without it leaves the page's last list, which starts empty: email alone.
+  The App keeps the last list avibe.bot answered (memory and `UserDefaults`,
+  an enum list, not per account) and refreshes it whenever an account page
+  appears, signed in or not; a signed-out answer whose read is slower than
+  2 s carries that last list instead, so Welcome after sign-out or on a cold
+  start shows the row at once. Welcome also asks `auth.providers` (no
+  arguments; refused in sheets) when it appears and when the App returns to
+  the foreground on it, and replaces the row in place with the answer. So the App can ship before the broker
   serves a provider, and each mark appears when avibe.bot enables it.
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
   `provider` exactly `google`, `github` or `apple`; any other value or an extra key

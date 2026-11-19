@@ -122,6 +122,7 @@ enum MobileBridgeMethod: String, CaseIterable {
     case authVerifySecondFactor = "auth.verifySecondFactor"
     case authVerifyPasskey = "auth.verifyPasskey"
     case authSignInWithProvider = "auth.signInWithProvider"
+    case authProviders = "auth.providers"
     case sessionRefresh = "session.refresh"
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
@@ -322,7 +323,8 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                          .authSignInWithPassword,
                          .authVerifySecondFactor,
                          .authVerifyPasskey,
-                         .authSignInWithProvider:
+                         .authSignInWithProvider,
+                         .authProviders:
                         throw MobileAccountError.forbidden
                     default:
                         break
@@ -378,6 +380,17 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         code: code
                     )
                     reply(replyHandler, result: await self.sessionResult(state))
+                case .authProviders:
+                    guard request.params.isEmpty else {
+                        throw MobileAccountError.invalidRequest
+                    }
+                    // Welcome asks when it appears and when the App returns to
+                    // the foreground on it; the answer updates its row in place.
+                    var result: [String: Any] = [:]
+                    if let providers = await coordinator.advertisedProviders(within: 10) {
+                        result["providers"] = providers.map(\.rawValue)
+                    }
+                    reply(replyHandler, result: result)
                 case .authSignInWithProvider:
                     guard
                         request.params.count == 1,
@@ -477,8 +490,9 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
 
     /// A session answer for the page. A signed-in account that this generation's provider
     /// sign-in created carries `new_account: true`, a hint for the empty state only. A
-    /// signed-out answer carries `providers`, the sign-ins avibe.bot offers the App now, when
-    /// they could be read within 2 s; Welcome shows only those.
+    /// signed-out answer carries `providers`, the sign-ins avibe.bot offers the App: read now
+    /// when that answers within 2 s, otherwise the last list it advertised; Welcome shows only
+    /// those.
     private func sessionResult(_ state: MobileSessionState) async -> Any {
         var object = state.jsonObject
         switch state {
