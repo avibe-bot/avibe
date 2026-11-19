@@ -21,7 +21,7 @@ from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskE
 from storage import message_deliveries as deliveries
 from storage.models import agent_runs, agent_sessions, messages, run_definitions, session_delegations
 from storage.session_delegations import (
-    candidate_query, has_dispatch_pair, latest_reply_query, pending_return_queries, pending_wake_queries,
+    candidate_query, dispatched_turn_query, has_dispatch_pair, pending_return_queries, pending_wake_queries,
 )
 
 NOW = "2026-11-08T00:00:00+00:00"
@@ -284,7 +284,7 @@ def test_multipart_answers_stay_answers_until_dispatcher_sends_again(harness, me
     assert [row["session_id"] for row in _notices(h)] == ["sesA"]
 
 
-@pytest.mark.parametrize("blocker", ["turn", "queued_run", "queued_input", "outgoing-report", "outgoing-delegate"])
+@pytest.mark.parametrize("blocker", ["turn", "queued_run", "queued_input", "outgoing-report"])
 def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harness, blocker):
     h = harness
     run = _send(h)
@@ -292,8 +292,8 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     pair = _pair(h)
     if blocker == "queued_run":
         pending = _send(h, sender="sesD")
-    elif blocker in {"outgoing-report", "outgoing-delegate"}:
-        pending = _send(h, sender="sesB", recipient="sesA" if blocker == "outgoing-report" else "sesC")
+    elif blocker == "outgoing-report":
+        pending = _send(h, sender="sesB", recipient="sesA")
     elif blocker == "queued_input":
         with h.engine.begin() as conn:
             deliveries.insert_delivery(conn, delivery_id="user-queued", session_id="sesB", priority="p3", state="queued",
@@ -311,7 +311,7 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     assert next(item for item in items if item.partition_key == run.id).cursor_only
     if blocker == "turn":
         _finish(h, turn, [run])
-    elif blocker in {"queued_run", "outgoing-report", "outgoing-delegate"}:
+    elif blocker in {"queued_run", "outgoing-report"}:
         h.requests.cancel_run(pending.id)
     elif blocker == "queued_input":
         with h.engine.begin() as conn:
@@ -324,7 +324,7 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     assert h.lane._notify(pair)
 
 
-@pytest.mark.parametrize("arranged", ["watch", "scheduled", "delegate"])
+@pytest.mark.parametrize("arranged", ["watch", "scheduled", "delegate", "delegate-working", "delegate-queued"])
 def test_a_dispatched_turn_that_ends_tells_the_dispatcher_however_it_arranged_to_continue(harness, arranged):
     """A Watch or Task the recipient armed, or its own delegation still open, used to
     hold the receipt back for hours (11-15 stall retro). The Turn ended: say so."""
@@ -335,8 +335,12 @@ def test_a_dispatched_turn_that_ends_tells_the_dispatcher_however_it_arranged_to
         with h.engine.begin() as conn:
             conn.execute(run_definitions.insert().values(id="future", definition_type=arranged, session_id="sesB",
                 enabled=1, created_at=NOW, updated_at=NOW, metadata_json="{}"))
-    else:
+    elif arranged == "delegate":
         _accept(h, _send(h, sender="sesB", recipient="sesC"))
+    elif arranged == "delegate-working":
+        _accept(h, _send(h, sender="sesB", recipient="sesC"), finish=False)  # C keeps working
+    else:
+        _send(h, sender="sesB", recipient="sesC")  # not accepted by C yet
     assert h.lane._notify(_pair(h))
     assert [row["session_id"] for row in _notices(h)] == ["sesA"]
 
@@ -777,7 +781,7 @@ def test_hot_queries_are_index_keyed_without_history_sort(harness):
     h = harness
     queries = [candidate_query(limit=32, cursor="old"), *pending_wake_queries("sesB"),
                *pending_return_queries("sesA", "sesB"),
-               *(latest_reply_query("sesB", kind) for kind in ("result", "error", "output"))]
+               dispatched_turn_query("run_x")]
     with h.engine.connect() as conn:
         for query in queries:
             sql = str(query.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True}))
@@ -820,7 +824,7 @@ def test_owner_sized_history_does_not_expand_runtime_probe_work(harness):
     h = harness
     queries = [candidate_query(limit=32, cursor="0"),
                *(select(exists(query)) for query in (*pending_wake_queries("sesB"), *pending_return_queries("sesA", "sesB"))),
-               latest_reply_query("sesB", "result")]
+               dispatched_turn_query("run_x")]
     with h.engine.begin() as conn:
         def probe_work():
             steps = 0
@@ -861,3 +865,37 @@ def test_owner_sized_history_does_not_expand_runtime_probe_work(harness):
         ) for i in range(5000)])
         grown = probe_work()
         assert grown < baseline + 100, (baseline, grown)
+
+
+
+@pytest.mark.parametrize("intermediate", [False, True])
+def test_the_receipt_quotes_the_turns_final_reply(harness, intermediate):
+    """A final reply lives in the Turn's terminal evidence, not in session_turn_replies (#4014 review)."""
+    h = harness
+    run = _send(h)
+    turn = _accept(h, run, finish=False)
+    if intermediate:
+        _turn_reply(h, turn, "an earlier progress note")
+    with h.engine.begin() as conn:
+        deliveries.terminalize_turn(conn, turn, outcome="completed", settled_by="terminal_result",
+                                    evidence_kind="terminal_result", evidence={"result_text": "the final answer"})
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="succeeded", completed_at=NOW))
+    assert h.lane._notify(_pair(h))
+    assert _notices(h)[0]["prompt"].split("\n", 1)[1] == "the final answer"
+
+
+def test_an_old_receipt_does_not_answer_a_newer_dispatch(harness):
+    """Receipt 1 is queued; B finishes dispatch 2; A accepting receipt 1 must not
+    close dispatch 2 (#4014 review)."""
+    from core.scheduled_tasks import TaskExecutionRequest
+    h = harness
+    _accept(h, _send(h))
+    assert h.lane._notify(_pair(h))
+    receipt = TaskExecutionRequest.from_dict(h.requests.get_run(_notices(h)[0]["id"]))
+    second = _send(h)
+    _accept(h, second)
+    assert _pair(h)["state"] == "open" and _pair(h)["run_id"] == second.id
+    _accept(h, receipt)
+    assert _pair(h)["state"] == "open"
+    assert h.lane._notify(_pair(h))
+    assert len(_notices(h)) == 2
