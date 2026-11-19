@@ -918,3 +918,21 @@ def test_a_return_the_dispatcher_already_accepted_does_not_hold_back_the_next_re
     _accept(h, second)
     assert _pair(h)["run_id"] == second.id
     assert h.lane._notify(_pair(h))
+
+
+
+def test_two_dispatches_that_end_before_the_receipt_get_one_receipt_with_the_later_reply(harness):
+    """Product decision (#4014): one receipt per sender and recipient pair in this case,
+    no per-dispatch rows; the earlier reply stays in the recipient's record."""
+    h = harness
+    first, second = _send(h), _send(h)
+    turn_1 = _accept(h, first, finish=False)
+    _turn_reply(h, turn_1, "first reply")
+    _finish(h, turn_1, [first])
+    turn_2 = _accept(h, second, finish=False)
+    _turn_reply(h, turn_2, "second reply")
+    _finish(h, turn_2, [second])
+    assert h.lane._notify(_pair(h))
+    assert not h.lane._notify(_pair(h))
+    [notice] = _notices(h)
+    assert notice["prompt"].split("\n", 1)[1] == "second reply"

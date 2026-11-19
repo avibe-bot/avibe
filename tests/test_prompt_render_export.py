@@ -112,7 +112,8 @@ _PREVIOUS_CONTINUE_SESSION_RULE = (
 _CALLBACK_RULES = (
     "- If a dispatched Session handles your message without writing back, Avibe sends one read receipt with the last "
     "reply of the Turn that took it once that Turn ends with no input pending, even if it armed a Task or Watch or "
-    "delegated onward; a run that does not complete still reports immediately.\n"
+    "delegated onward (two such dispatches that end together get one receipt, with the later reply); a run that "
+    "does not complete still reports immediately.\n"
     "- Add `--no-reply` to an existing `--session-id` or `--bot` message that needs no answer or read receipt; "
     "not with `--sync` or a new/forked Session.\n"
     "- `--sync` changes waiting behavior, not session identity: runs are async by default; "
