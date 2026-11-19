@@ -4,6 +4,7 @@ import {
   chatTriggerLink,
   harnessChipLabelKey,
   needsHarnessProvenanceReconcile,
+  turnCarryLabelKey,
   vaultCallbackStatusKey,
 } from './chatTrigger';
 
@@ -182,5 +183,19 @@ describe('harnessChipLabelKey (leading-label key by source presence)', () => {
   // pins that it is not quietly re-added on the author_name side channel.
   it('has no Show-specific label left for the retired show_annotation trigger', () => {
     expect(key({ author_name: 'show_annotation' })).toBe('chat.source.harness');
+  });
+});
+
+describe('turnCarryLabelKey', () => {
+  it('labels an input a failed or stopped Turn handed on, from its server-written reason', () => {
+    expect(turnCarryLabelKey({ metadata: { turn_carry: 'stopped' } })).toBe('chat.source.turnCarry.stopped');
+    expect(turnCarryLabelKey({ metadata: { turn_carry: 'failed' } })).toBe('chat.source.turnCarry.failed');
+    expect(turnCarryLabelKey({ metadata: { turn_carry: 'failed_user' } })).toBe('chat.source.turnCarry.failed_user');
+  });
+
+  it('labels nothing else', () => {
+    expect(turnCarryLabelKey({ metadata: null })).toBeNull();
+    expect(turnCarryLabelKey({ metadata: { turn_carry: 'toString' } })).toBeNull();
+    expect(turnCarryLabelKey({ metadata: { turn_carry: { source_turn_id: 't' } } })).toBeNull();
   });
 });

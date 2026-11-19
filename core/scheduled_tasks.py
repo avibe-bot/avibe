@@ -8354,12 +8354,31 @@ class ScheduledTaskService:
         text of its own, so its interruption reason is named instead.
         """
         text = self._fallback_callback_result(run, status=status)
+        carried = self._exhausted_carry_input(run) if status == "failed" else None
+        if carried:
+            # Its one carry is spent: the sender decides whether it still matters.
+            from storage.message_deliveries import TURN_CARRY_EXHAUSTED_NOTICE
+
+            text = "\n\n".join(part for part in (TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=carried), text) if part)
         metadata = run.get("metadata") if isinstance(run.get("metadata"), Mapping) else {}
         reason = str(metadata.get("interrupt_reason") or "").strip()
         if reason and not str(run.get("error") or "").strip():
             label = i18n_t(failure_notices.notice_reason_i18n_key(reason), "en")
             text = "\n\n".join(part for part in (text, i18n_t("harness.run.fallbackResult.reason", "en", reason=label)) if part)
         return text
+
+    def _exhausted_carry_input(self, run: dict[str, Any]) -> Optional[str]:
+        """The sender's own input id, when its Run failed on an input a Turn's end carried."""
+        delivery_id = str(run.get("delivery_id") or "").strip()
+        store = getattr(self.request_store, "sqlite_backend", None)
+        if not delivery_id or store is None:
+            return None
+        from storage import message_deliveries as delivery_store
+
+        with store.engine.connect() as conn:
+            delivery = delivery_store.get_delivery(conn, delivery_id)
+        carry = delivery_store.turn_carry(delivery) if delivery is not None else None
+        return str(carry.get("original_id") or delivery_id) if carry else None
 
     def _fallback_callback_result(self, run: dict[str, Any], *, status: str) -> str:
         parts: list[str] = []

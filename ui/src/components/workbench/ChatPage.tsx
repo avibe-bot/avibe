@@ -75,6 +75,7 @@ import {
   harnessChipLabelKey,
   isVaultCallback,
   needsHarnessProvenanceReconcile,
+  turnCarryLabelKey,
   vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
@@ -6427,6 +6428,7 @@ export const MessageRow = memo(function MessageRow({
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
+  const turnCarryKey = isHarness ? turnCarryLabelKey(message) : null;
   const vaultStatusKey = isVaultCallback(message) ? vaultCallbackStatusKey(message) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
   const resultPresentation = useMemo(() => resultFooterParts(message), [message]);
@@ -6721,6 +6723,10 @@ export const MessageRow = memo(function MessageRow({
               )}
             </span>
           </div>
+          {turnCarryKey && (
+            // A message carried over from a Turn that failed or was stopped says so, once.
+            <span className="px-0.5 text-[11px] text-muted">{t(turnCarryKey)}</span>
+          )}
           <Button
             type="button"
             variant="ghost"

@@ -1520,7 +1520,9 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
     first = dict(snapshots[0])
     first["created_at"] = deliveries[0]["submitted_at"]
     contents = [_json_object(snapshot.get("content_json")) for snapshot in snapshots]
-    texts = with_turn_carry_line(snapshots, [str(snapshot.get("content_text") or "") for snapshot in snapshots])
+    # The carry line is model input only; the Web labels a carried row from its
+    # ``turn_carry`` metadata in the reader's language.
+    texts = [str(snapshot.get("content_text") or "") for snapshot in snapshots]
     visible_text = "\n".join(text for text in texts if text)
     attachments = [
         attachment
@@ -2086,6 +2088,16 @@ TURN_CARRY_LINES = {
     "failed_user": "The previous Turn failed before answering the user's last message and before handling the messages below.",
 }
 _STOP_SETTLEMENTS = frozenset({"stopped", "agent_run_canceled"})
+#: To a sender whose input waits behind a failing model (approved copy, model input).
+TURN_CARRY_PARKED_NOTICE = (
+    "Not handled yet: the target Session's model is failing. Your input stays queued there "
+    "and will be delivered with its next Turn; do not resend."
+)
+#: To a sender whose carried input failed again (approved copy, model input).
+TURN_CARRY_EXHAUSTED_NOTICE = (
+    "These inputs were carried forward once and the next Turn failed too. They will not be "
+    "retried automatically; send them again if they still matter: {inputs}"
+)
 
 
 def _carry_envelope(delivery: dict[str, Any]) -> dict[str, Any]:
@@ -2095,7 +2107,15 @@ def _carry_envelope(delivery: dict[str, Any]) -> dict[str, Any]:
     Turn's end could not send it again. A person's own message keeps none: it stays
     in the context and is answered with the next thing they send, as before.
     """
-    if _json_object(delivery.get("snapshot_json")).get("source") != "harness":
+    snapshot = _json_object(delivery.get("snapshot_json"))
+    # Harness inputs a person did not produce: another Session's Run or callback,
+    # a Task, a Watch, a hook. A page button (``show_intent``) is the person's own
+    # action, and a transcript resume carries no input of its own.
+    if (
+        snapshot.get("source") != "harness"
+        or snapshot.get("type") != "harness"
+        or snapshot.get("author_name") == "show_intent"
+    ):
         return {}
     return {_CARRY_ENVELOPE_KEY: [delivery["snapshot_json"], delivery.get("dispatch_text") or ""]}
 
@@ -2112,16 +2132,16 @@ def with_turn_carry_line(rows: Iterable[Mapping[str, Any]], texts: Iterable[str]
     """``texts``, one per input of a batch, with the first carried one opened by its line."""
     opened: list[str] = []
     pending = True
-    for row, text in zip(rows, texts):
+    for row, body in zip(rows, texts):
         metadata = row.get("metadata")
         if not isinstance(metadata, Mapping):
             snapshot = _json_object(row.get("snapshot_json")) if row.get("snapshot_json") else row
             metadata = _json_object(snapshot.get("metadata_json"))
         line = TURN_CARRY_LINES.get(str(metadata.get(TURN_CARRY_METADATA_KEY) or "")) if pending else None
-        if line and text:
+        if line and body:
             pending = False
-            text = f"{line}\n\n{text}"
-        opened.append(text)
+            body = f"{line}\n\n{body}"
+        opened.append(body)
     return opened
 
 
@@ -2202,6 +2222,8 @@ def carry_accepted_inputs(
     """
     turn_id = str(turn["id"])
     reason = _carry_reason(turn)
+    parked_run_ids: list[str] = []
+    exhausted_input_ids: list[str] = []
     provenance = _json_object(turn.get("terminal_evidence_json")).get("output_provenance")
     kind = provenance.get("error_kind") if isinstance(provenance, Mapping) else None
     provider_failed = reason == "failed" and kind in TRANSIENT_FAILURE_KINDS
@@ -2220,6 +2242,12 @@ def carry_accepted_inputs(
         )
         prior = turn_carry(row) or {}
         eligible = provider_failed or (row["id"] != turn["initial_delivery_id"] and not prior)
+        if (
+            envelope is not None and prior and not eligible
+            and reason in {"failed", "failed_user"}
+        ):
+            # Its one carry is spent and the next Turn failed too.
+            exhausted_input_ids.append(str(prior.get("original_id") or row["id"]))
         if envelope is not None and reason is not None and eligible and (run_ids := _carriable_run_ids(conn, row)) is not None:
             depth = int(prior.get("depth", 0)) + 1 if provider_failed else 1
             snapshot = _json_object(envelope[0])
@@ -2245,11 +2273,14 @@ def carry_accepted_inputs(
                 },
             )
             _rebind_runs(conn, run_ids, carried_id, source_turn_id=turn_id)
+            if provider_failed and depth == 4:
+                # Parked from now on; its senders are told once, here.
+                parked_run_ids.extend(run_ids)
         if envelope is not None:
             conn.execute(update(message_deliveries).where(message_deliveries.c.id == row["id"]).values(
                 delivery_history_json=_canonical_json(history),
             ))
-    return {}
+    return {"parked_run_ids": parked_run_ids, "exhausted_input_ids": exhausted_input_ids}
 
 
 def runs_carried_from_turn(

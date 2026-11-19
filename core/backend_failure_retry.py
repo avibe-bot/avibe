@@ -22,6 +22,10 @@ from storage.message_deliveries import (
 )
 from storage.models import agent_sessions, message_deliveries, messages, session_turns
 
+#: How many Turns of carried inputs may run between a failure and the press on its Retry.
+_CARRY_TURN_LOOKBACK = 8
+
+
 class RetryUnavailable(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
@@ -129,12 +133,20 @@ def _validate_boundary(
         or (turn["backend"] != session["agent_backend"] and turn["terminal_outcome"] != "not_written")
     ):
         raise RetryUnavailable("retry_not_available")
-    latest = conn.execute(
+    latest = None
+    for candidate in conn.execute(
         select(session_turns.c.id)
         .where(session_turns.c.session_id == session_id)
         .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+        .limit(_CARRY_TURN_LOOKBACK)
+    ).scalars():
+        latest = candidate
+        # A Turn that only ran inputs another Turn's end carried (``turn_carry``)
+        # does not make this failure stale: a press that releases parked inputs
+        # lets them run first, in their own Turn, and must still count.
+        initial = deliveries.initial_deliveries_for_turn(conn, candidate)
+        if candidate == turn_id or not initial or not all(deliveries.turn_carry(row) for row in initial):
+            break
     if latest != turn_id:
         raise RetryUnavailable("retry_stale")
     if turn["state"] != "terminal":
@@ -150,12 +162,17 @@ def _validate_boundary(
     # A reserved/unknown input is just as important as an active Turn: it may
     # already have an owner on its way to admission.
     pending = conn.execute(
-        select(message_deliveries.c.id, message_deliveries.c.state)
+        select(message_deliveries.c.id, message_deliveries.c.state, message_deliveries.c.delivery_history_json)
         .where(message_deliveries.c.session_id == session_id)
         .where(message_deliveries.c.id.not_in(exclude_ids))
         .where(message_deliveries.c.state.not_in(("accepted", "retired")))
     )
-    if any(policy_for(row.state).ordering != "terminal" for row in pending):
+    # Inputs parked behind a failing model wait for exactly this: the next start.
+    if any(
+        policy_for(row.state).ordering != "terminal"
+        and not deliveries.waiting_for_external_input(dict(row._mapping))
+        for row in pending
+    ):
         raise RetryUnavailable("retry_pending_input")
     return turn
 

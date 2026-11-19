@@ -4816,8 +4816,14 @@ class SessionTurnManager:
         if source == SOURCE_HUMAN:
             stored = "\n".join(str(row.get("dispatch_text") or "") for row in deliveries if row.get("dispatch_text"))
             segment_text = _segment_dispatch_text(deliveries)
-            if stored and text.endswith(stored) and not text.endswith(segment_text):
-                text = text[: -len(stored)] + segment_text
+            if stored and text.endswith(stored):
+                head = text[: -len(stored)]
+                # The stored Turn text already opens with a carried batch's line.
+                for line in delivery_store.TURN_CARRY_LINES.values():
+                    opening = f"{line}\n\n"
+                    if segment_text.startswith(opening) and head.endswith(opening):
+                        segment_text = segment_text[len(opening):]
+                text = head + segment_text
         if source == SOURCE_SCHEDULED:
             # Keep the raw prompt until MessageHandler parses an explicit
             # ``subagent: prompt`` prefix. The handler prepares structured
@@ -5191,6 +5197,68 @@ class SessionTurnManager:
             logger.exception("durable terminal completion deferred for Turn=%s", pending.turn_id)
             return {"defer_queue_resume": True}
 
+    def _record_turn_carry_notices(
+        self, conn: Connection, session_id: str, turn_id: str, settled: dict[str, Any],
+    ) -> None:
+        """In the terminal transaction, so each notice is written exactly once.
+
+        A sender whose input is parked behind a failing model is told once not to
+        resend; the Session's owner is told which inputs a second failure left.
+        The sender of an input that will not be carried again learns it from its
+        Run's own failure callback (``ScheduledTaskService._did_not_complete_text``).
+        """
+        exhausted = list(settled.get("exhausted_input_ids") or [])
+        if exhausted:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+            messages_service.append(
+                conn, scope_id=scope_id, session_id=session_id, platform="avibe", author="agent",
+                source="agent", message_type="notify",
+                text=i18n_t("harness.turnCarry.exhausted", self._controller_language(), inputs=", ".join(exhausted)),
+                metadata={"event": "turn_carry_exhausted", "turn_id": turn_id, "input_ids": exhausted},
+            )
+        parked = list(settled.get("parked_run_ids") or [])
+        if not parked:
+            return
+        from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
+        from storage.background import enqueue_run_in_connection
+
+        now = datetime.now(timezone.utc).isoformat()
+        for run in conn.execute(
+            select(agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json)
+            .where(agent_runs.c.id.in_(parked))
+        ).mappings():
+            sender = str(run["callback_session_id"] or "").strip()
+            if not sender or sender == session_id:
+                continue
+            try:
+                target = resolve_session_id_target(sender, db_path=Path(str(self._sqlite_engine().url.database)))
+            except UnresolvableSessionTarget:
+                continue
+            metadata = {"source_session_id": session_id, "parked_run_id": str(run["id"])}
+            from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+            try:
+                run_metadata = json.loads(run["metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                run_metadata = {}
+            # The notice runs with the authority the sender's Run was given, no more.
+            authority = run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY) if isinstance(run_metadata, dict) else None
+            if isinstance(authority, dict):
+                metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = authority
+            enqueue_run_in_connection(conn, {
+                "id": uuid.uuid4().hex[:12], "run_type": "agent_run", "status": "queued",
+                "source_kind": "callback", "source_actor": f"{run['id']}:turn-carry-parked",
+                "parent_run_id": str(run["id"]), "session_policy": "existing",
+                "session_id": target.session_id, "legacy_session_key": target.session_key.to_key(),
+                "agent_id": target.agent_id, "agent_name": target.agent_name,
+                "agent_backend": target.agent_backend, "model": target.model,
+                "reasoning_effort": target.reasoning_effort,
+                "prompt": delivery_store.TURN_CARRY_PARKED_NOTICE,
+                "metadata_json": json.dumps(metadata), "created_at": now, "updated_at": now,
+            })
+
     def _terminalize_durable_turn(
         self,
         turn_id: str,
@@ -5492,6 +5560,8 @@ class SessionTurnManager:
                     evidence_kind=evidence_kind,
                     evidence=evidence,
                 )
+                if settled.get("changed"):
+                    self._record_turn_carry_notices(conn, session_id, turn_id, settled)
                 if not settled.get("changed"):
                     result = {
                         "changed": False,

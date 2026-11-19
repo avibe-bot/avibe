@@ -5,6 +5,7 @@ Turn dies on a model error or is stopped, the message used to end with it: its
 sender waited, or resent it by hand.
 """
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -73,11 +74,14 @@ def _run_delivery(conn, run_id):
 
 def _start_next(conn):
     """The queue's next Turn takes everything waiting, as a drain would."""
-    queue = [store.get_delivery(conn, row["id"]) for row in store.list_queued(conn, "ses_fsm")]
+    from core.session_turns import _segment_dispatch_text
+
+    payloads = store.list_queued(conn, "ses_fsm")
+    queue = [store.get_delivery(conn, row["id"]) for row in payloads]
     turn_id = store.new_turn_id()
     store.claim_start_batch(
         conn, turn_id=turn_id, session_id="ses_fsm", backend="codex", deliveries=queue,
-        dispatch_text="\n".join(row["dispatch_text"] for row in queue),
+        dispatch_text=_segment_dispatch_text(payloads),
     )
     turn = store.get_turn(conn, turn_id)
     store.bind_native_start(
@@ -176,10 +180,15 @@ def test_a_stopped_turn_carries_what_other_sessions_sent_and_nothing_else(manage
         assert all(row["state"] == "accepted" for row in store.deliveries_for_turn(conn, turn_id))
         successor = _start_next(conn)
         shown = conn.execute(
-            select(messages.c.content_text).where(messages.c.id == store.get_turn(conn, successor)["initial_delivery_id"])
-        ).scalar_one()
-    # Visibly a carry, once, and the stopped work is not in it.
-    assert shown == f"{STOP_LINE}\n\nfirst report\nsecond report"
+            select(messages.c.content_text, messages.c.metadata_json)
+            .where(messages.c.id == store.get_turn(conn, successor)["initial_delivery_id"])
+        ).one()
+        sent = store.get_turn(conn, successor)["dispatch_text"]
+    # The person sees the reports once, labelled as a carry in their language by the Web
+    # (``turn_carry``); the Agent reads the approved line first. No stopped work in either.
+    assert shown.content_text == "first report\nsecond report"
+    assert json.loads(shown.metadata_json)["turn_carry"] == "stopped"
+    assert sent == f"{STOP_LINE}\n\nfirst report\nsecond report"
 
 
 @pytest.mark.parametrize("kind", ["auth", "rate_limit", "context_overflow", "invalid_request", None])
@@ -192,10 +201,10 @@ def test_a_failure_that_will_repeat_carries_the_reports_and_not_its_request(mana
         assert "automatic_retry_delivery_id" not in _end(conn, turn_id, kind=kind)
         assert _texts(conn) == ["collateral report"]
         successor = _start_next(conn)
-        shown = conn.execute(
-            select(messages.c.content_text).where(messages.c.id == store.get_turn(conn, successor)["initial_delivery_id"])
-        ).scalar_one()
-        assert shown == "The previous Turn failed before answering the user's last message and before handling the messages below.\n\ncollateral report"
+        assert store.get_turn(conn, successor)["dispatch_text"] == (
+            "The previous Turn failed before answering the user's last message and before handling "
+            "the messages below.\n\ncollateral report"
+        )
         # The carried input had its one replay: a second failure sends nothing again.
         _end(conn, successor, kind=kind)
         assert _texts(conn) == []
@@ -269,3 +278,111 @@ def test_the_failing_turn_does_not_settle_a_run_that_goes_on(managers, kind, car
         assert record() == carried
     finally:
         background.close()
+
+
+def _fail_through_manager(manager, turn_id, kind):
+    with manager._sqlite_engine().begin() as conn:
+        _notice(conn, turn_id)
+    return manager._terminalize_durable_turn(
+        turn_id, "failed", settled_by="terminal_result", evidence_kind="terminal_result",
+        evidence={"output_provenance": {"error_kind": kind, "turn_id": turn_id}, "settles_run": True},
+        resume_successors=False,
+    )
+
+
+def test_a_parked_input_tells_its_sender_once_not_to_resend(managers):
+    from tests.test_session_delivery_fsm import _seed_session
+
+    manager, _, engine, _, _ = managers
+    _seed_session(engine, "ses_sender")
+    turn_id, _ = asyncio.run(_activate(manager, text="human request"))
+    _run(engine, "run-report", _merge(manager, "report"), callback_session_id="ses_sender",
+         source_kind="agent", source_actor="ses_sender")
+    notices = []
+    for attempt in range(5):
+        assert _fail_through_manager(manager, turn_id, "overloaded")["changed"]
+        with engine.begin() as conn:
+            notices.append(conn.execute(
+                select(agent_runs.c.prompt, agent_runs.c.session_id).where(agent_runs.c.parent_run_id == "run-report")
+            ).all())
+            if attempt < 4:
+                if attempt == 3:  # parked: a fresh input releases it into the next Turn
+                    store.enqueue_queued(conn, scope_id=None, session_id="ses_fsm", text="new work")
+                payloads = [p for p in store.list_queued(conn, "ses_fsm") if p["dispatch_text"] == "report"]
+                turn_id = store.new_turn_id()
+                store.claim_start_batch(conn, turn_id=turn_id, session_id="ses_fsm", backend="codex",
+                                        deliveries=[store.get_delivery(conn, payloads[0]["id"])], dispatch_text="report")
+                turn = store.get_turn(conn, turn_id)
+                store.bind_native_start(conn, turn_id, expected_version=turn["version"], runtime_key="r",
+                                        runtime_turn_id="r", native_turn_id="r")
+                store.materialize_start_acceptance(conn, turn_id=turn_id, evidence={})
+    # Nothing for the three successors, one notice at parking, none when it parks again.
+    assert [len(rows) for rows in notices] == [0, 0, 0, 1, 1]
+    assert notices[-1] == [(store.TURN_CARRY_PARKED_NOTICE, "ses_sender")]
+    with engine.connect() as conn:
+        assert conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == "run-report")).scalar_one() == "running"
+
+
+def test_a_second_failure_tells_the_owner_and_the_sender_which_inputs(managers):
+    from core.scheduled_tasks import ScheduledTaskService
+    from types import SimpleNamespace
+
+    manager, _, engine, _, _ = managers
+    turn_id, _ = asyncio.run(_activate(manager, text="human request"))
+    report = _merge(manager, "report")
+    _run(engine, "run-report", report)
+    _fail_through_manager(manager, turn_id, "auth")
+    with engine.begin() as conn:
+        successor = _start_next(conn)
+    _fail_through_manager(manager, successor, "auth")
+    with engine.connect() as conn:
+        rows = conn.execute(select(messages.c.content_text, messages.c.metadata_json).where(messages.c.type == "notify")).all()
+        carried_to = _run_delivery(conn, "run-report")
+    owner = [row for row in rows if json.loads(row.metadata_json).get("event") == "turn_carry_exhausted"]
+    assert len(owner) == 1 and report in owner[0].content_text
+    assert json.loads(owner[0].metadata_json)["input_ids"] == [report]
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.request_store = SimpleNamespace(sqlite_backend=SimpleNamespace(engine=engine))
+    text = service._did_not_complete_text({"delivery_id": carried_to, "error": "auth"}, status="failed")
+    assert text.startswith("These inputs were carried forward once and the next Turn failed too.")
+    assert text.split("\n\n")[0].endswith(report)
+
+
+def test_a_retry_press_is_not_blocked_or_made_stale_by_parked_inputs(managers):
+    from core.backend_failure_retry import _validate_boundary, admission_denial
+    from tests.backend_failure_retry_helpers import reserve_failure_retry
+
+    manager, _, engine, _, _ = managers
+    turn_id, _ = asyncio.run(_activate(manager, text="request"))
+    _merge(manager, "report")
+    with engine.begin() as conn:
+        for _attempt in range(4):
+            _end(conn, turn_id, kind="network")
+            if _attempt < 3:
+                turn_id = _start_next(conn)
+        notice = conn.execute(select(messages).where(
+            messages.c.type == "notify", messages.c.metadata_json.like(f"%{turn_id}%"),
+        )).mappings().one()
+        notice = messages_service.get_message(conn, notice["id"])
+        assert _validate_boundary(conn, notice, exclude_ids=set())["id"] == turn_id
+        retry = reserve_failure_retry(conn, notice)
+        # Admission queues the press, as ``_admit_p3`` does.
+        retry = store.cas_delivery(conn, retry["id"], expected_version=retry["version"],
+                                   expected_states=("reserved",), values={"state": "queued"},
+                                   history_event={"kind": "queue", "reason": "p3_admission"})
+        assert admission_denial(conn, retry) is None
+        # The press released the parked report; it runs first, in its own Turn...
+        carried = store.claimable_fifo_head(conn, "ses_fsm")
+        assert carried["id"] != retry["id"] and store.turn_carry(carried)
+        released = store.new_turn_id()
+        store.claim_start_batch(conn, turn_id=released, session_id="ses_fsm", backend="codex",
+                                deliveries=[carried], dispatch_text="report")
+        turn = store.get_turn(conn, released)
+        store.bind_native_start(conn, released, expected_version=turn["version"], runtime_key="x",
+                                runtime_turn_id="x", native_turn_id="x")
+        store.materialize_start_acceptance(conn, turn_id=released, evidence={})
+        store.terminalize_turn(conn, released, outcome="completed", settled_by="terminal_result",
+                               evidence_kind="terminal_result")
+        # ...and the press still counts afterwards.
+        assert admission_denial(conn, store.get_delivery(conn, retry["id"])) is None
+        assert store.claimable_fifo_head(conn, "ses_fsm")["id"] == retry["id"]
