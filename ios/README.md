@@ -314,8 +314,8 @@ iOS 18, which is why the deployment target is iOS 17.4
 `SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
 process without bringing the App to the front (`supportedModes`
 `[.background, .foreground(.dynamic)]` from iOS 26), and Apple requires a Live
-Activity for as long as it records. It is deliberately not also a
-`LiveActivityIntent` (see the tries below).
+Activity for as long as it records. It is also a `LiveActivityIntent`: only
+then may it start its island from the background (see the tries below).
 `UIBackgroundModes` declares `audio`, which Apple requires to keep recording
 once the App is in the background (`AVAudioSession.Category.record`); the
 other Info.plist addition is `NSSupportsLiveActivities`. The background audio mode is
@@ -358,20 +358,22 @@ the main Bot acts on the user's computer.
   on its own 90 seconds past the five-minute cap, and a stale one is drawn as
   interrupted, so no timer runs on for a take nobody holds.
 - Tries of one press, after the instance agreed, in order (each refusal is
-  kept): 0, the 26.1 setup (the island, then a `.record` session, then the
-  recorder); 1, a `.record` session before a fresh island; 2, `.playAndRecord`
-  with `.mixWithOthers` (mixable); 3, in the App. The intent is an
-  `AudioRecordingIntent` only: 26.1, declared that way, started in the
-  background on the owner's phone, while 35.1, also a `LiveActivityIntent`,
-  was refused at activation for both session types (560557684, 561015905).
-  A cold press, whose island cannot start from the background, goes straight
-  to try 3. Activating a session records nothing; recording starts only once
-  an island is up. Try 3 (iOS 26, when the intent can bring Avibe forward)
-  records at once with nothing to tap and one line, 正在录音，再长按一次侧边键发送;
-  the second press sends as usual. The message carries which try recorded,
-  the App's state at the press, and every refused try before it in
-  `metadata.capture_attempt`, for example
-  `3 [background cold] (0 liveActivity ActivityAuthorizationError 3)`.
+  kept): 0, the island, then a `.record` session, then the recorder; 1,
+  `.playAndRecord` with `.mixWithOthers` and `.duckOthers` under the same
+  island, for when another App holds audio (cannotInterruptOthers); 3, in the
+  App. A minimal sample on the Simulator (11-19) showed that only an
+  `AudioRecordingIntent` that is also a `LiveActivityIntent` starts its island
+  from the background, warm and cold (without it: `visibility`, as on the
+  owner's 37.1), and that order and a delay of up to 4 s don't matter there.
+  Whether a phone then lets the microphone start is device-only. A press
+  whose island cannot start goes to try 3. Activating a session records
+  nothing; recording starts only once the island is up. Try 3 (iOS 26, when
+  the intent can bring Avibe forward) records at once with nothing to tap and
+  one line, 正在录音，再长按一次侧边键发送; the second press sends as usual. The
+  message carries which try recorded, the App's state at the press, whether
+  another App was playing audio and where sound goes, and every refused try
+  before it in `metadata.capture_attempt`, for example
+  `1 [background warm otherAudio=1 silenceHint=1 out=Speaker] (0 sessionActivate 560557684)`.
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is

@@ -161,28 +161,18 @@ final class VoiceCaptureController {
         case needsForeground
     }
 
-    /// Where a try's island comes relative to its session.
-    enum Island {
-        /// The island, then the session (the 26.1 order).
-        case first
-        /// The session, then a fresh island (an earlier try's is ended).
-        case freshAfterSession
-        /// Keep an island an earlier try started, else one after the session.
-        case keep
-    }
-
-    /// One way of trying: its number in the notice and message metadata, the
-    /// session set-up it uses, and where its island comes.
-    typealias Try = (number: Int, candidate: VoiceCaptureSessionCandidate, island: Island)
-    /// 0: the 26.1 setup (island, then `.record`); 1: `.record` before a
-    /// fresh island; 2: mixable. The owner's 35.1 press refused 1 and 2
-    /// under a `LiveActivityIntent`; 26.1 started with 0 under a plain
-    /// `AudioRecordingIntent`.
-    static let backgroundTries: [Try] = [
-        (0, .exclusiveRecord, .first), (1, .exclusiveRecord, .freshAfterSession), (2, .mixablePlayAndRecord, .keep),
-    ]
+    /// One way of trying: its number in the notice and message metadata, and
+    /// the session set-up it uses. The island comes first, once per press;
+    /// later tries record under it.
+    typealias Try = (number: Int, candidate: VoiceCaptureSessionCandidate)
+    /// 0: the island, then `.record`; 1: mixable, under the same island,
+    /// for when another App holds audio (cannotInterruptOthers). The sample
+    /// (11-19) showed only an intent that is also a `LiveActivityIntent`
+    /// starts its island from the background, warm and cold, with order and
+    /// a delay of up to 4 s not mattering on the Simulator.
+    static let backgroundTries: [Try] = [(0, .exclusiveRecord), (1, .mixablePlayAndRecord)]
     /// In front, the ordinary non-mixable session.
-    static let foregroundTry: Try = (3, .exclusiveRecord, .first)
+    static let foregroundTry: Try = (3, .exclusiveRecord)
 
     /// The refused background tries of a press waiting for Avibe to come
     /// forward (try 3).
@@ -461,6 +451,7 @@ final class VoiceCaptureController {
         }
         state = .idle
         guard let take else { return [] }
+        record("account transition: the take is given up")
         let barrier = take.instance.releaseBarrier
         take.audio.stop()
         take.instance.close()
@@ -575,19 +566,8 @@ final class VoiceCaptureController {
         var activity: VoiceCaptureActivityHandle?
         var recorded: Int?
         var islandError: Error?
-        tryLoop: for (number, candidate, island) in tries {
-            if island == .freshAfterSession, let current = activity {
-                // This try puts the session before a fresh island.
-                activity = nil
-                await current.end(nil, dismissal: .immediate)
-                guard generation == startGeneration else {
-                    // The account changed meanwhile: give the press up.
-                    instance.close()
-                    audio.discard()
-                    return .stopped
-                }
-            }
-            if island == .first, activity == nil {
+        tryLoop: for (number, candidate) in tries {
+            if activity == nil {
                 do {
                     activity = try requestListeningIsland(startedAt)
                 } catch {
@@ -603,16 +583,6 @@ final class VoiceCaptureController {
                 attempts.append(Self.attempt(number, error: error, step: .sessionActivate))
                 continue
             }
-            if activity == nil {
-                do {
-                    activity = try requestListeningIsland(startedAt)
-                } catch {
-                    _ = audio.stop()
-                    attempts.append(Self.attempt(number, error: error, step: .liveActivity))
-                    islandError = error
-                    break tryLoop
-                }
-            }
             do {
                 try audio.start()
                 recorded = number
@@ -626,7 +596,6 @@ final class VoiceCaptureController {
         if let islandError, !foregroundFallback {
             // No island means no recording (Apple stops it), and Avibe
             // cannot come forward here: say why, with the step and code.
-            if let activity { await activity.end(nil, dismissal: .immediate) }
             instance.close()
             state = .idle
             audio.discard()
@@ -1006,6 +975,21 @@ enum VoiceCaptureLaunch {
         @unknown default: state = "unknown"
         }
         let cold = !everActive && (launchedAt.map { Date().timeIntervalSince($0) < 10 } ?? false)
-        return "\(state) \(cold ? "cold" : "warm")"
+        let session = AVAudioSession.sharedInstance()
+        return "\(state) \(cold ? "cold" : "warm") " + audioContext(
+            otherAudio: session.isOtherAudioPlaying,
+            silenceHint: session.secondaryAudioShouldBeSilencedHint,
+            outputs: session.currentRoute.outputs.map(\.portType.rawValue)
+        )
+    }
+
+    /// Whether another App holds audio (navigation prompts, music) and where
+    /// sound goes, for the message metadata. The input is left out: before
+    /// a take's session is set up, the route's input reflects only whatever
+    /// category the shared session last had. `otherAudio=0` between
+    /// navigation prompts does not rule navigation out.
+    nonisolated static func audioContext(otherAudio: Bool, silenceHint: Bool, outputs: [String]) -> String {
+        "otherAudio=\(otherAudio ? 1 : 0) silenceHint=\(silenceHint ? 1 : 0) "
+            + "out=\(outputs.isEmpty ? "-" : outputs.joined(separator: ","))"
     }
 }
