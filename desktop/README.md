@@ -293,10 +293,19 @@ rules are stated at the top of that file. In short:
   use at that instant, which no known path reaches; the reads at
   `window.open`, at the commit, at the reveal and for every click and key do
   not depend on it.) The shell erases a retired Workbench's data store after
-  hiding its web view, so by then the pages of that Workbench's sandbox
-  windows have been destroyed, and a hidden Workbench is refused any new
-  window. The Workbench's own page, and the sandbox frame inside it, live
-  through the erase, as the retirement was designed. A web view moved or
+  hiding its web view. By then that Workbench's sandbox windows are closed
+  and WebKit has been asked to end their pages, and a hidden Workbench is
+  refused any new window. That is not those pages having stopped: a page's
+  own process hears of it a moment later (it has been seen writing up to a
+  quarter of a second after) and one last write can land in the store during
+  the erase or after it; and the Workbench's own page, and the sandbox frame
+  inside it, live through the erase, as the retirement was designed. So the
+  erase is not the guarantee. The guarantee is that a retired instance's
+  disposable (not persistent) data is destroyed as a whole: whatever is in
+  the store is in memory only, the app releases the store when it closes the
+  web view in the same retirement, and the next instance or account gets a
+  store of its own. (When WebKit's storage process then drops what the store
+  held cannot be observed from the app.) A web view moved or
   resized over a Workbench without being created or shown there is not
   announced; the reads above still keep a window from appearing or taking
   input. A sandbox window becomes the key window when its content is
@@ -387,7 +396,13 @@ stays; without the second a sandbox window stays open across a Workbench
 reload. The probe makes its replacement web views itself, with the same two
 calls, and retires one with the same sequence as `instance_store::retire`
 (hide, erase the data store, read its cookies back, close); it does not link
-the library, so the sequence is written out in the probe.
+the library, so the sequence is written out in the probe. For a retired
+store it checks the guarantee above, not an empty store after the erase: the
+store is not persistent; the card's page gives no sign of life later than two
+seconds after the hide; after the web view is closed, weak references to the
+store, the web view and the card's web view all read nil within a bound; and
+the next web view has a different store with nothing in it for the card's
+origin. A late write found after the erase is counted and printed.
 
 Only a signed build can show the rest: the shell's install passing its own
 admission; the real origin and how long its first paint takes; the passkey

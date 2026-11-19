@@ -46,7 +46,7 @@ mod probe {
     };
 
     use objc2::{
-        rc::Retained,
+        rc::{Retained, Weak},
         runtime::{AnyClass, AnyObject},
         MainThreadMarker,
     };
@@ -190,11 +190,26 @@ addEventListener('message', (event) => {
   if (event.data === 'log-later') setTimeout(() => fetch('/report', { method: 'POST', body: JSON.stringify(log) }), 3000);
 });
 if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slow.css">');
-if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe=' + Date.now() + '; path=/'; }, 20);
+if (location.hash.startsWith('#cookies')) {
+  setInterval(() => {
+    // The value is when the write was made, on this machine's clock.
+    document.cookie = 'probe=' + Date.now() + '; path=/';
+    try { localStorage.setItem('probe', String(Date.now())); } catch (error) {}
+  }, 20);
+  // And a sign of life the probe's server sees whatever becomes of the store.
+  setInterval(() => fetch('/alive/' + location.hash.slice(9), { method: 'POST', cache: 'no-store' }).catch(() => {}), 50);
+}
 </script>
 <body style="margin:0"><button style="position:fixed;inset:0;width:100%;height:100%">Confirm</button>"#;
 
     /// A sandbox page that reports nothing, for windows the shell must close.
+    /// A page of the sandbox origin that says what its store holds for it.
+    const STORAGE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>storage</title>
+<script>
+let stored = null;
+try { stored = localStorage.getItem('probe'); } catch (error) { stored = 'error: ' + error; }
+fetch('/report', { method: 'POST', body: JSON.stringify({ case: 'storage', stored, cookie: document.cookie }) });
+</script>"#;
     const QUIET_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>quiet</title><p>sandbox</p>"#;
 
     const ELSEWHERE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>elsewhere</title>
@@ -708,13 +723,27 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// store of its own, and later retires it. Such a Workbench opens the
         /// sandbox's window as the first one does, and however it goes (retired
         /// as the shell retires one, hidden, or closed without being hidden)
-        /// its card is closed and the card's page destroyed at that moment,
-        /// before anything else happens to its data store.
+        /// its card is closed at that moment and WebKit is asked to end the
+        /// card's page.
+        ///
+        /// The page's own process hears of that a moment later and can write
+        /// once more, also while the store is being erased or after; and the
+        /// Workbench's own page and its sandbox frame run through the erase by
+        /// design. So an empty store after the erase is not what is promised.
+        /// What is: a retired Workbench's disposable (not persistent) data is
+        /// destroyed as a whole with its web view, and the next Workbench
+        /// gets a store of its own. Checked here: the store is not
+        /// persistent; the card's page gives no sign of life later than two
+        /// seconds after the hide; once the web view is closed the app has
+        /// released the store, the web view and the card's web view; and the
+        /// next web view has a different store and finds nothing in it. A
+        /// late write is counted and said, not failed.
         fn replacement_workbenches(&mut self) {
             let sandbox = format!("http://localhost:{}", self.port);
             // The shell hides the Workbench it replaces.
             let first: &tauri::Webview = self.main.as_ref();
             first.hide().unwrap();
+            let mut hides: Vec<(&str, f64)> = Vec::new();
             for ending in ["retired", "hidden", "closed"] {
                 let port = self.port;
                 let view = self
@@ -758,17 +787,22 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 self.report("frame-ready");
 
                 // Its card keeps writing to the data store it shares with it.
-                view.eval(format!("probe.windows.card = window.open('{sandbox}/card#cookies')"))
-                    .unwrap();
+                view.eval(format!(
+                    "probe.windows.card = window.open('{sandbox}/card#cookies-{ending}')"
+                ))
+                .unwrap();
                 self.wait_children("a replacement Workbench's card", |children| {
                     children.len() == 1 && children[0].shown()
                 });
+                let (shared, persistent) = self.keep_the_card_of(&view);
+                assert!(shared, "the card does not share its replacement Workbench's data store");
                 assert!(
-                    self.keep_the_card_of(&view),
-                    "the card does not share its replacement Workbench's data store"
+                    !persistent,
+                    "a replacement Workbench's disposable data store is persistent"
                 );
 
                 // A retirement begins by hiding the web view.
+                let hidden = now_ms();
                 match ending {
                     "closed" => view.close().unwrap(),
                     _ => view.hide().unwrap(),
@@ -781,37 +815,124 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     Some(false),
                     "the card's page outlived its {ending} Workbench"
                 );
-                match ending {
+                let said = match ending {
                     // The rest of a retirement, in the order of the shell's
                     // `instance_store::retire`: erase the store, read its
                     // cookies back, close the web view. The probe does not
                     // link the library, so the steps are made here.
                     "retired" => {
-                        self.erase_the_store_of(&view);
-                        // Time for a page that was still alive to write again.
+                        let erased = self.erase_the_store_of(&view);
+                        // As the shell reads them, and again after time for a
+                        // page that was still alive to write once more.
+                        let mut left = store_cookies(&view);
                         std::thread::sleep(Duration::from_millis(200));
-                        let cookies = view.cookies().expect("the erased store's cookies are read back");
-                        assert!(
-                            cookies.is_empty(),
-                            "a cookie was written to a retired Workbench's store after it was erased: {} left",
-                            cookies.len()
-                        );
+                        left.extend(store_cookies(&view));
+                        // The card's last write may have landed while the
+                        // erase ran, or after it: counted and said. (The
+                        // same name each time, so at most one is there.)
+                        let mut latest: Option<f64> = None;
+                        for (name, value) in &left {
+                            let written = value.parse::<f64>().ok().filter(|_| name == "probe");
+                            let written = written.unwrap_or_else(|| {
+                                panic!("something other than the card wrote to the retired store: {left:?}")
+                            });
+                            latest = Some(latest.map_or(written, |latest| latest.max(written)));
+                        }
                         view.close().unwrap();
                         self.on_main(|_| ());
+                        match latest {
+                            None => "; late writes left in the erased store: 0".to_owned(),
+                            Some(written) => format!(
+                                "; late writes left in the erased store: 1, made by the card's page {:.0} ms after \
+                                 the hide, {:.0} ms {} the erase completed",
+                                written - hidden,
+                                (erased - written).abs(),
+                                if written <= erased { "before" } else { "after" }
+                            ),
+                        }
                     }
                     "hidden" => {
+                        // The card's page stops. It writes every 20 ms: three
+                        // looks 40 ms apart that find the same value say so.
+                        let written = |view: &tauri::Webview| {
+                            store_cookies(view)
+                                .into_iter()
+                                .find(|(name, _)| name == "probe")
+                                .and_then(|(_, value)| value.parse::<f64>().ok())
+                        };
+                        let (mut last, mut same) = (written(&view), 0);
+                        while same < 3 {
+                            std::thread::sleep(Duration::from_millis(40));
+                            let now = written(&view);
+                            if now == last {
+                                same += 1;
+                            } else {
+                                (last, same) = (now, 0);
+                            }
+                            assert!(
+                                now_ms() - hidden < 2000.0 || same >= 3,
+                                "the card's page was still writing two seconds after its window was closed: {now:?}, \
+                                 hidden at {hidden:.0}"
+                            );
+                        }
+                        let last = last.expect("the card had written before its Workbench was hidden");
                         view.close().unwrap();
                         self.on_main(|_| ());
+                        if last <= hidden {
+                            "; its page made no write after the hide".to_owned()
+                        } else {
+                            format!("; its page made its last write {:.0} ms after the hide", last - hidden)
+                        }
                     }
-                    _ => {}
+                    _ => String::new(),
+                };
+                // The web view is closed: the app has released the store it
+                // had, with the card's web view and its own.
+                let released_after = self.the_retired_store_is_released(ending);
+                if ending == "retired" {
+                    self.the_next_workbench_finds_nothing();
                 }
+                // No sign of the card's page later than two seconds after the
+                // hide; looked for a little later than that.
+                let look_at = hidden + 2300.0;
+                std::thread::sleep(Duration::from_millis((look_at - now_ms()).max(0.0) as u64));
+                let sign = last_sign_of(ending).expect("the card said it was alive while it was up");
+                assert!(
+                    sign <= hidden + 2000.0,
+                    "the card of a {ending} Workbench was still alive {:.0} ms after the hide",
+                    sign - hidden
+                );
+                hides.push((ending, hidden));
                 println!(
-                    "vault window probe: a replacement Workbench was {ending} with a card up; the card was closed{}",
+                    "vault window probe: a replacement Workbench with a disposable (not persistent) data store was \
+                     {ending} with a card up; the card was closed{}{said}; the last sign of the card's page reached \
+                     the probe's server {}; the app had released the data store, the web view and the card's web \
+                     view {released_after:?} after the web view was closed{}",
                     if destroyed == Some(true) {
-                        " and its page destroyed at once"
+                        " and its page closed at once on the app's side"
                     } else {
-                        " (WebKit does not say whether its page is destroyed)"
+                        " (WebKit does not say whether its page is closed)"
+                    },
+                    if sign <= hidden {
+                        "before the hide".to_owned()
+                    } else {
+                        format!("{:.0} ms after the hide", sign - hidden)
+                    },
+                    if ending == "retired" {
+                        "; the next web view had a different store, not persistent either, with no cookie and no \
+                         local storage for the card's origin"
+                    } else {
+                        ""
                     }
+                );
+            }
+            // And none of the three cards has shown itself since.
+            for (ending, hidden) in hides {
+                let sign = last_sign_of(ending).expect("the card said it was alive while it was up");
+                assert!(
+                    sign <= hidden + 2000.0,
+                    "the card of a {ending} Workbench showed itself again {:.0} ms after the hide",
+                    sign - hidden
                 );
             }
             let first: &tauri::Webview = self.main.as_ref();
@@ -819,9 +940,75 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             self.on_main(|_| ());
         }
 
+        /// A retired Workbench's disposable data is destroyed as a whole: once
+        /// its web view is closed, the app has released the store, the web
+        /// view and its card's web view, and nothing holds them. (When
+        /// WebKit's own storage process then drops what the store held is
+        /// its behaviour, with no public way to look.)
+        fn the_retired_store_is_released(&self, ending: &str) -> Duration {
+            let started = Instant::now();
+            loop {
+                let left = self.on_main(|_| left_of_the_retiring());
+                if left.is_empty() {
+                    return started.elapsed();
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "a {ending} Workbench's web view was closed and these are still held: {left:?}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        /// The next Workbench gets a store of its own: the retired one is
+        /// already released when this one exists, this one is not persistent
+        /// either, and a page of the card's origin in it finds no cookie and
+        /// nothing in local storage.
+        fn the_next_workbench_finds_nothing(&mut self) {
+            let next = self
+                .main
+                .as_ref()
+                .window()
+                .add_child(
+                    tauri::webview::WebviewBuilder::new(
+                        "replacement-next",
+                        WebviewUrl::External(format!("http://localhost:{}/storage", self.port).parse().unwrap()),
+                    )
+                    .incognito(true)
+                    .on_new_window(|_url, _features| NewWindowResponse::Deny),
+                    tauri::LogicalPosition::new(0., 0.),
+                    tauri::LogicalSize::new(4000., 4000.),
+                )
+                .unwrap();
+            let storage = self.report("storage");
+            assert!(
+                storage["stored"].is_null() && storage["cookie"] == "",
+                "the next Workbench's store holds what a retired one's card wrote: {storage}"
+            );
+            let (tx, rx) = mpsc::channel();
+            next.with_webview(move |platform| {
+                // SAFETY: Tauri hands out the live web view on the main thread.
+                let persistent = unsafe {
+                    let next = Retained::retain(platform.inner().cast::<WKWebView>()).expect("the next web view");
+                    next.configuration().websiteDataStore().isPersistent()
+                };
+                let _ = tx.send((persistent, left_of_the_retiring()));
+            })
+            .unwrap();
+            let (persistent, left) = rx.recv_timeout(Duration::from_secs(10)).expect("main thread answered");
+            assert!(!persistent, "the next Workbench's data store is persistent");
+            assert!(
+                left.is_empty(),
+                "the retired store is still held beside the next one: {left:?}"
+            );
+            next.close().unwrap();
+            self.on_main(|_| ());
+        }
+
         /// Erases everything in a web view's data store, as the shell does
         /// when it retires a Workbench, and waits until WebKit says it is done.
-        fn erase_the_store_of(&self, view: &tauri::Webview) {
+        /// Returns when that was, on the clock of `now_ms`.
+        fn erase_the_store_of(&self, view: &tauri::Webview) -> f64 {
             let (tx, rx) = mpsc::channel();
             view.with_webview(move |platform| {
                 let mtm = MainThreadMarker::new().expect("main thread");
@@ -833,19 +1020,22 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     let types = objc2_web_kit::WKWebsiteDataStore::allWebsiteDataTypes(mtm);
                     let since = objc2_foundation::NSDate::dateWithTimeIntervalSince1970(0.0);
                     let erased = block2::RcBlock::new(move || {
-                        let _ = tx.send(());
+                        let _ = tx.send(now_ms());
                     });
                     store.removeDataOfTypes_modifiedSince_completionHandler(&types, &since, &erased);
                 }
             })
             .unwrap();
             rx.recv_timeout(Duration::from_secs(20))
-                .expect("the data store was erased");
+                .expect("the data store was erased")
         }
 
         /// Keeps a reference to the one card's web view for a later question,
-        /// and says whether it has the data store of `opener`.
-        fn keep_the_card_of(&self, opener: &tauri::Webview) -> bool {
+        /// and says whether it has the data store of `opener` and whether that
+        /// store is persistent. Also keeps weak
+        /// references to that store and to both web views, which hold
+        /// nothing, to ask later whether they are gone.
+        fn keep_the_card_of(&self, opener: &tauri::Webview) -> (bool, bool) {
             let (tx, rx) = mpsc::channel();
             opener
                 .with_webview(move |platform| {
@@ -862,8 +1052,13 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                             &*card.configuration().websiteDataStore(),
                             &*opener.configuration().websiteDataStore(),
                         );
+                        RETIRING.set(Some(Retiring {
+                            store: Weak::from_retained(&opener.configuration().websiteDataStore()),
+                            workbench: Weak::from_retained(&opener),
+                            card: Weak::from_retained(&card),
+                        }));
                         KEPT_CARD.set(Some(card));
-                        shared
+                        (shared, opener.configuration().websiteDataStore().isPersistent())
                     };
                     let _ = tx.send(shared);
                 })
@@ -2487,6 +2682,57 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         static KEPT_CARD: std::cell::RefCell<Option<Retained<WKWebView>>> = const { std::cell::RefCell::new(None) };
     }
 
+    /// When the probe's server last heard from each card that says it is
+    /// alive, by the card's name, on the clock of `now_ms`.
+    static CARD_SIGNS: std::sync::Mutex<Vec<(String, f64)>> = std::sync::Mutex::new(Vec::new());
+
+    fn last_sign_of(card: &str) -> Option<f64> {
+        CARD_SIGNS
+            .lock()
+            .expect("the signs")
+            .iter()
+            .find(|(name, _)| name == card)
+            .map(|(_, at)| *at)
+    }
+
+    struct Retiring {
+        store: Weak<objc2_web_kit::WKWebsiteDataStore>,
+        workbench: Weak<WKWebView>,
+        card: Weak<WKWebView>,
+    }
+
+    thread_local! {
+        /// The replacement Workbench being retired; main thread only.
+        static RETIRING: std::cell::RefCell<Option<Retiring>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// What of the retiring Workbench is still held by anything: its data
+    /// store, its web view, its card's web view.
+    fn left_of_the_retiring() -> Vec<&'static str> {
+        RETIRING.with_borrow(|retiring| {
+            let Some(retiring) = retiring else {
+                return Vec::new();
+            };
+            [
+                ("its data store", retiring.store.load().is_some()),
+                ("its web view", retiring.workbench.load().is_some()),
+                ("its card's web view", retiring.card.load().is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(what, held)| held.then_some(what))
+            .collect()
+        })
+    }
+
+    /// The cookies in a web view's data store, by name and value.
+    fn store_cookies(view: &tauri::Webview) -> Vec<(String, String)> {
+        view.cookies()
+            .expect("the store's cookies are read")
+            .iter()
+            .map(|cookie| (cookie.name().to_owned(), cookie.value().to_owned()))
+            .collect()
+    }
+
     /// Whether the kept card's page has been destroyed, as WebKit says it;
     /// `None` when WebKit has no word for it.
     fn kept_card_is_destroyed() -> Option<bool> {
@@ -3148,11 +3394,18 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 });
                 return;
             }
+            if let Some(card) = path.strip_prefix("/alive/") {
+                let mut signs = CARD_SIGNS.lock().expect("the signs");
+                signs.retain(|(name, _)| name != card);
+                signs.push((card.to_owned(), now_ms()));
+            }
             let response = match path {
                 "/slow-window" => page(SLOW_PAGE),
                 "/stuck-window" => page(STUCK_PAGE),
                 "/quiet" => page(QUIET_PAGE),
                 "/card" => page(CARD_PAGE),
+                "/storage" => page(STORAGE_PAGE),
+                path if path.starts_with("/alive/") => page("ok"),
                 "/workbench" => page(&WORKBENCH_PAGE.replace("PORT", &port.to_string())),
                 "/frame" => page(FRAME_PAGE),
                 "/window" => page(&WINDOW_PAGE.replace("PORT", &port.to_string())),

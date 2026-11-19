@@ -305,12 +305,28 @@ hidden Workbench. Three things follow.
   account screen, and first on every retirement path), closing it without
   hiding it, and creating another web view in front of it, as it does with a
   candidate Workbench during a switch. A retirement hides the web view,
-  erases its data store and then closes it; the hide closes the cards and
-  destroys their pages, so that is done before the erase starts. That is
-  true of every sandbox window's page; the Workbench's own page and the
-  sandbox frame inside it live through the erase, as #3850 designed it. What is
-  asked of WebKit there is `_close` on the card's web view, in the same turn
-  as the hide; the erase is asked for in a later turn.
+  erases its data store and then closes it; the hide closes the cards, and
+  `_close` is called on each card's web view in the same turn, so the app has
+  closed their pages before it asks for the erase in a later turn. That is
+  not the pages having stopped. `_close` has no acknowledgement: the page's
+  own process hears of it a moment later and can make one more write, which
+  reaches WebKit's storage process in either order with the erase. Measured
+  with a card writing a cookie every 20 ms: in 4 of 600 retirements the
+  card's cookie was in the store after the erase, written 11 to 16 ms after
+  the hide and before the erase completed; a page was seen writing up to 251
+  ms after the hide. And the Workbench's own page and the sandbox frame
+  inside it live through the erase, as #3850 designed it, so the card is one
+  writer of three: waiting for the card could not make "nothing in the store
+  after the erase" true.
+- **So the erase is not the guarantee; the destruction of the store is.** A
+  retired instance's disposable (not persistent) data is destroyed as a
+  whole: each disposable web view has a non-persistent store of its own; the
+  retirement closes the web view right after the erase, whatever the erase
+  found; the module holds the Workbench's web view weakly and drops a card
+  after `_close`, so the app then holds nothing of the store; nothing can
+  join a retired store (a hidden Workbench is refused a window); and the next
+  instance or account gets a new store. When WebKit's storage process drops
+  what the store held cannot be observed from the app.
 - **A sandbox window exists only for an opener in place: one that is not in
   place cannot get one, and one that leaves its place loses those it has in
   that turn.** So admission at `window.open` reads all three too, and a web
@@ -486,7 +502,17 @@ the sandbox's window goes to the browser with every other link.
     the hide or the close. One of the hidden ones is then taken through the
     rest of the sequence of `instance_store::retire`, written out in the
     probe because the probe does not link the library: the data store is
-    erased, and 200 ms later its cookies are read back and must be none.
+    erased and its cookies are read back, at once and 200 ms later. A cookie
+    found there is the card's late write; it is counted and printed with
+    when it was made, and anything else in the store fails. For each of the
+    three the probe then checks the guarantee: the store is not persistent;
+    the card's page, which also calls the probe's server every 50 ms, gives
+    no sign of life later than two seconds after the hide; after the web
+    view is closed, weak references to the store, the web view and the
+    card's web view all read nil within ten seconds; and after the
+    retirement a new replacement web view has a different store, not
+    persistent either, in which a page of the card's origin finds no cookie
+    and nothing in local storage.
     Minimizing, a Space change and display sleep are not
     produced by the probe; for those, as for full covering, the claim rests on
     AppKit's documentation of the occlusion state.
@@ -519,12 +545,12 @@ without a macOS 15 machine. Until the probe passes on it, the marker is not set
 on macOS 15, and those systems keep the browser hand-off. Follow-up: make the
 read-back work on macOS 15 (or replace it), then add a CI job and the version.
 
-**A page's last writes.** Destroying a card's page is asked of WebKit before
-the erase is; the page's process is told a moment later. The probe's
-retirement passed with a card writing cookies, but nothing proves that no
-write from a card can land after the erase. The Workbench's own page is alive
-through the erase in any case; that is the retirement's existing rule, not
-this change's.
+**What WebKit does with a released store.** A card's last write can land in a
+retired store during or after its erase (shown; see "One native window,
+several web views"). The probe shows that the app releases the store, and
+that the next web view's store is another one. That WebKit's storage process
+then frees what a released non-persistent store held, and when, has no
+public way to be looked at.
 
 **A web view moved or reordered over a Workbench**, as said above: not
 announced, not produced by the probe.
