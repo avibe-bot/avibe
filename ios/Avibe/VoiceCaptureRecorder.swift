@@ -104,20 +104,21 @@ final class VoiceCaptureRecorder {
     }
 
     /// Deletes every take on disk; only called while none is recording.
-    static func discardAll() {
-        guard let directory = try? FileManager.default.url(
-            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false
-        ).appending(path: "VoiceCapture", directoryHint: .isDirectory) else { return }
+    static func discardAll(in base: URL? = nil) {
+        guard let directory = try? takesDirectory(in: base, create: false) else { return }
         try? FileManager.default.removeItem(at: directory)
     }
 
-    static func takeURL(id: UUID) throws -> URL {
-        let directory = try FileManager.default.url(
-            for: .cachesDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ).appending(path: "VoiceCapture", directoryHint: .isDirectory)
+    /// Where takes live: `Caches/VoiceCapture` (tests pass their own base).
+    static func takesDirectory(in base: URL? = nil, create: Bool) throws -> URL {
+        let root = try base ?? FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: create
+        )
+        return root.appending(path: "VoiceCapture", directoryHint: .isDirectory)
+    }
+
+    static func takeURL(id: UUID, in base: URL? = nil) throws -> URL {
+        let directory = try takesDirectory(in: base, create: true)
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true

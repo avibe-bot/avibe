@@ -434,20 +434,25 @@ final class VoiceCaptureTests: XCTestCase {
 
     /// A no deletes the take's file; the launch sweep clears leftovers.
     func testANoDeletesTheTakesFileAndTheLaunchSweepClearsLeftovers() throws {
-        let url = try VoiceCaptureRecorder.takeURL(id: UUID())
+        // Its own directory, never the host App's Caches.
+        let base = FileManager.default.temporaryDirectory.appending(path: "takes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
         try Data([1, 2, 3]).write(to: url)
         let recorder = VoiceCaptureRecorder(url: url, session: FakeSession(), permission: { true }, makeEngine: { _ in FakeEngine() })
         recorder.discard()
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
 
-        let leftover = try VoiceCaptureRecorder.takeURL(id: UUID())
+        let leftover = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
         try Data([4, 5, 6]).write(to: leftover)
-        VoiceCaptureRecorder.discardAll()
+        VoiceCaptureRecorder.discardAll(in: base)
         XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
     }
 
     func testTakesAreExcludedFromBackup() throws {
-        let url = try VoiceCaptureRecorder.takeURL(id: UUID())
+        let base = FileManager.default.temporaryDirectory.appending(path: "takes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let url = try VoiceCaptureRecorder.takeURL(id: UUID(), in: base)
         let values = try url.deletingLastPathComponent().resourceValues(forKeys: [.isExcludedFromBackupKey])
         XCTAssertEqual(values.isExcludedFromBackup, true)
     }
@@ -766,20 +771,22 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(failed.ended, 0)
     }
 
-    func testTheSwitchIsAHiddenURLOnly() {
-        XCTAssertFalse(VoiceCaptureEndSwitch.handle(URL(string: "https://avibe.bot/voice/end-after-background?on=1")!))
-        XCTAssertFalse(VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/other?on=1")!))
-        XCTAssertFalse(
-            VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/end-after-background?on=1")!, allowed: false),
-            "an App Store build ignores it"
-        )
-        let defaults = UserDefaults.standard
-        let before = defaults.object(forKey: VoiceCaptureEndSwitch.key)
-        defer { defaults.set(before, forKey: VoiceCaptureEndSwitch.key) }
-        XCTAssertTrue(VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/end-after-background?on=1")!))
-        XCTAssertTrue(VoiceCaptureEndSwitch.isOn)
-        XCTAssertTrue(VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/end-after-background?on=0")!))
-        XCTAssertFalse(VoiceCaptureEndSwitch.isOn)
+    func testTheSwitchIsAHiddenURLOnly() throws {
+        // Its own preferences, never the host App's.
+        let suite = "voice-capture-switch-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        func handle(_ string: String, allowed: Bool = true) -> Bool {
+            VoiceCaptureEndSwitch.handle(URL(string: string)!, allowed: allowed, defaults: defaults)
+        }
+        XCTAssertFalse(handle("https://avibe.bot/voice/end-after-background?on=1"))
+        XCTAssertFalse(handle("avibe-diagnostics://voice/other?on=1"))
+        XCTAssertFalse(handle("avibe-diagnostics://voice/end-after-background?on=1", allowed: false), "an App Store build ignores it")
+        XCTAssertFalse(VoiceCaptureEndSwitch.isOn(in: defaults))
+        XCTAssertTrue(handle("avibe-diagnostics://voice/end-after-background?on=1"))
+        XCTAssertTrue(VoiceCaptureEndSwitch.isOn(in: defaults))
+        XCTAssertTrue(handle("avibe-diagnostics://voice/end-after-background?on=0"))
+        XCTAssertFalse(VoiceCaptureEndSwitch.isOn(in: defaults))
     }
 
     /// A reservation whose intent ended without coming forward (never

@@ -562,6 +562,7 @@ final class VoiceCaptureController {
         state = .idle
         guard let take else { return [] }
         record("account transition: the take is given up")
+        take.consent.cancel()
         let barrier = take.instance.releaseBarrier
         take.audio.stop()
         take.instance.close()
@@ -848,6 +849,7 @@ final class VoiceCaptureController {
         maximumDurationTask = nil
         take.audio.stop()
         take.audio.discard()
+        take.consent.cancel()
         take.instance.close()
         state = .idle
         await take.activity.end(nil, dismissal: .immediate)
@@ -867,8 +869,10 @@ final class VoiceCaptureController {
         }
     }
 
-    /// Nil when the instance takes this voice input; otherwise why not.
+    /// Nil when the instance takes this voice input; otherwise why not. A
+    /// cancelled ask (the take was given up) asks nothing.
     private static func refusal(from instance: VoiceCaptureInstance) async -> Refusal? {
+        guard !Task.isCancelled else { return Refusal(reason: .offline, needsApp: false, transient: true) }
         do {
             let status = try await instance.status()
             guard status.available else { return Refusal(reason: .voiceUnavailable, needsApp: false) }
@@ -1219,18 +1223,22 @@ enum VoiceCaptureEndSwitch {
     private static let decisionKey = "avibe.voiceCapture.lastEndDecision"
 
     /// Off in an App Store build even if a TestFlight build had set it.
-    static var isOn: Bool { isInternalBuild && UserDefaults.standard.bool(forKey: key) }
+    static var isOn: Bool { isOn(in: .standard) }
+
+    static func isOn(in defaults: UserDefaults) -> Bool {
+        isInternalBuild && defaults.bool(forKey: key)
+    }
 
     /// Handles the switch's URL; returns whether it was one.
     @discardableResult
-    static func handle(_ url: URL, allowed: Bool = isInternalBuild) -> Bool {
+    static func handle(_ url: URL, allowed: Bool = isInternalBuild, defaults: UserDefaults = .standard) -> Bool {
         guard allowed, url.scheme == "avibe-diagnostics", url.host == "voice",
               url.path == "/end-after-background",
               let on = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "on" })?.value
         else { return false }
         let enabled = on == "1"
-        UserDefaults.standard.set(enabled, forKey: key)
+        defaults.set(enabled, forKey: key)
         VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.text(
             enabled ? "voiceCapture.diagnostics.endOn" : "voiceCapture.diagnostics.endOff"
         )))

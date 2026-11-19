@@ -20,7 +20,7 @@ import Foundation
 struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Talk to Main Bot"
     static let description = IntentDescription(
-        "Records what you say and sends it to your main Bot. For now, Avibe may open to record."
+        "Records what you say and sends it to your main Bot. Avibe may open to record."
     )
 
     /// The main Bot can act on the user's computer, so a locked phone must
