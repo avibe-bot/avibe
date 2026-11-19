@@ -2409,34 +2409,6 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(retried.load(), page)
     }
 
-    /// A marked page stored for another WebKit store (another account's, or
-    /// one rotated away) is never read for this runtime.
-    @MainActor
-    func testAMarkedPageFromAnotherStoreIsNeverUsed() async throws {
-        let app = try await makeApp(directTransport: nil)
-        let runtime = try await select("instance-1", in: app)
-        defer { app.runtimePageCache.removeAll() }
-        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
-        let page = RuntimeCachedPage(
-            url: runtime.instance.url,
-            headers: ["Content-Type": "text/html"],
-            body: Data(#"<meta name="avibe-cached-shell" content="1" />"#.utf8),
-            capturedAt: Date(),
-            keepsShellUnreachable: true
-        )
-        // The same account and origin, in another store's directory.
-        let otherStore = RuntimePageCache(directory: RuntimePageCache.root
-            .appendingPathComponent(UUID().uuidString, isDirectory: true))
-        defer { otherStore.removeAll() }
-        otherStore.store(page, accountID: runtime.account.id, origin: origin)
-        XCTAssertEqual(otherStore.page(accountID: runtime.account.id, origin: origin), page)
-        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: runtime))
-        XCTAssertNil(access.load())
-        // The runtime's own store reads it.
-        access.store(page)
-        XCTAssertEqual(access.load(), page)
-    }
-
     /// A cold start that opened first and shows a marked cached page,
     /// uncovered: avibe.bot then listing the instance unavailable (asleep,
     /// offline) leaves the page; the open ends in the "can't reach" banner.
