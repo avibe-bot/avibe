@@ -1390,7 +1390,6 @@ final class AppModel: ObservableObject {
             guard
                 var attempt = runtimeOpenAttempt,
                 attempt.runtime == runtime,
-                route.runtime == runtime,
                 attempt.listedOffline
             else {
                 return
@@ -1406,7 +1405,8 @@ final class AppModel: ObservableObject {
         guard
             var attempt = runtimeOpenAttempt,
             attempt.runtime == runtime,
-            route.runtime == runtime,
+            // Not the route: an open preparing its direct route shows the
+            // loading screen, and is settled the same way.
             sessionCoordinator.isSelectedRuntime(runtime),
             attempt.phase != .documentLoaded,
             attempt.phase != .cachedOffline
