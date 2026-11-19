@@ -2266,7 +2266,7 @@ def carry_accepted_inputs(
     """
     turn_id = str(turn["id"])
     reason = _carry_reason(turn)
-    parked_run_ids: list[str] = []
+    parked_runs: dict[str, str] = {}
     exhausted_input_ids: list[str] = []
     exhausted_runs: dict[str, str] = {}
     provenance = _json_object(turn.get("terminal_evidence_json")).get("output_provenance")
@@ -2326,19 +2326,19 @@ def carry_accepted_inputs(
             _rebind_runs(conn, run_ids, carried_id, source_turn_id=turn_id)
             if provider_failed and depth == 4:
                 # Parked from now on; its senders are told once, here.
-                parked_run_ids.extend(run_ids)
+                parked_runs.update({run_id: str(prior.get("original_id") or row["id"]) for run_id in run_ids})
         if envelope is not None:
             conn.execute(update(message_deliveries).where(message_deliveries.c.id == row["id"]).values(
                 delivery_history_json=_canonical_json(history),
             ))
     result = {
-        "parked_run_ids": parked_run_ids, "exhausted_input_ids": exhausted_input_ids,
+        "parked_runs": parked_runs, "exhausted_input_ids": exhausted_input_ids,
         "exhausted_runs": exhausted_runs,
     }
-    if late and (parked_run_ids or exhausted_input_ids):
+    if late and (parked_runs or exhausted_input_ids):
         owed = conn.info.setdefault(LATE_CARRY_NOTICES_KEY, {})
-        entry = owed.setdefault(turn_id, {"parked_run_ids": [], "exhausted_input_ids": [], "exhausted_runs": {}})
-        entry["parked_run_ids"].extend(parked_run_ids)
+        entry = owed.setdefault(turn_id, {"parked_runs": {}, "exhausted_input_ids": [], "exhausted_runs": {}})
+        entry["parked_runs"].update(parked_runs)
         entry["exhausted_input_ids"].extend(exhausted_input_ids)
         entry["exhausted_runs"].update(exhausted_runs)
     return result

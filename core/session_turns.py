@@ -5217,7 +5217,31 @@ class SessionTurnManager:
         model (parked), or that it will not be retried (exhausted). A notice is itself
         never a cause of another notice, nor new work that releases parked inputs.
         """
-        exhausted = list(settled.get("exhausted_input_ids") or [])
+        from storage.background import definition_owner_session_id
+        from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+        runs_by_kind = {
+            "parked": dict(settled.get("parked_runs") or {}),
+            "exhausted": dict(settled.get("exhausted_runs") or {}),
+        }
+        rows = {
+            str(run["id"]): run
+            for run in conn.execute(
+                select(
+                    agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json,
+                    agent_runs.c.source_kind, agent_runs.c.source_actor,
+                ).where(agent_runs.c.id.in_([run_id for runs in runs_by_kind.values() for run_id in runs]))
+            ).mappings().all()
+        } if any(runs_by_kind.values()) else {}
+        # An internal notice is never named to anyone as something to resend.
+        notice_inputs = {
+            input_id for runs in runs_by_kind.values() for run_id, input_id in runs.items()
+            if run_id in rows and delivery_store.is_carry_notice_run(rows[run_id]["source_actor"])
+        }
+        exhausted = [
+            input_id for input_id in dict.fromkeys(settled.get("exhausted_input_ids") or [])
+            if input_id not in notice_inputs
+        ]
         if exhausted:
             scope_id = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)
@@ -5228,20 +5252,13 @@ class SessionTurnManager:
                 text=i18n_t("harness.turnCarry.exhausted", self._controller_language(), inputs=", ".join(exhausted)),
                 metadata={"event": "turn_carry_exhausted", "turn_id": turn_id, "input_ids": exhausted},
             )
-        owed: dict[tuple[str, str], list[str]] = {}
-        for kind, runs in (
-            ("parked", {run_id: "" for run_id in settled.get("parked_run_ids") or []}),
-            ("exhausted", dict(settled.get("exhausted_runs") or {})),
-        ):
-            if not runs:
-                continue
-            for run in conn.execute(
-                select(
-                    agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json,
-                    agent_runs.c.source_kind, agent_runs.c.source_actor,
-                ).where(agent_runs.c.id.in_(list(runs)))
-            ).mappings().all():
-                if delivery_store.is_carry_notice_run(run["source_actor"]):
+        # One notice per kind, sender and authority: a notice never carries more
+        # authority, or names more inputs, than each Run it answers (#4010 review).
+        owed: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for kind, runs in runs_by_kind.items():
+            for run_id, input_id in runs.items():
+                run = rows.get(run_id)
+                if run is None or delivery_store.is_carry_notice_run(run["source_actor"]):
                     continue
                 try:
                     run_metadata = json.loads(run["metadata_json"] or "{}")
@@ -5250,49 +5267,48 @@ class SessionTurnManager:
                 if not isinstance(run_metadata, dict):
                     run_metadata = {}
                 # Who waits on it: the failure-callback target, else the Session that
-                # sent it (an Agent Run's actor, a callback's source Session).
+                # sent it: an Agent Run's actor, a callback's source Session, or the
+                # Session that created the Task or Watch.
                 sender = str(
                     run["callback_session_id"]
                     or (run["source_actor"] if run["source_kind"] == "agent" else "")
                     or (run_metadata.get("source_session_id") if run["source_kind"] == "callback" else "")
+                    or definition_owner_session_id(run_metadata)
                     or ""
                 ).strip()
-                if sender and sender != session_id:
-                    owed.setdefault((kind, sender), []).append(str(run["id"]))
-                    owed.setdefault((kind + ":inputs", sender), []).append(runs[str(run["id"])])
+                if not sender or sender == session_id:
+                    continue
+                authority = run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+                authority = authority if isinstance(authority, dict) else None
+                key = (kind, sender, json.dumps(authority, sort_keys=True))
+                entry = owed.setdefault(key, {"run_ids": [], "inputs": [], "authority": authority})
+                entry["run_ids"].append(run_id)
+                entry["inputs"].append(input_id)
         if not owed:
             return
         from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
         from storage.background import enqueue_run_in_connection
-        from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
 
         now = datetime.now(timezone.utc).isoformat()
-        for (kind, sender), run_ids in owed.items():
-            if ":" in kind:
-                continue
+        for (kind, sender, _authority_key), entry in owed.items():
             try:
                 target = resolve_session_id_target(sender, db_path=Path(str(self._sqlite_engine().url.database)))
             except UnresolvableSessionTarget:
                 continue
-            if kind == "parked":
-                prompt = delivery_store.TURN_CARRY_PARKED_NOTICE
-            else:
-                inputs = ", ".join(dict.fromkeys(owed[("exhausted:inputs", sender)]))
-                prompt = delivery_store.TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=inputs)
-            metadata: dict[str, Any] = {"source_session_id": session_id, "turn_carry_run_ids": run_ids}
-            # The notice runs with the authority the sender's Run was given, no more.
-            first = conn.execute(select(agent_runs.c.metadata_json).where(agent_runs.c.id == run_ids[0])).scalar()
-            try:
-                authority = (json.loads(first or "{}") or {}).get(RESOURCE_USER_CONTEXT_METADATA_KEY)
-            except (TypeError, ValueError, AttributeError):
-                authority = None
-            if isinstance(authority, dict):
-                metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = authority
+            inputs = ", ".join(dict.fromkeys(entry["inputs"]))
+            prompt = (
+                f"{delivery_store.TURN_CARRY_PARKED_NOTICE}\n{inputs}" if kind == "parked"
+                else delivery_store.TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=inputs)
+            )
+            metadata: dict[str, Any] = {"source_session_id": session_id, "turn_carry_run_ids": entry["run_ids"]}
+            if entry["authority"] is not None:
+                metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = entry["authority"]
+            first = entry["run_ids"][0]
             enqueue_run_in_connection(conn, {
                 "id": uuid.uuid4().hex[:12], "run_type": "agent_run", "status": "queued",
                 "source_kind": "callback",
-                "source_actor": f"{run_ids[0]}{delivery_store.TURN_CARRY_NOTICE_ACTOR_MARKER}{kind}",
-                "parent_run_id": run_ids[0], "session_policy": "existing",
+                "source_actor": f"{first}{delivery_store.TURN_CARRY_NOTICE_ACTOR_MARKER}{kind}",
+                "parent_run_id": first, "session_policy": "existing",
                 "session_id": target.session_id, "legacy_session_key": target.session_key.to_key(),
                 "agent_id": target.agent_id, "agent_name": target.agent_name,
                 "agent_backend": target.agent_backend, "model": target.model,

@@ -136,20 +136,26 @@ def _validate_boundary(
     source_created = conn.execute(
         select(session_turns.c.created_at).where(session_turns.c.id == turn_id)
     ).scalar_one_or_none()
-    latest = turn_id if source_created is not None else None
-    for newer_id, newer_state in conn.execute(
-        select(session_turns.c.id, session_turns.c.state)
+    membership = select(message_deliveries.c.id).where(message_deliveries.c.turn_id == session_turns.c.id)
+    newer_work = (
+        select(session_turns.c.id)
         .where(session_turns.c.session_id == session_id, session_turns.c.id != turn_id)
         .where(or_(
             session_turns.c.created_at > source_created,
             and_(session_turns.c.created_at == source_created, session_turns.c.id > turn_id),
         ))
-        .order_by(session_turns.c.created_at, session_turns.c.id)
-    ).all() if latest else ():
-        taken = [row for row in deliveries.deliveries_for_turn(conn, newer_id) if row.get("turn_id") == newer_id]
-        if newer_state != "terminal" or not taken or not all(deliveries.turn_carry(row) for row in taken):
-            latest = newer_id
-            break
+        .where(or_(
+            session_turns.c.state != "terminal",
+            ~membership.exists(),
+            membership.where(
+                ~message_deliveries.c.delivery_history_json.like('%"kind":"turn_carry"%')
+            ).exists(),
+        ))
+        .limit(1)
+    )
+    latest = (
+        turn_id if source_created is not None and conn.execute(newer_work).first() is None else None
+    )
     if latest != turn_id:
         raise RetryUnavailable("retry_stale")
     if turn["state"] != "terminal":

@@ -349,7 +349,8 @@ def test_a_parked_input_tells_its_sender_once_not_to_resend(managers, sender):
     manager, _, engine, _, _ = managers
     _seed_session(engine, "ses_sender")
     turn_id, _ = asyncio.run(_activate(manager, text="human request"))
-    _run(engine, "run-report", _merge(manager, "report"), **sender)
+    original = _merge(manager, "report")
+    _run(engine, "run-report", original, **sender)
     notices = []
     for attempt in range(5):
         assert _fail_through_manager(manager, turn_id, "overloaded")["changed"]
@@ -377,7 +378,8 @@ def test_a_parked_input_tells_its_sender_once_not_to_resend(managers, sender):
                 store.materialize_start_acceptance(conn, turn_id=turn_id, evidence={})
     # Nothing for the three successors, one notice at parking, none when it parks again.
     assert [len(rows) for rows in notices] == [0, 0, 0, 1, 1]
-    assert notices[-1] == [(store.TURN_CARRY_PARKED_NOTICE, "ses_sender")]
+    # The approved sentence, then the sender's own input, by its original id.
+    assert notices[-1] == [(f"{store.TURN_CARRY_PARKED_NOTICE}\n{original}", "ses_sender")]
     with engine.connect() as conn:
         assert conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == "run-report")).scalar_one() == "running"
 
@@ -718,3 +720,55 @@ def test_a_retry_that_reuses_a_carried_input_releases_the_parked_ones(managers):
         store.claim_start_batch(conn, turn_id=store.new_turn_id(), session_id="ses_fsm", backend="codex",
                                 deliveries=[other], dispatch_text="other carried")
         assert not store.waiting_for_external_input(store.get_delivery(conn, parked["id"]))
+
+
+
+def test_notices_split_by_authority_and_skip_internal_notices(managers):
+    """Two reports from one Session with different authority get separate notices,
+    each with its own Run's authority; an internal notice is named to nobody."""
+    from tests.test_session_delivery_fsm import _seed_session
+
+    manager, _, engine, _, _ = managers
+    _seed_session(engine, "ses_sender")
+    turn_id, _ = asyncio.run(_activate(manager))
+    local, remote = _merge(manager, "local report"), _merge(manager, "remote report")
+    internal = _merge(manager, "Not handled yet: ...")
+    _run(engine, "run-local", local, callback_session_id="ses_sender")
+    _run(engine, "run-remote", remote, callback_session_id="ses_sender",
+         metadata_json=json.dumps({"resource_user_context": {"user_key": "remote:u1"}}))
+    _run(engine, "run-internal", internal, source_kind="callback", source_actor="x:turn-carry-parked",
+         metadata_json=json.dumps({"source_session_id": "ses_sender"}))
+    _fail_through_manager(manager, turn_id, "auth")
+    with engine.begin() as conn:
+        successor = _start_next(conn)
+    _fail_through_manager(manager, successor, "auth")
+    with engine.connect() as conn:
+        notices = conn.execute(
+            select(agent_runs.c.prompt, agent_runs.c.metadata_json)
+            .where(agent_runs.c.session_id == "ses_sender", agent_runs.c.source_actor.like("%:turn-carry-%"))
+        ).all()
+        owner = conn.execute(select(messages.c.metadata_json).where(messages.c.type == "notify")).scalars().all()
+    by_input = {
+        prompt.rsplit(": ", 1)[-1]: json.loads(metadata).get("resource_user_context") for prompt, metadata in notices
+    }
+    assert by_input == {local: None, remote: {"user_key": "remote:u1"}}
+    exhausted = [json.loads(m) for m in owner if json.loads(m).get("event") == "turn_carry_exhausted"]
+    assert exhausted and internal not in exhausted[0]["input_ids"]
+
+
+def test_a_task_from_another_session_tells_its_creator(managers):
+    from tests.test_session_delivery_fsm import _seed_session
+
+    manager, _, engine, _, _ = managers
+    _seed_session(engine, "ses_creator")
+    turn_id, _ = asyncio.run(_activate(manager))
+    report = _merge(manager, "task output")
+    _run(engine, "run-task", report, source_kind="scheduler", source_actor="task_1",
+         metadata_json=json.dumps({"created_by": {"kind": "caller_context", "caller": {"session_id": "ses_creator"}}}))
+    _fail_through_manager(manager, turn_id, "auth")
+    with engine.begin() as conn:
+        successor = _start_next(conn)
+    _fail_through_manager(manager, successor, "auth")
+    assert _notices_to(engine, "ses_creator") == [
+        (store.TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=report), "run-task:turn-carry-exhausted"),
+    ]
