@@ -104,6 +104,34 @@ def test_install_selects_exact_platform_without_execution(tmp_path, monkeypatch,
     assert manager.resolve_binary().read_bytes() != b"tampered fixture"
 
 
+@pytest.mark.parametrize(("revision", "source", "compatible"), [
+    (2, "578659184dfa38bc87261a6fa832f9b4c65a1c90", True),
+    (3, "4e8d24e55583738e5bbf443d4e40e721e43b9a3f", True),
+    (3, "4e8d24e55583738e5bbf443d4e40e721e43b9a30", False),
+])
+def test_public_trial_requires_reviewed_source_and_verified_install(tmp_path, published, revision, source, compatible):
+    payload, manifest, _, sources = published
+    old_tag = payload["release_tag"]
+    tag = f"direct-transport-v0.1.0-{revision}"
+    payload["release_tag"] = tag
+    payload["source_url"] = payload["source_url"].replace(old_tag, tag)
+    payload["provenance"] = {"source_sha": source}
+    for archive in payload["archives"].values():
+        old_url = archive["url"]
+        archive["url"] = old_url.replace(old_tag, tag)
+        sources[archive["url"]] = sources[old_url]
+    manifest.write_text(json.dumps(payload))
+    manager = DirectTransportRuntimeManager(runtime_dir=tmp_path / "runtime")
+    assert manager.resolve_binary(require_public_trial=True) is None
+    installed = manager.ensure()
+    assert installed["ok"]
+    binary = Path(installed["path"])
+    assert manager.resolve_binary() == binary
+    assert manager.resolve_binary(require_public_trial=True) == (binary if compatible else None)
+    binary.write_bytes(b"tampered")
+    assert manager.resolve_binary(require_public_trial=True) is None
+
+
 @pytest.mark.parametrize("change", [
     {"release_state": "pending"},
     {"release_state": None},
