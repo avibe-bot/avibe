@@ -454,30 +454,33 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(denied.activations, 0)
     }
 
-    // MARK: Session first, then candidates (the owner's 33.1 press, 11-19:
-    // 激活音频会话 refused with 560557684, cannotInterruptOthers)
+    // MARK: Try 0, the 26.1 setup (the owner's 35.1 press, 11-19: tries
+    // 1 and 2 refused at activation, 560557684 and 561015905)
 
-    /// The audio session goes active before the Live Activity (while the
-    /// intent's launch still counts as in front), the recorder after it.
-    func testTheSessionIsActivatedBeforeTheLiveActivityAndTheRecorderAfter() async {
+    /// The island first, then a `.record` session, then the recorder: the
+    /// order 26.1 started with on the owner's phone.
+    func testTryZeroStartsTheIslandFirstThenTheSessionThenTheRecorder() async {
         let world = World()
-        let outcome = await world.controller().toggle()
+        let controller = world.controller()
+        let outcome = await controller.toggle()
         XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["prepare1", "activity", "record"])
+        XCTAssertEqual(world.events, ["activity", "prepare1", "record"])
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.captures.first ?? nil, "0 [background warm]", "the press's App state rides along")
     }
 
-    func testARefusedExclusiveSessionFallsBackToTheMixableOne() async {
+    func testARefusedSessionUnderTryZeroFallsBackToTheMixableOne() async {
         let world = World()
         world.prepareErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 560557684)]
         let controller = world.controller()
         let outcome = await controller.toggle()
         XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["prepare1", "prepare2", "activity", "record"])
+        XCTAssertEqual(world.events, ["activity", "prepare1", "prepare2", "record"])
         XCTAssertTrue(world.failureNotices.isEmpty, "it records: no failure notice")
         world.audio?.duration = 2
         _ = await controller.toggle()
-        let capture = world.instance.captures.first ?? nil
-        XCTAssertEqual(capture, "2 (1 sessionActivate 560557684)", "the message says which try worked")
+        XCTAssertEqual(world.instance.captures.first ?? nil, "2 [background warm] (0 sessionActivate 560557684)")
     }
 
     func testARecorderRefusedOnTheFirstSessionTriesTheSecondUnderTheSameIsland() async {
@@ -485,9 +488,36 @@ final class VoiceCaptureTests: XCTestCase {
         world.startErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
         let outcome = await world.controller().toggle()
         XCTAssertEqual(outcome, .started)
-        XCTAssertEqual(world.events, ["prepare1", "activity", "record", "stop", "prepare2", "record"])
+        XCTAssertEqual(world.events, ["activity", "prepare1", "record", "stop", "prepare2", "record"])
         XCTAssertEqual(world.activities.count, 1)
-        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "the first session is released before the second")
+    }
+
+    /// A cold press: the island cannot start from the background, so the
+    /// press goes on in the App (try 3) and records there.
+    func testAColdPressWhoseIslandIsRefusedRecordsInTheApp() async {
+        let world = World()
+        world.activityRequestFails = true
+        world.pressContext = "background cold"
+        let controller = world.controller()
+        let outcome = await controller.toggle(foregroundFallback: true)
+        XCTAssertEqual(outcome, .needsForeground)
+        XCTAssertTrue(world.failureNotices.isEmpty)
+        XCTAssertEqual(world.audio?.started, false)
+        world.activityRequestFails = false  // in front it may start
+        let inApp = await controller.startInForeground()
+        XCTAssertEqual(inApp, .started)
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.captures.first ?? nil, "3 [background cold] (0 liveActivity ActivityAuthorizationError 7)")
+    }
+
+    func testTheInAppLineIsPlain() throws {
+        func value(_ language: String) throws -> String {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+            return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: "voiceCapture.startedInApp", value: nil, table: "VoiceCapture")
+        }
+        XCTAssertEqual(try value("zh-Hans"), "正在录音，再长按一次侧边键发送")
+        XCTAssertEqual(try value("en"), "Recording. Long-press the Action Button again to send.")
     }
 
     /// Every try refused: one notice names each, in order.
@@ -499,7 +529,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(outcome, .stopped)
         XCTAssertEqual(world.failureNotices.count, 1)
         let attempts = world.failureNotices.first?.attempts ?? []
-        XCTAssertEqual(attempts.map(\.candidate), [1, 2])
+        XCTAssertEqual(attempts.map(\.candidate), [0, 2])
         XCTAssertEqual(attempts.map(\.step), [.sessionActivate, .recorder])
         XCTAssertEqual(attempts.map(\.error), ["560557684", "561145187"])
         XCTAssertEqual(world.activities.first?.ended?.attempts, attempts)
@@ -532,7 +562,7 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()  // the second press sends as usual
         XCTAssertEqual(
             world.instance.captures.first ?? nil,
-            "3 (1 sessionActivate 560557684; 2 sessionActivate 560557684)"
+            "3 [background warm] (0 sessionActivate 560557684; 2 sessionActivate 560557684)"
         )
     }
 
@@ -544,7 +574,7 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle(foregroundFallback: true)
         controller.foregroundUnavailable()
         XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [1, 2])
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 2])
         let next = await controller.toggle(foregroundFallback: true)
         XCTAssertNotEqual(next, .busy)
     }
@@ -558,7 +588,7 @@ final class VoiceCaptureTests: XCTestCase {
         let inApp = await controller.startInForeground()
         XCTAssertEqual(inApp, .stopped)
         XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [1, 2, 3])
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 2, 3])
     }
 
     /// A press left waiting (a locked phone unlocked much later) never
@@ -577,7 +607,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(late, .stopped)
         XCTAssertNotEqual(controller.phase, .listening)
         XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [1, 2])
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 2])
     }
 
     func testAnAbandonedWaitDoesNotBlockTheNextPress() async {
@@ -662,23 +692,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertNotEqual(controller.phase, .listening)
     }
 
-    func testTheInAppLineReadsPlainly() throws {
-        let path = try XCTUnwrap(Bundle.main.path(forResource: "zh-Hans", ofType: "lproj"))
-        XCTAssertEqual(
-            try XCTUnwrap(Bundle(path: path)).localizedString(forKey: "voiceCapture.startedInApp", value: nil, table: "VoiceCapture"),
-            "这次没能在后台开始录音，已在 App 里开始。"
-        )
-    }
 
-    func testRefusedBeforeAnyIslandStillLeavesOneNotice() async {
-        let world = World()
-        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
-        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
-        _ = await world.controller().toggle()
-        XCTAssertEqual(world.events, ["prepare1", "prepare2", "activity"], "only the short notice island")
-        XCTAssertEqual(world.failureNotices.count, 1)
-        XCTAssertEqual(world.failureNotices.first?.attempts?.count, 2)
-    }
 
     /// The real recorder sets each candidate's category on the session.
     func testTheRecorderPreparesEachCandidatesSession() throws {
@@ -925,6 +939,8 @@ private final class World {
     /// The order things happened in: prepareN, activity, record.
     var events: [String] = []
     var onActivityRequested: ((FakeActivity) -> Void)?
+    /// The App's state at the press, as the message metadata gives it.
+    var pressContext = "background warm"
     var takeFileFails = false
     var leftoverAudioDiscarded = 0
     var now: () -> Date = Date.init
@@ -961,6 +977,7 @@ private final class World {
             existingActivities: { (self.leftovers + self.activities).filter { $0.ended == nil } },
             discardLeftoverAudio: { self.leftoverAudioDiscarded += 1 },
             postFailureNotice: { self.failureNotices.append($0) },
+            pressContext: { self.pressContext },
             now: { self.now() },
             sleep: { _ in await Task.yield(); try? await Task.sleep(for: .seconds(3600)) }
         ))
