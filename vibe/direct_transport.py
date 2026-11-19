@@ -101,6 +101,49 @@ class _Stopping(Exception):
     """Internal control-flow signal for a requested supervisor stop."""
 
 
+class _StreamLogBudget:
+    """Loop-owned minute window. A stream keeps its opening sampling decision."""
+
+    def __init__(self):
+        self.timer: asyncio.TimerHandle | None = None
+        self.sampled = self.opened = self.closed = 0
+        self.bytes_in = self.bytes_out = self.max_ms = 0
+
+    def _arm(self):
+        if self.timer is None:
+            self.timer = asyncio.get_running_loop().call_later(60, self.flush)
+
+    def open(self, ordinal):
+        self._arm()
+        if self.sampled < 20:
+            self.sampled += 1
+            logger.info("direct stream open stream=%d", ordinal)
+            return True
+        self.opened += 1
+        return False
+
+    def close(self, sampled, ordinal, duration_ms, bytes_in, bytes_out):
+        if sampled:
+            logger.info("direct stream close stream=%d duration_ms=%d bytes_in=%d bytes_out=%d",
+                        ordinal, duration_ms, bytes_in, bytes_out)
+            return
+        self._arm()  # May close in a later window than it opened.
+        self.closed += 1
+        self.bytes_in += bytes_in
+        self.bytes_out += bytes_out
+        self.max_ms = max(self.max_ms, duration_ms)
+
+    def flush(self):
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
+        if self.opened or self.closed:
+            logger.info("direct stream summary opened=%d closed=%d bytes_in=%d bytes_out=%d max_duration_ms=%d",
+                        self.opened, self.closed, self.bytes_in, self.bytes_out, self.max_ms)
+        self.sampled = self.opened = self.closed = 0
+        self.bytes_in = self.bytes_out = self.max_ms = 0
+
+
 class DirectTransportSupervisor:
     """Own the sidecar child and its loopback stream listener.
 
@@ -154,6 +197,7 @@ class DirectTransportSupervisor:
 
         self._running = False
         self._reason: str | None = "not_running"
+        self._stream_log = _StreamLogBudget()
         self._connections = 0
         self._refusals = 0
         self._started = False
@@ -286,10 +330,16 @@ class DirectTransportSupervisor:
             peer = self._data_header_peer(line)
             accepted = True
             self._connections += 1
-            await self._ingress.handle_stream(
-                AsyncioByteStream(reader, writer),
-                peer=peer,
-            )
+            stream_id = self._connections
+            stream = AsyncioByteStream(reader, writer)
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            sampled = self._stream_log.open(stream_id)
+            try:
+                await self._ingress.handle_stream(stream, peer=peer)
+            finally:
+                self._stream_log.close(sampled, stream_id, int((loop.time() - started) * 1000),
+                                       stream.bytes_read, stream.bytes_written)
         except (ConnectionError, OSError):
             if not accepted:
                 self._refuse_stream()
@@ -728,6 +778,7 @@ class DirectTransportSupervisor:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._stream_log.flush()
 
     def _withdraw(self, reason: str) -> None:
         self._rendezvous.set_admission_listener(None)

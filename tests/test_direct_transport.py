@@ -364,7 +364,31 @@ async def test_admission_notices_follow_rendezvous_admissions(sidecar):
 
 
 @pytest.mark.asyncio
-async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar):
+async def test_stream_log_budget_pairs_and_summarizes_across_windows(caplog):
+    from vibe.direct_transport import _StreamLogBudget
+
+    caplog.set_level(logging.INFO, logger="vibe.direct_transport")
+    budget = _StreamLogBudget()
+    decisions = [budget.open(i) for i in range(1, 24)]
+    assert decisions == [True] * 20 + [False] * 3
+    for i in range(1, 23):
+        budget.close(decisions[i-1], i, i, 2, 3)
+    budget.flush()  # Fire the minute boundary; stream 23 is still open.
+    assert budget.open(24)
+    budget.close(False, 23, 80, 4, 5)
+    budget.close(True, 24, 1, 0, 0)
+    budget.flush()
+    lines = [r.getMessage() for r in caplog.records if r.name == "vibe.direct_transport"]
+    assert sum(line.startswith("direct stream open ") for line in lines) == 21
+    assert sum(line.startswith("direct stream close ") for line in lines) == 21
+    assert [line for line in lines if "summary" in line] == [
+        "direct stream summary opened=3 closed=2 bytes_in=4 bytes_out=6 max_duration_ms=22",
+        "direct stream summary opened=0 closed=1 bytes_in=4 bytes_out=5 max_duration_ms=80",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar, caplog):
     """Protect the sole data door and the peer label passed to ingress."""
     path, events, env = sidecar
     env["DIRECT_TEST_MODE"] = "stream"
@@ -373,9 +397,14 @@ async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar):
     os.environ.update(env)
     supervisor = DirectTransportSupervisor(str(path), ingress, RecordingRendezvous())
     try:
+        caplog.set_level(logging.INFO, logger="vibe.direct_transport")
         await supervisor.start()
         await asyncio.wait_for(ingress.started.wait(), timeout=5)
         assert ingress.calls == [(PEER, b"payload")]
+        lines = [record.getMessage() for record in caplog.records if record.getMessage().startswith("direct stream ")]
+        assert len(lines) == 2 and lines[0] == "direct stream open stream=1"
+        import re
+        assert re.fullmatch(r"direct stream close stream=1 duration_ms=\d+ bytes_in=7 bytes_out=0", lines[1])
     finally:
         await supervisor.stop()
         os.environ.clear()

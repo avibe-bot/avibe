@@ -49,6 +49,8 @@ class DirectAccessStatus:
     certificate_not_after: str | None = None
     transport_running: bool = False
     direct_access_allowed: bool | None = None
+    streams_opened: int = 0
+    refusals: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +58,7 @@ class DirectAccessStatus:
             "certificate_not_after": self.certificate_not_after,
             "transport_running": self.transport_running,
             "direct_access_allowed": self.direct_access_allowed,
+            "streams_opened": self.streams_opened, "refusals": self.refusals,
         }
 
 
@@ -717,12 +720,15 @@ class DirectAccessLifecycle:
 
     def _set_state(self, state: str, reason: str) -> None:
         assert state in DIRECT_STATES
+        diagnostics = self._supervisor.status if self._supervisor is not None else None
         with self._state_lock:
             self._status = DirectAccessStatus(
                 enabled=bool(self._signature and self._signature[0]), state=state, reason=reason,
                 certificate_not_after=getattr(self._certificate_result, "certificate_not_after", None),
                 transport_running=bool(self._supervisor is not None and self._supervisor.running),
                 direct_access_allowed=self._permission_fresh(),
+                streams_opened=diagnostics.connections if diagnostics else 0,
+                refusals=diagnostics.refusals if diagnostics else 0,
             )
 
     def _submit(self, callback: Callable, *args: Any) -> None:
