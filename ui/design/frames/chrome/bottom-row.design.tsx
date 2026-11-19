@@ -61,11 +61,17 @@ const shell = (row?: ReactNode) => () => (
   </Routes>
 );
 
-const shots: { name: string; title: string; render: () => ReactNode }[] = [
+const shots: { name: string; title: string; render: () => ReactNode; hover?: string }[] = [
   { name: 'web', title: '侧边栏底部 · Web（运行状态在左，版本号在右）', render: shell() },
   {
     name: 'desktop-local', title: '侧边栏底部 · 桌面应用（本机）',
     render: shell(<DesktopAccountRowView {...rowProps(false)} localUpdater={<VersionBadge openUpward />} />),
+  },
+  // The trigger's wash shows only under the pointer; the dot keeps the Apps button's inset inside it.
+  {
+    name: 'desktop-local-hover', title: '侧边栏底部 · 桌面应用（本机）· 指针悬停在账户按钮上',
+    render: shell(<DesktopAccountRowView {...rowProps(false)} localUpdater={<VersionBadge openUpward />} />),
+    hover: '[data-account-trigger]',
   },
   {
     name: 'desktop-remote', title: '侧边栏底部 · 桌面应用连接另一台电脑（版本号同样是可点的版本号）',
@@ -95,6 +101,7 @@ const designFrames = frames(shots.flatMap((shot) => (['zh', 'en'] as const).map(
   route: '/',
   fixtures: fixturesFor(lang),
   render: shot.render,
+  ...(shot.hover ? { hover: shot.hover } : {}),
 }))));
 
 export default designFrames;
