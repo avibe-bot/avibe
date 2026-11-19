@@ -1027,28 +1027,6 @@ class VibeAgentStore:
             )
 
     @staticmethod
-    def _archive_removed_bot_session(conn: Connection, agent: VibeAgent, *, user_context: Any) -> None:
-        """Deleting a removed Bot's Agent ends that Bot: no Bot can reconnect to its Session, so it is archived too.
-
-        Rides the Agent's transaction. A caller who may not archive that Session leaves it as it was, and the Agent
-        is still deleted.
-        """
-        from storage.agent_session_rows import BOT_SESSION_ID_PREFIX
-        from storage.workbench_sessions_service import archive_session
-
-        record = _agent_metadata(agent).get(BOT_METADATA_KEY)
-        handle = str(record.get("handle") or "").strip() if isinstance(record, dict) else ""
-        session_id = f"{BOT_SESSION_ID_PREFIX}{handle}"
-        if not handle or conn.execute(
-            select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-        ).scalar_one_or_none() in (None, "archived"):
-            return
-        try:
-            archive_session(conn, session_id, authorization_context=user_context, user_context=user_context)
-        except (LookupError, PermissionError):
-            logger.info("Kept the Session %s of the deleted Agent %s: not the caller's to archive", session_id, agent.name)
-
-    @staticmethod
     def _require_manageable_agent(
         conn: Connection,
         agent: VibeAgent,
@@ -1416,7 +1394,6 @@ class VibeAgentStore:
                 new_name=archived_name,
                 revision=now,
             )
-            self._archive_removed_bot_session(conn, agent, user_context=user_context)
             if replacement is not None:
                 self._write_default_agent_name(conn, replacement.name, now=now)
                 remaining_default_name = replacement.name

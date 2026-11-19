@@ -6111,6 +6111,38 @@ def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskC
     )
 
 
+def _archive_deleted_bot_session(agent) -> dict:
+    """Archive the Session a deleted Agent's removed Bot left, through the service's own archive lifecycle.
+
+    No Bot can reconnect to it any more. Returns the payload fields that say what happened to it, if anything.
+    """
+    from storage.resource_access_service import resolve_resource_access_context
+    from vibe import api, internal_client
+
+    session_id = api.deleted_bot_session_id(agent)
+    # A Bot's Session is its owner's (``docs/plans/bots.md`` D1): only the owner's deletion archives it.
+    if not session_id or not resolve_resource_access_context(None).is_instance_owner:
+        return {}
+    try:
+        result = asyncio.run(internal_client.archive_session(session_id))
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        result = {}
+    body = result.get("body") if isinstance(result.get("body"), dict) else {}
+    session = body.get("session") if isinstance(body.get("session"), dict) else {}
+    if result.get("status_code") != 200 or session.get("status") != "archived":
+        return {
+            "bot_session": {"id": session_id, "archived": False},
+            "hint": (
+                f"Its Bot's Session {session_id} was kept because the service did not archive it; with the service "
+                f"running, `DELETE /api/sessions/{session_id}` on the Web API archives it."
+            ),
+        }
+    scopes = session.get("revoked_vault_grant_scopes") or []
+    if scopes:
+        api.release_vault_agent_scopes(scopes, reason=f"archive_session:{session_id}")
+    return {"bot_session": {"id": session_id, "archived": True}}
+
+
 def cmd_agent_remove(args):
     from core.vibe_agents import AgentArchiveError, AgentReferenceRewriteError
 
@@ -6135,8 +6167,10 @@ def cmd_agent_remove(args):
             raise _agent_reference_rewrite_cli_error(exc) from exc
         if archived is None:
             raise TaskCliError(f"agent '{args.name}' not found", code="agent_not_found", details={"agent": args.name})
+        bot_session = _archive_deleted_bot_session(archived.agent)
         _print_cli_payload(
             "agent",
+            **bot_session,
             removed_agent=archived.original_name,
             archived_agent=_agent_payload(archived.agent, brief=True),
             references=archived.references,

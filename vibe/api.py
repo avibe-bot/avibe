@@ -2416,6 +2416,20 @@ def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
     }
 
 
+def deleted_bot_session_id(agent: Any) -> Optional[str]:
+    """The Session a deleted Agent's removed Bot left, which no Bot can reconnect to any more, else None.
+
+    Deleting the Agent (``vibe agent remove``, the Web) then archives it through the Session's own archive
+    lifecycle, which authorizes the caller and tears down what the Session holds (``docs/plans/bots.md`` D1).
+    """
+    from core.vibe_agents import BOT_METADATA_KEY
+    from storage.agent_session_rows import BOT_SESSION_ID_PREFIX
+
+    record = (getattr(agent, "metadata", None) or {}).get(BOT_METADATA_KEY)
+    handle = str(record.get("handle") or "").strip() if isinstance(record, dict) else ""
+    return f"{BOT_SESSION_ID_PREFIX}{handle}" if handle else None
+
+
 def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
@@ -2443,6 +2457,7 @@ def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
             return {"ok": False, "code": "agent_not_found", "message": f"agent '{name}' not found"}
         return {
             "ok": True,
+            "bot_session_id": deleted_bot_session_id(archived.agent),
             "removed_agent": archived.original_name,
             "archived_agent": _vibe_agent_payload(archived.agent, brief=True),
             "references": archived.references,

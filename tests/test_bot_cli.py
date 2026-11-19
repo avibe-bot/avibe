@@ -243,3 +243,38 @@ def test_the_callback_flag_matrix(home, capsys, monkeypatch, caller, argv, route
     stored = store.get_run(payload["run"]["id"])
     assert (stored["callback_session_id"], (stored["metadata"] or {}).get("callback_mode")) == route
     assert (stored["metadata"].get("no_reply") is True) == ("--no-reply" in argv)
+
+
+def test_agent_remove_archives_a_removed_bots_session_through_the_service(home, monkeypatch, capsys):
+    """``vibe agent remove`` on a removed Bot's Agent archives its Session through the service's archive lifecycle and
+    releases the Vault grants that teardown revoked; with the service down the Session is kept and the reply says so."""
+    from vibe import api, internal_client
+
+    archived, released = [], []
+
+    async def archive_via_controller(session_id):
+        archived.append(session_id)
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "session": {"id": session_id, "status": "archived",
+                                             "revoked_vault_grant_scopes": [{"grant_id": "g1"}]}},
+        }
+
+    monkeypatch.setattr(internal_client, "archive_session", archive_via_controller)
+    monkeypatch.setattr(api, "release_vault_agent_scopes", lambda scopes, reason: released.append((scopes, reason)))
+    for handle in ("gone", "later"):
+        assert _run(monkeypatch, capsys, "bot", "create", "--name", handle.title(), "--handle", handle)[0] == 0
+        assert _run(monkeypatch, capsys, "bot", "remove", handle)[0] == 0
+
+    code, payload = _run(monkeypatch, capsys, "agent", "remove", "gone")
+    assert (code, payload["bot_session"]) == (0, {"id": "ses_gone", "archived": True})
+    assert archived == ["ses_gone"]
+    assert released == [([{"grant_id": "g1"}], "archive_session:ses_gone")]
+
+    async def unavailable(session_id):
+        raise internal_client.InternalServerUnavailable("down")
+
+    monkeypatch.setattr(internal_client, "archive_session", unavailable)
+    code, payload = _run(monkeypatch, capsys, "agent", "remove", "later")
+    assert (code, payload["bot_session"]) == (0, {"id": "ses_later", "archived": False})
+    assert "ses_later" in payload["hint"]

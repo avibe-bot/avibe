@@ -106,6 +106,36 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
     assert again.get_json()["bot"]["session_id"] == "ses_cso"
 
 
+def test_deleting_a_removed_bots_agent_archives_its_session_over_http(client, monkeypatch):
+    """No Bot can reconnect to a deleted Agent's Session, so deleting the Agent archives it through the Session's own
+    archive lifecycle (the controller's teardown); a removed Bot whose Agent stays keeps its Session."""
+    from core.bots import BotService
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import archive_session, get_session
+    from vibe import internal_client
+
+    archived: list[str] = []
+
+    async def archive_via_controller(session_id):
+        archived.append(session_id)
+        with create_sqlite_engine().begin() as conn:
+            session = archive_session(conn, session_id)
+        return {"status_code": 200, "body": {"ok": True, "session": session}}
+
+    monkeypatch.setattr(internal_client, "archive_session", archive_via_controller)
+    with BotService() as service:
+        for name in ("Gone", "Kept"):
+            service.remove_bot(service.create_bot(display_name=name).handle)
+
+    deleted = client.delete("/api/agents/gone", headers=csrf_headers(client))
+    assert deleted.status_code == 200, deleted.get_json()
+    assert "bot_session_id" not in deleted.get_json()
+    assert archived == ["ses_gone"]
+    with create_sqlite_engine().connect() as conn:
+        assert get_session(conn, "ses_gone")["status"] == "archived"
+        assert get_session(conn, "ses_kept")["status"] == "active"
+
+
 def test_the_main_bots_avatar_is_refused_over_http_in_the_readers_language(client):
     from PIL import Image
 

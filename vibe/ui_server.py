@@ -6086,18 +6086,27 @@ def vibe_agent_patch(name):
 
 
 @app.route("/api/agents/<name>", methods=["DELETE"])
-def vibe_agent_delete(name):
+async def vibe_agent_delete(name):
     from vibe import api
 
     try:
-        return _vibe_agent_result_response(
-            api.remove_vibe_agent(
-                name,
-                user_context=getattr(g, "authorization_context", None),
-            )
+        result = await asyncio.to_thread(
+            api.remove_vibe_agent,
+            name,
+            user_context=getattr(g, "authorization_context", None),
         )
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
+    bot_session_id = result.pop("bot_session_id", None)
+    context = getattr(g, "authorization_context", None)
+    if result.get("ok") and bot_session_id and getattr(context, "is_instance_owner", False):
+        # No Bot can reconnect to a deleted Agent's Session: it is archived the way its owner would archive it
+        # (a Bot's Session is the owner's, bots.md D1); another member's deletion leaves it as it was.
+        archived = await sessions_archive(bot_session_id)
+        status = archived[1] if isinstance(archived, tuple) and len(archived) > 1 else 200
+        if status != 200:
+            logger.info("Kept the Session %s of the deleted Agent %s (archive answered %s)", bot_session_id, name, status)
+    return _vibe_agent_result_response(result)
 
 
 @app.route("/api/settings", methods=["GET"])
