@@ -6690,9 +6690,9 @@ class SQLiteBackgroundTaskStore:
             turn_id = str(terminal_provenance.get("turn_id") or "").strip()
             settles_failed_now = normalize_run_status(terminal_status) == "failed"
             if turn_id and settles_failed_now:
-                from storage.message_deliveries import runs_awaiting_input_handoff
+                from storage.message_deliveries import runs_carried_from_turn
 
-                carried = runs_awaiting_input_handoff(conn, turn_id, rows.values(), terminal_provenance)
+                carried = runs_carried_from_turn(conn, turn_id, rows.values(), terminal_provenance)
                 loaded_run_ids = [run_id for run_id in loaded_run_ids if run_id not in carried]
                 if _durable_activity_blockers is not None:
                     _durable_activity_blockers.difference_update(carried)

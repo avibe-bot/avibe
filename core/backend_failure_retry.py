@@ -10,10 +10,10 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import Connection
 
-from core.input_admission import InputEnvelope, admit_input
+from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
 from storage import message_deliveries as deliveries, messages_service
 from storage.delivery_states import policy_for
 from storage.message_deliveries import (
@@ -276,6 +276,52 @@ def reserve_retry(
     saved = deliveries.get_delivery(conn, delivery_id)
     assert saved is not None
     return saved
+
+
+def automatic_retry(conn: Connection, turn: dict[str, Any], *, create: bool = True) -> dict[str, Any] | None:
+    """Press a failed Turn's own Retry for it, once, under the Turn's terminal writer.
+
+    The same notice, boundary and continuation as a person's press, so a press that
+    follows resolves to this one. ``None`` when the notice offers no Retry, or the
+    Turn already is a Retry or a carry: its inputs had their one replay. With
+    ``create`` false, only a Retry this Turn already has and that has not started.
+    """
+    session_id, turn_id = str(turn["session_id"]), str(turn["id"])
+    if any(
+        retry_binding(row) is not None or deliveries.turn_carry(row) is not None
+        for row in deliveries.initial_deliveries_for_turn(conn, turn_id)
+    ):
+        return None
+    notice_id = conn.execute(
+        select(messages.c.id)
+        .where(messages.c.session_id == session_id, messages.c.type == "notify")
+        .where(func.json_extract(messages.c.metadata_json, "$.failure_id") == f"turn:{turn_id}")
+        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if notice_id is None:
+        return None
+    try:
+        notice = _notice(conn, session_id, notice_id)
+        existing = existing_retry(conn, session_id, notice_id, notice=notice)
+        if existing is not None or not create:
+            return existing if existing is not None and existing["state"] in {"reserved", "queued"} else None
+        return reserve_retry(
+            conn,
+            session_id=session_id,
+            notice_id=notice_id,
+            envelope=InputEnvelope(
+                session_id=session_id,
+                scope_id=notice.get("scope_id"),
+                sender=InputSender("harness"),
+                kind="agent_initiated",
+                provenance=InputProvenance(source="failure_retry", origin="harness"),
+                dispatch_text="continue",
+                text="continue",
+            ),
+        )
+    except RetryUnavailable:
+        return None
 
 
 def admission_denial(conn: Connection, delivery: dict[str, Any]) -> str | None:

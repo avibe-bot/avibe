@@ -1509,7 +1509,7 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
     first = dict(snapshots[0])
     first["created_at"] = deliveries[0]["submitted_at"]
     contents = [_json_object(snapshot.get("content_json")) for snapshot in snapshots]
-    texts = [str(snapshot.get("content_text") or "") for snapshot in snapshots]
+    texts = with_turn_carry_line(snapshots, [str(snapshot.get("content_text") or "") for snapshot in snapshots])
     visible_text = "\n".join(text for text in texts if text)
     attachments = [
         attachment
@@ -1669,7 +1669,6 @@ def materialize_start_acceptance(
             history_event={
                 "kind": "start",
                 "attempt_id": turn.get("start_attempt_id"),
-                "handoff": [row["snapshot_json"], row["dispatch_text"]],
                 "turn_id": turn_id,
                 "outcome": "accepted",
                 "evidence": evidence,
@@ -1684,8 +1683,6 @@ def materialize_start_acceptance(
             .where(show_session_events.c.message_id.is_(None))
             .values(message_id=message_id)
         )
-    if turn.get("state") == "terminal":
-        _finish_accepted_inputs(conn, turn, accepted)
     return accepted
 
 
@@ -1752,7 +1749,7 @@ def materialize_acceptance(
         history_event={
             "kind": str(delivery.get("current_attempt_kind") or evidence.get("kind") or "start"),
             "attempt_id": delivery.get("current_attempt_id"),
-            "handoff": [delivery["snapshot_json"], delivery["dispatch_text"]],
+            **_carry_envelope(delivery),
             "turn_id": turn_id,
             "outcome": "accepted",
             "evidence": evidence,
@@ -1769,7 +1766,7 @@ def materialize_acceptance(
         .values(message_id=delivery_id)
     )
     if target_turn.get("state") == "terminal":
-        _finish_accepted_inputs(conn, target_turn, [accepted])
+        carry_accepted_inputs(conn, target_turn, [accepted], late=True)
     return accepted
 
 
@@ -1842,7 +1839,7 @@ def materialize_steer_acceptance(
             },
             history_event={
                 "kind": "steer",
-                "handoff": [row["snapshot_json"], row["dispatch_text"]],
+                **_carry_envelope(row),
                 "attempt_id": expected_attempt_id,
                 "turn_id": turn_id,
                 "outcome": "accepted",
@@ -1859,7 +1856,7 @@ def materialize_steer_acceptance(
             .values(message_id=message_id)
         )
     if target_turn.get("state") == "terminal":
-        _finish_accepted_inputs(conn, target_turn, accepted)
+        carry_accepted_inputs(conn, target_turn, accepted, late=True)
     return accepted
 
 
@@ -2054,91 +2051,199 @@ def terminalize_turn(
         expected_states=(str(turn["state"]),),
         values=values,
     )
+    carried: dict[str, Any] = {}
     if settled is not None:
-        _finish_accepted_inputs(conn, settled, deliveries_for_turn(conn, turn_id))
-    return {"changed": settled is not None, "turn": settled or turn}
+        carried = carry_accepted_inputs(conn, settled, deliveries_for_turn(conn, turn_id))
+    return {"changed": settled is not None, "turn": settled or turn, **carried}
 
 
-def _carry_candidate(delivery, turn, outcome, settled_by, provenance) -> bool:
-    if delivery["state"] != "accepted" or delivery_has_history_event(delivery, kind="terminal_carry"):
-        return False
-    collateral = delivery["id"] != turn["initial_delivery_id"]
-    if settled_by == "stopped":
-        return collateral
-    # An unclassified failure, including an ambiguous rate/quota error, is
-    # never permission to replay the initiating request automatically.
-    return outcome == "failed" and (collateral or provenance.get("error_kind") in {
-        "server", "network", "overloaded", "stalled",
-    })
+#: A provider failure that can pass by itself (``ProviderError.kind``). A rate limit, an
+#: authentication or quota error, a context that cannot fit, and a failure nothing
+#: classified are not: the same request would fail the same way.
+TRANSIENT_FAILURE_KINDS = frozenset({"server", "network", "overloaded", "stalled"})
+TURN_CARRY_HISTORY_KIND = "turn_carry"
+TURN_CARRY_METADATA_KEY = "turn_carry"
+_CARRY_ENVELOPE_KEY = "carry_envelope"
+#: What opens a carried input, for the Agent and for a person reading the Session.
+TURN_CARRY_LINES = {
+    "stopped": (
+        "The user stopped the previous Turn. The messages below arrived during it. "
+        "Do not resume the stopped work unless one of them asks for it."
+    ),
+    "failed": "The previous Turn failed before handling the messages below.",
+}
+_STOP_SETTLEMENTS = frozenset({"stopped", "agent_run_canceled"})
 
 
-def runs_awaiting_input_handoff(conn, turn_id, run_rows, provenance) -> set[str]:
-    """Exclude these Runs from the *old* failure writer, not from the successor.
+def _carry_envelope(delivery: dict[str, Any]) -> dict[str, Any]:
+    """What a steer from another Session, a Task or a Watch keeps until its Turn ends.
 
-    Called under the same writer lock as the output it filters. A late output
-    may observe the new queue binding rather than the old accepted Delivery.
+    Acceptance merges an input into one Message and drops its own snapshot, so the
+    Turn's end could not send it again. A person's own message keeps none: it stays
+    in the context and is answered with the next thing they send, as before.
     """
-    turn = get_turn(conn, turn_id)
-    if not turn:
-        return set()
-    awaiting = set()
-    for run in run_rows:
-        if run.get("cancel_requested") or not run.get("delivery_id"):
-            continue
-        row = get_delivery(conn, run["delivery_id"])
-        if not row:
-            continue
-        events = _history(row["delivery_history_json"])["events"]
-        if any(e.get("kind") == "terminal_carry" and e.get("source_turn_id") == turn_id for e in events):
-            awaiting.add(run["id"])
-        elif (row.get("turn_id") == turn_id and any("handoff" in e for e in events)
-              and _carry_candidate(row, turn, "failed", None, provenance)):
-            awaiting.add(run["id"])
-    return awaiting
+    if _json_object(delivery.get("snapshot_json")).get("source") != "harness":
+        return {}
+    return {_CARRY_ENVELOPE_KEY: [delivery["snapshot_json"], delivery.get("dispatch_text") or ""]}
 
 
-def _finish_accepted_inputs(conn: Connection, turn: dict[str, Any], rows: list[dict[str, Any]]) -> None:
-    """Consume the temporary per-input envelopes under the terminal writer lock.
+def turn_carry(delivery: dict[str, Any]) -> dict[str, Any] | None:
+    """The carry that produced this Delivery, if a Turn's end sent it again."""
+    for event in _history(delivery.get("delivery_history_json"))["events"]:
+        if isinstance(event, dict) and event.get("kind") == TURN_CARRY_HISTORY_KIND:
+            return event
+    return None
 
-    The accepted rows retain their Message and Turn membership; only the queue
-    claim moves. A carry is never itself a new original input.
+
+def with_turn_carry_line(rows: Iterable[Mapping[str, Any]], texts: Iterable[str]) -> list[str]:
+    """``texts``, one per input of a batch, with the first carried one opened by its line."""
+    opened: list[str] = []
+    pending = True
+    for row, text in zip(rows, texts):
+        metadata = row.get("metadata")
+        if not isinstance(metadata, Mapping):
+            snapshot = _json_object(row.get("snapshot_json")) if row.get("snapshot_json") else row
+            metadata = _json_object(snapshot.get("metadata_json"))
+        line = TURN_CARRY_LINES.get(str(metadata.get(TURN_CARRY_METADATA_KEY) or "")) if pending else None
+        if line and text:
+            pending = False
+            text = f"{line}\n\n{text}"
+        opened.append(text)
+    return opened
+
+
+def _carry_reason(turn: dict[str, Any]) -> str | None:
+    if turn.get("settled_by") in _STOP_SETTLEMENTS:
+        return "stopped"
+    if turn.get("terminal_outcome") == "failed" and turn.get("terminal_evidence_kind") == "terminal_result":
+        return "failed"
+    return None
+
+
+def _is_replay(conn: Connection, turn: dict[str, Any]) -> bool:
+    """Whether this Turn already is a Retry or a carry: its inputs had their one replay."""
+    return any(
+        failure_retry_binding(row) is not None or turn_carry(row) is not None
+        for row in initial_deliveries_for_turn(conn, str(turn["id"]))
+    )
+
+
+def _carriable_run_ids(conn: Connection, delivery: dict[str, Any]) -> list[str] | None:
+    """The live Runs of an input, or ``None`` when one of them was called off."""
+    rows = list(conn.execute(
+        select(agent_runs.c.id, agent_runs.c.status, agent_runs.c.cancel_requested)
+        .where(agent_runs.c.delivery_id == str(delivery["id"]))
+        .order_by(agent_runs.c.created_at, agent_runs.c.id)
+    ).mappings())
+    if any(row["cancel_requested"] for row in rows):
+        return None
+    return [str(row["id"]) for row in rows if row["status"] in {"queued", "pending", "running", "processing"}]
+
+
+def _rebind_runs(conn: Connection, run_ids: list[str], delivery_id: str, *, source_turn_id: str) -> None:
+    for run_id in run_ids:
+        metadata = _json_object(conn.execute(
+            select(agent_runs.c.metadata_json).where(agent_runs.c.id == run_id)
+        ).scalar_one_or_none())
+        metadata[TURN_CARRY_METADATA_KEY] = {"source_turn_id": source_turn_id}
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(
+            delivery_id=delivery_id, metadata_json=_canonical_json(metadata),
+        ))
+
+
+def carry_accepted_inputs(
+    conn: Connection, turn: dict[str, Any], rows: list[dict[str, Any]], *, late: bool = False,
+) -> dict[str, Any]:
+    """Under the terminal writer: what a failed or stopped Turn accepted is not lost.
+
+    A failure that can pass by itself presses the Turn's own Retry once: nothing is
+    sent again, and the Runs of its inputs settle with the continued Turn. Otherwise
+    the inputs other Sessions, Tasks and Watches merged into the Turn are queued
+    again as text, once, opened by ``TURN_CARRY_LINES``; the stopped or failing
+    request itself is not. A Turn that already is a replay carries nothing it
+    received that way, so a failing input cannot loop.
     """
-    evidence = _json_object(turn.get("terminal_evidence_json"))
-    provenance = evidence.get("output_provenance") or {}
-    stopped = turn.get("settled_by") == "stopped"
-    for row in rows:
-        if row["state"] != "accepted":
+    turn_id = str(turn["id"])
+    reason = _carry_reason(turn)
+    retry: dict[str, Any] | None = None
+    provenance = _json_object(turn.get("terminal_evidence_json")).get("output_provenance")
+    kind = provenance.get("error_kind") if isinstance(provenance, Mapping) else None
+    if reason == "failed" and kind in TRANSIENT_FAILURE_KINDS:
+        from core.backend_failure_retry import automatic_retry
+
+        retry = automatic_retry(conn, turn, create=not late)
+    for row in sorted(rows, key=lambda item: (item.get("turn_position") or 0, str(item["id"]))):
+        if row["state"] != "accepted" or row.get("turn_id") != turn_id:
             continue
         history = _history(row["delivery_history_json"])
-        envelope = next((event.pop("handoff") for event in reversed(history["events"]) if "handoff" in event), None)
-        if envelope is None:
-            continue
-        original = row["id"]
-        candidate = _carry_candidate(row, turn, turn["terminal_outcome"], turn.get("settled_by"), provenance)
-        run_ids = agent_run_ids_for_delivery(conn, row) if candidate else []
-        canceled = bool(run_ids and conn.execute(select(agent_runs.c.id).where(
-            agent_runs.c.id.in_(run_ids), agent_runs.c.cancel_requested == 1,
-        ).limit(1)).first())
-        if candidate and not canceled:
-            # Same timestamp and sortable original identity keep the original
-            # FIFO position, including ties with already queued later inputs.
-            next_id = original + "~carry"
-            insert_delivery(
-                conn, delivery_id=next_id, session_id=row["session_id"], priority="p3", state="queued",
-                snapshot=_json_object(envelope[0]), dispatch_text=envelope[1] or "",
-                history_event={"kind": "terminal_carry", "source_turn_id": turn["id"],
-                               "original_id": original, "stopped": stopped}, now=row["submitted_at"],
-            )
-            admission = next((event for event in history["events"] if event.get("kind") == "admission"), None)
-            if admission:
-                copy = get_delivery(conn, next_id)
-                cas_delivery(conn, next_id, expected_version=copy["version"], expected_states=("queued",),
-                             values={}, history_event=admission)
+        envelope = next(
+            (event.pop(_CARRY_ENVELOPE_KEY) for event in history["events"] if _CARRY_ENVELOPE_KEY in event), None
+        )
+        run_ids = _carriable_run_ids(conn, row)
+        if retry is not None:
             if run_ids:
-                conn.execute(update(agent_runs).where(agent_runs.c.delivery_id == original).values(delivery_id=next_id))
-        conn.execute(update(message_deliveries).where(message_deliveries.c.id == original).values(
-            delivery_history_json=_canonical_json(history),
-        ))
+                _rebind_runs(conn, run_ids, str(retry["id"]), source_turn_id=turn_id)
+        elif envelope is not None and reason is not None and run_ids is not None:
+            snapshot = _json_object(envelope[0])
+            metadata = _json_object(snapshot.get("metadata_json"))
+            metadata[TURN_CARRY_METADATA_KEY] = reason
+            snapshot["metadata_json"] = _canonical_json(metadata)
+            carried_id = new_delivery_id()
+            # The original's time keeps its place in the queue, ahead of later inputs.
+            insert_delivery(
+                conn, delivery_id=carried_id, session_id=str(row["session_id"]), priority="p3", state="queued",
+                snapshot=snapshot, dispatch_text=str(envelope[1] or ""), now=row["submitted_at"],
+                history_event=next(
+                    (event for event in history["events"] if event.get("kind") == "admission"), None
+                ),
+            )
+            carried = get_delivery(conn, carried_id)
+            cas_delivery(
+                conn, carried_id, expected_version=int(carried["version"]), expected_states=("queued",), values={},
+                history_event={
+                    "kind": TURN_CARRY_HISTORY_KIND, "source_turn_id": turn_id,
+                    "original_id": str(row["id"]), "reason": reason,
+                },
+            )
+            _rebind_runs(conn, run_ids, carried_id, source_turn_id=turn_id)
+        if envelope is not None:
+            conn.execute(update(message_deliveries).where(message_deliveries.c.id == row["id"]).values(
+                delivery_history_json=_canonical_json(history),
+            ))
+    return {"automatic_retry_delivery_id": str(retry["id"])} if retry is not None else {}
+
+
+def runs_carried_from_turn(
+    conn: Connection, turn_id: str, run_rows: Iterable[Mapping[str, Any]], provenance: Mapping[str, Any],
+) -> set[str]:
+    """The Runs a failing Turn's own failure must not settle: they go on with its replay.
+
+    Read under the writer the failure is recorded with. After the Turn's end the
+    Run's Delivery says where it went. Before it, this is what the end will decide;
+    a Run the end then leaves with the Turn is settled from the Turn's terminal
+    snapshot, as a late accepted Run is (``_reconcile_terminal_agent_runs``).
+    """
+    turn = get_turn(conn, turn_id)
+    if turn is None:
+        return set()
+    retried = (
+        turn["state"] != "terminal"
+        and provenance.get("error_kind") in TRANSIENT_FAILURE_KINDS
+        and not _is_replay(conn, turn)
+    )
+    carried: set[str] = set()
+    for run in run_rows:
+        delivery = get_delivery(conn, str(run["delivery_id"] or "")) if run["delivery_id"] else None
+        if delivery is None or run["cancel_requested"]:
+            continue
+        source = failure_retry_binding(delivery) or turn_carry(delivery) or {}
+        if source.get("source_turn_id") == turn_id:
+            carried.add(str(run["id"]))
+        elif turn["state"] != "terminal" and delivery.get("turn_id") == turn_id and delivery["state"] == "accepted":
+            events = _history(delivery["delivery_history_json"])["events"]
+            if retried or any(_CARRY_ENVELOPE_KEY in event for event in events):
+                carried.add(str(run["id"]))
+    return carried
 
 
 # The predicates of the partial indexes that migration 0044 built over live rows

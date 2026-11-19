@@ -497,7 +497,7 @@ def _delivery_dispatch_text(delivery: dict[str, Any]) -> str:
 
 
 def _segment_dispatch_text(segment: list[dict[str, Any]]) -> str:
-    texts = [_delivery_dispatch_text(row) for row in segment]
+    texts = delivery_store.with_turn_carry_line(segment, [_delivery_dispatch_text(row) for row in segment])
     texts = [text for text in texts if text.strip()]
     leader = segment[0] if segment else {}
     if "snapshot_json" in leader:
