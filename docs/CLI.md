@@ -452,9 +452,10 @@ line per column. Values are printed as stored, with real newlines; a multi-line
 value starts on the line after its column name, indented two spaces, and SQL
 `NULL` prints as `(null)`. A page holds 20 rows unless `--limit` says
 otherwise (at most 100). When more rows match, one line says which rows were
-shown and ends with the next page's command, which keeps `--format text`; JSON
-carries the same line as `message` beside `pagination.next_command`. JSON stays
-the default, and errors are the JSON error envelope on stderr in both formats.
+shown and ends with the next page's command, which keeps `--format text`. In
+JSON, `message` says which rows were shown, and the command stays in
+`pagination.next_command`. JSON stays the default, and errors are the JSON
+error envelope on stderr in both formats.
 
 The connection is read-only: writes, schema changes, `ATTACH`, and transactions
 are refused. The schema PRAGMAs `table_list`, `table_info`, `table_xinfo`,
