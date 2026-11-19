@@ -5189,7 +5189,10 @@ extension NavigationPolicyTests {
 
         reachable.set(true)
         try await waitUntil { connected == 1 }
-        XCTAssertEqual(documents.count, 0)
+        // Connected without a live document (the currency check that follows
+        // fetches the page's own URL, which is not a navigation).
+        XCTAssertFalse(events.contains { $0.stage == .committed && !$0.fromCache })
+        XCTAssertEqual(events.filter { $0.stage == .started && !$0.fromCache }.count, 1)
         XCTAssertEqual(uncovered, 1)
     }
 
@@ -5238,10 +5241,29 @@ extension NavigationPolicyTests {
             )
             let window = host(controller)
             defer { window.isHidden = true }
+            // A row that does not reach a step says where it stood, and the
+            // next row still runs.
+            func reach(_ step: String, _ condition: @MainActor () -> Bool) async -> Bool {
+                do {
+                    try await waitUntil(condition)
+                    return true
+                } catch {
+                    let path = try? await primaryWebView(of: controller)
+                        .evaluateJavaScript("location.pathname + ' ' + document.title") as? String
+                    XCTFail("""
+                        \(row.name): did not reach "\(step)"; page \(path ?? "?"), \
+                        documents \(documents.count), uncovered \(uncovered), connected \(connected), \
+                        events \(events.map { "\($0.stage)\($0.fromCache ? "(cache)" : "")" })
+                        """)
+                    return false
+                }
+            }
 
-            try await waitUntil { events.contains { $0.stage == .finished && $0.fromCache } }
+            guard await reach("cached page loaded", { events.contains { $0.stage == .finished && $0.fromCache } }) else {
+                continue
+            }
             if row.uncovers {
-                try await waitUntil { uncovered == 1 }
+                guard await reach("uncovered", { uncovered == 1 }) else { continue }
                 XCTAssertEqual(documents.count, 0, row.name)
                 // The Web UI's own move to its setup fallback (a replace, as
                 // its router does).
@@ -5250,7 +5272,7 @@ extension NavigationPolicyTests {
                 ) as? String
                 XCTAssertEqual(moved, "/setup", row.name)
             }
-            try await waitUntil { documents.count == 1 }
+            guard await reach("live load", { documents.count == 1 }) else { continue }
             XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
             XCTAssertEqual(uncovered, row.uncovers ? 1 : 0, row.name)
             XCTAssertEqual(connected, 0, row.name)
