@@ -5,7 +5,6 @@ from __future__ import annotations
 import gc
 import json
 import logging
-import os
 import sys
 import time
 import types
@@ -148,14 +147,9 @@ def _counts(controller):
     )
 
 
-def configured(controller):
-    if os.environ.get("AVIBE_DIAGNOSTIC_GC_CENSUS") != "1":
-        return None
-
-    def sample():
-        start = time.perf_counter()
-        report = _counts(controller)
-        report["elapsed_ms"] = round((time.perf_counter() - start) * 1000, 1)
-        logging.getLogger("core.loop_watchdog").warning("GC census: %s", json.dumps(report, separators=(",", ":")))
-
-    return sample
+def sample_controller(controller, **trigger):
+    start = time.perf_counter()
+    report = _counts(controller)
+    report.update(trigger)
+    report["elapsed_ms"] = round((time.perf_counter() - start) * 1000, 1)
+    logging.getLogger("core.loop_watchdog").warning("GC census: %s", json.dumps(report, separators=(",", ":")))
