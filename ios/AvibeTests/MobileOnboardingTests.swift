@@ -1388,10 +1388,11 @@ final class MobileOnboardingTests: XCTestCase {
         let defaults = makeDefaults()
         // What an earlier launch read; this launch's read fails.
         defaults.set(["github"], forKey: "avibe.mobile.advertisedProviders")
-        let transport = FakeMobileAuthTransport()
-        transport.advertised = nil
+        // A signed-out start may rotate to a fresh store: every store's read fails.
+        let transports = (0..<3).map { _ in FakeMobileAuthTransport() }
+        transports.forEach { $0.advertised = nil }
         let controller = MobileOnboardingViewController(
-            coordinator: makeCoordinator(defaults: defaults, transports: [transport, FakeMobileAuthTransport()])
+            coordinator: makeCoordinator(defaults: defaults, transports: transports)
         )
         let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
         defer { window.isHidden = true }
