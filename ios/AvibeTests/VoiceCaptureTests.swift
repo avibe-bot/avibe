@@ -411,7 +411,9 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.audio?.discarded, false, "kept for Retry")
         XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
 
+        // Retry asks again then, not with an answer taken during the outage.
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        for _ in 0..<5 { await Task.yield() }
         await controller.retry()
         XCTAssertEqual(world.instance.sent, ["hello"])
     }
@@ -673,6 +675,44 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(on.audio?.discarded, true)
         XCTAssertEqual(on.ended, 1)
         XCTAssertEqual(on.endDecisions, ["ended"])
+        XCTAssertEqual(on.held, 1, "kept running while it waits")
+        XCTAssertEqual(on.released, 1)
+    }
+
+    /// A wait that ran late (the process was suspended; the next wake may be
+    /// the next press) does not end the process.
+    func testALateWaitNeverEndsTheProcess() async {
+        let world = World()
+        world.endSwitch = true
+        var clock = Date()
+        world.now = { clock }
+        world.beforeEnding = { clock = clock.addingTimeInterval(VoiceCaptureController.endingWindow + 1) }
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        await controller.endingTask?.value
+        XCTAssertEqual(world.ended, 0)
+        XCTAssertEqual(world.endDecisions, ["skip:late"])
+        XCTAssertEqual(world.released, 1)
+    }
+
+    /// An older intent resuming after a newer press reserved cannot take it.
+    func testAnOlderIntentCannotTakeANewerPress() async {
+        let world = World()
+        world.prepareErrors = [.mixableBackground: NSError(domain: NSOSStatusErrorDomain, code: 561015905)]
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        _ = await controller.beginPress()
+        let old = controller.reservation
+        _ = await controller.startTake(inFront: false, foregroundFallback: true, reservation: old)
+        clock = clock.addingTimeInterval(VoiceCaptureController.foregroundWait + 1)
+        _ = await controller.beginPress()
+        XCTAssertNotEqual(controller.reservation, old)
+        let late = await controller.startTake(inFront: true, reservation: old)
+        XCTAssertEqual(late, .stopped)
+        XCTAssertEqual(controller.phase, .preparing, "the newer press keeps its reservation")
     }
 
     func testTheProcessNeverEndsWhenShownInFrontOrBusy() async {
@@ -715,6 +755,10 @@ final class VoiceCaptureTests: XCTestCase {
     func testTheSwitchIsAHiddenURLOnly() {
         XCTAssertFalse(VoiceCaptureEndSwitch.handle(URL(string: "https://avibe.bot/voice/end-after-background?on=1")!))
         XCTAssertFalse(VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/other?on=1")!))
+        XCTAssertFalse(
+            VoiceCaptureEndSwitch.handle(URL(string: "avibe-diagnostics://voice/end-after-background?on=1")!, allowed: false),
+            "an App Store build ignores it"
+        )
         let defaults = UserDefaults.standard
         let before = defaults.object(forKey: VoiceCaptureEndSwitch.key)
         defer { defaults.set(before, forKey: VoiceCaptureEndSwitch.key) }
@@ -1092,6 +1136,9 @@ private final class World {
     var otherWork: String?
     var ended = 0
     var endDecisions: [String] = []
+    var beforeEnding: () -> Void = {}
+    var held = 0
+    var released = 0
 
     func controller() -> VoiceCaptureController {
         instance.log = { self.events.append($0) }
@@ -1135,7 +1182,11 @@ private final class World {
             endProcessAfterBackgroundCapture: { self.endSwitch },
             processEverShown: { self.shown },
             otherWorkInFlight: { self.otherWork },
-            waitBeforeEnding: {},
+            waitBeforeEnding: { self.beforeEnding() },
+            holdWhileEnding: {
+                self.held += 1
+                return { self.released += 1 }
+            },
             endProcess: { self.ended += 1 },
             noteEndDecision: { self.endDecisions.append($0) },
             now: { self.now() },
