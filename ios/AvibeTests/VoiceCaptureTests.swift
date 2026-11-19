@@ -370,11 +370,13 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(fresh.phase, .listening)
     }
 
-    func testTheIntentMayStartItsIslandAndKeepRecordingInTheBackground() throws {
+    func testTheIntentIsAPlainAudioRecordingIntentThatKeepsRecordingInTheBackground() throws {
         guard #available(iOS 18.0, *) else { throw XCTSkip("iOS 18") }
-        // A Live Activity may be started from the background only by a
-        // LiveActivityIntent (Apple: LiveActivityIntent).
-        XCTAssertTrue((SpeakToMainBotIntent.self as Any) is any LiveActivityIntent.Type)
+        // As in 26.1, the one build that started in the background on the
+        // owner's phone: not also a LiveActivityIntent (35.1 was, and its
+        // background session activations were refused).
+        XCTAssertTrue((SpeakToMainBotIntent.self as Any) is any AudioRecordingIntent.Type)
+        XCTAssertFalse((SpeakToMainBotIntent.self as Any) is any LiveActivityIntent.Type)
         // Recording continues in the background only with the audio mode
         // (Apple: AVAudioSession.Category.record).
         let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
@@ -520,6 +522,46 @@ final class VoiceCaptureTests: XCTestCase {
         world.audio?.duration = 2
         _ = await controller.toggle()
         XCTAssertEqual(world.instance.captures.first ?? nil, "3 [background cold] (0 liveActivity ActivityAuthorizationError 7)")
+    }
+
+    /// An account change while try 0's island ends (before try 1) gives the
+    /// press up.
+    func testAnAccountChangeBeforeTryOneGivesThePressUp() async {
+        let world = World()
+        world.prepareErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 560557684)]
+        let controller = world.controller()
+        world.onActivityRequested = { activity in
+            activity.onEnd = { _ = controller.cancelForAccountTransition() }
+        }
+        let outcome = await controller.toggle(foregroundFallback: true)
+        XCTAssertEqual(outcome, .stopped)
+        XCTAssertEqual(world.events, ["activity", "prepare1"], "no try after the change")
+        XCTAssertTrue(world.instance.closed)
+        XCTAssertEqual(world.audio?.discarded, true)
+    }
+
+    /// An island refused after a later try's session went active: that
+    /// session is released, and the press goes on in the App.
+    func testAnIslandRefusedAfterTryOnesSessionReleasesItAndGoesOnInTheApp() async {
+        let world = World()
+        world.startErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
+        var requests = 0
+        world.onActivityRequested = { _ in requests += 1; if requests == 1 { world.activityRequestFails = true } }
+        let controller = world.controller()
+        let outcome = await controller.toggle(foregroundFallback: true)
+        XCTAssertEqual(outcome, .needsForeground)
+        XCTAssertNil(world.audio?.prepared, "try 1's session released")
+        XCTAssertEqual(world.events, ["activity", "prepare1", "record", "stop", "prepare1", "stop"])
+    }
+
+    /// Without a way forward, every try refused still leaves one notice.
+    func testEveryTryRefusedWithoutAWayForwardLeavesOneNotice() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        _ = await world.controller().toggle()
+        XCTAssertEqual(world.failureNotices.count, 1)
+        XCTAssertEqual(world.failureNotices.first?.attempts?.map(\.candidate), [0, 1, 2])
     }
 
     func testTheInAppLineIsPlain() throws {

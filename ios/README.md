@@ -314,8 +314,8 @@ iOS 18, which is why the deployment target is iOS 17.4
 `SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
 process without bringing the App to the front (`supportedModes`
 `[.background, .foreground(.dynamic)]` from iOS 26), and Apple requires a Live
-Activity for as long as it records. It is also a `LiveActivityIntent`, the
-documented way for an App that is not in front to start a Live Activity.
+Activity for as long as it records. It is deliberately not also a
+`LiveActivityIntent` (see the tries below).
 `UIBackgroundModes` declares `audio`, which Apple requires to keep recording
 once the App is in the background (`AVAudioSession.Category.record`); the
 other Info.plist addition is `NSSupportsLiveActivities`. The background audio mode is

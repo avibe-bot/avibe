@@ -156,7 +156,7 @@ final class VoiceCaptureController {
         case stopped
         case busy
         case needsApp(VoiceCaptureAttributes.Reason)
-        /// Both background tries were refused: bring Avibe forward and call
+        /// Every background try was refused: bring Avibe forward and call
         /// `startInForeground()` (try 3), or `foregroundUnavailable()`.
         case needsForeground
     }

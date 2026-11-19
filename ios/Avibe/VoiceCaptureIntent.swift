@@ -46,7 +46,7 @@ struct SpeakToMainBotIntent: AudioRecordingIntent {
         }
         let outcome = await controller.toggle(foregroundFallback: canComeForward)
         if outcome == .needsForeground {
-            // Both background tries were refused: try 3 records in the App
+            // Every background try was refused: try 3 records in the App
             // at once, with one line saying why it opened.
             if #available(iOS 26.0, *) {
                 do {
