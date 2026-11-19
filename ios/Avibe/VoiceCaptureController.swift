@@ -179,7 +179,8 @@ struct VoiceCaptureEnvironment {
         },
         presentInFront: { reason, needsApp in
             if needsApp {
-                VoiceCaptureController.shared.openMainBotChat()
+                // The main Bot's conversation, where the Web UI asks.
+                InstancePathRequests.shared.open(path: OpenMainBotIntent.path)
             }
             VoiceCaptureAlert.present(reason)
         },
