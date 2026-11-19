@@ -1953,6 +1953,7 @@ def _expire_pending_request_rows(
     *,
     reason: str = "request-expired",
     delivery_extra: dict[str, Any] | None = None,
+    callback_status: str = "pending",
 ) -> int:
     now = _now()
     expired = 0
@@ -1960,7 +1961,7 @@ def _expire_pending_request_rows(
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
-            .values(status="expired", decided_at=now, callback_status="pending")
+            .values(status="expired", decided_at=now, callback_status=callback_status)
         )
         if result.rowcount != 1:
             continue
@@ -1976,6 +1977,33 @@ def _expire_pending_request_rows(
         )
         expired += 1
     return expired
+
+
+class RequestNotYoursError(VaultServiceError):
+    """An Agent asked to withdraw a Vault request another Session made."""
+
+
+def withdraw_request(conn: Connection, request_id: str, *, session_id: str | None) -> dict[str, Any]:
+    """End a pending Vault request the calling Session made, as if it had expired.
+
+    Any kind (provide, use, sign, delete) and either tier: only the request row ends, so its
+    card leaves the pending list and a later Approve fails closed as on an expired request. A
+    request that is not pending (being signed, decided or expired) stays as it is. The Agent
+    withdrew it itself, so it is not woken with the outcome.
+    """
+    row = _load_request_row(conn, request_id)
+    if not session_id or _request_session_id(row) != str(session_id):
+        raise RequestNotYoursError(request_id)
+    if row.get("status") != "pending":
+        raise InvalidRequestError(f"request is {row.get('status')}, not pending")
+    withdrawn = _expire_pending_request_rows(
+        conn, [row], reason="request-withdrawn", delivery_extra={"session_id": str(session_id)},
+        callback_status="skipped",
+    )
+    if withdrawn != 1:
+        raise InvalidRequestError("request is not pending")
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 
 def _expire_request_if_due(conn: Connection, row: dict[str, Any]) -> tuple[dict[str, Any], bool]:

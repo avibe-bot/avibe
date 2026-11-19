@@ -878,6 +878,38 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     assert payload["request"]["status"] == "pending"
 
 
+@pytest.mark.parametrize("tier", ["protected", "standard"])
+def test_an_agent_withdraws_only_its_own_pending_request(tier, capfd, monkeypatch):
+    """3.2.8: an Agent withdraws a pending request its own Session made, in either tier; another Session
+    cannot, a request no longer pending stays, and an approval pressed after the withdrawal fails closed."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="OOPS_KEY", protection=tier, sealed=_sealed(tier))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+    assert cli.cmd_vault_remove(_ns(name="OOPS_KEY")) == 0
+    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_other")
+    assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+    assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 0
+    assert json.loads(capfd.readouterr().out)["status"] == "expired"
+    with cli._open_vault_engine().begin() as conn:
+        row = conn.execute(
+            vault_service.vault_requests.select().where(vault_service.vault_requests.c.id == request_id)
+        ).mappings().one()
+        assert (row["status"], row["callback_status"]) == ("expired", "skipped")
+        assert vault_service.list_requests(conn, status="pending") == []
+        # The user's Approve a moment later is refused, and nothing is deleted.
+        with pytest.raises(vault_service.InvalidRequestError):
+            vault_service.approve_delete_request(conn, request_id)
+        assert vault_service.get_secret_meta(conn, "OOPS_KEY")["name"] == "OOPS_KEY"
+
+    assert cli.cmd_vault_withdraw(_ns(request_id=request_id)) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_pending"
+
+
 def test_access_non_requestable_standard_secret_keeps_not_grantable_code(capfd):
     _create_standard_secret("STANDARD_KEY")
     assert cli.cmd_vault_access(_ns(name="STANDARD_KEY")) == 1
