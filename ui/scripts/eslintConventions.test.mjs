@@ -153,7 +153,7 @@ describe('the upgraded lint presets enforce their behavioral contract', () => {
 const REFRESH = 'react-refresh/only-export-components';
 
 // These are the unchanged Dialog, app-registry and deferred-preview export
-// shapes. Refresh 0.5.4 adds debt for them despite the identical configuration;
+// shapes. Refresh 0.5.0-0.5.8 add debt for them despite the identical configuration;
 // a version/config snapshot alone does not protect the consuming convention.
 describe('React Refresh preserves the established component export shapes', () => {
   it.each([

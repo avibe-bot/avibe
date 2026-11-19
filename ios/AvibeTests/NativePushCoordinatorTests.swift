@@ -269,6 +269,61 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertNil(absentStatus["endpoint"])
     }
 
+    /// The status names iOS's notification permission, so the page can turn
+    /// notifications back on after a sign-in only when iOS already allows
+    /// them, never prompting on its own. A fresh install's account (nothing
+    /// bound yet) and a signed-out App say it too.
+    func testStatusNamesTheSystemPermission() async throws {
+        let cases: [(UNAuthorizationStatus, String)] = [
+            (.authorized, "granted"),
+            (.provisional, "granted"),
+            (.ephemeral, "granted"),
+            (.notDetermined, "notDetermined"),
+            (.denied, "denied"),
+        ]
+        for (authorization, expected) in cases {
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: nil,
+                providerPatchPending: false
+            )
+            let bound = makeCoordinator(
+                store: store,
+                management: ManagementRecorder(),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let status = try await bound.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(status["permission"] as? String, expected, "\(authorization)")
+
+            let unbound = makeCoordinator(
+                store: InMemoryPushKeychainStore(),
+                management: ManagementRecorder(),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let fresh = try await unbound.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(fresh["state"] as? String, expected == "denied" ? "unavailable" : "off")
+            XCTAssertEqual(fresh["permission"] as? String, expected, "\(authorization)")
+
+            let signedOut = makeCoordinator(
+                store: InMemoryPushKeychainStore(),
+                management: ManagementRecorder(),
+                account: Locked<MobileAccount?>(nil),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let none = try await signedOut.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(none["permission"] as? String, expected, "\(authorization)")
+        }
+    }
+
     func testRevokeOutcomeBridgePayloadRemainsLegacyCompatible() {
         XCTAssertEqual(
             NativePushRevokeOutcome.confirmed.jsonObject["revoked"] as? Bool,
@@ -1137,6 +1192,88 @@ final class NativePushCoordinatorTests: XCTestCase {
             subscription["endpoint"] as? String,
             record.publicSubscription["endpoint"] as? String
         )
+    }
+
+    /// A revoke the relay keeps refusing for one origin (an instance that left
+    /// the account) stays queued for retry, and does not stop another
+    /// origin from subscribing (turning notifications back on after a
+    /// sign-in). One the new registration depends on still does: for the
+    /// subscribing origin itself, or with the same VAPID key (the relay
+    /// refuses a create while another registration with that key is active,
+    /// as when the same instance moved to a new address).
+    func testAStuckRevokeForAnotherOriginDoesNotBlockSubscribing() async throws {
+        let subscribingHash = SHA256.hash(
+            data: try XCTUnwrap(PushBase64URL.decode(Self.vapidPublicKey))
+        ).map { String(format: "%02x", $0) }.joined()
+        let rows: [(name: String, origin: String, vapidKeyHash: String, blocks: Bool)] = [
+            ("another origin", "https://gone.example", String(repeating: "a", count: 64), false),
+            ("own origin", Self.instanceOrigin, String(repeating: "a", count: 64), true),
+            ("another origin, same VAPID key", "https://moved-from.example", subscribingHash, true),
+        ]
+        for row in rows {
+            let ownOrigin = row.blocks
+            let stuckOrigin = row.origin
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: PushProviderState(
+                    deviceToken: Data(repeating: 15, count: 32),
+                    environment: "sandbox",
+                    topic: "bot.avibe.ios",
+                    generation: 1
+                ),
+                providerPatchPending: false
+            )
+            try store.saveRecord(PushKeyRecord(
+                kid: "stuck-revoke",
+                instanceOrigin: stuckOrigin,
+                accountID: Self.accountA.id,
+                accountGeneration: 1,
+                bindGeneration: 1,
+                privateKey: Data(),
+                authSecret: Data(),
+                vapidKeyHash: row.vapidKeyHash,
+                state: .retiring,
+                pendingRevoke: true,
+                replacementRegistrationIDs: []
+            ))
+            let recorder = ManagementRecorder()
+            recorder.responseHandler = { request in
+                request.method == "DELETE" && request.path.hasSuffix("/stuck-revoke")
+                    ? PushManagementResponse(
+                        statusCode: 503,
+                        body: ["error": ["code": "relay_unavailable"]]
+                    )
+                    : Self.successResponse
+            }
+            let coordinator = makeCoordinator(store: store, management: recorder)
+
+            let name = row.name
+            do {
+                let subscription = try await coordinator.subscribe(
+                    vapidPublicKey: Self.vapidPublicKey,
+                    instanceOrigin: Self.instanceOrigin
+                )
+                XCTAssertFalse(ownOrigin, "A revoke it depends on must stop it: \(name)")
+                XCTAssertNotNil(subscription["endpoint"] as? String, name)
+            } catch {
+                XCTAssertTrue(ownOrigin, "Blocked by an unrelated revoke: \(error), \(name)")
+            }
+
+            let creates = recorder.requests.filter {
+                $0.method == "PUT" && $0.path.contains("/registrations/")
+            }
+            XCTAssertEqual(creates.count, ownOrigin ? 0 : 1, name)
+            XCTAssertTrue(
+                recorder.requests.contains {
+                    $0.method == "DELETE" && $0.path.hasSuffix("/stuck-revoke")
+                },
+                "The stuck revoke was tried: \(name)"
+            )
+            // Still queued for retry either way.
+            let stuck = try XCTUnwrap(try store.loadRecord(kid: "stuck-revoke"), name)
+            XCTAssertTrue(stuck.pendingRevoke, name)
+            XCTAssertEqual(stuck.state, .retiring, name)
+        }
     }
 
     /// UIKit hands the device token back as a main-queue block. When it is

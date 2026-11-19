@@ -135,6 +135,7 @@
 		1A0000000000000000000004 /* HealthConsentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000004 /* HealthConsentView.swift */; };
 		1A0000000000000000000005 /* HealthDataReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000005 /* HealthDataReaderTests.swift */; };
 		1A0000000000000000000006 /* HealthSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000006 /* HealthSyncTests.swift */; };
+		16000000000000000000000032 /* VoiceCaptureFailureNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -297,6 +298,7 @@
 		2A0000000000000000000004 /* HealthConsentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthConsentView.swift; sourceTree = "<group>"; };
 		2A0000000000000000000005 /* HealthDataReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataReaderTests.swift; sourceTree = "<group>"; };
 		2A0000000000000000000006 /* HealthSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthSyncTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureFailureNotification.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -416,6 +418,7 @@
 				26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */,
 				26000000000000000000000005 /* VoiceCaptureRecorder.swift */,
 				26000000000000000000000031 /* VoiceCaptureAlert.swift */,
+				26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */,
 				200000000000000000000120 /* DirectIrohByteStream.swift */,
 				200000000000000000000121 /* DirectIrohEngine.swift */,
 				200000000000000000000136 /* DirectIrohBinding.swift */,
@@ -980,6 +983,7 @@
 				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
 				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
 				16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */,
+				16000000000000000000000032 /* VoiceCaptureFailureNotification.swift in Sources */,
 				16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
@@ -1232,6 +1236,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Avibe/Avibe.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -1264,6 +1269,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Avibe/Avibe.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;

@@ -55,16 +55,20 @@ struct RootView: View {
                 .ignoresSafeArea(.container, edges: .all)
             }
             if appModel.route == .loading {
+                // Never a blocking spinner: the page's skeleton, and while an
+                // open is under way the thin progress line over it.
+                if appModel.runtimeOpenAttempt != nil
+                    || appModel.mobileSessionCoordinator.hasStoredSelection
+                {
+                    RuntimeSkeleton()
+                }
                 if let attempt = appModel.runtimeOpenAttempt {
-                    RuntimeOpenProgressOverlay(
-                        attempt: attempt,
-                        cancel: {
-                            appModel.cancelRuntimeOpen(attemptID: attempt.id)
-                        }
-                    )
+                    RuntimeOpenProgress(attempt: attempt) {
+                        appModel.cancelRuntimeOpen(attemptID: attempt.id)
+                    }
                 } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // The session is being restored: the line, with no stage.
+                    RuntimeProgressLine(label: Text("runtime.loading"))
                 }
             }
             if appModel.route == .onboarding(.instances),
@@ -247,6 +251,7 @@ private struct SystemScheduleConfirmationOverlay: View {
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .foregroundStyle(AvibeStyle.onAccent)
                                 .accessibilityIdentifier(
                                     "system-schedule-confirm"
                                 )
@@ -437,14 +442,16 @@ private struct BrowserScreen: View {
                     .ignoresSafeArea(.container, edges: [.top, .bottom])
 
                     if overlay == .loading, let attempt {
-                        RuntimeOpenProgressOverlay(
-                            attempt: attempt,
-                            cancel: {
-                                appModel.cancelRuntimeOpen(
-                                    attemptID: attempt.id
-                                )
-                            }
-                        )
+                        // Until the page's document commits the WebView is
+                        // blank: its skeleton stands in. The progress line
+                        // stays until the document finishes and blocks
+                        // nothing.
+                        if attempt.phase != .loadingPage {
+                            RuntimeSkeleton()
+                        }
+                        RuntimeOpenProgress(attempt: attempt) {
+                            appModel.cancelRuntimeOpen(attemptID: attempt.id)
+                        }
                     }
 
                     if overlay == .loadFailure {
@@ -478,6 +485,7 @@ private struct BrowserScreen: View {
                                     )
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .foregroundStyle(AvibeStyle.onAccent)
                             }
 
                             Button("browser.other_instances") {
@@ -525,41 +533,224 @@ private struct BrowserScreen: View {
     }
 }
 
-private struct RuntimeOpenProgressOverlay: View {
+/// Avibe's colours in native chrome: the mint accent is the Web UI's
+/// `--primary` (#10b981 light, #5bffa0 dark), as the Live Activity uses;
+/// text on an accent fill is `--primary-foreground` (white light, #080812
+/// dark). White on #10b981 is the owner's accepted brand pair (2.54:1,
+/// ui/src/index.css); #080812 on #5bffa0 is 15:1.
+enum AvibeStyle {
+    static let accent = Color("AccentColor")
+    static let onAccent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x08 / 255, green: 0x08 / 255, blue: 0x12 / 255, alpha: 1)
+            : .white
+    })
+    /// The Workbench's top bar (instance name, account), below the status
+    /// bar: native chrome over a page stays below it.
+    static let topBarHeight: CGFloat = 44
+    /// The Workbench's bottom tab bar, above the Home indicator.
+    static let tabBarHeight: CGFloat = 56
+    /// What a page keeps at its bottom edge: the tab bar, or a chat's
+    /// composer, whichever is taller. Native banners sit above it.
+    static let bottomChromeHeight: CGFloat = 64
+    /// The open's progress line, at the top edge below the status bar.
+    static let progressLineHeight: CGFloat = 2.5
+}
+
+/// How an open that is under way shows itself at first: a thin line at the
+/// top edge, below the status bar. No text and no button, and it takes no
+/// touches; VoiceOver hears the stage once.
+struct RuntimeOpenProgressLine: View {
+    let attempt: RuntimeOpenAttempt
+
+    var body: some View {
+        let label = runtimeOpenPhaseText(
+            attempt.phase,
+            instanceName: attempt.runtime.instance.name
+        )
+        RuntimeProgressLine(label: Text(label))
+            .onAppear {
+                // Once per attempt, however many screens show its line.
+                if RuntimeOpenAnnouncements.lastAnnounced != attempt.id {
+                    RuntimeOpenAnnouncements.lastAnnounced = attempt.id
+                    AccessibilityNotification.Announcement(label).post()
+                }
+            }
+            .accessibilityIdentifier("runtime-open-progress")
+    }
+}
+
+@MainActor
+enum RuntimeOpenAnnouncements {
+    static var lastAnnounced: Int?
+}
+
+/// The thin progress line itself: Avibe green at the top edge, below the
+/// status bar. It takes no touches.
+struct RuntimeProgressLine: View {
+    let label: Text
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweeping = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            let segment = geometry.size.width * 0.3
+            ZStack(alignment: .leading) {
+                Rectangle().fill(AvibeStyle.accent.opacity(0.18))
+                if reduceMotion {
+                    Rectangle().fill(AvibeStyle.accent.opacity(0.6))
+                } else {
+                    Capsule()
+                        .fill(AvibeStyle.accent)
+                        .frame(width: segment)
+                        .offset(x: sweeping ? geometry.size.width : -segment)
+                }
+            }
+        }
+        .frame(height: AvibeStyle.progressLineHeight)
+        .clipped()
+        .frame(maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+                sweeping = true
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(label)
+    }
+}
+
+/// The open's progress while no page content shows: the line, and past the
+/// long-wait mark the banner with Cancel.
+struct RuntimeOpenProgress: View {
     let attempt: RuntimeOpenAttempt
     let cancel: () -> Void
 
     var body: some View {
-        VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.large)
-            Text(
-                runtimeOpenPhaseText(
-                    attempt.phase,
-                    instanceName: attempt.runtime.instance.name
+        ZStack {
+            RuntimeOpenProgressLine(attempt: attempt)
+            if attempt.offersCancel {
+                RuntimeOpenSlowBanner(
+                    showsLastContent: false,
+                    cancel: cancel
                 )
-            )
-                .font(.headline)
-                .multilineTextAlignment(.center)
-            if attempt.isTakingLong {
-                Text("runtime.open.long_wait")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                .transition(.opacity)
             }
-            Button("common.cancel", action: cancel)
-                .buttonStyle(.bordered)
         }
-        .padding(22)
-        .frame(maxWidth: 320)
+        .animation(.easeOut(duration: 0.2), value: attempt.offersCancel)
+        .onChange(of: attempt.offersCancel) { _, offers in
+            // Cancel is the way out now: say so.
+            if offers {
+                AccessibilityNotification.Announcement(
+                    String(localized: "runtime.open.slow")
+                ).post()
+            }
+        }
+    }
+}
+
+/// An open that has run past the long-wait mark says so in one row above
+/// the page's tab bar or composer. Over the last page's content it only
+/// says that content is shown; with nothing to show it offers Cancel, back
+/// to the instances.
+struct RuntimeOpenSlowBanner: View {
+    let showsLastContent: Bool
+    var cancel: (() -> Void)?
+    var dismiss: (() -> Void)?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        // No spinner: the progress line at the top already shows the open is
+        // under way, and the instance's name is on the page.
+        HStack(alignment: .center, spacing: 10) {
+            Text(
+                showsLastContent
+                    ? "runtime.open.slow.last_content"
+                    : "runtime.open.slow"
+            )
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let cancel {
+                Button("common.cancel", action: cancel)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(AvibeStyle.accent)
+            }
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(
             .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
-        .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("runtime-open-slow")
+    }
+}
+
+/// The page's shape before its first paint, with no data: a header, a few
+/// list rows, and the tab bar. Touches stop at it.
+struct RuntimeSkeleton: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Circle().frame(width: 32, height: 32)
+                RoundedRectangle(cornerRadius: 6).frame(width: 44, height: 14)
+                Spacer()
+                Circle().frame(width: 28, height: 28)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: AvibeStyle.topBarHeight)
+            .padding(.bottom, 16)
+            ForEach(0..<7, id: \.self) { index in
+                HStack(alignment: .top, spacing: 12) {
+                    Circle().frame(width: 40, height: 40)
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 5)
+                            .frame(width: index.isMultiple(of: 2) ? 150 : 110, height: 12)
+                        RoundedRectangle(cornerRadius: 5)
+                            .frame(maxWidth: index.isMultiple(of: 3) ? 220 : 260)
+                            .frame(height: 10)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            }
+            Spacer(minLength: 0)
+            HStack {
+                ForEach(0..<4, id: \.self) { _ in
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 6).frame(width: 28, height: 28)
+                    Spacer()
+                }
+            }
+            .padding(.vertical, 14)
+            .padding(.bottom, 20)
+        }
+        .foregroundStyle(Color(uiColor: .tertiarySystemFill))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.08))
-        .accessibilityIdentifier("runtime-open-progress")
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+        // It covers a page that may already be painting underneath (a
+        // sign-in redirect, a reload): taps stop here, as the old overlay's.
+        .contentShape(Rectangle())
+        .onTapGesture {}
+        .accessibilityHidden(true)
+        .accessibilityIdentifier("runtime-skeleton")
     }
 }
 

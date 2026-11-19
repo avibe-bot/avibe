@@ -62,9 +62,13 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     static func foregroundPresentationOptions(
         for content: UNNotificationContent
     ) -> UNNotificationPresentationOptions {
-        content.threadIdentifier == testNotificationThread
-            ? [.banner, .list, .sound]
-            : []
+        switch content.threadIdentifier {
+        case testNotificationThread: [.banner, .list, .sound]
+        // A failed voice start, posted while Avibe came forward to say why:
+        // keep it in Notification Center so its line can be sent back.
+        case VoiceCaptureFailureNotification.thread: [.list]
+        default: []
+        }
     }
 
     func application(
@@ -122,6 +126,13 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        // A voice-capture notice only opens Avibe; it is not an instance push.
+        guard response.notification.request.content.threadIdentifier
+            != VoiceCaptureFailureNotification.thread
+        else {
+            completionHandler()
+            return
+        }
         NotificationCenter.default.post(
             name: .avibePushNotificationTapped,
             object: nil,

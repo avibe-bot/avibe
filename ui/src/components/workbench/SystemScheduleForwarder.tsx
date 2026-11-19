@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, type FC } from 'react';
 
+import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { apiFetch, withApiDeadline } from '@/lib/apiFetch';
 import {
@@ -13,7 +14,6 @@ import {
 } from '@/lib/native';
 import { onPageReactivated } from '@/lib/pageActivity';
 
-const POLL_INTERVAL_MS = 5_000;
 const MAX_CLAIMS_PER_RECONCILE = 16;
 const CLAIM_TIMEOUT_MS = 15_000;
 const RECEIPT_TIMEOUT_MS = 15_000;
@@ -99,7 +99,8 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
       if (PERMANENT_RECEIPT_ERRORS.has(payload?.error)) return 'discard';
     }
   } catch {
-    // The lease and receipt remain in memory for the next poll/reactivation.
+    // The lease and receipt remain in memory for the next claim (page open,
+    // reactivation, an Agent turn end or a stream reconnect).
   } finally {
     window.clearTimeout(timeout);
   }
@@ -108,10 +109,14 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
 
 /** Forwards durable Runtime requests through independent trusted iOS bridge leases. */
 export const SystemScheduleForwarder: FC = () => {
+  const { connectWorkbenchEvents } = useApi();
   const { capabilities } = useInstanceAuthorization();
   const active = capabilities.can_chat && hasNativeCapability('systemSchedule');
   const enabledRef = useRef(false);
   const claimMutexRef = useRef(false);
+  // A reconcile asked for while another runs (for example when a Native call
+  // finishes): run once more after it, instead of dropping the request.
+  const rerunRequestedRef = useRef(false);
   const inFlightLeasesRef = useRef(new Map<
     string,
     { leaseToken: string; action: ScheduleClaim['action'] }
@@ -148,7 +153,7 @@ export const SystemScheduleForwarder: FC = () => {
           : await nativeSystemScheduleCancel(claim.request as NativeSystemScheduleCancel);
         if (receipt?.error && RETRY_NATIVE_RECEIPT_ERRORS.has(receipt.error.code)) {
           // Native cannot yet read or commit the item's management record.
-          // Keep the Runtime lease sticky so the next poll re-enters Native
+          // Keep the Runtime lease sticky so the next claim re-enters Native
           // recovery instead of treating an uncertain effect as terminal.
           reconcileImmediately = false;
           return;
@@ -163,7 +168,8 @@ export const SystemScheduleForwarder: FC = () => {
         }
       } catch {
         // Admission may stay unavailable while an account sheet covers Runtime.
-        // Retry the sticky lease on the next poll/reactivation, without spinning.
+        // Retry the sticky lease on the next claim (page open, reactivation,
+        // an Agent turn end or a stream reconnect), without spinning.
         reconcileImmediately = false;
       } finally {
         inFlightLeasesRef.current.delete(key);
@@ -189,14 +195,15 @@ export const SystemScheduleForwarder: FC = () => {
   }, []);
 
   const reconcile = useCallback(async () => {
-    if (
-      !enabledRef.current
-      || claimMutexRef.current
-      || document.visibilityState !== 'visible'
-    ) {
+    if (!enabledRef.current || document.visibilityState !== 'visible') {
+      return;
+    }
+    if (claimMutexRef.current) {
+      rerunRequestedRef.current = true;
       return;
     }
     claimMutexRef.current = true;
+    rerunRequestedRef.current = false;
     try {
       const identity = await readIdentity();
       if (!identity) return;
@@ -234,21 +241,38 @@ export const SystemScheduleForwarder: FC = () => {
       // Opening or returning to the App retries; this path owns no visible error UI.
     } finally {
       claimMutexRef.current = false;
+      if (rerunRequestedRef.current) {
+        rerunRequestedRef.current = false;
+        window.setTimeout(() => void reconcileRef.current(), 0);
+      }
     }
   }, [startClaim, startReceiptDelivery]);
 
   useEffect(() => {
     reconcileRef.current = reconcile;
     enabledRef.current = active;
+    // Claims run when the page opens, each time it comes back to the
+    // foreground, when an Agent turn ends (the turn that asked for an alarm
+    // has queued it by then) and when the event stream (re)connects. Never on
+    // a timer. Interim: #3967 replaces these triggers with a push of the
+    // request itself.
     void reconcile();
-    const interval = window.setInterval(() => void reconcile(), POLL_INTERVAL_MS);
     const stopReactivation = onPageReactivated(() => void reconcile());
     return () => {
       enabledRef.current = false;
-      window.clearInterval(interval);
       stopReactivation();
     };
   }, [active, reconcile]);
+
+  useEffect(() => {
+    if (!active) return undefined;
+    return connectWorkbenchEvents({
+      onTurnEnd: () => void reconcileRef.current(),
+      // The stream replays nothing it missed: catch up on a turn end lost
+      // while it was down (the documented use of `onConnected`).
+      onConnected: () => void reconcileRef.current(),
+    });
+  }, [active, connectWorkbenchEvents]);
 
   return null;
 };

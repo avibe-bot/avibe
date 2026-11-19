@@ -296,9 +296,28 @@ final class NativePushCoordinator {
         resumeAfterAccountActivation()
     }
 
+    /// The push state for one instance origin, with iOS's notification
+    /// permission for the App (`permission`: granted, notDetermined or
+    /// denied), which the page reads to turn notifications back on after a
+    /// sign-in without ever prompting.
     func status(
         vapidPublicKey: String?,
         instanceOrigin: String
+    ) async throws -> [String: Any] {
+        let authorizationStatus = await notificationAuthorizationStatus()
+        var status = try await statusBody(
+            vapidPublicKey: vapidPublicKey,
+            instanceOrigin: instanceOrigin,
+            authorizationStatus: authorizationStatus
+        )
+        status["permission"] = Self.permissionName(authorizationStatus)
+        return status
+    }
+
+    private func statusBody(
+        vapidPublicKey: String?,
+        instanceOrigin: String,
+        authorizationStatus: UNAuthorizationStatus
     ) async throws -> [String: Any] {
         guard let account = accountProvider() else {
             return [
@@ -306,7 +325,6 @@ final class NativePushCoordinator {
                 "revokeState": "absent",
             ]
         }
-        let authorizationStatus = await notificationAuthorizationStatus()
         let inactiveState = Self.authorizationAllowsAlerts(authorizationStatus)
             || authorizationStatus == .notDetermined
             ? "off"
@@ -399,7 +417,10 @@ final class NativePushCoordinator {
 
         let vapidKeyHash = try Self.requireVapidHash(vapidPublicKey)
         let installation = try await ensureBound(to: account)
-        try await reconcilePendingOperations(for: installation)
+        try await reconcilePendingOperations(
+            for: installation,
+            subscribing: (instanceOrigin, vapidKeyHash)
+        )
         try await requestPermission()
         let provider = try await ensureProvider(installation: installation)
         guard provider.generation > 0 else {
@@ -807,10 +828,19 @@ final class NativePushCoordinator {
         return installation
     }
 
+    /// With `subscribing`, a pending revoke that fails stays queued for retry
+    /// instead of failing the subscription, unless the new registration
+    /// depends on it: one for the same origin, or one with the same VAPID key
+    /// (the relay refuses a create while another registration with that key
+    /// is active). The account-wide revoke still fails it.
     private func reconcilePendingOperations(
-        for installation: PushInstallationState
+        for installation: PushInstallationState,
+        subscribing: (origin: String, vapidKeyHash: String)? = nil
     ) async throws {
-        try await reconcilePendingRevokes(for: installation)
+        try await reconcilePendingRevokes(
+            for: installation,
+            failingOnlyFor: subscribing
+        )
         try await reconcileRegistrationCreates(
             for: installation,
             throughBindGeneration: installation.bindGeneration
@@ -870,11 +900,14 @@ final class NativePushCoordinator {
         return true
     }
 
+    /// Tries every pending revoke: one the relay keeps refusing must not hold
+    /// back the others. The first failure is reported after, or, with
+    /// `subscription`, only the first failure a registration for that origin
+    /// and VAPID key depends on; the others stay pending for the next pass.
     private func reconcilePendingRevokes(
-        for installation: PushInstallationState
+        for installation: PushInstallationState,
+        failingOnlyFor subscription: (origin: String, vapidKeyHash: String)? = nil
     ) async throws {
-        // Every pending revoke gets its try: one the relay keeps refusing must
-        // not hold back the others. The first failure is reported after.
         var firstFailure: Error?
         let records = try keychain.listRecords()
         for record in records where
@@ -898,7 +931,11 @@ final class NativePushCoordinator {
                 }
                 throw Self.managementError(response)
             } catch {
-                if firstFailure == nil {
+                let blocks = subscription.map {
+                    record.instanceOrigin == $0.origin
+                        || record.vapidKeyHash == $0.vapidKeyHash
+                } ?? true
+                if firstFailure == nil, blocks {
                     firstFailure = error
                 }
             }
@@ -1444,6 +1481,15 @@ final class NativePushCoordinator {
     ) -> String? {
         response.body["error"] as? String
             ?? (response.body["error"] as? [String: Any])?["code"] as? String
+    }
+
+    private static func permissionName(
+        _ status: UNAuthorizationStatus
+    ) -> String {
+        if authorizationAllowsAlerts(status) {
+            return "granted"
+        }
+        return status == .notDetermined ? "notDetermined" : "denied"
     }
 
     private static func authorizationAllowsAlerts(

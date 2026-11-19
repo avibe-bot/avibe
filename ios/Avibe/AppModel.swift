@@ -1,3 +1,4 @@
+import os
 import SwiftUI
 import WebKit
 
@@ -10,10 +11,19 @@ protocol RuntimeOpenTimer: AnyObject {
 protocol RuntimeOpenTiming: AnyObject {
     var now: Duration { get }
 
+    /// The deadlines of the account transports the App opens. The App's are
+    /// `.standard`; a timing for the CI simulator may give the control-plane
+    /// page a web content launch's time there.
+    var accountTransportDeadlines: MobileAuthTransportDeadlines { get }
+
     func schedule(
         after delay: Duration,
         _ action: @escaping @MainActor () -> Void
     ) -> any RuntimeOpenTimer
+}
+
+extension RuntimeOpenTiming {
+    var accountTransportDeadlines: MobileAuthTransportDeadlines { .standard }
 }
 
 @MainActor
@@ -107,6 +117,13 @@ struct RuntimeOpenAttempt: Equatable {
     /// remains visible until the user cancels or a later document arrives.
     var canResumeAutomaticBudget: Bool
     var isTakingLong: Bool
+
+    /// Whether the open's loading layer offers Cancel: past the long-wait
+    /// mark, or once automatic timing has ended for good (a handoff) while
+    /// the layer stays, since no timeout will end it then.
+    var offersCancel: Bool {
+        isTakingLong || (automaticStartedAt == nil && !canResumeAutomaticBudget)
+    }
 
     /// Native-only v1 has no product-ready signal. `documentLoaded` therefore
     /// remains explicitly readiness-unknown.
@@ -250,7 +267,9 @@ final class AppModel: ObservableObject {
     /// The one Native-owned opening attempt. It outlives `didFinish` as
     /// `documentLoaded` so callbacks keep their generation fence, but its
     /// automatic budget ends there because legacy pages have no ready signal.
-    @Published private(set) var runtimeOpenAttempt: RuntimeOpenAttempt?
+    @Published private(set) var runtimeOpenAttempt: RuntimeOpenAttempt? {
+        didSet { signpostRuntimeOpen(from: oldValue, to: runtimeOpenAttempt) }
+    }
     /// Recovery shown over the instance list after an automatic timeout.
     @Published private(set) var runtimeOpenNotice: RuntimeOpenNotice?
     @Published private(set) var lastRuntimeOpenTermination: RuntimeOpenTermination?
@@ -331,6 +350,13 @@ final class AppModel: ObservableObject {
         defaults: defaults,
         controlPlane: controlPlane,
         websiteDataStore: websiteDataStore,
+        transportFactory: { [deadlines = runtimeOpenTiming.accountTransportDeadlines] url, store in
+            MobileAuthTransport(
+                controlPlaneURL: url,
+                websiteDataStore: store,
+                deadlines: deadlines
+            )
+        },
         onOpenRuntime: { [weak self] runtime in
             _ = self?.openRuntime(runtime)
         },
@@ -1176,11 +1202,52 @@ final class AppModel: ObservableObject {
         route = .onboarding(.instances)
     }
 
+    /// Cold start timing in Instruments (os_signpost, category ColdStart):
+    /// the bootstrap and its session restore, and each runtime open from its
+    /// attempt to its first document, with an event per stage.
+    private static let coldStartSignposter = OSSignposter(
+        subsystem: Bundle.main.bundleIdentifier ?? "bot.avibe.ios",
+        category: "ColdStart"
+    )
+    private var runtimeOpenSignpost: OSSignpostIntervalState?
+
+    private func signpostRuntimeOpen(
+        from old: RuntimeOpenAttempt?,
+        to new: RuntimeOpenAttempt?
+    ) {
+        let signposter = Self.coldStartSignposter
+        if old?.id != new?.id, let state = runtimeOpenSignpost {
+            signposter.endInterval("runtime open", state, "ended")
+            runtimeOpenSignpost = nil
+        }
+        guard let new else {
+            return
+        }
+        if old?.id != new.id {
+            runtimeOpenSignpost = signposter.beginInterval("runtime open")
+        }
+        if old?.id != new.id || old?.phase != new.phase {
+            signposter.emitEvent("runtime open stage", "\(String(describing: new.phase), privacy: .public)")
+        }
+        if new.phase == .documentLoaded || new.phase == .failed,
+           let state = runtimeOpenSignpost {
+            signposter.endInterval("runtime open", state, "\(String(describing: new.phase), privacy: .public)")
+            runtimeOpenSignpost = nil
+        }
+    }
+
     private func bootstrap() async {
+        let launch = Self.coldStartSignposter.beginInterval("bootstrap")
+        defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
         await websiteDataStore.sweepOrphans()
         sessionCoordinator.activateAccountSurface()
         do {
-            let state = try await sessionCoordinator.bootstrap()
+            let restore = Self.coldStartSignposter.beginInterval("session restore")
+            let state: MobileSessionState
+            do {
+                defer { Self.coldStartSignposter.endInterval("session restore", restore) }
+                state = try await sessionCoordinator.bootstrap()
+            }
             if let runtime = sessionCoordinator.restorableRuntime(from: state) {
                 sessionCoordinator.deactivateAccountSurface()
                 openRuntime(runtime)

@@ -357,6 +357,19 @@ the main Bot acts on the user's computer.
   one starts a new take. A listening or sending Live Activity also goes stale
   on its own 90 seconds past the five-minute cap, and a stale one is drawn as
   interrupted, so no timer runs on for a take nobody holds.
+- The microphone permission is checked before anything else; a missing one
+  brings Avibe forward. If the audio session or the recorder then refuses to
+  start, or the take's file or the Live Activity cannot be made, the user is
+  told 录音没能开始 with the step where it stopped (准备录音文件, 设置音频会话,
+  激活音频会话, 启动录音器, 启动实时活动) and the error as given (the system's
+  number, or an ActivityKit error's type and case), never the permission
+  line. The line is posted once as a notification that stays in Notification
+  Center (thread `voice-capture`; tapping it only opens Avibe), which needs
+  notification permission. It also shows on the island, except for
+  启动实时活动, where no island exists and the alert Avibe shows on coming
+  forward carries it. A run within a second of a start
+  that failed and said so does nothing, so a press the system runs twice
+  shows one notice.
 - If the system will not start the Live Activity, nothing is recorded. When
   "Talk to Main Bot" has to bring Avibe forward, an alert says why.
 - An account sign-out or change (`AppModel.prepareForAccountTransition`)

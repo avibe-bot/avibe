@@ -74,7 +74,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
           cache: npm
           cache-dependency-path: |
             ui/package-lock.json
@@ -236,7 +236,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
       - name: Validate UI types and static contracts
@@ -258,7 +258,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
       - name: Run Vitest
@@ -343,7 +343,7 @@ jobs:
           sparse-checkout-cone-mode: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies
@@ -410,7 +410,7 @@ jobs:
           path: .show-runtime-test
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
           cache: npm
           cache-dependency-path: .show-runtime-test/package-lock.json
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
@@ -447,7 +447,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
@@ -1372,7 +1372,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
 
       - name: Verify Windows Computer Use process ownership and kernel pipes
         timeout-minutes: 5
