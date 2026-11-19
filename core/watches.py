@@ -2817,7 +2817,7 @@ class ManagedWatchService:
                         exit_code=124,
                         error=None,
                         disable=False,
-                        **self._retrying_notice(watch, 124, cycle_started_at),
+                        retrying_started_at=cycle_started_at,
                     ):
                         return
                     await self._sleep_before_retry(
@@ -2847,7 +2847,7 @@ class ManagedWatchService:
                     exit_code=result.exit_code,
                     error=None,
                     disable=False,
-                    **self._retrying_notice(watch, result.exit_code, cycle_started_at),
+                    retrying_started_at=cycle_started_at,
                 ):
                     return
                 await self._sleep_before_retry(
@@ -2950,10 +2950,20 @@ class ManagedWatchService:
         commit it already makes: no timer, and no extra run of the check. Both facts
         are durable and belong to the activation (``watch_lifetime_started_at``) that
         ran the check: a store retry or a supervisor restart neither loses nor repeats
-        them, and a stale cycle cannot lend them to a newer activation. The notice has
-        a stable id per activation, so a split store that lost it re-sends that one.
+        them, and a stale cycle cannot lend them to a newer activation. Runs on the
+        store worker inside ``_commit_cycle_result``. On the shared SQLite ledger the
+        marker and the notice commit together; split (file-backed) stores keep the
+        same ordering as every other Watch hook there (HFR-267). The notice id is
+        stable per activation, so a replayed commit cannot queue it twice.
         """
-        metadata = watch.metadata or {}
+        stored = self.store.get_watch(watch.id)
+        if stored is None or not stored.enabled or (stored.metadata or {}).get(
+            LIFETIME_STARTED_AT_METADATA_KEY
+        ) != (watch.metadata or {}).get(LIFETIME_STARTED_AT_METADATA_KEY):
+            # Paused, or resumed into a new activation, while this check ran: its run of
+            # retries says nothing about the Watch now (#4015 review).
+            return {}
+        metadata = stored.metadata or {}
         activation = str(metadata.get(LIFETIME_STARTED_AT_METADATA_KEY) or "")
         recorded = metadata.get(RETRYING_SINCE_METADATA_KEY)
         since = (
@@ -2971,7 +2981,7 @@ class ManagedWatchService:
         notice_id = "wrn" + hashlib.sha256(f"{watch.id}\0{activation}".encode()).hexdigest()[:9]
         if elapsed < WATCH_RETRY_NOTICE_SECONDS:
             return extras
-        if metadata.get(RETRY_NOTICE_ACTIVATION_METADATA_KEY) == activation and self.request_store.get_run(notice_id):
+        if metadata.get(RETRY_NOTICE_ACTIVATION_METADATA_KEY) == activation:
             return extras
         extras["metadata_updates"][RETRY_NOTICE_ACTIVATION_METADATA_KEY] = activation
         extras.update(
@@ -3100,6 +3110,7 @@ class ManagedWatchService:
         body: Optional[str] = None,
         follow_up_fence: bool = True,
         request_id: Optional[str] = None,
+        retrying_started_at: Optional[str] = None,
     ) -> bool:
         """Record a cycle's outcome and queue the hook it authorises, as ONE decision.
 
@@ -3130,6 +3141,14 @@ class ManagedWatchService:
         file-backed watch store has no compare-and-set for a teardown to outrun.
         """
 
+        if retrying_started_at is not None:
+            # Decided here, on the store worker that commits it, from the stored Watch.
+            extras = self._retrying_notice(watch, exit_code, retrying_started_at)
+            metadata_updates = {**(metadata_updates or {}), **extras.pop("metadata_updates", {})}
+            hook_outcome = extras.get("hook_outcome", hook_outcome)
+            prompt = extras.get("prompt", prompt)
+            follow_up_fence = extras.get("follow_up_fence", follow_up_fence)
+            request_id = extras.get("request_id", request_id)
         request = self._hook_request(
             watch,
             event_detected=event_detected,

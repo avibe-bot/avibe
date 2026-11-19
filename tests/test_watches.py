@@ -5844,6 +5844,13 @@ def test_a_stale_run_of_retries_from_another_activation_is_ignored(tmp_path: Pat
         **watch.metadata, LIFETIME_STARTED_AT_METADATA_KEY: "new-activation",
         "watch_retrying_since": {"activation": "old-activation", "since": "2026-01-01T00:00:00+00:00"},
     }
+    stored = store.get_watch(watch.id)
+    stored.metadata = watch.metadata
+    monkeypatch.setattr(store, "get_watch", lambda _id: stored)
     extras = service._retrying_notice(watch, 75, datetime.now(timezone.utc).isoformat())
     assert "prompt" not in extras
     assert extras["metadata_updates"]["watch_retrying_since"]["activation"] == "new-activation"
+    # A Watch paused while its check ran gets no notice from that check.
+    watch.metadata["watch_retrying_since"] = {"activation": "new-activation", "since": "2026-01-01T00:00:00+00:00"}
+    stored.enabled = False
+    assert service._retrying_notice(watch, 75, datetime.now(timezone.utc).isoformat()) == {}
