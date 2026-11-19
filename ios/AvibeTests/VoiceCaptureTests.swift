@@ -419,6 +419,25 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.instance.sent, ["hello"])
     }
 
+    /// An account change while a stop waits for the answer: nothing is asked
+    /// again on the closed client.
+    func testAnAccountChangeWhileSendingWaitsNeverAsksAgain() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        world.instance.holdStatus = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        while !world.instance.isHolding { await Task.yield() }
+        world.audio?.duration = 3
+        let stop = Task { await controller.toggle() }
+        while controller.phase != .sending { await Task.yield() }
+        _ = controller.cancelForAccountTransition()
+        world.instance.release()
+        _ = await stop.value
+        XCTAssertEqual(world.instance.statusCalls, 1, "not asked again after the change")
+        XCTAssertEqual(world.instance.transcribed, 0)
+    }
+
     /// Unreachable when recording began, reachable at the stop: it sends then.
     func testAnInstanceUnreachableAtTheStartButReachableAtTheStopSends() async {
         let world = World()
@@ -1233,7 +1252,10 @@ private final class FakeInstance: VoiceCaptureInstance {
     var log: (String) -> Void = { _ in }
     private var held: CheckedContinuation<Void, Never>?
 
+    var statusCalls = 0
+
     func status() async throws -> VoiceCaptureInstanceClient.Status {
+        statusCalls += 1
         log("status")
         if holdStatus {
             await withCheckedContinuation { held = $0 }

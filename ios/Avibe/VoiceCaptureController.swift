@@ -899,6 +899,8 @@ final class VoiceCaptureController {
         // Nothing leaves the phone before the instance said yes. An answer
         // that was "unreachable" is asked again now, not reused.
         var answer = await take.consent.value
+        // An account change meanwhile closed this take's client: ask nothing.
+        guard generation == deliverGeneration else { return }
         if answer?.transient == true {
             answer = await Self.refusal(from: take.instance)
             let fresh = answer
