@@ -40,11 +40,12 @@ final class HealthSyncCoordinator: ObservableObject {
     private var foreground = false
     private var restoring = false
 
-    /// A connection, restoration, sync, cleanup or convergence under way
-    /// (not the idle poll or retry timers), for voice capture's check before
-    /// it ends a background process.
+    /// A connection, restoration, sync or convergence under way (not the
+    /// idle poll or retry timers, nor `cleanupTask`, which stays set once a
+    /// cleanup has run), for voice capture's check before it ends a
+    /// background process.
     var hasWorkInFlight: Bool {
-        connecting != nil || restoring || syncTask != nil || cleanupTask != nil || convergeTask != nil
+        connecting != nil || restoring || syncTask != nil || convergeTask != nil
     }
     private var uploadingIDs: Set<String> = []
     private var backgroundDelivery = false

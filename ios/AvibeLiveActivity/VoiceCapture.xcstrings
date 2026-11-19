@@ -129,6 +129,38 @@
         }
       }
     },
+    "voiceCapture.diagnostics.endOff" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostics: end after a background capture is off."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "诊断：后台录音后结束进程，已关闭。"
+          }
+        }
+      }
+    },
+    "voiceCapture.diagnostics.endOn" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diagnostics: end after a background capture is on."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "诊断：后台录音后结束进程，已开启。"
+          }
+        }
+      }
+    },
     "voiceCapture.phase.failed" : {
       "localizations" : {
         "en" : {

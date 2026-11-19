@@ -132,6 +132,9 @@ struct VoiceCaptureEnvironment {
     var otherWorkInFlight: () -> String?
     /// Waits before ending the process (about 1 s).
     var waitBeforeEnding: () async -> Void
+    /// Keeps the process running while it waits to end (a background task
+    /// assertion); returns what releases it.
+    var holdWhileEnding: () -> () -> Void
     var endProcess: () -> Void
     /// Keeps the decision for the next press's `capture_attempt`.
     var noteEndDecision: (String) -> Void
@@ -189,6 +192,18 @@ struct VoiceCaptureEnvironment {
             return nil
         },
         waitBeforeEnding: { try? await Task.sleep(for: .seconds(1)) },
+        holdWhileEnding: {
+            var id = UIBackgroundTaskIdentifier.invalid
+            id = UIApplication.shared.beginBackgroundTask(withName: "voice-capture-end") {
+                UIApplication.shared.endBackgroundTask(id)
+                id = .invalid
+            }
+            return {
+                guard id != .invalid else { return }
+                UIApplication.shared.endBackgroundTask(id)
+                id = .invalid
+            }
+        },
         endProcess: { exit(0) },
         noteEndDecision: { VoiceCaptureEndSwitch.noteDecision($0) },
         now: Date.init,
@@ -768,6 +783,9 @@ final class VoiceCaptureController {
         return state
     }
 
+    /// The longest the wait before ending may take before it is not trusted.
+    static let endingWindow: TimeInterval = 2.5
+
     /// The pending end of this process after a background capture (tests
     /// await it).
     private(set) var endingTask: Task<Void, Never>?
@@ -787,16 +805,26 @@ final class VoiceCaptureController {
             environment.noteEndDecision("skip:\(blocker)")
             return
         }
+        // Held as a background task so the wait runs now, not at the next
+        // wake (which may be the next press); a wait that ran late is not
+        // trusted.
+        let release = environment.holdWhileEnding()
+        let scheduled = environment.now()
         endingTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self else { return release() }
             await self.environment.waitBeforeEnding()
+            if self.environment.now().timeIntervalSince(scheduled) > Self.endingWindow {
+                self.environment.noteEndDecision("skip:late")
+                return release()
+            }
             if let blocker = self.endBlocker() {
                 self.environment.noteEndDecision("skip:\(blocker)")
-                return
+                return release()
             }
             self.environment.noteEndDecision("ended")
             self.record("ending the process after a background capture")
             self.environment.endProcess()
+            release()
         }
     }
 
@@ -863,15 +891,20 @@ final class VoiceCaptureController {
         let deliverGeneration = generation
         state = .sending(take)
         await take.activity.update(content(for: take, phase: .sending))
-        // Nothing leaves the phone before the instance said yes.
-        if let refusal = await take.consent.value {
+        // Nothing leaves the phone before the instance said yes. An answer
+        // that was "unreachable" is asked again now, not reused.
+        var answer = await take.consent.value
+        if answer?.transient == true {
+            answer = await Self.refusal(from: take.instance)
+            let fresh = answer
+            take.consent = Task { fresh }
+        }
+        if let refusal = answer {
             guard generation == deliverGeneration else { return }
             if refusal.transient {
-                // Unreachable is not a no: keep the take on the phone, and
-                // ask again when the user retries.
+                // Unreachable is not a no: keep the take on the phone; Retry
+                // asks again.
                 record("deliver: instance unreachable; kept for Retry, unsent")
-                let instance = take.instance
-                take.consent = Task { await Self.refusal(from: instance) }
                 await keepForRetry(take, reason: .offline)
                 return
             }
@@ -1188,22 +1221,34 @@ enum VoiceCaptureEndSwitch {
 
     /// Handles the switch's URL; returns whether it was one.
     @discardableResult
-    static func handle(_ url: URL) -> Bool {
-        guard url.scheme == "avibe-diagnostics", url.host == "voice",
+    static func handle(_ url: URL, allowed: Bool = isInternalBuild) -> Bool {
+        guard allowed, url.scheme == "avibe-diagnostics", url.host == "voice",
               url.path == "/end-after-background",
               let on = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "on" })?.value
         else { return false }
         let enabled = on == "1"
         UserDefaults.standard.set(enabled, forKey: key)
-        VoiceCaptureBanner.show(enabled
-            ? "后台录音后结束进程：已开启 / End after background capture: on"
-            : "后台录音后结束进程：已关闭 / End after background capture: off")
+        VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.text(
+            enabled ? "voiceCapture.diagnostics.endOn" : "voiceCapture.diagnostics.endOff"
+        )))
         return true
+    }
+
+    /// Only TestFlight and development builds take the switch's URL; an App
+    /// Store build ignores it.
+    static var isInternalBuild: Bool {
+        #if DEBUG
+        return true
+        #else
+        return Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+        #endif
     }
 
     static func noteDecision(_ decision: String) {
         UserDefaults.standard.set(decision, forKey: decisionKey)
+        // The process may end right after: write it through now.
+        UserDefaults.standard.synchronize()
     }
 
     /// The last decision, once (the next press reports it).

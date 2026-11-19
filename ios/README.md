@@ -340,8 +340,9 @@ the main Bot acts on the user's computer.
   the voice consent question: the take is discarded and the Live Activity
   asks to update Avibe. `null` or `declined` discards the take; in front the
   App opens the main Bot's conversation, where the Web UI asks, and in the
-  background the island says so. An unreachable instance is not a no: the
-  take is kept on the phone, unsent, for Retry, which asks again. No
+  background the island says so. An unreachable instance is not a no: it is
+  asked again when the take is sent, and if still unreachable the take is
+  kept on the phone, unsent, for Retry, which asks again. No
   sign-in, no microphone permission, or Live Activities turned off bring the
   App to the main Bot's conversation before anything records. A later
   `403 voice_consent_required` stops the take and keeps nothing. The take's
@@ -413,14 +414,16 @@ the main Bot acts on the user's computer.
   coming forward give up.
 - Variant (a), behind a hidden switch that is off by default: once a take
   recorded in the background has been sent (its message accepted, its audio
-  deleted), the process ends about a second later, so the next press is a
-  process launched for it (legato and oliv do the same; Apple's QA1561
+  deleted), the process ends about a second later (held as a background task
+  so the wait runs then; a wait that ran late is skipped), so the next press
+  is a process launched for it (legato and oliv do the same; Apple's QA1561
   discourages ending an App, so it stays off unless the owner turns it on).
   It never ends a process that was ever shown, while Avibe is in front, with
   a take under way, or with health sync or push work in flight; the decision
   goes into the next press's `capture_attempt` (`prevEnd=`). The switch is
-  not in Settings and not discoverable: opening
-  `avibe-diagnostics://voice/end-after-background?on=1` (or `on=0`) sets it.
+  not in Settings and not discoverable: in a TestFlight or development build,
+  opening `avibe-diagnostics://voice/end-after-background?on=1` (or `on=0`)
+  sets it; an App Store build ignores the URL.
 - `VoiceCaptureInstanceClient` makes these requests as the signed-in user
   without the runtime WebView: a hidden `WKWebView` on the account's own
   named store (the selection and store identifier the account coordinator
