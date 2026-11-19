@@ -146,8 +146,9 @@ def test_manager_stop_dispatches_surviving_reports_once(managers, cancel_one):
     assert hints[-1][0] == STOP_LINE
 
 
-def test_late_acceptance_of_report_after_stop_queues_one_copy(managers):
-    manager, other, engine, _, _ = managers
+def test_late_acceptance_of_report_after_stop_starts_it_once(managers):
+    """The Turn and its last queue drain are over; the carried report still starts (#4010 review)."""
+    manager, other, engine, _, starts = managers
 
     async def exercise():
         turn_id, _ = await _activate(manager)
@@ -166,10 +167,13 @@ def test_late_acceptance_of_report_after_stop_queues_one_copy(managers):
         other._terminalize_durable_turn(turn_id, "canceled", settled_by="stopped", evidence_kind="terminal_result", resume_successors=False)
         release.set()
         assert (await receipt).state == "accepted"
+        for _ in range(50):
+            if starts[-1][1] == "late report":
+                break
+            await asyncio.sleep(0.01)
 
     asyncio.run(exercise())
-    with engine.connect() as conn:
-        assert _texts(conn) == ["late report"]
+    assert [text for _, text in starts].count("late report") == 1
 
 
 def _complete(conn, turn_id):
@@ -783,3 +787,28 @@ def test_a_task_from_another_session_tells_its_creator(managers):
             select(agent_runs.c.metadata_json).where(agent_runs.c.source_actor == "run-task:turn-carry-exhausted")
         ).scalar_one()
     assert json.loads(metadata)["resource_user_context"] == {"user_key": "remote:creator"}
+
+
+
+def test_a_carried_message_gets_its_own_native_identity(managers):
+    """Found live on Incus: a carried ``agent_run:<id>`` input collided with its first
+    Message's native identity, so the successor could not accept it (#4010 review)."""
+    manager, _, engine, _, _ = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    report = asyncio.run(manager.deliver(DeliveryRequest(
+        session_id="ses_fsm", priority="p1", content="report", source="harness", author="harness",
+        message_type="harness", native_message_id="agent_run:run_x",
+    ), context=_context()))
+    with engine.begin() as conn:
+        _end(conn, turn_id, stopped=True)
+        successor = _start_next(conn)
+        accepted = store.get_turn(conn, successor)["initial_delivery_id"]
+        rows = conn.execute(
+            select(messages.c.id, messages.c.native_message_id, messages.c.metadata_json)
+            .where(messages.c.content_text == "report").order_by(messages.c.created_at)
+        ).all()
+    assert [row.id for row in rows] == [report.delivery_id, accepted]
+    assert rows[0].native_message_id == "agent_run:run_x"
+    assert rows[1].native_message_id == f"agent_run:run_x~carry:{turn_id}"
+    assert json.loads(rows[1].metadata_json)["carried_native_message_id"] == "agent_run:run_x"

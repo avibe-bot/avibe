@@ -2115,6 +2115,8 @@ TURN_CARRY_LINES = {
 _STOP_SETTLEMENTS = frozenset({"stopped", "agent_run_canceled"})
 #: ``Connection.info`` key: notices a late acceptance owes, by Turn, for the Turn owner.
 LATE_CARRY_NOTICES_KEY = "avibe.late_turn_carry_notices"
+#: ``Connection.info`` key: a late acceptance queued a carried input.
+LATE_CARRY_CREATED_KEY = "avibe.late_turn_carry_created"
 #: To a sender whose input waits behind a failing model (approved copy, model input).
 TURN_CARRY_PARKED_NOTICE = (
     "Not handled yet: the target Session's model is failing. Your input stays queued there "
@@ -2320,6 +2322,12 @@ def carry_accepted_inputs(
             snapshot = _json_object(envelope[0])
             metadata = _json_object(snapshot.get("metadata_json"))
             metadata[TURN_CARRY_METADATA_KEY] = reason
+            # Its Message is new: a native identity (``agent_run:<id>``, an IM message
+            # id) is unique per Message, so the carry gets its own and keeps the first.
+            native = str(snapshot.get("native_message_id") or "").strip()
+            if native:
+                metadata.setdefault("carried_native_message_id", native)
+                snapshot["native_message_id"] = f"{native}~carry:{turn_id}"
             snapshot["metadata_json"] = _canonical_json(metadata)
             carried_id = str(row["id"]) + "~carry"
             # The original's time keeps its place in the queue, ahead of later inputs.
@@ -2341,6 +2349,8 @@ def carry_accepted_inputs(
                 },
             )
             _rebind_runs(conn, run_ids, carried_id, source_turn_id=turn_id)
+            if late:
+                conn.info[LATE_CARRY_CREATED_KEY] = True
             if provider_failed and depth == 4:
                 # Parked from now on; its senders are told once, here.
                 parked_runs.update({

@@ -3574,6 +3574,7 @@ class SessionTurnManager:
         }
         should_drain = False
         materialized = False
+        carried_late = False
         saved: dict[str, Any] | None = None
         accepted_run_ids: list[str] = []
         terminal_target: dict[str, Any] | None = None
@@ -3649,7 +3650,7 @@ class SessionTurnManager:
                             target_turn_id or None,
                             "receipt_cas_lost",
                         )
-                    self._flush_late_carry_notices(conn, session_id)
+                    carried_late = self._flush_late_carry_notices(conn, session_id)
                     saved = accepted_rows[0]
                     materialized = True
                     target_turn = delivery_store.get_turn(conn, target_turn_id)
@@ -3765,6 +3766,12 @@ class SessionTurnManager:
                     terminal_target,
                 )
             self._publish_materialized_delivery(delivery_id)
+            if carried_late:
+                # The Turn and its queue drain are over: start the carried input now
+                # rather than leave it for the next input (#4010 review).
+                asyncio.create_task(
+                    self._resume_post_terminal(session_id), name=f"late-carry-resume:{session_id}",
+                )
             return DeliveryResult(
                 delivery_id,
                 str((saved or {}).get("message_id") or delivery_id),
@@ -5201,11 +5208,16 @@ class SessionTurnManager:
             logger.exception("durable terminal completion deferred for Turn=%s", pending.turn_id)
             return {"defer_queue_resume": True}
 
-    def _flush_late_carry_notices(self, conn: Connection, session_id: str) -> None:
-        """What a receipt accepted after its Turn ended owes, in the same transaction."""
+    def _flush_late_carry_notices(self, conn: Connection, session_id: str) -> bool:
+        """What a receipt accepted after its Turn ended owes, in the same transaction.
+
+        Returns whether it carried anything, which then needs a queue resume.
+        """
+        carried = bool(conn.info.pop(delivery_store.LATE_CARRY_CREATED_KEY, False))
         owed = conn.info.pop(delivery_store.LATE_CARRY_NOTICES_KEY, None) or {}
         for turn_id, notices in owed.items():
             self._record_turn_carry_notices(conn, session_id, turn_id, notices)
+        return carried
 
     def _record_turn_carry_notices(
         self, conn: Connection, session_id: str, turn_id: str, settled: dict[str, Any],
