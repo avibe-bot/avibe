@@ -19,7 +19,6 @@ from storage.models import (
     agent_sessions,
     message_deliveries,
     messages,
-    run_definitions,
     session_delegations,
     session_turns,
 )
@@ -120,7 +119,14 @@ def _has_rows(conn: Connection, query) -> bool:
 
 
 def pending_wake_queries(session_id: str):
-    """Session-keyed probes; retired/paused definitions are not future wake-ups."""
+    """Session-keyed probes for work the recipient is still doing or about to do.
+
+    Only a live or waiting Turn, queued input, a live Run for it, or a report it
+    is sending count. A Watch or Task it armed, or a delegation of its own still
+    open, does not: each can wait for hours, and the dispatcher would hear nothing
+    meanwhile (11-15 stall retro). The receipt says the dispatched Turn ended, which
+    is true however the recipient arranged to continue.
+    """
     return (
         select(session_turns.c.id).where(
             session_turns.c.session_id == session_id, text("state in ('starting', 'active')"),
@@ -139,14 +145,6 @@ def pending_wake_queries(session_id: str):
         select(agent_runs.c.id).where(
             agent_runs.c.source_kind == "agent", agent_runs.c.source_actor == session_id,
             agent_runs.c.status.in_(_LIVE_RUN_STATUSES),
-        ),
-        select(run_definitions.c.id).where(
-            run_definitions.c.session_id == session_id,
-            run_definitions.c.definition_type.in_(("watch", "scheduled")),
-            run_definitions.c.enabled == 1, run_definitions.c.deleted_at.is_(None), run_definitions.c.retired_at.is_(None),
-        ),
-        select(session_delegations.c.run_id).where(
-            session_delegations.c.sender_session_id == session_id, session_delegations.c.state == "open",
         ),
     )
 
@@ -240,6 +238,22 @@ def acknowledge_sync_return(engine, run_id: str) -> None:
                 session_delegations.c.recipient_session_id == run["session_id"],
                 session_delegations.c.state.in_(("open", "notified")),
             ).values(state="answered", updated_at=datetime.now(timezone.utc).isoformat()))
+
+
+def dispatched_turn_reply(conn: Connection, run_id: str) -> str:
+    """The last reply of the Turn that took the dispatched Run's input, or "".
+
+    Not the Session's latest reply: that can be hours old and about something
+    else (11-15 retro, 10:08 receipt quoting 04:33).
+    """
+    from storage.message_deliveries import turn_last_reply
+
+    turn_id = conn.execute(
+        select(message_deliveries.c.turn_id)
+        .select_from(agent_runs.join(message_deliveries, message_deliveries.c.id == agent_runs.c.delivery_id))
+        .where(agent_runs.c.id == run_id)
+    ).scalar_one_or_none()
+    return str(turn_last_reply(conn, turn_id) or "") if turn_id else ""
 
 
 def latest_reply_query(session_id: str, message_type: str):
