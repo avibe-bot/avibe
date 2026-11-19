@@ -7828,5 +7828,51 @@
       "title": "Avibe Desktop on this computer",
       "body": "You are using Avibe on another computer. This updates the desktop app on this one."
     }
+  },
+  "health": {
+    "title": {
+      "connect": "Connect health data",
+      "refresh": "Update health data"
+    },
+    "authorize": "Authorize on iPhone",
+    "opening": "Opening authorization…",
+    "loading": "Loading request…",
+    "loadError": "The request status is unavailable. Please try opening this page again later.",
+    "readOnly": "Read-only. Nothing is written to the Health app.",
+    "status": {
+      "waiting": "Waiting for iPhone",
+      "claimed": "In progress",
+      "succeeded": "Sync complete",
+      "connected": "Connected",
+      "declined": "Declined",
+      "failed": "Didn’t finish",
+      "expired": "Request expired",
+      "canceled": "Canceled",
+      "needsUpdate": "Update Avibe"
+    },
+    "note": {
+      "authorize": "Read-only. Nothing is written to the Health app.",
+      "waiting": "Open this request in Avibe on your iPhone to continue.",
+      "claimed": "In progress. Return to the conversation for the result.",
+      "succeeded": "This sync is complete.",
+      "connected": "Your Health connection is set up. Return to the conversation for the sync result.",
+      "declined": "You declined this connection request. You can request it again in the conversation.",
+      "failed": "This request did not finish. You can ask again in the conversation later.",
+      "expired": "This request has expired. Ask for a new one in the conversation.",
+      "canceled": "This request was canceled.",
+      "needsUpdate": "This iPhone’s Avibe does not support health data. Update Avibe first."
+    },
+    "landing": {
+      "authorize": "Read this iPhone’s steps, activity, workouts and sleep, and sync them to this instance. Next, choose access in Avibe and iOS.",
+      "openConversations": "Open conversations"
+    },
+    "metric": {
+      "steps": "Steps",
+      "activity": "Activity",
+      "workouts": "Workouts",
+      "sleep": "Sleep"
+    },
+    "metricSeparator": ", ",
+    "waitingRefresh": "Waiting for your iPhone to process this request."
   }
 }

@@ -103,6 +103,16 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --chat-message-max-w: min(92%, 860px);
 }
 
+/* Approved Health card and notification landing geometry. */
+:root {
+  --health-card-copy-basis: 180px;
+  --health-landing-max-w: 420px;
+  --health-landing-min-h: 76dvh;
+}
+@theme {
+  --text-health-metric: 13px;
+}
+
 /* Motion (docs/plans/web-ui-motion.md §4; ui/design: motion/tokens/sheet). A
    moment picks one duration and one curve from here; nothing animates on a
    literal. Durations: `instant` answers a press, `fast` moves small things

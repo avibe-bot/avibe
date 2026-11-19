@@ -79,6 +79,7 @@ export const APPLICATION_ROUTE_PATHS = [
 export const APPLICATION_DYNAMIC_ROUTE_PATHS = [
   '/apps/show/:sessionId',
   '/chat/:sessionId',
+  '/mobile/health/:requestId',
 ] as const;
 
 const APPLICATION_ROUTES = new Set<string>(APPLICATION_ROUTE_PATHS);

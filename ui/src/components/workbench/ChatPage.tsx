@@ -1,3 +1,5 @@
+import { HealthRequestCard } from '../health/HealthRequest';
+import { readHealthRequest } from '../../lib/healthRequests';
 import { desktopDragRegion } from '../../lib/desktopShell';
 import { createPortal } from 'react-dom';
 import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
@@ -6571,6 +6573,16 @@ export const MessageRow = memo(function MessageRow({
         rowClass={rowClass}
       />
     );
+  }
+
+  const healthRequest = isNotify && message.author === 'harness' ? readHealthRequest(message.metadata?.mobile_request) : null;
+  if (healthRequest) {
+    return <div data-message-id={message.id} className={rowClass('justify-start')}>
+      <div className="group/message flex w-full flex-col gap-1">
+        <HealthRequestCard key={healthRequest.id} request={healthRequest} readOnly={readOnly} />
+        {time}
+      </div>
+    </div>;
   }
 
   // ----- Notify: compact gold pill, left-aligned (a status marker) -----

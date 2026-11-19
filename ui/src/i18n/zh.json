@@ -7828,5 +7828,51 @@
       "title": "这台电脑上的 Avibe 桌面应用",
       "body": "你正在使用另一台电脑上的 Avibe，这里更新的是这台电脑上的桌面应用。"
     }
+  },
+  "health": {
+    "title": {
+      "connect": "连接健康数据",
+      "refresh": "更新健康数据"
+    },
+    "authorize": "在 iPhone 上授权",
+    "opening": "正在打开授权…",
+    "loading": "正在读取请求…",
+    "loadError": "暂时无法获取请求状态。请稍后重新打开此页面。",
+    "readOnly": "只读取，不写入健康 App。",
+    "status": {
+      "waiting": "等待 iPhone",
+      "claimed": "处理中",
+      "succeeded": "同步已完成",
+      "connected": "已连接",
+      "declined": "已拒绝",
+      "failed": "未完成",
+      "expired": "请求已过期",
+      "canceled": "已取消",
+      "needsUpdate": "需要更新 Avibe"
+    },
+    "note": {
+      "authorize": "只读取，不写入健康 App。",
+      "waiting": "请在 iPhone 上的 Avibe 中打开此请求并继续。",
+      "claimed": "正在处理，请回到会话查看结果。",
+      "succeeded": "本次同步已完成。",
+      "connected": "健康连接已建立。请回到会话查看同步结果。",
+      "declined": "你拒绝了这次连接请求。可以在会话里重新发起。",
+      "failed": "这次请求未完成。你可以稍后在会话里重新查询。",
+      "expired": "这个请求已过期。请在会话里重新发起。",
+      "canceled": "这个请求已取消。",
+      "needsUpdate": "这台 iPhone 上的 Avibe 版本不支持健康数据，请先更新 Avibe。"
+    },
+    "landing": {
+      "authorize": "读取这台 iPhone 的步数、活动、锻炼和睡眠，并同步到当前实例。接下来在 Avibe 和 iOS 中选择授权。",
+      "openConversations": "打开会话列表"
+    },
+    "metric": {
+      "steps": "步数",
+      "activity": "活动",
+      "workouts": "锻炼",
+      "sleep": "睡眠"
+    },
+    "metricSeparator": "、",
+    "waitingRefresh": "等待 iPhone 处理这个请求。"
   }
 }

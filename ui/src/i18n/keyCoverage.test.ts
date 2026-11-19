@@ -874,6 +874,9 @@ const KEY_PREFIXES = [
  * `resolvesIn`, so a stem whose family exists resolves and never reaches here.
  */
 const NON_KEY_LITERALS = [
+  // Mobile request operations / native bridge method, never translation keys.
+  'health.connect',
+  'health.refresh',
   // Monaco theme tokens and editor actions. Read by the editor, never by i18next.
   'editor.action.selectAll',
   'editor.background',
