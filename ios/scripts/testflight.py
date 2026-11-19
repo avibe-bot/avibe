@@ -480,12 +480,17 @@ def check_signed_bundle(
         raise TestFlightError(f"The archived build number is {info.get('CFBundleVersion')!r}, not {build}")
     if require_encryption_declaration and info.get("ITSAppUsesNonExemptEncryption") is not False:
         raise TestFlightError("Info.plist must declare ITSAppUsesNonExemptEncryption = false")
-    if "NSHealthUpdateUsageDescription" in info:
-        raise TestFlightError("Info.plist must not declare NSHealthUpdateUsageDescription; HealthKit is read-only")
     if bundle_id == BUNDLE_ID:
-        health_usage = info.get("NSHealthShareUsageDescription")
-        if not isinstance(health_usage, str) or not health_usage.strip():
-            raise TestFlightError("Info.plist must declare a non-empty NSHealthShareUsageDescription")
+        # App Store upload validation requires both HealthKit purpose strings
+        # once the app links requestAuthorization(toShare:read:), even with an
+        # empty share set (run 44454583255). Avibe still writes nothing; the
+        # source test pins toShare to [].
+        for key in ("NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"):
+            health_usage = info.get(key)
+            if not isinstance(health_usage, str) or not health_usage.strip():
+                raise TestFlightError(f"Info.plist must declare a non-empty {key}")
+    elif "NSHealthShareUsageDescription" in info or "NSHealthUpdateUsageDescription" in info:
+        raise TestFlightError("Only the app declares HealthKit purpose strings")
     if entitlements.get("application-identifier") != application_identifier:
         raise TestFlightError("The bundle is not signed for " + application_identifier)
     if entitlements.get("get-task-allow"):
