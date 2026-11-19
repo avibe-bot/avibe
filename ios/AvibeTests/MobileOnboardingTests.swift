@@ -1349,6 +1349,108 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     // The advertised list decorates signed-out answers; a slow read never holds them up.
+    // P1 (TestFlight 37.1): after signing out, Welcome showed email alone. The
+    // signed-in start never read the list, and the fresh store's first read
+    // took longer than the sign-out answer waits. Welcome must show the
+    // advertised sign-ins at once and keep them current.
+    func testWelcomeAfterSignOutShowsTheAdvertisedSignInsBeforeTheFreshStoreAnswers() async throws {
+        let signedIn = FakeMobileAuthTransport()
+        signedIn.session = snapshot(accountID: "account-1")
+        signedIn.advertised = [.google, .github, .apple]
+        // The store after sign-out is new: its first read is slow.
+        let afterSignOut = FakeMobileAuthTransport()
+        afterSignOut.advertised = [.google, .github, .apple]
+        afterSignOut.advertisedDelay = 6_000_000_000
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [signedIn, afterSignOut, FakeMobileAuthTransport()]
+            ),
+            startScreen: .account
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+
+        let canSignOut = try await waitForJavaScriptValue(in: webView) {
+            Self.enabledButtonScript("Sign out on this device")
+        }
+        XCTAssertTrue(canSignOut)
+        _ = try await webView.evaluateJavaScript(Self.clickButtonScript("Sign out on this device"))
+
+        let shown = try await waitUntil(seconds: 4, in: webView) {
+            Self.welcomeMarksScript(["Continue with Google", "Continue with GitHub", "Continue with Apple"])
+        }
+        XCTAssertTrue(shown, "Welcome after sign-out shows the advertised sign-ins")
+    }
+
+    func testWelcomeOnAColdStartShowsTheLastAdvertisedSignInsWhenTheReadFails() async throws {
+        let defaults = makeDefaults()
+        // What an earlier launch read; this launch's read fails.
+        defaults.set(["github"], forKey: "avibe.mobile.advertisedProviders")
+        let transport = FakeMobileAuthTransport()
+        transport.advertised = nil
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(defaults: defaults, transports: [transport, FakeMobileAuthTransport()])
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+
+        let shown = try await waitUntil(seconds: 4, in: webView) {
+            Self.welcomeMarksScript(["Continue with GitHub"])
+        }
+        XCTAssertTrue(shown)
+        let others = try await webView.evaluateJavaScript(
+            Self.welcomeMarksScript(["Continue with Google"])
+        ) as? Bool
+        XCTAssertEqual(others, false)
+    }
+
+    private static func enabledButtonScript(_ text: String) -> String {
+        """
+        Array.from(document.querySelectorAll('button')).some(b =>
+          b.textContent.trim() === '\(text)' && !b.disabled)
+        """
+    }
+
+    private static func clickButtonScript(_ text: String) -> String {
+        """
+        Array.from(document.querySelectorAll('button'))
+          .find(b => b.textContent.trim() === '\(text)').click()
+        """
+    }
+
+    /// Welcome with exactly these provider marks, by their VoiceOver labels.
+    private static func welcomeMarksScript(_ labels: [String]) -> String {
+        let list = labels.map { "'\($0)'" }.joined(separator: ",")
+        return """
+        (() => {
+          const welcome = Array.from(document.querySelectorAll('button'))
+            .some(b => b.textContent.trim() === 'Continue with email');
+          const marks = Array.from(document.querySelectorAll('button[aria-label^="Continue with"]'))
+            .map(b => b.getAttribute('aria-label'));
+          return welcome && JSON.stringify(marks) === JSON.stringify([\(list)]);
+        })()
+        """
+    }
+
+    /// Polls `script` until it is true or `seconds` pass.
+    private func waitUntil(
+        seconds: Double,
+        in webView: WKWebView,
+        script: () -> String
+    ) async throws -> Bool {
+        try await WebKitReadiness.waitForDocument(in: webView)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .milliseconds(Int(seconds * 1000)))
+        while clock.now < deadline {
+            if try await webView.evaluateJavaScript(script()) as? Bool == true {
+                return true
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
     func testTheAdvertisedListIsReadWithinItsBoundOrLeftOut() async throws {
         let transport = FakeMobileAuthTransport()
         transport.advertised = [.github, .apple]
