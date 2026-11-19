@@ -376,7 +376,7 @@ the main Bot acts on the user's computer.
   (`!int`, then `!pla`). If the try is refused and the intent can bring
   Avibe forward (iOS 26), its island goes at once and Avibe records in
   front as soon as it is active (`.record`); only then come a haptic and the
-  line 正在录音，再长按一次侧边键发送. A press that waits more than 30 s to come
+  line 正在录音，再长按一次操作按钮发送. A press that waits more than 30 s to come
   forward never records. A stop press (or the island's Send) runs in the
   background and sends without coming forward. The intent stays an
   `AudioRecordingIntent` and a `LiveActivityIntent` (without the latter the

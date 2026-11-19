@@ -921,8 +921,8 @@ final class VoiceCaptureTests: XCTestCase {
             let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
             return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: "voiceCapture.startedInApp", value: nil, table: "VoiceCapture")
         }
-        XCTAssertEqual(try value("zh-Hans"), "正在录音，再长按一次侧边键发送")
-        XCTAssertEqual(try value("en"), "Recording. Press and hold the side button again to send.")
+        XCTAssertEqual(try value("zh-Hans"), "正在录音，再长按一次操作按钮发送")
+        XCTAssertEqual(try value("en"), "Recording. Press and hold the Action Button again to send.")
     }
 
     /// The real recorder sets the candidate's category on the session.

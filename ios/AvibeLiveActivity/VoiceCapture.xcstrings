@@ -534,13 +534,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Recording. Press and hold the side button again to send."
+            "value" : "Recording. Press and hold the Action Button again to send."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在录音，再长按一次侧边键发送"
+            "value" : "正在录音，再长按一次操作按钮发送"
           }
         }
       }

@@ -117,7 +117,7 @@ struct VoiceCaptureEnvironment {
     /// forward, so the session activates at the first moment it may.
     var untilActive: () async -> Void
     /// The moment capture really starts: a haptic, and in front the line
-    /// 正在录音，再长按一次侧边键发送. Never shown before.
+    /// 正在录音，再长按一次操作按钮发送. Never shown before.
     var captureStarted: (_ inFront: Bool) -> Void
     /// Says a refusal in front: the main Bot chat for what the App must ask
     /// (voice consent, sign-in), and an alert with the reason.
