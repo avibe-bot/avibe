@@ -1325,4 +1325,12 @@ scenarios:
       callback on a signed build, the real providers and Apple's sheet remain
       device checks after the backend exchange is deployed.
     owning_layer: iOS XCTest plus physical-device acceptance
+  - id: AUTH-SETUP-186
+    name: A personal unshared instance pairs a fake health device with route-scoped credentials and local-only reads
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: mobile
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
+    reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
 next_priority: []

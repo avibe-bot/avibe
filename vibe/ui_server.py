@@ -89,6 +89,7 @@ from modules.agents.catalog import (
 )
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
 from vibe.http_request_diagnostics import RequestCounterMiddleware, RequestCounters
+from vibe.ui_mobile_routes import register_mobile_routes
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -177,6 +178,7 @@ class _ShowEventDispatchOutcome(str, Enum):
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
+register_mobile_routes(app)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -721,6 +723,8 @@ def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
 
 
 def _is_mutation_guard_exempt() -> bool:
+    if getattr(g, "mobile_device_route", False):
+        return True
     if getattr(request._request.state, "show_server_api_registration", None) is not None:
         return True
     if request.path in {
@@ -2543,6 +2547,25 @@ def enforce_remote_access_cookie():
 
     local_request = _is_local_request(config)
     docker_probe_request = _is_trusted_docker_loopback_probe()
+    from vibe.ui_mobile_routes import canonical_device_route, is_device_route
+
+    if is_device_route(request.method, request.path):
+        if not canonical_device_route(request._request):
+            return jsonify({"ok": False, "code": "device_unauthorized"}), 401
+        # Keep the existing origin-host fence, then delegate authentication to
+        # the device handler. This route never receives browser Owner authority.
+        if config is None:
+            if not (local_request or docker_probe_request):
+                return jsonify({"ok": False, "error": "remote_access_config_unavailable"}), 503
+        elif _is_remote_access_request(config):
+            if _remote_access_public_url_invalid(config) or not config.remote_access.vibe_cloud.enabled:
+                return jsonify({"ok": False, "error": "remote_access_disabled"}), 503
+        elif not (local_request or docker_probe_request or _is_loopback_origin_proxy_request()):
+            return jsonify({"ok": False, "error": "remote_access_host_mismatch"}), 503
+        if _auth_rate_limited():
+            return _auth_rate_limit_response()
+        g.mobile_device_route = True
+        return None
     if config is None:
         if local_request or docker_probe_request:
             g.authorization_context = instance_owner_context()
@@ -2789,6 +2812,8 @@ def _require_runtime_record(context: Any, record: Any, *, not_found: tuple[dict[
 
 @app.before_request
 def enforce_instance_role_capabilities():
+    if getattr(g, "mobile_device_route", False):
+        return None
     if _remote_auth_exempt_path():
         return None
     from vibe.authorization import (
@@ -3219,6 +3244,8 @@ def add_api_timing_headers(response: Response) -> Response:
 
 @app.after_request
 def add_csrf_cookie(response: Response) -> Response:
+    if getattr(g, "mobile_device_route", False):
+        return response
     return _ensure_csrf_cookie(response)
 
 
@@ -13166,6 +13193,10 @@ def _registered_media_response(
     if not matches_expected_source:
         return jsonify({"error": "not_found"}), 404
     stored = row["local_path"]
+    from core.mobile_storage_boundary import is_mobile_private_path
+
+    if is_mobile_private_path(stored):
+        return jsonify({"error": "not_found"}), 404
     try:
         candidate = Path(stored).resolve(strict=True)
     except (OSError, ValueError):
@@ -16281,6 +16312,12 @@ def _is_show_page_runtime_denied_path(
     confine_to_workspace: bool = False,
 ) -> bool:
     decoded = _decode_show_page_asset_path(asset_path)
+    from core.mobile_storage_boundary import is_mobile_private_path
+
+    if not decoded.startswith("@fs/") and is_mobile_private_path(
+        paths.get_show_page_dir(session_id) / decoded,
+    ):
+        return True
     segments = [segment for segment in decoded.split("/") if segment]
     if any(_is_show_runtime_sensitive_file_segment(segment) for segment in segments):
         return True
@@ -16338,6 +16375,10 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, confine_to
         # Vite cache deps; otherwise deny so a hidden path can't be proxied here.
         return not _is_relocated_vite_dep_path(decoded)
 
+    from core.mobile_storage_boundary import is_mobile_private_path
+
+    if is_mobile_private_path(fs_path):
+        return True
     workspace = paths.get_show_page_dir(session_id).resolve(strict=False)
     target = fs_path.resolve(strict=False)  # follows symlinks, like the runtime will
     try:
@@ -16437,7 +16478,12 @@ def _show_page_file_response(root: Path, asset_path: str):
         _is_show_runtime_sensitive_file_segment(segment) for segment in segments
     ):
         return _show_page_file_not_found_response()
-    candidate = (root / decoded).resolve()
+    from core.mobile_storage_boundary import is_mobile_private_path
+
+    raw_candidate = root / decoded
+    if is_mobile_private_path(raw_candidate):
+        return _show_page_file_not_found_response()
+    candidate = raw_candidate.resolve()
     root_resolved = root.resolve()
     if candidate != root_resolved and root_resolved not in candidate.parents:
         return _show_page_file_not_found_response()

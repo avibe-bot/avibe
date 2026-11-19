@@ -4309,6 +4309,7 @@ class ScheduledTaskService:
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
         self._notice_drain_task: Optional["asyncio.Task[Any]"] = None
+        self._mobile_policy_check_at = 0.0
         self._job_signatures: Dict[str, tuple[Any, ...]] = {}
         # Logical Task id -> the physical APScheduler job generation. One-shot
         # job ids are unique per registration so a queued event from a replaced
@@ -5078,6 +5079,10 @@ class ScheduledTaskService:
         else:
             self._register_request_recovery()
         try:
+            self.scheduler.add_job(
+                self._mobile_maintenance, "interval", seconds=2, id="mobile-health-maintenance",
+                replace_existing=True, coalesce=True, max_instances=1, args=[],
+            )
             self.scheduler.start()
         except BaseException:
             self._begin_stop()
@@ -5097,6 +5102,22 @@ class ScheduledTaskService:
             self.audit_definition_bindings()
         except Exception as exc:
             logger.error("Harness definition binding audit failed: %s", exc, exc_info=True)
+
+    async def _mobile_maintenance(self) -> None:
+        from core.handlers.mobile_health import maintenance_pass
+
+        now = time.monotonic()
+        check_policy = now >= self._mobile_policy_check_at
+        if check_policy:
+            self._mobile_policy_check_at = now + 60
+        try:
+            delivered = await self._run_runtime_sync(
+                maintenance_pass, self.request_store, check_eligibility=check_policy,
+            )
+            if delivered:
+                self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+        except Exception:
+            logger.warning("mobile maintenance code=maintenance_failed")
 
     def _spawn_watch_store(self) -> None:
         self._reconcile_task = asyncio.create_task(self._watch_store())
@@ -6026,7 +6047,7 @@ class ScheduledTaskService:
             self._job_signatures[task.id] = signature
 
         for job in list(self.scheduler.get_jobs()):
-            if job.id not in desired_job_ids:
+            if job.id not in desired_job_ids and job.id != "mobile-health-maintenance":
                 self.scheduler.remove_job(job.id)
                 self._one_shot_job_identities.pop(job.id, None)
         for task_id in set(self._job_ids) - desired_ids:

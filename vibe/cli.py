@@ -18858,6 +18858,9 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
 def build_parser():
     parser = VibeArgumentParser(prog="vibe")
     subparsers = parser.add_subparsers(dest="command")
+    from vibe.cli_mobile import add_mobile_parser
+
+    add_mobile_parser(subparsers)
     # ``vibe mcp`` is dispatched from raw argv in ``main`` (server and tool names
     # are dynamic); this entry only lists it in ``vibe --help``.
     subparsers.add_parser("mcp", help="Discover and call generated MCP server tools (vibe mcp --help)", add_help=False)
@@ -21363,6 +21366,12 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
 #: later fails closed until it is classified; ``test_cli_command_admission``
 #: walks the parser so that classification cannot be forgotten silently.
 _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
+    ("mobile", "health", "status"): None,
+    ("mobile", "health", "read"): None,
+    ("mobile", "health", "connect"): None,
+    ("mobile", "health", "revoke"): None,
+    ("mobile", "requests", "show"): None,
+    ("mobile", "requests", "await"): None,
     # Public facts, unchanged: a version and an update check answer the same
     # thing to anyone, and status is not gated merely because doctor is.
     ("version",): None,
@@ -21747,6 +21756,10 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(_control_command(f"schedule.{args.schedule_command}", args))
     if args.command == "skill":
         sys.exit(cmd_skill(args))
+    if args.command == "mobile":
+        from vibe.cli_mobile import cmd_mobile
+
+        sys.exit(cmd_mobile(args))
     if args.command == "computer":
         try:
             sys.exit(cmd_computer(args))
