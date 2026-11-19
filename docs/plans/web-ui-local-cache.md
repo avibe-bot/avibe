@@ -230,6 +230,17 @@ from it while the same checks run in the background:
   principal, and the user did not log out since.
 - Any other result tears the shell down to the existing gate (login,
   revoked, unavailable, setup) and applies section 4.4.
+- Exception, in the native App only (the native bridge is present) and only
+  while the replayed shell is up: a check that cannot reach the instance (a
+  network failure, a timeout, or a 5xx such as a down tunnel's 530, on the
+  session read and its retry, or on the setup check while the retried session
+  answers) is no answer. The shell stays, still provisional, and the check
+  runs again when the network or the page comes back, or after 15 s, then
+  less often (up to every 2 min). Setup,
+  login and the other gates still follow only from an answer; without a
+  replayed shell nothing changes. The App may show the instance's last page
+  from its own cache, so this keeps that page on screen instead of sending it
+  to setup.
 - A login-required result marks the stored outcome unconfirmed, so the next
   cold start waits again.
 

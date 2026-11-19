@@ -207,6 +207,37 @@ scenarios:
     layer: contract
     backend: web
     test: ui/src/context/ApiContext.bootSession.test.tsx::AUTH-SETUP-143 forgets the boot session and refuses a late guard check that would record it again
+  - id: AUTH-SETUP-187
+    name: In the native App, a replayed shell stays when the session check cannot reach the instance, and is checked again on reconnect
+    status: covered
+    kind: retry
+    layer: contract
+    backend: web
+    test:
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on no network and checks again on reconnect
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on a down tunnel (530) and checks again on reconnect
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on a server error (503) and checks again on reconnect
+    reason: >-
+      The App may show the instance's last page from its cache; no network, a
+      timeout or a 5xx (a down tunnel's 530) on the read and its retry is no
+      answer, so the provisional shell and the boot session stay and the next
+      reconnect reads the session once more.
+  - id: AUTH-SETUP-188
+    name: In the native App, an owner's replayed shell stays when only the setup check cannot reach the instance, across repeated checks
+    status: covered
+    kind: retry
+    layer: contract
+    backend: web
+    test:
+      - "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-188 keeps the owner's replayed shell when only the setup check could not reach the instance"
+      - "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-188 keeps the owner's shell across repeated unreachable checks, and answers a refusal already received"
+  - id: AUTH-SETUP-189
+    name: Setup still follows from an answer, and nothing changes in a browser or without a replayed shell
+    status: covered
+    kind: negative_path
+    layer: contract
+    backend: web
+    test: ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-189 still goes to setup in a browser, without a replayed shell, and on a definite refusal
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered

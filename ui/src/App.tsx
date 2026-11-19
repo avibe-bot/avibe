@@ -307,6 +307,22 @@ const WebPushNotificationNavigator = () => {
     return null;
 };
 
+/** The App's first recheck after an unreachable instance, doubling up to
+ * the last value: each failed read can put up an error toast. */
+const UNREACHABLE_RECHECK_MS = [15_000, 30_000, 60_000, 120_000];
+
+/** A session read that could not reach the instance, as opposed to an
+ * answer from it: a network failure, a timeout, or a 5xx (a down tunnel
+ * answers 530). */
+function isUnreachable(failure: unknown): boolean {
+    if (failure instanceof TypeError) return true;
+    if (failure instanceof Error && (failure.name === 'AbortError' || failure.name === 'TimeoutError')) {
+        return true;
+    }
+    const status = (failure as { status?: unknown } | null)?.status;
+    return typeof status === 'number' && status >= 500;
+}
+
 // Wrapper to check if setup is needed.
 //
 // Validation is global (auth session + setup state), so we only run it
@@ -326,6 +342,11 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // waits for the server as it always has.
     const [bootSession] = useState(() => readBootSession());
     const provisionalRef = useRef(bootSession !== null);
+    // The App's session check could not reach the instance: it runs again
+    // when the network or the page comes back.
+    const [awaitingReconnect, setAwaitingReconnect] = useState(false);
+    // Consecutive unreachable checks, for the recheck's backoff.
+    const unreachableChecksRef = useRef(0);
     const [provisional, setProvisional] = useState(bootSession !== null);
     // Bumped by every terminal authorization signal (revoked, login required).
     // A check that started before one can still answer ``ready``; it must not
@@ -360,6 +381,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         // A terminal signal settles the guard as surely as a check does.
         const settleOnTerminalSignal = () => {
+            setAwaitingReconnect(false);
             terminalSignalRef.current += 1;
             provisionalRef.current = false;
             setProvisional(false);
@@ -433,6 +455,10 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // that check is what confirms the shell, so it runs behind it.
         if (!provisionalRef.current) setGuardStatus('loading');
         setSetupModelHubAllowed(false);
+        setAwaitingReconnect(false);
+        // Whether this check runs behind the replayed shell (it clears the
+        // flag as soon as the session answers, before the setup check).
+        const behindReplay = provisionalRef.current;
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (superseded()) return;
@@ -470,6 +496,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && !session.capabilities.can_manage_instance
             ) {
                 recordBootSession(session, Date.now(), bootGeneration);
+                unreachableChecksRef.current = 0;
                 setGuardStatus('ready');
                 return null;
             }
@@ -489,14 +516,38 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                     return;
                 }
                 recordBootSession(session, Date.now(), bootGeneration);
+                unreachableChecksRef.current = 0;
                 setGuardStatus('ready');
             });
         }).catch(async (error) => {
             if (superseded()) return;
+            // In the App the shell may be the instance's last page from the
+            // App's cache. While it is the replayed (provisional) shell, a
+            // check that could not reach the instance (no network, a timeout,
+            // a 5xx such as a down tunnel's 530) is no answer: the shell stays
+            // and the check runs again (see `awaitingReconnect`). Setup and
+            // every gate follow only from an answer.
+            const keepsReplayWhenUnreachable = behindReplay && isNativeShell();
             // The replay stays provisional through the retry: until it answers,
             // nothing has confirmed or replaced the replayed capabilities.
-            const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
+            let retryFailure: unknown = null;
+            const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession)
+                .catch((failure: unknown) => { retryFailure = failure; return null; });
             if (superseded()) return;
+            if (
+                !authCheck
+                && keepsReplayWhenUnreachable
+                // Both the first failure and the retry: an answer already
+                // received (a refusal, a missing config) is never overridden.
+                && isUnreachable(error)
+                && isUnreachable(retryFailure)
+            ) {
+                // The session-success path may have settled it already.
+                provisionalRef.current = true;
+                setProvisional(true);
+                setAwaitingReconnect(true);
+                return;
+            }
             provisionalRef.current = false;
             setProvisional(false);
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
@@ -528,6 +579,15 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setGuardStatus('ready');
                 return;
             }
+            if (keepsReplayWhenUnreachable && authCheck?.checkSetup && isUnreachable(error)) {
+                // The session answered on the retry, but the setup check
+                // that failed (its session or config read) never reached the
+                // instance: still no setup answer.
+                provisionalRef.current = true;
+                setProvisional(true);
+                setAwaitingReconnect(true);
+                return;
+            }
             // Blocked or needs setup: a gate either way.
             forgetBootSession();
             const blocked = accessBlockedCode(error);
@@ -556,6 +616,29 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // sidebar navigation never re-runs (which would re-mount the
         // shell behind the Loading state).
     }, [authCheckVersion, bypassSetupGuard, setupRedirectExempt, isSetupRoute, getConfig, getAuthSession]);
+
+    // In the App, a check that could not reach the instance runs again when
+    // the network or the page comes back (see the check above).
+    useEffect(() => {
+        if (!awaitingReconnect) return undefined;
+        const recheck = () => {
+            setAwaitingReconnect(false);
+            setAuthCheckVersion((version) => version + 1);
+        };
+        window.addEventListener('online', recheck);
+        const stopReactivation = onPageReactivated(recheck);
+        // A down tunnel never fires `online`: also once more after a while.
+        const delay = UNREACHABLE_RECHECK_MS[
+            Math.min(unreachableChecksRef.current, UNREACHABLE_RECHECK_MS.length - 1)
+        ];
+        unreachableChecksRef.current += 1;
+        const timer = window.setTimeout(recheck, delay);
+        return () => {
+            window.removeEventListener('online', recheck);
+            stopReactivation();
+            window.clearTimeout(timer);
+        };
+    }, [awaitingReconnect]);
 
     // A route exempt from the setup redirect still needs a session: without one
     // its capabilities would read as denied. When the first probe found none
