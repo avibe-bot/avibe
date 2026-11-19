@@ -23,6 +23,8 @@ HEALTHKIT_ENTITLEMENTS = (
     "com.apple.developer.healthkit",
     "com.apple.developer.healthkit.background-delivery",
 )
+HEALTH_UPDATE_USAGE_EN = "Avibe never writes to Apple Health. It only reads the data you allow."
+HEALTH_UPDATE_USAGE_ZH = "Avibe 不会向「健康」写入数据，只读取你允许的数据。"
 HEALTH_SHARE_USAGE_EN = (
     "Avibe reads your steps, activity, workouts, and sleep to provide your personal daily and weekly status "
     "through your own Avibe instance. Access is read-only; Avibe never writes to Apple Health."
@@ -248,7 +250,8 @@ def test_export_options_upload_with_the_named_profile_and_manual_signing():
 def signed(info=None, entitlements=None):
     base_info = {"CFBundleIdentifier": "bot.avibe.ios", "CFBundleVersion": "7.1",
                  "CFBundleShortVersionString": "0.1.0", "ITSAppUsesNonExemptEncryption": False,
-                 "NSHealthShareUsageDescription": HEALTH_SHARE_USAGE_EN}
+                 "NSHealthShareUsageDescription": HEALTH_SHARE_USAGE_EN,
+                 "NSHealthUpdateUsageDescription": HEALTH_UPDATE_USAGE_EN}
     base_entitlements = {"application-identifier": "68B2SQ6YK3.bot.avibe.ios", "get-task-allow": False,
                          "aps-environment": "production",
                          "com.apple.developer.healthkit": True,
@@ -260,7 +263,12 @@ def signed(info=None, entitlements=None):
                              testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
                          ],
                          testflight.SIGN_IN_WITH_APPLE: ["Default"]}
-    return {**base_info, **(info or {})}, {**base_entitlements, **(entitlements or {})}
+    merged_info = {**base_info, **(info or {})}
+    if merged_info["CFBundleIdentifier"] != testflight.BUNDLE_ID:
+        # Extensions declare no HealthKit purpose strings.
+        merged_info.pop("NSHealthShareUsageDescription", None)
+        merged_info.pop("NSHealthUpdateUsageDescription", None)
+    return merged_info, {**base_entitlements, **(entitlements or {})}
 
 
 def test_a_distribution_signed_app_with_its_entitlements_passes():
@@ -726,43 +734,43 @@ def test_extensions_cannot_carry_healthkit_even_when_disabled(boundary, bundle_i
             )
 
 
+@pytest.mark.parametrize("key", ["NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"])
 @pytest.mark.parametrize(
     "value", [None, "", " \n\t", True, ["Read health data"]],
     ids=["missing", "empty", "whitespace", "boolean", "list"],
 )
-def test_main_healthkit_read_usage_description_is_required(value):
+def test_main_healthkit_usage_descriptions_are_required(key, value):
+    # App Store upload validation rejects the archive without either one
+    # (ios-testflight run 44454583255), even though Avibe only reads.
     info, entitlements = signed()
     if value is None:
-        info.pop("NSHealthShareUsageDescription")
+        info.pop(key)
     else:
-        info["NSHealthShareUsageDescription"] = value
-    with pytest.raises(testflight.TestFlightError, match="non-empty NSHealthShareUsageDescription"):
+        info[key] = value
+    with pytest.raises(testflight.TestFlightError, match=f"non-empty {key}"):
         testflight.check_signed_app(info, entitlements, build="7.1")
 
 
 @pytest.mark.parametrize(
-    "bundle_id", [testflight.BUNDLE_ID, testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
-                  testflight.LIVE_ACTIVITY_BUNDLE_ID],
-    ids=["main", "notification-service", "live-activity"],
+    "bundle_id", [testflight.NOTIFICATION_SERVICE_BUNDLE_ID, testflight.LIVE_ACTIVITY_BUNDLE_ID],
+    ids=["notification-service", "live-activity"],
 )
-@pytest.mark.parametrize("value", ["Write health data", "", False])
-def test_no_archived_bundle_may_declare_healthkit_write_usage(bundle_id, value):
-    if bundle_id == testflight.BUNDLE_ID:
-        info, entitlements = signed()
-        required = testflight.MAIN_REQUIRED_ENTITLEMENTS
-    else:
-        info, entitlements = _live_activity_signed()
-        info["CFBundleIdentifier"] = bundle_id
-        entitlements["application-identifier"] = f"{testflight.TEAM_ID}.{bundle_id}"
-        required = testflight.LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS
-        if bundle_id == testflight.NOTIFICATION_SERVICE_BUNDLE_ID:
-            entitlements.update({
-                "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-                "keychain-access-groups": [testflight.SHARED_KEYCHAIN_ACCESS_GROUP],
-            })
-            required = testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS
-    info["NSHealthUpdateUsageDescription"] = value
-    with pytest.raises(testflight.TestFlightError, match="must not declare NSHealthUpdateUsageDescription"):
+@pytest.mark.parametrize("key", ["NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"])
+def test_no_extension_may_declare_healthkit_usage(bundle_id, key):
+    info, entitlements = _live_activity_signed()
+    info["CFBundleIdentifier"] = bundle_id
+    info.pop("NSHealthShareUsageDescription", None)
+    info.pop("NSHealthUpdateUsageDescription", None)
+    entitlements["application-identifier"] = f"{testflight.TEAM_ID}.{bundle_id}"
+    required = testflight.LIVE_ACTIVITY_REQUIRED_ENTITLEMENTS
+    if bundle_id == testflight.NOTIFICATION_SERVICE_BUNDLE_ID:
+        entitlements.update({
+            "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+            "keychain-access-groups": [testflight.SHARED_KEYCHAIN_ACCESS_GROUP],
+        })
+        required = testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS
+    info[key] = "Health data"
+    with pytest.raises(testflight.TestFlightError, match="Only the app declares HealthKit purpose strings"):
         testflight.check_signed_bundle(
             info, entitlements, bundle_id=bundle_id,
             application_identifier=f"{testflight.TEAM_ID}.{bundle_id}",
@@ -785,8 +793,15 @@ def test_healthkit_source_configuration_is_main_only_and_read_only_in_both_langu
     localized = catalog["strings"]["NSHealthShareUsageDescription"]["localizations"]
     assert localized["en"]["stringUnit"]["value"] == HEALTH_SHARE_USAGE_EN
     assert localized["zh-Hans"]["stringUnit"]["value"] == HEALTH_SHARE_USAGE_ZH
-    assert "NSHealthUpdateUsageDescription" not in info
-    assert "NSHealthUpdateUsageDescription" not in catalog["strings"]
+    # The update string exists only because upload validation requires it; Avibe requests no
+    # write types, so the source must keep `toShare: []`.
+    assert info["NSHealthUpdateUsageDescription"] == HEALTH_UPDATE_USAGE_EN
+    update = catalog["strings"]["NSHealthUpdateUsageDescription"]["localizations"]
+    assert update["en"]["stringUnit"]["value"] == HEALTH_UPDATE_USAGE_EN
+    assert update["zh-Hans"]["stringUnit"]["value"] == HEALTH_UPDATE_USAGE_ZH
+    reader = (ROOT / "ios/Avibe/HealthDataReader.swift").read_text(encoding="utf-8")
+    assert reader.count("requestAuthorization(") == 1
+    assert "requestAuthorization(toShare: [], read:" in reader
     for source in ("ios/NotificationService/Info.plist", "ios/AvibeLiveActivity/Info.plist"):
         extension_info = plistlib.loads((ROOT / source).read_bytes())
         assert "NSHealthShareUsageDescription" not in extension_info

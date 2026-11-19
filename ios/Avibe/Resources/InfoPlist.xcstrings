@@ -35,6 +35,23 @@
         }
       }
     },
+    "NSHealthUpdateUsageDescription" : {
+      "comment" : "Required by App Store upload validation for HealthKit; Avibe never writes to Health.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe never writes to Apple Health. It only reads the data you allow."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe 不会向「健康」写入数据，只读取你允许的数据。"
+          }
+        }
+      }
+    },
     "NSLocalNetworkUsageDescription" : {
       "comment" : "Explains the system Local Network permission prompt.",
       "localizations" : {
