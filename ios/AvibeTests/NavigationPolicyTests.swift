@@ -5191,7 +5191,7 @@ extension NavigationPolicyTests {
         let page = RuntimeCachedPage(
             url: origin.url,
             headers: ["Content-Type": "text/html; charset=utf-8"],
-            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /></head><script>history.replaceState(null, '', '/setup')</script>"#.utf8),
+            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title></head>"#.utf8),
             capturedAt: Date(),
             keepsShellUnreachable: true
         )
@@ -5210,8 +5210,17 @@ extension NavigationPolicyTests {
         let window = host(controller)
         defer { window.isHidden = true }
 
-        try await waitUntil { documents.count == 1 }
+        try await waitUntil { events.contains { $0.stage == .finished && $0.fromCache } }
         XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache && $0.cachedKeepsShell })
+        XCTAssertEqual(documents.count, 0)
+        // The Web UI's own move to its setup fallback (a replace, as its
+        // router does).
+        let moved = try await primaryWebView(of: controller).evaluateJavaScript(
+            "history.replaceState(null, '', '/setup'); location.pathname"
+        ) as? String
+        XCTAssertEqual(moved, "/setup")
+
+        try await waitUntil { documents.count == 1 }
         XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache })
         XCTAssertEqual(connected, 0)
     }
