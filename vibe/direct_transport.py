@@ -200,6 +200,7 @@ class DirectTransportSupervisor:
         self._stream_log = _StreamLogBudget()
         self._report_window = 0.0
         self._report_lines = self._report_skipped = 0
+        self._report_pairs: set[int] = set()
         self._path_reports = False
         self._connections = 0
         self._refusals = 0
@@ -484,11 +485,10 @@ class DirectTransportSupervisor:
             message_type = message.get("type")
             if message_type == "ready":
                 self._handle_ready(message)
+                self._report_pairs.clear()
                 self._path_reports = message.get("path_reports_v1") is True
                 if self._path_reports:
                     await self._write_control(process.stdin, {"type": "observe_paths_v1"})
-            elif message_type == "path_report":
-                self._handle_path_report(message)
             elif message_type == "relay_status":
                 self._handle_relay_status(message)
             elif message_type == "addresses":
@@ -598,7 +598,15 @@ class DirectTransportSupervisor:
         if now >= self._report_window:
             self._report_window = now + 60
             self._report_lines = 0
-        if self._report_lines >= 60:
+        ordinal, phase = msg["ordinal"], msg["phase"]
+        free = 60 - self._report_lines - len(self._report_pairs)
+        if phase == "open" and ordinal not in self._report_pairs and free >= 2:
+            self._report_pairs.add(ordinal)
+        elif phase == "close" and ordinal in self._report_pairs:
+            self._report_pairs.remove(ordinal)
+        elif phase == "change" and ordinal in self._report_pairs and free >= 1:
+            pass
+        else:
             self._report_skipped += 1
             return
         self._report_lines += 1
@@ -731,8 +739,23 @@ class DirectTransportSupervisor:
         if reader is None:
             return
         try:
-            while chunk := await reader.read(4096):
-                logger.debug("direct transport sidecar: %s", chunk.decode("utf-8", "replace").rstrip())
+            # Dedicated negotiated diagnostic sideband; never echo raw stderr.
+            dropping = False
+            while True:
+                try:
+                    line = await reader.readuntil(b"\n")
+                except asyncio.LimitOverrunError as exc:
+                    await reader.readexactly(exc.consumed)
+                    dropping = True
+                    continue
+                except asyncio.IncompleteReadError:
+                    return
+                if not dropping and self._path_reports and len(line) <= CONTROL_LINE_LIMIT_BYTES:
+                    with contextlib.suppress(ValueError, UnicodeError, RecursionError, _ProtocolError):
+                        message = json.loads(line)
+                        if isinstance(message, dict) and message.get("type") == "path_report":
+                            self._handle_path_report(message)
+                dropping = False
         except (asyncio.CancelledError, ConnectionError, OSError):
             return
 

@@ -6,7 +6,7 @@ use iroh::{
     endpoint::{Connection, PathEvent, PathEventStream, PathStats},
 };
 use serde::Serialize;
-use std::{future::poll_fn, pin::Pin, task::Poll};
+use std::{future::poll_fn, pin::Pin};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Copy, Serialize, Default)]
@@ -90,17 +90,27 @@ impl Observer {
     pub(super) async fn next(&mut self) -> Option<PathEvent> {
         poll_fn(|cx| Pin::new(&mut self.events).poll_next(cx)).await
     }
-    pub(super) async fn drain_ready(&mut self) {
-        // A terminal accept and the last Closed events can become ready together.
-        // Read buffered close-time stats without waiting for a future event.
-        for _ in 0..256 {
-            let item = poll_fn(|cx| Poll::Ready(Pin::new(&mut self.events).poll_next(cx))).await;
-            match item {
-                Poll::Ready(Some(e)) => self.update(e),
-                _ => return,
+    pub(super) async fn finish(mut self) -> Report {
+        // Closing the connection causes iroh to emit Closed.last_stats for
+        // each remaining path before it drops the event sender. Its retained
+        // list is *not* an open-path snapshot at this point.
+        if tokio::time::timeout(std::time::Duration::from_millis(750), async {
+            while let Some(event) = self.next().await {
+                self.update(event);
             }
+        })
+        .await
+        .is_err()
+        {
+            self.partial = true;
         }
-        self.partial = true;
+        Report {
+            ordinal: self.ordinal,
+            phase: "close",
+            selected: self.selected,
+            partial: self.partial,
+            families: self.closed,
+        }
     }
     pub(super) fn update(&mut self, event: PathEvent) {
         match event {

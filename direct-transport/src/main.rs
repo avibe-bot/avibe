@@ -408,10 +408,16 @@ async fn handle_connection(
     let mut stream_tasks = JoinSet::new();
     let no_stream = time::sleep(NO_STREAM_TIMEOUT);
     tokio::pin!(no_stream);
-    let mut observer = control
+    let terminal = control
         .observe
         .load(std::sync::atomic::Ordering::Relaxed)
-        .then(|| path_report::Observer::new(&connection));
+        .then(|| reports.clone().try_reserve_owned().ok())
+        .flatten();
+    let mut observer = terminal
+        .as_ref()
+        .map(|_| path_report::Observer::new(&connection));
+    let mut changed = false;
+    let mut next_change = Instant::now() + Duration::from_secs(1);
     if let Some(obs) = &mut observer {
         obs.report(&connection, "open", &reports);
     }
@@ -424,8 +430,13 @@ async fn handle_connection(
                 if let Some(event) = event {
                     let obs = observer.as_mut().unwrap();
                     obs.update(event);
-                    obs.report(&connection, "change", &reports);
+                    changed = true;
                 } else { break; }
+            }
+            _ = time::sleep_until(next_change), if changed => {
+                if let Some(obs) = &mut observer { obs.report(&connection, "change", &reports); }
+                changed = false;
+                next_change = Instant::now() + Duration::from_secs(1);
             }
             incoming_stream = connection.accept_bi() => {
                 let Ok((mut send, mut recv)) = incoming_stream else { break; };
@@ -450,13 +461,12 @@ async fn handle_connection(
     if reason == "connection_closed" && !control.admissions.allows_connection(&connection) {
         reason = "admission_ended";
     }
-    if let Some(obs) = &mut observer {
-        obs.drain_ready().await;
-        obs.report(&connection, "close", &reports);
-    }
     connection.close(close_code(), reason.as_bytes());
     stream_tasks.abort_all();
     while stream_tasks.join_next().await.is_some() {}
+    if let (Some(obs), Some(slot)) = (observer, terminal) {
+        slot.send(obs.finish().await);
+    }
     control.peer_closed(&endpoint_id, reason).await;
 }
 
@@ -600,21 +610,22 @@ async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Resu
     let handshake_limit = HandshakeLimit::new();
     let connection_limit = Arc::new(Semaphore::new(config.max_connections as usize));
     let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(64);
-    let report_writer = async {
+    let report_writer = tokio::spawn(async move {
+        let mut sink = tokio::io::stderr();
         while let Some(report) = report_rx.recv().await {
-            if let Err(error) = control.emit(&Message::PathReport { report }).await {
-                control.fail(error).await;
+            let mut line =
+                serde_json::to_vec(&Message::PathReport { report }).expect("numeric report");
+            line.push(b'\n');
+            if sink.write_all(&line).await.is_err() || sink.flush().await.is_err() {
                 break;
             }
         }
-    };
-    tokio::pin!(report_writer);
+    });
     let mut connection_tasks = JoinSet::new();
     loop {
         tokio::select! {
             biased;
             _ = control.stop.wait() => break,
-            _ = &mut report_writer => break,
             _ = &mut relay_events => break,
             // Drain finished tasks before more arrivals, so an inbound flood
             // cannot retain an unbounded backlog of completed JoinSet entries.
@@ -651,6 +662,11 @@ async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Resu
     .await;
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
+    drop(report_tx);
+    let mut writer = report_writer;
+    if time::timeout(IO_TIMEOUT, &mut writer).await.is_err() {
+        writer.abort();
+    }
     let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
     address_task.abort();
     expiry_task.abort();

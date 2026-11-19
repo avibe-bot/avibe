@@ -18,8 +18,8 @@ async def main(binary, relay):
     body = secrets.token_hex(16).encode()
     async with AsyncExitStack() as cleanup:
 
-        async def spawn(*argv):
-            p = await asyncio.create_subprocess_exec(*argv, stdin=-1, stdout=-1)
+        async def spawn(*argv, diagnostics=False):
+            p = await asyncio.create_subprocess_exec(*argv, stdin=-1, stdout=-1, stderr=-1 if diagnostics else None)
 
             async def finish():
                 if p.returncode is None:
@@ -60,7 +60,7 @@ async def main(binary, relay):
 
         async def child(role):
             return await spawn(
-                binary, "--exact", "relay_interop::" + role, "--ignored", "--nocapture", "--format", "terse"
+                binary, "--exact", "relay_interop::" + role, "--ignored", "--nocapture", "--format", "terse", diagnostics=role == "sidecar"
             )
 
         client = await child("client")
@@ -119,12 +119,18 @@ async def main(binary, relay):
             writer.close()
             assert await line(client, b"PATH ") == b"local-relay"
             assert await client.wait() == 0
-            first = await event(sidecar, "path_report")
+            async def diagnostic():
+                report = json.loads(await sidecar.stderr.readline())
+                assert set(report) == {"type", "ordinal", "phase", "selected", "partial", "families"}
+                assert report["type"] == "path_report" and len(report["families"]) == 4
+                return report
+            first = await diagnostic()
             assert first["phase"] == "open"
             report = first
             while report["phase"] != "close":
-                report = await event(sidecar, "path_report")
+                report = await diagnostic()
                 assert report["ordinal"] == first["ordinal"]
+            assert all(row["open"] == 0 for row in report["families"])
             assert report["selected"] == "relay" and report["families"][0]["rx_bytes"] > 0
             send(sidecar, type="stop")
             assert await sidecar.wait() == 0
