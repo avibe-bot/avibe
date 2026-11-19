@@ -1174,6 +1174,36 @@ class SQLiteSessionsService:
             result = conn.execute(statement)
             return bool(result.rowcount)
 
+    def succeed_retired_session_route(
+        self,
+        session_id: str,
+        *,
+        model: tuple[str, str] | None = None,
+        reasoning_effort: tuple[str, str] | None = None,
+    ) -> bool:
+        """Move a Session's stored model and effort, each a (stored, successor) pair, to their successors.
+
+        Only a row that still stores every value this moves changes, so a Session the
+        user switched meanwhile keeps the choice. Returns True when the row changed.
+        """
+        values: dict[str, Any] = {}
+        statement = agent_sessions.update().where(agent_sessions.c.id == str(session_id))
+        for column, pair in (("model", model), ("reasoning_effort", reasoning_effort)):
+            if pair is None:
+                continue
+            values[column] = pair[1]
+            statement = statement.where(getattr(agent_sessions.c, column) == pair[0])
+        if not values:
+            return False
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            result = conn.execute(
+                statement.where(agent_sessions.c.status != "archived").values(
+                    **values, updated_at=_utc_now_iso()
+                )
+            )
+            return bool(result.rowcount)
+
     def bind_agent_session_by_id(
         self,
         *,

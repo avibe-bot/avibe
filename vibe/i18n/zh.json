@@ -1231,6 +1231,8 @@
       "last_connection_failure": "最后一次连接错误（{source}）：{detail}",
       "passthrough_model_unlisted": "供应商的模型列表里没有 {model}，换一个模型试试。",
       "model_unlisted": "模型 {model} 不在 {backend} 的模型列表中。请选择其他模型后继续。",
+      "model_succeeded": "模型 {old} 已不在 {backend} 的模型列表中，这个会话已改用 {new}。",
+      "effort_succeeded": "{model} 已不提供推理强度 {old}，这个会话已改用 {new}。",
       "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
       "request_incompatible_detail": "供应商拒绝了此请求，切换模型供应商也无法解决。供应商返回：{detail}"
     }

@@ -125,6 +125,17 @@ class SessionsFacade:
             expected_route=expected_route,
         )
 
+    def succeed_retired_session_route(
+        self,
+        agent_session_id: str,
+        *,
+        model: tuple[str, str] | None = None,
+        reasoning_effort: tuple[str, str] | None = None,
+    ) -> bool:
+        return self.sessions_store.succeed_retired_session_route(
+            agent_session_id, model=model, reasoning_effort=reasoning_effort
+        )
+
     def get_agent_session_by_id(self, agent_session_id: str) -> Optional[dict]:
         """The persisted ``agent_sessions`` row, read by primary key."""
         getter = getattr(self.sessions_store, "get_agent_session_by_id", None)

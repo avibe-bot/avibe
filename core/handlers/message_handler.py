@@ -454,6 +454,17 @@ class MessageHandler(BaseHandler):
                 fallback_model=resolved_target.get("model") or inherited_model,
                 fallback_reasoning_effort=resolved_target.get("reasoning_effort") or inherited_reasoning_effort,
             )
+            succession = await self._succeed_retired_session_route(
+                context,
+                session_target if isinstance(session_target, dict) else resolved_target,
+                backend=agent_name,
+                vibe_agent=vibe_agent,
+            )
+            if succession is not None:
+                if succession.model and effective_model == succession.model[0]:
+                    effective_model = succession.model[1]
+                if succession.reasoning_effort and effective_reasoning_effort == succession.reasoning_effort[0]:
+                    effective_reasoning_effort = succession.reasoning_effort[1]
             materialized_agent_identity = bool(
                 vibe_agent
                 and isinstance(session_target, dict)
@@ -1870,6 +1881,74 @@ class MessageHandler(BaseHandler):
             agent = None
         backend = getattr(agent, "backend", None)
         return str(backend) if is_agent_backend(str(backend)) else None
+
+    async def _succeed_retired_session_route(
+        self,
+        context: MessageContext,
+        row: dict,
+        *,
+        backend: str,
+        vibe_agent: Any,
+    ):
+        """Move a Session whose stored model or effort left its backend's list to the successor, and say so.
+
+        The row is rewritten, so the Session says it once; the Turn then runs on the successor.
+        """
+
+        from core.session_route_succession import retired_route_succession
+
+        session_id = str(row.get("id") or row.get("agent_session_id") or "")
+        store = getattr(getattr(self.controller, "model_hub_service", None), "store", None)
+        succeed = getattr(self.sessions, "succeed_retired_session_route", None)
+        if not session_id or vibe_agent is None or store is None or not callable(succeed):
+            return None
+
+        def move():
+            succession = retired_route_succession(
+                store.load(),
+                backend,
+                stored_model=row.get("model"),
+                stored_reasoning_effort=row.get("reasoning_effort"),
+                agent_model=getattr(vibe_agent, "model", None),
+                agent_reasoning_effort=getattr(vibe_agent, "reasoning_effort", None),
+            )
+            if succession is None:
+                return None
+            moved = succeed(session_id, model=succession.model, reasoning_effort=succession.reasoning_effort)
+            return succession if moved else None
+
+        try:
+            succession = await asyncio.to_thread(move)
+        except Exception:
+            logger.warning("Could not move Session %s off a retired model", session_id, exc_info=True)
+            return None
+        if succession is None:
+            return None
+        payload = context.platform_specific or {}
+        rows = [payload.get("agent_session_target"), payload.get("agent_run_target")]
+        lines = []
+        if succession.model:
+            old, new = succession.model
+            logger.info("Session %s moves from retired model %s to %s", session_id, old, new)
+            for target in rows:
+                if isinstance(target, dict) and target.get("model") == old:
+                    target["model"] = new
+            lines.append(
+                self._t("modelHub.launch.model_succeeded", old=old, new=new, backend=display_name_for_backend(backend))
+            )
+        if succession.reasoning_effort:
+            old, new = succession.reasoning_effort
+            model = succession.model[1] if succession.model else row.get("model") or vibe_agent.model
+            logger.info("Session %s moves from retired effort %s to %s on %s", session_id, old, new, model)
+            for target in rows:
+                if isinstance(target, dict) and target.get("reasoning_effort") == old:
+                    target["reasoning_effort"] = new
+            lines.append(self._t("modelHub.launch.effort_succeeded", old=old, new=new, model=model))
+        try:
+            await self.controller.emit_agent_message(context, "notify", "\n".join(lines))
+        except Exception:
+            logger.warning("Could not tell Session %s it moved off a retired model", session_id, exc_info=True)
+        return succession
 
     async def _stream_terminal_error(
         self,

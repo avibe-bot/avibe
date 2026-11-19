@@ -2526,6 +2526,44 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
         service.close()
 
 
+def test_succeed_retired_session_route_moves_only_the_values_still_stored(tmp_path: Path) -> None:
+    """A Session moving off a retired model or effort keeps a choice the user made meanwhile: the move is
+    compare-and-set on every value it replaces."""
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        with patch(
+            "storage.sessions_service.V2Config.load",
+            return_value=SimpleNamespace(runtime=SimpleNamespace(default_cwd=str(tmp_path))),
+        ):
+            session_id = service.reserve_agent_session(
+                scope_key="avibe::project::proj_abc",
+                agent_backend="vibey",
+                session_anchor="avibe_ses1",
+                agent_name="vibey",
+            )
+        from storage.workbench_sessions_service import update_session
+
+        with service.engine.begin() as conn:
+            update_session(conn, session_id, model="gpt-6-astra", reasoning_effort="ultra")
+
+        # The user already switched the effort: nothing moves, not even the model.
+        assert not service.succeed_retired_session_route(
+            session_id, model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("max", "high")
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert (row["model"], row["reasoning_effort"]) == ("gpt-6-astra", "ultra")
+
+        assert service.succeed_retired_session_route(
+            session_id, model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("ultra", "max")
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert (row["model"], row["reasoning_effort"]) == ("gpt-6.2-astra", "max")
+        # Moved once: the same move finds nothing left to replace.
+        assert not service.succeed_retired_session_route(session_id, model=("gpt-6-astra", "gpt-6.2-astra"))
+    finally:
+        service.close()
+
+
 def test_materialize_agent_session_route_pins_resolved_agent_identity(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
