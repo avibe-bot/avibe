@@ -746,7 +746,8 @@ describe('useHoldToTalk', () => {
     pipeline.startMs = 5_000;
     const el = await mount();
     await holdFor(el);
-    expect(hold.phase).toBe('listening');
+    // Waiting for the microphone: still a press, no speak-now cue yet.
+    expect(hold.phase).toBe('pressing');
     fireEvent.pointerCancel(el, { pointerId: 1 });
     expect(pipeline.takes[0].abort).toHaveBeenCalled();
     expect(hold.outcome).toBe('asking');
