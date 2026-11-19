@@ -5272,7 +5272,8 @@ extension NavigationPolicyTests {
                 ) as? String
                 XCTAssertEqual(moved, "/setup", row.name)
             }
-            guard await reach("live load", { documents.count == 1 }) else { continue }
+            // The live document, and then the capture's own fetch of it.
+            guard await reach("live load", { documents.count >= 1 }) else { continue }
             XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
             XCTAssertEqual(uncovered, row.uncovers ? 1 : 0, row.name)
             XCTAssertEqual(connected, 0, row.name)
