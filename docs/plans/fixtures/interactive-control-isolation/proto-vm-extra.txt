@@ -1,0 +1,3 @@
+{"attempts": 80, "body_bytes": 2536901, "checksums": "8f2a437e0eb3400520896cb5c3f7d877e4cf54d98cbe1e72c8e846178a618331", "control_rtt_ms": {"max": 18.8, "p50": 0.1, "p99": 13.7}, "control_samples": 2287, "controller_peak_rss_native_units": 30080, "elapsed_s": 28.13, "heartbeat_gap_ms": {"max": 56.8, "p50": 11.5, "p99": 24.0}, "mode": "paced", "platform": "linux", "python": "3.12.3", "requests": 2560, "sessions": 32}
+{"sibling_attempts": 80, "completed_after_kill": 70, "worker_exit": [-15, 0], "max_sibling_gap_ms": 24.4}
+800407552
