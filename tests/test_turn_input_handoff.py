@@ -325,14 +325,18 @@ def _fail_through_manager(manager, turn_id, kind):
     )
 
 
-def test_a_parked_input_tells_its_sender_once_not_to_resend(managers):
+@pytest.mark.parametrize("sender", [
+    {"callback_session_id": "ses_sender", "source_kind": "agent", "source_actor": "ses_sender"},
+    # A report that arrived as another Session's callback names its sender in metadata only.
+    {"source_kind": "callback", "source_actor": "parent", "metadata_json": '{"source_session_id": "ses_sender"}'},
+])
+def test_a_parked_input_tells_its_sender_once_not_to_resend(managers, sender):
     from tests.test_session_delivery_fsm import _seed_session
 
     manager, _, engine, _, _ = managers
     _seed_session(engine, "ses_sender")
     turn_id, _ = asyncio.run(_activate(manager, text="human request"))
-    _run(engine, "run-report", _merge(manager, "report"), callback_session_id="ses_sender",
-         source_kind="agent", source_actor="ses_sender")
+    _run(engine, "run-report", _merge(manager, "report"), **sender)
     notices = []
     for attempt in range(5):
         assert _fail_through_manager(manager, turn_id, "overloaded")["changed"]
@@ -341,9 +345,16 @@ def test_a_parked_input_tells_its_sender_once_not_to_resend(managers):
                 select(agent_runs.c.prompt, agent_runs.c.session_id).where(agent_runs.c.parent_run_id == "run-report")
             ).all())
             if attempt < 4:
-                if attempt == 3:  # parked: a fresh input releases it into the next Turn
+                if attempt == 3:  # parked: new work starts a Turn and releases it
                     store.enqueue_queued(conn, scope_id=None, session_id="ses_fsm", text="new work")
+                    head = store.get_delivery(conn, store.claimable_fifo_head(conn, "ses_fsm")["id"])
+                    assert head["dispatch_text"] == "new work"
+                    fresh = store.new_turn_id()
+                    store.claim_start_batch(conn, turn_id=fresh, session_id="ses_fsm", backend="codex",
+                                            deliveries=[head], dispatch_text="new work")
+                    _complete(conn, fresh)
                 payloads = [p for p in store.list_queued(conn, "ses_fsm") if p["dispatch_text"] == "report"]
+                assert store.claimable_fifo_head(conn, "ses_fsm")["id"] == payloads[0]["id"]
                 turn_id = store.new_turn_id()
                 store.claim_start_batch(conn, turn_id=turn_id, session_id="ses_fsm", backend="codex",
                                         deliveries=[store.get_delivery(conn, payloads[0]["id"])], dispatch_text="report")
@@ -370,6 +381,8 @@ def test_a_second_failure_tells_the_owner_and_the_sender_which_inputs(managers):
     with engine.begin() as conn:
         successor = _start_next(conn)
     _fail_through_manager(manager, successor, "auth")
+    with engine.begin() as conn:  # the Turn's failure output settles the Run before its callback
+        conn.execute(agent_runs.update().where(agent_runs.c.id == "run-report").values(status="failed"))
     with engine.connect() as conn:
         rows = conn.execute(select(messages.c.content_text, messages.c.metadata_json).where(messages.c.type == "notify")).all()
         carried_to = _run_delivery(conn, "run-report")
@@ -558,6 +571,7 @@ def test_a_coalesced_failure_callback_names_every_input_it_answers(managers):
         _end(conn, turn_id, kind="auth")
         successor = _start_next(conn)
         _end(conn, successor, kind="auth")
+        conn.execute(agent_runs.update().where(agent_runs.c.id.in_(["run-1", "run-2"])).values(status="failed"))
         delivery = _run_delivery(conn, "run-1")
     service = ScheduledTaskService.__new__(ScheduledTaskService)
     service.request_store = SimpleNamespace(sqlite_backend=SimpleNamespace(engine=engine))
@@ -572,3 +586,95 @@ def test_the_carry_line_keeps_an_explicit_subagent_prefix_first():
     assert store.with_turn_carry_line(rows, ["reviewer: inspect this change"]) == [
         "reviewer: The previous Turn failed before handling the messages below.\n\ninspect this change",
     ]
+
+
+def test_a_successful_output_from_an_older_turn_cannot_settle_a_carried_run(managers):
+    manager, _, engine, _, _ = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    _run(engine, "run-report", _merge(manager, "report"))
+    with engine.begin() as conn:
+        _end(conn, turn_id, stopped=True)
+    assert _record(engine, ["run-report"], turn_id, "succeeded") == {"run-report": "running"}
+
+
+def test_a_cancel_request_does_not_let_an_older_turn_settle_a_carried_run(managers):
+    manager, _, engine, _, _ = managers
+    t0, _ = asyncio.run(_activate(manager))
+    _run(engine, "run-report", _merge(manager, "report"))
+    with engine.begin() as conn:
+        _end(conn, t0, kind="network")
+        _start_next(conn)
+        conn.execute(agent_runs.update().where(agent_runs.c.id == "run-report").values(cancel_requested=1))
+    assert _record(engine, ["run-report"], t0, "failed", "network") == {"run-report": "running"}
+
+
+def test_a_live_carried_turn_still_makes_the_old_retry_busy(managers):
+    from core.backend_failure_retry import RetryUnavailable, _validate_boundary
+
+    manager, _, engine, _, _ = managers
+    t0, _ = asyncio.run(_activate(manager, text="request"))
+    _merge(manager, "report")
+    with engine.begin() as conn:
+        _end(conn, t0, kind="auth")
+        notice = messages_service.get_message(
+            conn, conn.execute(select(messages.c.id).where(messages.c.type == "notify")).scalar_one()
+        )
+        t1 = _start_next(conn)
+        with pytest.raises(RetryUnavailable):
+            _validate_boundary(conn, notice, exclude_ids=set())
+        _complete_started(conn, t1)
+        assert _validate_boundary(conn, notice, exclude_ids=set())["id"] == t0
+
+
+def test_a_fresh_runs_callback_also_names_the_inputs_whose_carry_ended(managers):
+    """Callbacks to one Session from one Turn coalesce; the winner may be a fresh Run."""
+    from core.scheduled_tasks import ScheduledTaskService
+    from types import SimpleNamespace
+
+    manager, _, engine, _, _ = managers
+    t0, _ = asyncio.run(_activate(manager))
+    carried_report = _merge(manager, "carried report")
+    _run(engine, "run-carried", carried_report, callback_session_id="ses_sender")
+    with engine.begin() as conn:
+        _end(conn, t0, kind="auth")
+        t1 = _start_next(conn)
+    manager._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
+    fresh = _merge(manager, "fresh report")
+    _run(engine, "run-fresh", fresh, callback_session_id="ses_sender")
+    with engine.begin() as conn:
+        _end(conn, t1, kind="auth")
+        conn.execute(agent_runs.update().where(agent_runs.c.id.in_(["run-carried", "run-fresh"])).values(status="failed"))
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.request_store = SimpleNamespace(sqlite_backend=SimpleNamespace(engine=engine))
+    text = service._did_not_complete_text(
+        {"delivery_id": fresh, "callback_session_id": "ses_sender", "error": "auth"}, status="failed",
+    )
+    assert carried_report in text.split("\n\n")[0]
+
+
+def test_a_url_is_not_mistaken_for_a_subagent_prefix():
+    rows = [{"metadata": {"turn_carry": "failed"}}]
+    assert store.with_turn_carry_line(rows, ["https://example.org/report"]) == [
+        "The previous Turn failed before handling the messages below.\n\nhttps://example.org/report",
+    ]
+
+
+def test_a_retry_that_reuses_a_carried_input_releases_the_parked_ones(managers):
+    manager, _, engine, _, _ = managers
+    turn_id, _ = asyncio.run(_activate(manager))
+    _merge(manager, "report")
+    with engine.begin() as conn:
+        for attempt in range(4):
+            _end(conn, turn_id, kind="network")
+            if attempt < 3:
+                turn_id = _start_next(conn)
+        parked = store.get_delivery(conn, store.list_queued(conn, "ses_fsm")[0]["id"])
+        other = store.enqueue_queued(conn, scope_id=None, session_id="ses_fsm", text="other carried")
+        other = store.cas_delivery(conn, other["id"], expected_version=other["version"], expected_states=("queued",),
+                                   values={}, history_event={"kind": store.TURN_CARRY_HISTORY_KIND, "source_turn_id": "x"})
+        other = store.cas_delivery(conn, other["id"], expected_version=other["version"], expected_states=("queued",),
+                                   values={}, history_event={"kind": store.FAILURE_RETRY_HISTORY_KIND, "notice_id": "n",
+                                                             "source_turn_id": "x", "delivery_ids": [other["id"]]})
+        store.claim_start_batch(conn, turn_id=store.new_turn_id(), session_id="ses_fsm", backend="codex",
+                                deliveries=[other], dispatch_text="other carried")
+        assert not store.waiting_for_external_input(store.get_delivery(conn, parked["id"]))

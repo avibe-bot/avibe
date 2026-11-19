@@ -8377,23 +8377,27 @@ class ScheduledTaskService:
 
         with store.engine.connect() as conn:
             delivery = delivery_store.get_delivery(conn, delivery_id)
-            if delivery is None or delivery_store.turn_carry(delivery) is None or not delivery.get("turn_id"):
+            turn_id = str((delivery or {}).get("turn_id") or "")
+            if not turn_id:
                 return None
             # Callbacks to one Session from one terminal Turn coalesce into one
-            # (``_enqueue_callback_run``): name every input of that Turn it was
-            # waiting on, not just this Run's (#4010 review).
+            # (``_enqueue_callback_run``), whichever Run wins: name every input of
+            # that Turn whose carry ended there, for this recipient (#4010 review).
             recipient = str(run.get("callback_session_id") or "").strip()
             inputs: list[str] = []
-            for row in delivery_store.deliveries_for_turn(conn, str(delivery["turn_id"])):
+            for row in delivery_store.deliveries_for_turn(conn, turn_id):
                 carry = delivery_store.turn_carry(row)
-                if carry is None or row.get("turn_id") != delivery["turn_id"]:
+                if carry is None or row.get("turn_id") != turn_id:
                     continue
-                if str(row["id"]) != delivery_id:
-                    sibling = conn.execute(
-                        select(agent_runs_table.c.callback_session_id).where(agent_runs_table.c.delivery_id == row["id"])
-                    ).scalar_one_or_none()
-                    if not recipient or str(sibling or "").strip() != recipient:
-                        continue
+                owner = conn.execute(
+                    select(agent_runs_table.c.callback_session_id, agent_runs_table.c.status)
+                    .where(agent_runs_table.c.delivery_id == row["id"])
+                ).first()
+                # Its Run still points here: it was not carried on again.
+                if owner is None or str(owner.status) != "failed":
+                    continue
+                if str(row["id"]) != delivery_id and (not recipient or str(owner.callback_session_id or "").strip() != recipient):
+                    continue
                 inputs.append(str(carry.get("original_id") or row["id"]))
         return ", ".join(dict.fromkeys(inputs)) or None
 

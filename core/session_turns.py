@@ -3645,6 +3645,7 @@ class SessionTurnManager:
                             target_turn_id or None,
                             "receipt_cas_lost",
                         )
+                    self._flush_late_carry_notices(conn, session_id)
                     saved = accepted_rows[0]
                     materialized = True
                     target_turn = delivery_store.get_turn(conn, target_turn_id)
@@ -5203,6 +5204,12 @@ class SessionTurnManager:
             logger.exception("durable terminal completion deferred for Turn=%s", pending.turn_id)
             return {"defer_queue_resume": True}
 
+    def _flush_late_carry_notices(self, conn: Connection, session_id: str) -> None:
+        """What a receipt accepted after its Turn ended owes, in the same transaction."""
+        owed = conn.info.pop(delivery_store.LATE_CARRY_NOTICES_KEY, None) or {}
+        for turn_id, notices in owed.items():
+            self._record_turn_carry_notices(conn, session_id, turn_id, notices)
+
     def _record_turn_carry_notices(
         self, conn: Connection, session_id: str, turn_id: str, settled: dict[str, Any],
     ) -> None:
@@ -5232,10 +5239,25 @@ class SessionTurnManager:
 
         now = datetime.now(timezone.utc).isoformat()
         for run in conn.execute(
-            select(agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json)
-            .where(agent_runs.c.id.in_(parked))
+            select(
+                agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json,
+                agent_runs.c.source_kind, agent_runs.c.source_actor,
+            ).where(agent_runs.c.id.in_(parked))
         ).mappings().all():
-            sender = str(run["callback_session_id"] or "").strip()
+            try:
+                run_metadata = json.loads(run["metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                run_metadata = {}
+            if not isinstance(run_metadata, dict):
+                run_metadata = {}
+            # Who waits on it: the failure-callback target, else the Session that
+            # sent it (an Agent Run's actor, a callback's source Session).
+            sender = str(
+                run["callback_session_id"]
+                or (run["source_actor"] if run["source_kind"] == "agent" else "")
+                or (run_metadata.get("source_session_id") if run["source_kind"] == "callback" else "")
+                or ""
+            ).strip()
             if not sender or sender == session_id:
                 continue
             try:
@@ -5245,10 +5267,6 @@ class SessionTurnManager:
             metadata = {"source_session_id": session_id, "parked_run_id": str(run["id"])}
             from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
 
-            try:
-                run_metadata = json.loads(run["metadata_json"] or "{}")
-            except (TypeError, ValueError):
-                run_metadata = {}
             # The notice runs with the authority the sender's Run was given, no more.
             authority = run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY) if isinstance(run_metadata, dict) else None
             if isinstance(authority, dict):

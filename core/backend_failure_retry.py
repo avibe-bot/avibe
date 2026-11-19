@@ -10,7 +10,7 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, not_, or_, select, update
 from sqlalchemy.engine import Connection
 
 from core.input_admission import InputEnvelope, admit_input
@@ -21,11 +21,6 @@ from storage.message_deliveries import (
     failure_retry_binding as retry_binding,
 )
 from storage.models import agent_sessions, message_deliveries, messages, session_turns
-
-#: A bound on the read, far above what can run between a failure and its Retry: carried
-#: inputs run at most three Turns in a row before they park, in at most a few segments.
-_CARRY_TURN_LOOKBACK = 64
-
 
 class RetryUnavailable(ValueError):
     def __init__(self, code: str) -> None:
@@ -134,22 +129,27 @@ def _validate_boundary(
         or (turn["backend"] != session["agent_backend"] and turn["terminal_outcome"] != "not_written")
     ):
         raise RetryUnavailable("retry_not_available")
-    latest = None
-    for candidate in conn.execute(
+    # Stale once anything newer than this failure ran or runs: a live Turn, or a
+    # Turn that took an input no failed or stopped Turn carried. Turns of carried
+    # inputs only, already ended, do not count: a press must still work after them.
+    source_created = conn.execute(
+        select(session_turns.c.created_at).where(session_turns.c.id == turn_id)
+    ).scalar_one_or_none()
+    newer = (
         select(session_turns.c.id)
-        .where(session_turns.c.session_id == session_id)
-        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
-        .limit(_CARRY_TURN_LOOKBACK)
-    ).scalars().all():
-        latest = candidate
-        # A Turn that only ran inputs another Turn's end carried (``turn_carry``)
-        # does not make this failure stale: a press that releases parked inputs
-        # lets them run first, in their own Turn, and must still count.
-        # Every input it took, steers included: a person's message merged into it
-        # is newer work than this failure (#4010 review).
-        taken = [row for row in deliveries.deliveries_for_turn(conn, candidate) if row.get("turn_id") == candidate]
-        if candidate == turn_id or not taken or not all(deliveries.turn_carry(row) for row in taken):
-            break
+        .select_from(session_turns.join(message_deliveries, message_deliveries.c.turn_id == session_turns.c.id))
+        .where(session_turns.c.session_id == session_id, session_turns.c.id != turn_id)
+        .where(or_(
+            session_turns.c.created_at > source_created,
+            and_(session_turns.c.created_at == source_created, session_turns.c.id > turn_id),
+        ))
+        .where(or_(
+            session_turns.c.state != "terminal",
+            not_(message_deliveries.c.delivery_history_json.like('%"kind":"turn_carry"%')),
+        ))
+        .limit(1)
+    )
+    latest = turn_id if source_created is not None and conn.execute(newer).first() is None else None
     if latest != turn_id:
         raise RetryUnavailable("retry_stale")
     if turn["state"] != "terminal":

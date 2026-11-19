@@ -6689,11 +6689,11 @@ class SQLiteBackgroundTaskStore:
             }
             turn_id = str(terminal_provenance.get("turn_id") or "").strip()
             settles_failed_now = normalize_run_status(terminal_status) == "failed"
-            if turn_id and normalize_run_status(terminal_status) in {"failed", "canceled"}:
+            if turn_id and terminal_status:
                 from storage.message_deliveries import runs_carried_from_turn
 
-                # A Stop or failure that carried an input on does not end its Run,
-                # including a steer accepted after the Turn ended (#4010 review).
+                # A Turn whose end carried an input on does not end its Run, whatever
+                # its output says, a steer accepted after it ended included (#4010 review).
                 carried = runs_carried_from_turn(
                     conn, turn_id, rows.values(), terminal_provenance, predict=settles_failed_now,
                 )
