@@ -2463,16 +2463,19 @@ final class DirectPathAppTests: XCTestCase {
                 """)
         }
         enum Stored { case none, unmarked, marked }
-        enum Shown { case covered, uncovered }
+        enum Shown { case live, covered, uncovered }
         enum Then { case declines, keepsShell, nothing }
         let rows: [(name: String, stored: Stored, shown: Shown?, then: Then, stays: Bool)] = [
             ("no cached page", .none, nil, .nothing, false),
             ("an unmarked cached page", .unmarked, .covered, .nothing, false),
+            ("a live load started before the answer", .marked, .live, .nothing, false),
             ("a marked page that does not declare a replayed shell", .marked, .covered, .declines, false),
             ("answered before the uncover", .marked, .covered, .keepsShell, true),
             ("answered after the uncover", .marked, .uncovered, .nothing, true),
         ]
         for row in rows {
+            // A manual clock: no time-out can end an open the rule failed to.
+            let timing = RuntimeOpenManualTiming()
             let first = try await makeApp(directTransport: nil)
             let selected = try await select("instance-1", in: first)
             let defaults = try XCTUnwrap(appDefaults)
@@ -2495,6 +2498,7 @@ final class DirectPathAppTests: XCTestCase {
             let next = try await makeApp(
                 directTransport: nil,
                 sessionResponse: { session.response },
+                runtimeOpenTiming: timing,
                 reusingDefaults: defaults
             )
             defer { next.runtimePageCache.removeAll() }
@@ -2506,6 +2510,13 @@ final class DirectPathAppTests: XCTestCase {
                 release.signal()
                 return XCTFail("The instance did not open first: \(row.name)")
             }
+            if row.shown == .live {
+                next.handleRuntimeNavigation(
+                    RuntimeNavigationEvent(stage: .started, destination: .instance),
+                    attemptID: attempt.id,
+                    runtime: opened
+                )
+            }
             let cached = { (stage: RuntimeNavigationStage) in
                 next.handleRuntimeNavigation(
                     RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
@@ -2513,7 +2524,7 @@ final class DirectPathAppTests: XCTestCase {
                     runtime: opened
                 )
             }
-            if row.shown != nil {
+            if row.shown == .covered || row.shown == .uncovered {
                 for stage in [RuntimeNavigationStage.started, .committed, .finished] {
                     cached(stage)
                 }
@@ -2546,19 +2557,17 @@ final class DirectPathAppTests: XCTestCase {
                 break
             }
             guard row.stays else {
-                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
-                    next.route == .onboarding(.instances)
-                }
+                // At once, and because the rule ended it (no time-out).
+                XCTAssertEqual(next.route, .onboarding(.instances), row.name)
+                XCTAssertEqual(next.lastRuntimeOpenTermination?.reason, .cancelled, row.name)
                 continue
             }
             XCTAssertEqual(next.route, .browser(opened), row.name)
             XCTAssertEqual(next.runtimeOpenAttempt?.phase, .cachedOffline, row.name)
-            XCTAssertEqual(
-                BrowserOverlay(attemptPhase: .cachedOffline, directFault: false),
-                .cachedOffline
-            )
-            // No timeout ends it.
-            XCTAssertNil(try XCTUnwrap(next.runtimeOpenAttempt).deadline, row.name)
+            // No time-out ends it.
+            timing.advance(by: .seconds(120))
+            XCTAssertEqual(next.route, .browser(opened), row.name)
+            XCTAssertEqual(next.runtimeOpenAttempt?.phase, .cachedOffline, row.name)
 
             if row.shown == .uncovered {
                 // Recovery: the instance answers the page; the open is done,
@@ -2621,7 +2630,8 @@ final class DirectPathAppTests: XCTestCase {
             }
             next.runtimeCachedPageKeepsShell(attemptID: online.id, runtime: opened)
             XCTAssertEqual(next.runtimeOpenAttempt?.phase, .showingCachedLive, row.name)
-            XCTAssertNotNil(try XCTUnwrap(next.runtimeOpenAttempt).deadline, row.name)
+            timing.advance(by: .seconds(60))
+            XCTAssertEqual(next.runtimeOpenAttempt?.phase, .cachedUnreachable, row.name)
         }
     }
 
@@ -2682,8 +2692,12 @@ final class DirectPathAppTests: XCTestCase {
                     return XCTFail("A launch did not open an offline instance with its cached page")
                 }
                 XCTAssertFalse(opened.instance.available)
-                XCTAssertEqual(third.runtimeOpenAttempt?.listedOffline, true)
+                // avibe.bot confirms it offline: the open waits for its page.
                 release.signal()
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    third.runtimeOpenAttempt?.listedOffline == true
+                }
+                XCTAssertEqual(third.route, .browser(opened))
             } else {
                 XCTAssertFalse(third.route.runtime != nil, "opened without a cached page")
                 release.signal()

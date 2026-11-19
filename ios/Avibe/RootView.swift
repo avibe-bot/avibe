@@ -687,25 +687,30 @@ struct CachedRuntimeOpenProgress: View {
 struct RuntimeCachedPageOfflineBanner: View {
     let retry: () -> Void
     let switchInstance: () -> Void
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Text("runtime.open.offline.body")
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 4 : 2)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button("runtime.open.offline.retry", action: retry)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(AvibeStyle.accent)
-                .fixedSize()
-            Button("runtime.open.offline.switch", action: switchInstance)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(AvibeStyle.accent)
-                .fixedSize()
+        // One line when the copy and both buttons fit; otherwise the copy
+        // in full, and the buttons below it on the right (stacked when even
+        // they do not fit side by side, at accessibility sizes).
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 10) {
+                message
+                buttons
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                message
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        Spacer(minLength: 0)
+                        buttons
+                    }
+                    VStack(alignment: .trailing, spacing: 8) {
+                        buttons
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -724,6 +729,23 @@ struct RuntimeCachedPageOfflineBanner: View {
                 NSLocalizedString("runtime.open.offline.body", comment: "")
             ).post()
         }
+    }
+
+    private var message: some View {
+        Text("runtime.open.offline.body")
+            .font(.subheadline.weight(.semibold))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var buttons: some View {
+        Button("runtime.open.offline.retry", action: retry)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(AvibeStyle.accent)
+        Button("runtime.open.offline.switch", action: switchInstance)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(AvibeStyle.accent)
     }
 }
 

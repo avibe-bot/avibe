@@ -1340,6 +1340,9 @@ final class AppModel: ObservableObject {
             ) {
                 sessionCoordinator.deactivateAccountSurface()
                 openRuntime(runtime)
+                // Opened although listed offline (only for its cached page):
+                // the confirmed listing applies as after an open-first.
+                settleListedAvailability(runtime, checked: state)
             } else {
                 route = .onboarding(.instances)
             }
@@ -1374,35 +1377,14 @@ final class AppModel: ObservableObject {
     /// store and origin, within a day), shown uncovered with the offline
     /// row; an open that may still show one waits for it; anything else
     /// ends at the instance list, as before.
-    /// Listed online again (after Retry), an open waiting on, or showing,
-    /// the offline outcome goes on as any open of a cached page.
     private func settleListedAvailability(
         _ runtime: MobileRuntimeContext,
         checked: MobileSessionState?
     ) {
         guard
             case .signedIn(let snapshot, _) = checked,
-            let listed = snapshot.instances.first(where: { $0.id == runtime.instance.id })
-        else {
-            return
-        }
-        if listed.available {
-            guard
-                var attempt = runtimeOpenAttempt,
-                attempt.runtime == runtime,
-                attempt.listedOffline
-            else {
-                return
-            }
-            attempt.listedOffline = false
-            runtimeOpenAttempt = attempt
-            if attempt.phase == .cachedOffline {
-                restartRuntimeOpenBudget(attemptID: attempt.id)
-                setRuntimeOpenPhase(.showingCachedLive, attemptID: attempt.id)
-            }
-            return
-        }
-        guard
+            let listed = snapshot.instances.first(where: { $0.id == runtime.instance.id }),
+            !listed.available,
             var attempt = runtimeOpenAttempt,
             attempt.runtime == runtime,
             // Not the route: an open preparing its direct route shows the
@@ -1413,19 +1395,24 @@ final class AppModel: ObservableObject {
         else {
             return
         }
-        switch attempt.phase {
-        case .showingCachedLive, .cachedUnreachable:
+        if attempt.phase == .showingCachedLive || attempt.phase == .cachedUnreachable {
             showCachedPageOffline(attemptID: attempt.id)
-        case .preparingRoute, .connecting, .showingCached
-            where !attempt.startedLive && hasUsableCachedPage(for: runtime):
+        } else if isWaitingForCachedPage(attempt), hasUsableCachedPage(for: runtime) {
             // The cached page is still to show, or to say whether it keeps
             // its shell: the open waits for that (`handleRuntimeNavigation`,
             // `runtimeCachedPageKeepsShell`).
             attempt.listedOffline = true
             runtimeOpenAttempt = attempt
-        default:
+        } else {
             cancelRuntimeOpen(attemptID: attempt.id)
         }
+    }
+
+    /// Nothing live has started, and no cached page has shown or declined:
+    /// the open may still show one.
+    private func isWaitingForCachedPage(_ attempt: RuntimeOpenAttempt) -> Bool {
+        !attempt.startedLive
+            && [.preparingRoute, .connecting, .showingCached].contains(attempt.phase)
     }
 
     /// Whether the cache holds a page for `runtime` that may be shown
@@ -1632,10 +1619,7 @@ final class AppModel: ObservableObject {
             automaticStartedAt: now,
             deadline: now + runtimeOpenBudget,
             canResumeAutomaticBudget: true,
-            isTakingLong: false,
-            // Opened although listed offline: only for its cached page
-            // (`restorableRuntime(from:opensOffline:)`).
-            listedOffline: !runtime.instance.available
+            isTakingLong: false
         )
         runtimeOpenAttempt = attempt
         scheduleRuntimeOpenTimers(attemptID: attempt.id)
@@ -1955,8 +1939,7 @@ final class AppModel: ObservableObject {
             || attempt.phase == .cachedUnreachable
             || attempt.phase == .cachedOffline
         if !event.fromCache, event.stage == .started {
-            if attempt.listedOffline,
-               [.preparingRoute, .connecting, .showingCached].contains(attempt.phase) {
+            if attempt.listedOffline, isWaitingForCachedPage(attempt) {
                 // Listed offline, and the instance loads live instead of a
                 // cached page that keeps its shell (none, it declined, or
                 // it fell to setup): as without a cache.
@@ -2067,6 +2050,12 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
+            if attempt.listedOffline {
+                // Waiting for a cached page while listed offline: none can
+                // show now, so as without one.
+                cancelRuntimeOpen(attemptID: attemptID)
+                return
+            }
             finishRuntimeOpenAutomaticBudget(
                 phase: .failed,
                 attemptID: attemptID
@@ -2092,6 +2081,10 @@ final class AppModel: ObservableObject {
             // A live navigation from a page shown uncovered failed before
             // replacing it: the page stays.
             guard attempt.phase != .failed, !showsCachedPageUncovered else {
+                return
+            }
+            if attempt.listedOffline, attempt.phase != .documentLoaded {
+                cancelRuntimeOpen(attemptID: attemptID)
                 return
             }
             if attempt.phase == .documentLoaded {
