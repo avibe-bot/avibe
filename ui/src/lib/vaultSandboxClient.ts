@@ -379,7 +379,8 @@ const SRI_LOADED_RESOURCE_PATHS: ReadonlySet<string> = new Set(
  * hashing every byte against the pin. Hash the manifest bytes too; redirects,
  * CORS/parse/identity failures are never an invitation to trust a mutable endpoint
  * or downgrade protected custody. A download that fails or runs out of time is
- * `sandbox_unreachable` (retryable), never reported as a mismatch. */
+ * `sandbox_unreachable`, or `sandbox_offline` when the browser reports the device offline (both
+ * retryable), never reported as a mismatch. */
 export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise<void> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
