@@ -418,3 +418,11 @@ def test_the_stopped_runner_does_not_cancel_the_runs_it_carried_on(managers):
     finally:
         background.close()
     assert settled == [["run-work"]]
+
+
+def test_a_carried_input_does_not_merge_with_a_fresh_one_from_the_same_sender():
+    """The line says these arrived during the stopped Turn; a later report did not."""
+    base = {"platform": "avibe", "author": "harness", "type": "harness", "source": "harness", "author_name": "agent_run"}
+    carried = {**base, "metadata": {"turn_carry": "stopped"}}
+    assert store.message_merge_identity(carried) != store.message_merge_identity({**base, "metadata": {}})
+    assert store.message_merge_identity(carried) == store.message_merge_identity({**base, "metadata": {"turn_carry": "stopped"}})

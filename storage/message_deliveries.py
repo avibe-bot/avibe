@@ -683,6 +683,8 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
         # Dictated and typed inputs never share a batch: the merged Message keeps the first
         # one's metadata, and the Agent reads one input mode per input (``is_voice_input``).
         is_voice_input(metadata),
+        # Nor do carried and fresh inputs: the carry line covers exactly what was carried.
+        str(metadata.get("turn_carry") or "") if isinstance(metadata.get("turn_carry"), str) else "",
     )
 
 

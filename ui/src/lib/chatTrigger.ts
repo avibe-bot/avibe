@@ -100,8 +100,6 @@ export function vaultCallbackStatusKey(message: TriggerFields): TranslationKey |
   return VAULT_CALLBACK_STATUS_KEYS[`${metadata.requestType}:${metadata.status}`] ?? null;
 }
 
-// ``agentFallback`` is the localized word for "agent" (chat.source.agentFallback);
-// passed in so this stays a pure, translation-free mapper.
 const TURN_CARRY_KEYS: Record<string, TranslationKey> = {
   stopped: 'chat.source.turnCarry.stopped',
   failed: 'chat.source.turnCarry.failed',
@@ -117,6 +115,8 @@ export function turnCarryLabelKey(message: { metadata?: Record<string, unknown> 
     : null;
 }
 
+// ``agentFallback`` is the localized word for "agent" (chat.source.agentFallback);
+// passed in so this stays a pure, translation-free mapper.
 export function chatTriggerLink(message: TriggerFields, agentFallback: string): ChatTriggerLink | null {
   if (message.source !== 'harness') return null;
 
