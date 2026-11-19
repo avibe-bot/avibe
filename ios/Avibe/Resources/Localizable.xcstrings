@@ -500,6 +500,24 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时连不上 %@" } }
       }
     },
+    "runtime.open.offline.body" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Instance offline. Showing your last content." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "实例不在线，显示的是上次的内容" } }
+      }
+    },
+    "runtime.open.offline.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "runtime.open.offline.switch" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Switch instance" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "切换实例" } }
+      }
+    },
     "runtime.open.phase.authenticating.named" : {
       "localizations" : {
         "en" : {

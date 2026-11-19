@@ -483,6 +483,16 @@ private struct BrowserScreen: View {
                         .id(attempt.id)
                     }
 
+                    if overlay == .cachedOffline, let attempt {
+                        // avibe.bot lists the instance offline; its last
+                        // page stays, and connects by itself when it is back.
+                        RuntimeCachedPageOfflineBanner(
+                            retry: { appModel.retryOfflineCachedPage() },
+                            switchInstance: { appModel.showInstances() }
+                        )
+                        .id(attempt.id)
+                    }
+
                     if overlay == .loadFailure {
                         ContentUnavailableView {
                             Label(
@@ -668,6 +678,52 @@ struct CachedRuntimeOpenProgress: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: attempt.isTakingLong)
+    }
+}
+
+/// avibe.bot lists the instance offline while its last page is shown: one
+/// row where the long-wait row sits, in its style, with Retry and Switch
+/// instance. It stays until the instance answers (the open is then done).
+struct RuntimeCachedPageOfflineBanner: View {
+    let retry: () -> Void
+    let switchInstance: () -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text("runtime.open.offline.body")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 4 : 2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("runtime.open.offline.retry", action: retry)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(AvibeStyle.accent)
+                .fixedSize()
+            Button("runtime.open.offline.switch", action: switchInstance)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(AvibeStyle.accent)
+                .fixedSize()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("runtime-cached-offline")
+        .onAppear {
+            AccessibilityNotification.Announcement(
+                NSLocalizedString("runtime.open.offline.body", comment: "")
+            ).post()
+        }
     }
 }
 
@@ -982,7 +1038,7 @@ private func runtimeOpenPhaseText(
         key = "runtime.open.phase.authenticating.named"
     case .loadingPage:
         key = "runtime.open.phase.loading_page.named"
-    case .showingCached, .showingCachedLive, .cachedUnreachable:
+    case .showingCached, .showingCachedLive, .cachedUnreachable, .cachedOffline:
         key = "runtime.open.phase.connecting.named"
     case .awaitingUser:
         key = "runtime.open.awaiting_user.title.named"
@@ -1008,7 +1064,7 @@ private func runtimeOpenPhaseLabel(_ phase: RuntimeOpenPhase) -> String {
         key = "runtime.open.stage.authenticating"
     case .loadingPage:
         key = "runtime.open.stage.loading_page"
-    case .showingCached, .showingCachedLive, .cachedUnreachable:
+    case .showingCached, .showingCachedLive, .cachedUnreachable, .cachedOffline:
         key = "runtime.open.stage.connecting"
     case .awaitingUser:
         key = "runtime.open.stage.awaiting_user"
@@ -1048,6 +1104,7 @@ enum BrowserOverlay: Equatable {
     case loading
     case showingCachedLive
     case cachedUnreachable
+    case cachedOffline
     case awaitingUser
     case loadFailure
     case directFault
@@ -1067,6 +1124,8 @@ enum BrowserOverlay: Equatable {
             self = .showingCachedLive
         case .cachedUnreachable:
             self = .cachedUnreachable
+        case .cachedOffline:
+            self = .cachedOffline
         case .awaitingUser:
             self = .awaitingUser
         case .failed:

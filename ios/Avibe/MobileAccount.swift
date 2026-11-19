@@ -1815,7 +1815,10 @@ final class MobileSessionCoordinator {
     /// answer decides as for any refresh. Nil when there is nothing to open
     /// first (no selection, another account's session, or a selected
     /// instance that cannot open), or once this process holds a session.
-    func restoreLastGoodSession() -> MobileSessionState? {
+    /// `opensOffline` as in `restorableRuntime(from:opensOffline:)`.
+    func restoreLastGoodSession(
+        opensOffline: (MobileRuntimeContext) -> Bool = { _ in false }
+    ) -> MobileSessionState? {
         guard
             phase == .ready,
             snapshot == nil,
@@ -1842,7 +1845,7 @@ final class MobileSessionCoordinator {
         let restored = state(for: stored)
         // Only a selection that opens is worth opening first; otherwise this
         // launch checks the session before anything, as without one.
-        guard restorableRuntime(from: restored) != nil else {
+        guard restorableRuntime(from: restored, opensOffline: opensOffline) != nil else {
             snapshot = nil
             return nil
         }
@@ -1873,8 +1876,12 @@ final class MobileSessionCoordinator {
         defaults.set(data, forKey: Self.lastGoodSessionKey)
     }
 
+    /// The selected instance to open from `state`: listed available, or
+    /// listed offline when `opensOffline` says the App can still show it
+    /// (its last page, from the App's cache).
     func restorableRuntime(
-        from state: MobileSessionState
+        from state: MobileSessionState,
+        opensOffline: (MobileRuntimeContext) -> Bool = { _ in false }
     ) -> MobileRuntimeContext? {
         guard
             phase == .ready,
@@ -1883,7 +1890,6 @@ final class MobileSessionCoordinator {
             let selectedInstanceID,
             let selected = snapshot.instances.first(where: {
                 $0.id == selectedInstanceID
-                    && $0.available
                     && WebOrigin(url: $0.url) != nil
             })
         else {
@@ -1895,7 +1901,10 @@ final class MobileSessionCoordinator {
             generation: generation,
             websiteDataStoreIdentifier: websiteDataStore.identifier
         )
-        return isCurrentRuntime(runtime) ? runtime : nil
+        guard isCurrentRuntime(runtime), selected.available || opensOffline(runtime) else {
+            return nil
+        }
+        return runtime
     }
 
     func isCurrentRuntime(_ runtime: MobileRuntimeContext) -> Bool {

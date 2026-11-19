@@ -1128,13 +1128,16 @@ final class WebViewController: UIViewController {
                 self.cachedPageUncovered = true
                 self.cachedPageKeepsShell()
             }
+            // Bounded: 3 s, then doubling up to 30 s between asks.
+            var interval: Duration = .seconds(3)
             while !Task.isCancelled {
                 let answer = await self?.askCachedPageInstance(keepsShell: keepsShell)
                 guard let answer, !Task.isCancelled else { return }
                 if answer == 0, keepsShell {
                     // Not reachable yet: the page stays; ask again. Nothing
                     // is held across the wait.
-                    do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                    do { try await Task.sleep(for: interval) } catch { return }
+                    interval = min(interval * 2, .seconds(30))
                     continue
                 }
                 guard let self, self.cachedNavigation != nil else { return }
@@ -2732,8 +2735,15 @@ extension WebViewController: WKNavigationDelegate {
             }
             primaryWebContentTerminationHandled = true
             primaryNavigationInProgress = false
-            // The cached page went with its process.
+            // The cached page went with its process. One shown uncovered
+            // (its shell waits out an unreachable instance) is shown again,
+            // so a process ended in the background brings back the same
+            // page, not a live load of an instance that may be offline.
+            let showsCachedPageAgain = cachedPageUncovered
             leaveCachedPage()
+            if showsCachedPageAgain {
+                hasUsedCache = false
+            }
             discardAllPopups(animated: false)
             reportPrimaryNavigationSettlement(
                 RuntimeNavigationEvent(

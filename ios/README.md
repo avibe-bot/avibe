@@ -57,6 +57,12 @@ and Web resizing cannot both run.
   `data-avibe-replayed-shell="1"` on its root element (it replays one, and is not
   at its setup fallback), the App uncovers it with the progress line while
   connecting. Any other cached page stays covered until the instance answers.
+  When avibe.bot lists the instance offline, only such an uncovered page keeps
+  the open (whether the answer comes before or after it is uncovered): it stays
+  with the row 「实例不在线，显示的是上次的内容」 / "Instance offline. Showing your
+  last content." offering Retry and Switch instance, and connects by itself
+  when the instance answers it. A launch opens an instance listed offline only
+  for such a page; otherwise the App shows the instance list, as before.
 - Google, GitHub and Apple authorization are intercepted with an alert whose
   「去登录」 / "Go to sign-in" reads the session: the instance page asked
   avibe.bot to sign in, so the App's avibe.bot session has lapsed, and the
