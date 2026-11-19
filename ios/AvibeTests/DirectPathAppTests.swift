@@ -5173,6 +5173,14 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
+        // The transport's selection follows the browser asynchronously: wait
+        // for it rather than for a fixed time a loaded simulator may exceed.
+        try await eventually {
+            transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+        }
+        // The replaced open must never surface later either. A "never" cannot
+        // be awaited, so a short window gives a late browser or selection for
+        // instance-1 the chance to appear before the final check.
         try await Task.sleep(for: .milliseconds(300))
 
         XCTAssertEqual(browsers, ["instance-2"])
