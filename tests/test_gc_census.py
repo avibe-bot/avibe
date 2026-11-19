@@ -4,8 +4,11 @@ from core import gc_census
 
 
 def test_opt_in_is_explicit(monkeypatch):
-    monkeypatch.delenv("AVIBE_DIAGNOSTIC_GC_CENSUS", raising=False)
-    assert gc_census.configured(SimpleNamespace()) is None
+    from core.loop_watchdog import EventLoopWatchdog
+
+    monkeypatch.setenv("AVIBE_DIAGNOSTIC_GC_CENSUS", "1")
+    watchdog = EventLoopWatchdog(SimpleNamespace())
+    assert watchdog._census is None and watchdog.arm_warm_census(SimpleNamespace())
 
 
 def test_count_only_private_types_shared_and_unattributed(monkeypatch):

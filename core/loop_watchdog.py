@@ -72,7 +72,6 @@ class EventLoopWatchdog:
         *,
         stall_seconds: float = STALL_SECONDS,
         poll_seconds: float = POLL_SECONDS,
-        census: Callable[[], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._loop = loop
@@ -92,9 +91,9 @@ class EventLoopWatchdog:
         self._gc_started_at: float | None = None
         self._gc_reports: deque[tuple[float, float, int, int, int, int, int, int, tuple[int, ...]]] = deque(maxlen=_MAX_GC_REPORTS)
         self._gc_callback = self._observe_gc
-        self._census = census
+        self._census: Callable[[], None] | None = None
         self._census_due = False
-        self._census_claimed = census is not None
+        self._census_claimed = False
         self._watchdog_birth = self._answered_at
         self._warm_since = None
         self._trigger_candidates = -1
@@ -121,7 +120,7 @@ class EventLoopWatchdog:
             if started_at is None:
                 return
             if (self._census is not None and info['generation'] == 2 and _active_requests == 0
-                    and (self._warm_since is None or started_at >= self._warm_since)):
+                    and self._warm_since is not None and started_at >= self._warm_since):
                 self._trigger_candidates = info.get('candidates', -1)
                 self._trigger_uptime = self._monotonic() - self._watchdog_birth
                 self._census_due = True  # scalar signal only; no object enumeration in a collector callback
