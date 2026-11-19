@@ -1953,6 +1953,7 @@ def _expire_pending_request_rows(
     *,
     reason: str = "request-expired",
     delivery_extra: dict[str, Any] | None = None,
+    callback_status: str = "pending",
 ) -> int:
     now = _now()
     expired = 0
@@ -1960,7 +1961,7 @@ def _expire_pending_request_rows(
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
-            .values(status="expired", decided_at=now, callback_status="pending")
+            .values(status="expired", decided_at=now, callback_status=callback_status)
         )
         if result.rowcount != 1:
             continue
@@ -1976,6 +1977,67 @@ def _expire_pending_request_rows(
         )
         expired += 1
     return expired
+
+
+class RequestNotYoursError(VaultServiceError):
+    """An Agent asked to withdraw a Vault request another Session made."""
+
+
+def withdraw_request(conn: Connection, request_id: str, *, session_id: str | None) -> dict[str, Any]:
+    """End a pending Vault request of the calling Session, as if it had expired.
+
+    A request belongs to the Session it records (``requester.session_id``): the one it was made in,
+    or the one a ``--session-id`` made it for, whose conversation shows its card and gets its outcome.
+    Any kind (provide, access, sign, delete) and either tier: only the request row ends, so its card
+    leaves the pending list and a later approval is refused as on an expired request. A request that
+    is not pending (being signed, decided or expired) stays as it is. The Session withdrew it itself,
+    so it is not woken with the outcome. Only the row's small columns are read, never its payload.
+    """
+    # The Session the request belongs to, in ``_request_session_id``'s order and typing, read as
+    # typed scalars (``_summary_request_session_id``) so a signing payload is never loaded.
+    session_columns = []
+    for label, column, path in (
+        ("requester", vault_requests.c.requester, "$.session_id"),
+        ("delivery", vault_requests.c.delivery, "$.session_id"),
+        ("card", vault_requests.c.delivery, "$.card.session_id"),
+    ):
+        safe = _safe_request_json(column)
+        session_columns += [
+            func.json_type(safe, path).label(f"_session_{label}_type"),
+            func.json_quote(func.json_extract(safe, path)).label(f"_session_{label}_json"),
+        ]
+    row = conn.execute(
+        select(
+            vault_requests.c.id, vault_requests.c.status, vault_requests.c.expires_at,
+            vault_requests.c.request_type, vault_requests.c.secret_name, *session_columns,
+        ).where(vault_requests.c.id == request_id)
+    ).mappings().first()
+    if row is None:
+        raise RequestNotFoundError(request_id)
+    row = dict(row)
+    owner = _summary_request_session_id(row)
+    if not session_id or not owner or owner != str(session_id):
+        raise RequestNotYoursError(request_id)
+    if row.get("status") != "pending":
+        raise InvalidRequestError(f"request is {row.get('status')}, not pending")
+    outcome = {
+        "id": row["id"], "status": "expired",
+        "request_type": row.get("request_type"), "secret_name": row.get("secret_name"),
+    }
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        # Already past its deadline: it expires as any overdue request does, and that is committed;
+        # the caller reports it was not withdrawn.
+        if _expire_pending_request_rows(conn, [row]) != 1:
+            raise InvalidRequestError("request is not pending")
+        return {**outcome, "withdrawn": False}
+    withdrawn = _expire_pending_request_rows(
+        conn, [row], reason="request-withdrawn", delivery_extra={"session_id": str(session_id)},
+        callback_status="skipped",
+    )
+    if withdrawn != 1:
+        raise InvalidRequestError("request is not pending")
+    return {**outcome, "withdrawn": True}
 
 
 def _expire_request_if_due(conn: Connection, row: dict[str, Any]) -> tuple[dict[str, Any], bool]:

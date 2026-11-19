@@ -12008,6 +12008,54 @@ def cmd_vault_await(args):
         return 1
 
 
+def cmd_vault_withdraw(args):
+    """Withdraw a pending Vault request of this Session, made by mistake.
+
+    The caller is the Session running the command, never a ``--session-id`` it names, and it
+    withdraws only requests recorded under it; the user can still deny any card.
+    """
+    from vibe import api
+    from storage import vault_service
+
+    help_command = "vibe vault withdraw --help"
+    request_id = str(getattr(args, "request_id", "") or "").strip()
+    session_id = _default_session_id_from_caller(caller_context_from_env())
+    try:
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            request = vault_service.withdraw_request(conn, request_id, session_id=session_id)
+        api._publish_vaults_updated(
+            scope="request", request_id=request_id, request_status=request.get("status"),
+            secret_name=request.get("secret_name"),
+        )
+        if not request.get("withdrawn"):
+            raise vault_service.InvalidRequestError("request has expired")
+        _print_cli_payload("vault_request_withdrawn", request_id=request_id, status=request.get("status"))
+        return 0
+    except vault_service.RequestNotFoundError:
+        _print_task_error(TaskCliError(f"request '{request_id}' not found", code="request_not_found", help_command=help_command))
+        return 1
+    except vault_service.RequestNotYoursError:
+        _print_task_error(TaskCliError(
+            f"request '{request_id}' does not belong to this Session",
+            code="request_not_yours",
+            hint="A Session withdraws only its own requests; the user can deny any request on its card.",
+            help_command=help_command,
+        ))
+        return 1
+    except vault_service.InvalidRequestError as exc:
+        _print_task_error(TaskCliError(
+            f"request '{request_id}' cannot be withdrawn: {exc}",
+            code="request_not_pending",
+            help_command=help_command,
+            details={"request_id": request_id},
+        ))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def _vault_request_followup_message(args, request_id: str, *, resolved_verb: str) -> str:
     """Agent-facing follow-up for an access/sign request.
 
@@ -20362,6 +20410,20 @@ def build_parser():
     vault_await_parser.add_argument("--wait", type=float, default=0, metavar="SECONDS", help="Poll for a decision up to SECONDS")
     _add_json_noop(vault_await_parser)
 
+    vault_withdraw_parser = vault_subparsers.add_parser(
+        "withdraw",
+        help="Withdraw a pending Vault request of this Session, made by mistake",
+        description=(
+            "End a still-pending request of this Session (provide, access, sign or delete), in either tier. "
+            "Its card leaves the pending list and a later approval is refused. A request being signed, "
+            "decided or expired is left as it is."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault withdraw --help",
+    )
+    vault_withdraw_parser.add_argument("request_id", help="Vault request ID")
+    _add_json_noop(vault_withdraw_parser)
+
     vault_export_parser = vault_subparsers.add_parser(
         "export",
         help="(advanced) Emit 'export NAME=...' lines for eval — prefer 'run'",
@@ -21559,6 +21621,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("vault", "access"): "editor",
     ("vault", "sign"): "editor",
     ("vault", "await"): "editor",
+    ("vault", "withdraw"): "editor",
     ("vault", "request"): "editor",
     ("vault", "inject"): "editor",
     ("vault", "export"): "editor",
@@ -21972,6 +22035,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_vault_sign(args))
         if args.vault_command == "await":
             sys.exit(cmd_vault_await(args))
+        if args.vault_command == "withdraw":
+            sys.exit(cmd_vault_withdraw(args))
         if args.vault_command == "request":
             sys.exit(cmd_vault_request(args))
         if args.vault_command == "export":

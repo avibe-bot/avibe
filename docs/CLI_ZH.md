@@ -521,7 +521,8 @@ Use a durable nonce for delayed submission.”
 不带此字段。
 
 等待现有回调，读取其签名结果并提交保存的原始字节；使用 `--no-callback` 时自行
-读取 `vibe vault await REQUEST_ID`。不要重跑待批准的 `sign`，也不要在旧批准下
+读取 `vibe vault await REQUEST_ID`。误发的请求在仍待批准时可用
+`vibe vault withdraw REQUEST_ID` 撤回（只限它所属的会话，也就是显示这张卡片的会话；卡片随之消失，之后的批准会被拒绝）。不要重跑待批准的 `sign`，也不要在旧批准下
 刷新区块哈希。同一 nonce 账户的交易应串行处理，提交前重新检查 nonce 和授权地址。
 广播结果不明时，先核对签名状态与 nonce 状态，再决定是否准备另一笔付款。执行失败
 也可能消耗 nonce 和费用。消息字节改变后必须重新批准；持久 nonce 不延长 Avibe
