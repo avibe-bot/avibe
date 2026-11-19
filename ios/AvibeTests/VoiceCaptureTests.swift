@@ -448,6 +448,112 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(denied.activations, 0)
     }
 
+    // MARK: Session first, then candidates (the owner's 33.1 press, 11-19:
+    // 激活音频会话 refused with 560557684, cannotInterruptOthers)
+
+    /// The audio session goes active before the Live Activity (while the
+    /// intent's launch still counts as in front), the recorder after it.
+    func testTheSessionIsActivatedBeforeTheLiveActivityAndTheRecorderAfter() async {
+        let world = World()
+        let outcome = await world.controller().toggle()
+        XCTAssertEqual(outcome, .started)
+        XCTAssertEqual(world.events, ["prepare1", "activity", "record"])
+    }
+
+    func testARefusedExclusiveSessionFallsBackToTheMixableOne() async {
+        let world = World()
+        world.prepareErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 560557684)]
+        let controller = world.controller()
+        let outcome = await controller.toggle()
+        XCTAssertEqual(outcome, .started)
+        XCTAssertEqual(world.events, ["prepare1", "prepare2", "activity", "record"])
+        XCTAssertTrue(world.failureNotices.isEmpty, "it records: no failure notice")
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        let capture = world.instance.captures.first ?? nil
+        XCTAssertEqual(capture, "2 (1 sessionActivate 560557684)", "the message says which try worked")
+    }
+
+    func testARecorderRefusedOnTheFirstSessionTriesTheSecondUnderTheSameIsland() async {
+        let world = World()
+        world.startErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
+        let outcome = await world.controller().toggle()
+        XCTAssertEqual(outcome, .started)
+        XCTAssertEqual(world.events, ["prepare1", "activity", "record", "prepare2", "record"])
+        XCTAssertEqual(world.activities.count, 1)
+        XCTAssertGreaterThan(world.audio?.stops ?? 0, 0, "the first session is released before the second")
+    }
+
+    /// Every try refused: one notice names each, in order.
+    func testWhenEveryCandidateIsRefusedOneNoticeNamesEach() async {
+        let world = World()
+        world.prepareErrors = [.exclusiveRecord: NSError(domain: NSOSStatusErrorDomain, code: 560557684)]
+        world.startErrors = [.mixablePlayAndRecord: NSError(domain: NSOSStatusErrorDomain, code: 561145187)]
+        let outcome = await world.controller().toggle()
+        XCTAssertEqual(outcome, .stopped)
+        XCTAssertEqual(world.failureNotices.count, 1)
+        let attempts = world.failureNotices.first?.attempts ?? []
+        XCTAssertEqual(attempts.map(\.candidate), [1, 2])
+        XCTAssertEqual(attempts.map(\.step), [.sessionActivate, .recorder])
+        XCTAssertEqual(attempts.map(\.error), ["560557684", "561145187"])
+        XCTAssertEqual(world.activities.first?.ended?.attempts, attempts)
+        XCTAssertNil(world.audio?.prepared, "no session left active")
+    }
+
+    func testRefusedBeforeAnyIslandStillLeavesOneNotice() async {
+        let world = World()
+        let refused = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        world.prepareErrors = [.exclusiveRecord: refused, .mixablePlayAndRecord: refused]
+        _ = await world.controller().toggle()
+        XCTAssertEqual(world.events, ["prepare1", "prepare2", "activity"], "only the short notice island")
+        XCTAssertEqual(world.failureNotices.count, 1)
+        XCTAssertEqual(world.failureNotices.first?.attempts?.count, 2)
+    }
+
+    /// The real recorder sets each candidate's category on the session.
+    func testTheRecorderPreparesEachCandidatesSession() throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "take-\(UUID().uuidString).m4a")
+        let session = FakeSession()
+        let recorder = VoiceCaptureRecorder(url: url, session: session, permission: { true }, makeEngine: { _ in FakeEngine() })
+        try recorder.prepare(.mixablePlayAndRecord)
+        XCTAssertTrue(session.active)
+        try recorder.start()
+        XCTAssertEqual(session.configured, [.mixablePlayAndRecord], "start keeps the prepared session")
+        recorder.stop()
+        XCTAssertFalse(session.active)
+
+        let refused = FakeSession()
+        refused.activateError = NSError(domain: NSOSStatusErrorDomain, code: 560557684)
+        let other = VoiceCaptureRecorder(url: url, session: refused, permission: { true }, makeEngine: { _ in FakeEngine() })
+        XCTAssertThrowsError(try other.prepare(.exclusiveRecord)) {
+            XCTAssertEqual(($0 as? VoiceCaptureRecorder.StartFailure)?.step, .sessionActivate)
+        }
+        XCTAssertFalse(refused.active)
+    }
+
+    func testTheAttemptsLineReadsPlainly() throws {
+        func format(_ language: String, _ key: String) throws -> String {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+            return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: "VoiceCapture")
+        }
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.attempt %lld %@ %@"), "方案%1$lld %2$@ 错误 %3$@")
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.attempt.separator"), "；")
+        XCTAssertEqual(try format("en", "voiceCapture.attempt %lld %@ %@"), "try %1$lld: %2$@, error %3$@")
+        let attempts = [
+            VoiceCaptureAttributes.Attempt(candidate: 1, step: .sessionActivate, error: "560557684"),
+            VoiceCaptureAttributes.Attempt(candidate: 2, step: .recorder, error: "561145187"),
+        ]
+        var state = VoiceCaptureAttributes.ContentState(phase: .failed, startedAt: Date(), reason: .recordingFailed)
+        state.attempts = attempts
+        let body = VoiceCaptureFailureNotification.content(for: state).body
+        let language = Bundle.main.preferredLocalizations.first ?? "en"
+        if language.hasPrefix("zh") {
+            XCTAssertEqual(body, "录音没能开始（方案1 激活音频会话 错误 560557684；方案2 启动录音器 错误 561145187）。")
+        } else {
+            XCTAssertEqual(body, "Recording couldn't start (try 1: activating the audio session, error 560557684; try 2: starting the recorder, error 561145187).")
+        }
+    }
+
     // MARK: Where a start stopped (the owner's one-press diagnosis, 11-19)
 
     /// The real recorder names the step that refused and keeps the system's
@@ -640,6 +746,10 @@ private final class World {
     var activityRequestFails = false
     /// What the recorder throws when it starts (the background refusal).
     var recorderStartError: Error?
+    var prepareErrors: [VoiceCaptureSessionCandidate: Error] = [:]
+    var startErrors: [VoiceCaptureSessionCandidate: Error] = [:]
+    /// The order things happened in: prepareN, activity, record.
+    var events: [String] = []
     var takeFileFails = false
     var leftoverAudioDiscarded = 0
     var now: () -> Date = Date.init
@@ -654,6 +764,9 @@ private final class World {
                 if self.takeFileFails { throw CocoaError(.fileWriteNoPermission) }
                 let audio = FakeAudio()
                 audio.startError = self.recorderStartError
+                audio.prepareErrors = self.prepareErrors
+                audio.startErrors = self.startErrors
+                audio.log = { self.events.append($0) }
                 self.audio = audio
                 return audio
             },
@@ -666,6 +779,7 @@ private final class World {
                 }
                 let activity = FakeActivity(state)
                 self.activities.append(activity)
+                self.events.append("activity")
                 return activity
             },
             existingActivities: { (self.leftovers + self.activities).filter { $0.ended == nil } },
@@ -689,6 +803,7 @@ private final class FakeInstance: VoiceCaptureInstance {
     var holdStatus = false
     var transcribed = 0
     var sent: [String] = []
+    var captures: [String?] = []
     var closed = false
     private var held: CheckedContinuation<Void, Never>?
 
@@ -720,7 +835,8 @@ private final class FakeInstance: VoiceCaptureInstance {
         return "/api/sessions/ses_main"
     }
 
-    func postMessage(_ text: String, to sessionPath: String) async throws {
+    func postMessage(_ text: String, to sessionPath: String, capture: String?) async throws {
+        captures.append(capture)
         posts += 1
         if postFailures > 0 {
             postFailures -= 1
@@ -746,11 +862,26 @@ private final class FakeAudio: VoiceCaptureAudio {
     }
 
     var startError: Error?
+    /// What each session candidate's activation throws, and per-candidate
+    /// recorder errors (the background refusals the owner's press showed).
+    var prepareErrors: [VoiceCaptureSessionCandidate: Error] = [:]
+    var startErrors: [VoiceCaptureSessionCandidate: Error] = [:]
+    var prepared: VoiceCaptureSessionCandidate?
+    var log: (String) -> Void = { _ in }
+
+    func prepare(_ candidate: VoiceCaptureSessionCandidate) throws {
+        log("prepare\(candidate.rawValue)")
+        if let error = prepareErrors[candidate] { throw error }
+        prepared = candidate
+    }
+
     func start() throws {
+        log("record")
         if let startError { throw startError }
+        if let prepared, let error = startErrors[prepared] { throw error }
         started = true
     }
-    func stop() -> TimeInterval { stops += 1; return duration }
+    func stop() -> TimeInterval { stops += 1; prepared = nil; return duration }
     func discard() { discarded = true }
 }
 
@@ -785,7 +916,9 @@ private final class FakeSession: VoiceCaptureAudioSession {
     var deactivations = 0
     var configureError: Error?
     var activateError: Error?
-    func configureForRecording() throws {
+    var configured: [VoiceCaptureSessionCandidate] = []
+    func configure(for candidate: VoiceCaptureSessionCandidate) throws {
+        configured.append(candidate)
         if let configureError { throw configureError }
     }
     func activate() throws {
