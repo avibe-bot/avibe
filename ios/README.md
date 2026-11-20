@@ -361,8 +361,13 @@ the main Bot acts on the user's computer.
   and 30 s, then every minute, and when Avibe comes to the front; each send
   asks again first), its island saying 还没发出去，连上你的 Avibe 后会自动发送。
   with Retry and Discard. After ten minutes it gets one last send and then
-  goes with its island. A take that could not be turned into text waits for
-  Retry instead. A new press still replaces a kept take (the ordered
+  goes with its island. While it is sent again it stays kept, so a new
+  press, Discard or Retry is never swallowed; one send of a take runs at a
+  time, and a take given up meanwhile asks nothing more and makes no
+  request (only a POST already on its way cannot be taken back, and
+  `capture_earlier` then says `sentAfterEnd`). A take that could not be
+  turned into text, or one this process cannot send until Avibe is opened
+  again (`direct_fault`), waits for Retry instead. A new press still replaces a kept take (the ordered
   outbox that ends this is a separate change). No
   sign-in, no microphone permission, or Live Activities turned off bring the
   App to the main Bot's conversation before anything records. A later

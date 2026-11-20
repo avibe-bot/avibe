@@ -35,6 +35,25 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         [.background, .foreground(.dynamic)]
     }
 
+    /// What an alert says when a start in front ended without recording:
+    /// the start's failure if it is new since `before` (read before the
+    /// press's first start), else the notice shown since, else nothing.
+    static func stoppedAlert(
+        before: VoiceCaptureAttributes.ContentState?,
+        after: VoiceCaptureAttributes.ContentState?,
+        noticesBefore: Int,
+        noticesAfter: Int,
+        lastNoticeReason: VoiceCaptureAttributes.Reason?
+    ) -> (reason: VoiceCaptureAttributes.Reason, failure: VoiceCaptureAttributes.ContentState?)? {
+        if let after, after != before {
+            return (.recordingFailed, after)
+        }
+        if noticesAfter != noticesBefore, let lastNoticeReason {
+            return (lastNoticeReason, nil)
+        }
+        return nil
+    }
+
     @MainActor
     func perform() async throws -> some IntentResult {
         let controller = VoiceCaptureController.shared
@@ -94,10 +113,12 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         case .stopped:
             // In front the island is not drawn, so say a failure here.
             guard inFront else { break }
-            if let failure = controller.lastFailure, failure != before {
-                VoiceCaptureAlert.present(.recordingFailed, failure: failure)
-            } else if controller.noticeCount != notices, let reason = controller.lastNoticeReason {
-                VoiceCaptureAlert.present(reason)
+            if let alert = Self.stoppedAlert(
+                before: before, after: controller.lastFailure,
+                noticesBefore: notices, noticesAfter: controller.noticeCount,
+                lastNoticeReason: controller.lastNoticeReason
+            ) {
+                VoiceCaptureAlert.present(alert.reason, failure: alert.failure)
             }
         }
         return .result()

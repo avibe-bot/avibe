@@ -625,7 +625,7 @@ final class VoiceCaptureController {
         }
         // Already being sent again by itself: one send at a time, so the
         // message cannot be posted twice.
-        guard automaticSend != take.id else { return }
+        guard sending != take.id else { return }
         take.retries += 1
         await deliver(take)
     }
@@ -1158,16 +1158,29 @@ final class VoiceCaptureController {
         }
     }
 
+    /// The take a send is under way for. One send per take at a time, set
+    /// before a send's first wait and cleared when it returns: whichever of
+    /// the stop, Retry, the retry schedule and Avibe coming to the front
+    /// gets there first sends, and the others do nothing, so a message is
+    /// never posted twice.
+    private var sending: UUID?
+    /// Takes that are over (`end`): a send still under way for one asks and
+    /// posts nothing more, and its client loads nothing more.
+    private var ended: Set<UUID> = []
+
     /// A send the user asked for (the stop, the island's Send or Retry):
     /// the island says it is sending, and nothing else starts meanwhile.
     private func deliver(_ initial: Take) async {
         var take = initial
+        guard sending != take.id else { return }
+        sending = take.id
         let deliverGeneration = generation
         retryTask?.cancel()
         retryTask = nil
         state = .sending(take)
         await take.activity.update(content(for: take, phase: .sending))
         let result = await send(&take)
+        if sending == take.id { sending = nil }
         guard generation == deliverGeneration else { return }
         await settle(result, of: take)
     }
@@ -1175,25 +1188,27 @@ final class VoiceCaptureController {
     /// A kept take sent again by itself. It stays kept while this runs (its
     /// island goes on saying it will send), so a new press or the island's
     /// Discard is never swallowed: either ends the take, and this send then
-    /// asks and posts nothing more.
-    private func sendKeptAgain(_ kept: Take) async {
-        var take = kept
+    /// asks nothing more and makes no request. Only a POST already on its
+    /// way cannot be taken back; the next message's `capture_earlier` then
+    /// says it went (`sentAfterEnd`) or may have (`unknownAfterEnd`).
+    private func sendKeptAgain(id: UUID) async {
+        guard sending != id, case .failed(var take) = state, take.id == id, !ended.contains(id) else { return }
+        sending = id
         take.retries += 1
         state = .failed(take)
-        automaticSend = take.id
         let result = await send(&take)
-        if automaticSend == take.id { automaticSend = nil }
-        guard case .failed(let current) = state, current.id == take.id, !ended.contains(take.id) else {
+        if sending == id { sending = nil }
+        guard case .failed(let current) = state, current.id == id, !ended.contains(id) else {
+            switch result {
+            case .sent: note("sentAfterEnd", for: take)
+            case .unknown: note("unknownAfterEnd", for: take)
+            default: break
+            }
             return
         }
         retryTask = nil
         await settle(result, of: take)
     }
-
-    /// The kept take an automatic send is under way for.
-    private var automaticSend: UUID?
-    /// Takes that are over (`end`): a send still under way for one stops.
-    private var ended: Set<UUID> = []
 
     /// What a finished send means for its take and island.
     private func settle(_ result: Sent, of take: Take) async {
@@ -1300,12 +1315,12 @@ final class VoiceCaptureController {
         retryTask = Task { [weak self] in
             await sleep(delay)
             guard !Task.isCancelled, let self, case .failed(let current) = self.state, current.id == id,
-                  self.automaticSend != id
+                  self.sending != id
             else {
                 return
             }
             if automatic {
-                await self.sendKeptAgain(current)
+                await self.sendKeptAgain(id: id)
             } else {
                 self.retryTask = nil
                 await self.drop(current)
@@ -1316,11 +1331,10 @@ final class VoiceCaptureController {
     /// Avibe came to the front: a take kept for an unreachable instance is
     /// sent again now, unless a send of it is already under way.
     func retryKeptNow() async {
-        guard case .failed(let take) = state, take.keptAutomatic, automaticSend != take.id else { return }
+        guard case .failed(let take) = state, take.keptAutomatic, sending != take.id else { return }
         retryTask?.cancel()
-        let task = Task { await self.sendKeptAgain(take) }
-        retryTask = task
-        await task.value
+        retryTask = nil
+        await sendKeptAgain(id: take.id)
     }
 
     /// The take's requests that did not reach the instance, for a note.

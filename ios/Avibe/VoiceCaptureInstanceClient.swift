@@ -311,9 +311,11 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         webView.map { WebsiteDataStoreReleaseBarrier(webViews: [$0]) }
     }
 
-    /// Releases the hidden WebView. Call when a take is finished.
+    /// Releases the hidden WebView, for good: a request made after it (a
+    /// send still under way for a take that was given up) loads nothing and
+    /// fails as unreachable. Call when a take is finished.
     func close() {
-        closes += 1
+        closed = true
         webView?.stopLoading()
         webView?.navigationDelegate = nil
         webView = nil
@@ -369,8 +371,13 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         deadline: TimeInterval = 15
     ) async throws -> Response {
         let label = "\(method) \(path)"
+        guard !closed else {
+            gaveUp(label, "closed")
+            throw Failure.offline
+        }
         try await ensureReady(for: label)
         guard
+            !closed,
             let webView,
             let current = webView.url,
             WebOrigin(url: current, requiresHTTPS: false) == target.origin
@@ -463,9 +470,9 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
 
     /// The document being made ready, shared by requests that overlap it.
     private var readying: Task<Void, Error>?
-    /// How often the client was closed: a load that was waiting for the
-    /// gate when it was closed is not made.
-    private var closes = 0
+    /// Closed for good (its take is over, or the account is changing):
+    /// nothing more is loaded or run, whatever is still on its way here.
+    private var closed = false
 
     private func ensureReady(for label: String) async throws {
         if ready, webView != nil {
@@ -482,7 +489,6 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
 
     private func makeReady(for label: String) async throws {
         loadingFor = label
-        let closesAtStart = closes
         // In front, a load that failed while the listener was held (it was
         // issued, or it ended, in the return's window) is made once more
         // after the gate settles; both waits share one `gateWait`. In the
@@ -495,7 +501,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
                 limit: max(deadline - ContinuousClock.now, .zero)
             )
             let waited = Int(Date().timeIntervalSince(waitedFrom) * 1000)
-            guard closes == closesAtStart else {
+            guard !closed else {
                 gaveUp(label, "closed")
                 throw Failure.offline
             }
@@ -509,7 +515,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
                 ready = true
                 return
             } catch Failure.offline where Self.loadsAgain(
-                attempt: attempt, closed: closes != closesAtStart, active: isActive(),
+                attempt: attempt, closed: closed, active: isActive(),
                 heldBefore: settled == .held, heldAfter: gate() == .held
             ) {
                 continue

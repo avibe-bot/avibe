@@ -903,7 +903,7 @@ final class VoiceCaptureTests: XCTestCase {
             world.instance.holdStatus = true
             let retry = controller.retryTask
             await world.wakeRetry()
-            while !world.instance.isHolding { await Task.yield() }
+            await world.instance.untilHolding()
             XCTAssertEqual(controller.phase, .failed, "\(action): still kept, not busy")
             world.instance.holdStatus = false
 
@@ -931,6 +931,114 @@ final class VoiceCaptureTests: XCTestCase {
             }
             XCTAssertEqual(world.retryHolds, 0, action)
         }
+    }
+
+    /// Avibe becoming active twice in a row, or Retry right after it, sends
+    /// a kept take once.
+    func testOneSendOfATakeAtATimeHoweverItIsAsked() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        world.instance.holdStatus = true
+        let first = Task { await controller.retryKeptNow() }
+        let second = Task { await controller.retryKeptNow() }
+        await world.instance.untilHolding()
+        world.instance.holdStatus = false
+        await controller.retry()
+        await controller.retryKeptNow()
+        await second.value
+        XCTAssertEqual(world.instance.statusCalls, 3, "the start, the stop, and one send again")
+        world.instance.release()
+        await first.value
+        XCTAssertEqual(world.instance.posts, 1)
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertEqual(controller.phase, .idle)
+    }
+
+    /// A message already on its way when its take is discarded cannot be
+    /// taken back: the next message's `capture_earlier` says it went.
+    func testAPostOnItsWayWhenItsTakeIsDiscardedIsRecorded() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        world.instance.holdPost = true
+        let send = Task { await controller.retryKeptNow() }
+        await world.instance.untilHolding()
+        await controller.finish(send: false)
+        XCTAssertEqual(controller.phase, .idle)
+        world.instance.release()
+        await send.value
+        XCTAssertEqual(world.instance.posts, 1)
+        XCTAssertTrue(world.earlier.contains { $0.contains("discarded") }, "\(world.earlier)")
+        XCTAssertTrue(world.earlier.last?.contains("sentAfterEnd") == true, "\(world.earlier)")
+    }
+
+    /// A client that was closed (its take is over) loads and runs nothing
+    /// more, whatever send is still under way for it.
+    func testAClosedClientMakesNoMoreRequests() async throws {
+        let target = VoiceCaptureTarget(
+            accountID: "a", instanceID: "i",
+            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.example")),
+            storeIdentifier: UUID()
+        )
+        var asked = 0
+        let client = VoiceCaptureInstanceClient(
+            target: target, gate: { asked += 1; return .open }, isActive: { true }, sleep: { _ in }
+        )
+        client.close()
+        do {
+            try await client.postMessage("hello", to: "/api/sessions/ses_main", capture: nil)
+            XCTFail("a closed client posts nothing")
+        } catch {
+            XCTAssertEqual(error as? Failure, .offline)
+        }
+        XCTAssertEqual(asked, 0, "no document is made for it")
+        XCTAssertNil(client.releaseBarrier)
+        XCTAssertTrue(client.failures.last?.contains("POST /api/sessions/ses_main/messages closed") == true, "\(client.failures)")
+    }
+
+    /// Avibe already in front at the press: a start that fails there is
+    /// said in an alert, told by the failure being new since before the
+    /// press's first start.
+    func testAFailedStartInFrontIsSaidWhenAvibeWasAlreadyActive() async {
+        let world = World()
+        world.inFront = true
+        world.recorderStartError = VoiceCaptureRecorder.StartFailure(
+            step: .recorder, underlying: NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+        )
+        let controller = world.controller()
+        _ = await controller.beginPress()
+        let before = controller.lastFailure
+        let notices = controller.noticeCount
+        let outcome = await controller.startTake(inFront: controller.isInFront, foregroundFallback: false)
+        XCTAssertEqual(outcome, .stopped)
+        let alert = SpeakToMainBotIntent.stoppedAlert(
+            before: before, after: controller.lastFailure,
+            noticesBefore: notices, noticesAfter: controller.noticeCount,
+            lastNoticeReason: controller.lastNoticeReason
+        )
+        XCTAssertEqual(alert?.reason, .recordingFailed)
+        XCTAssertEqual(alert?.failure?.failedStep, .recorder)
+        XCTAssertEqual(alert?.failure?.errorCode, 561145187)
+        XCTAssertEqual(world.events.filter { $0.hasPrefix("prepare") }, ["prepare1"], "the exclusive session, in front")
+
+        // Read after the start (as the regression did), the failure is not new.
+        XCTAssertNil(SpeakToMainBotIntent.stoppedAlert(
+            before: controller.lastFailure, after: controller.lastFailure,
+            noticesBefore: notices, noticesAfter: controller.noticeCount, lastNoticeReason: nil
+        ))
+        // A notice said since is the alert otherwise.
+        XCTAssertEqual(SpeakToMainBotIntent.stoppedAlert(
+            before: nil, after: nil, noticesBefore: 0, noticesAfter: 1, lastNoticeReason: .voiceUnavailable
+        )?.reason, .voiceUnavailable)
     }
 
     func testTheRetryScheduleBacksOffToAMinute() {
@@ -1894,6 +2002,7 @@ private final class FakeInstance: VoiceCaptureInstance {
     var posts = 0
     var holdTranscribe = false
     var holdStatus = false
+    var holdPost = false
     var transcribed = 0
     var sent: [String] = []
     var captures: [String?] = []
@@ -1928,6 +2037,13 @@ private final class FakeInstance: VoiceCaptureInstance {
     /// Whether a request is suspended, waiting for `release()`.
     var isHolding: Bool { held != nil }
 
+    /// Waits for a request to be held (a hold that never comes fails the
+    /// test instead of hanging it).
+    func untilHolding(file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<400 where held == nil { try? await Task.sleep(for: .milliseconds(5)) }
+        if held == nil { XCTFail("no request is held", file: file, line: line) }
+    }
+
     func mainBotMessagesPath() async throws -> String {
         if pathFailures > 0 {
             pathFailures -= 1
@@ -1946,6 +2062,9 @@ private final class FakeInstance: VoiceCaptureInstance {
         captures.append(capture)
         timings.append(timing)
         earliers.append(earlier)
+        if holdPost {
+            await withCheckedContinuation { held = $0 }
+        }
         posts += 1
         if postFailures > 0 {
             postFailures -= 1
