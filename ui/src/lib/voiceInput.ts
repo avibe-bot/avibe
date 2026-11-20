@@ -10,8 +10,17 @@ export type VoiceInputDevice = {
 };
 
 export type VoiceInputStreamOptions = {
+  /** Takes the fallback notice itself; otherwise `VOICE_INPUT_FALLBACK_EVENT` announces it. */
   onDeviceFallback?: () => void;
 };
+
+/**
+ * Dispatched on `window` once per recording that falls back from an
+ * unavailable selected microphone to the system input, unless the caller took
+ * the notice (`onDeviceFallback`). One app-level listener tells the user, so
+ * every recording path keeps the setting's promise without its own UI.
+ */
+export const VOICE_INPUT_FALLBACK_EVENT = 'avibe:voice-input-fallback';
 
 const storage = (): Storage | null => {
   if (typeof window === 'undefined') return null;
@@ -80,8 +89,13 @@ export const requestVoiceInputStream = async (
     return await devices.getUserMedia({ audio: { deviceId: { exact: selection } } });
   } catch (error) {
     if (!isUnavailableSelectedDevice(error)) throw error;
-    options.onDeviceFallback?.();
-    return devices.getUserMedia({ audio: true });
+    if (options.onDeviceFallback) {
+      options.onDeviceFallback();
+      return devices.getUserMedia({ audio: true });
+    }
+    const stream = await devices.getUserMedia({ audio: true });
+    window.dispatchEvent(new Event(VOICE_INPUT_FALLBACK_EVENT));
+    return stream;
   }
 };
 

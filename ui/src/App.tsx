@@ -135,6 +135,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { Button } from './components/ui/button';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
 import { installNavigationMotion } from './lib/navigationMotion';
+import { VoiceInputFallbackNotice } from './components/voice/VoiceInputFallbackNotice';
 
 const LegacySettingsRedirectRoute = ({ to }: { to: string }) => {
   const { hash } = useLocation();
@@ -1036,6 +1037,7 @@ function App() {
       <VaultSandboxAppearanceBridge />
       <StatusProvider>
         <ToastProvider>
+          <VoiceInputFallbackNotice />
           <ApiProvider>
             <NotificationPreferencesProvider>
             <BotRosterProvider>

@@ -1890,60 +1890,11 @@ fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() 
 }
 
 #[test]
-fn closing_or_quitting_asks_app_pages_before_discarding_unsaved_state() {
+fn the_shell_asks_the_same_close_guard_key_the_app_pages_register() {
+    // The key is a cross-language byte contract; the close and quit behaviour
+    // itself is owned and tested in `app_windows`.
     let windows = shipping_source("src/app_windows.rs");
-    let shell = shipping_source("src/lib.rs");
     let guard = read_to_string(&crate_dir().join("../../ui/src/apps/nativeWindowCloseGuard.ts"));
-    let editor = read_to_string(&crate_dir().join("../../ui/src/components/workbench/AppsEditorPage.tsx"));
-
-    // The shell asks the same page-owned key the Editor registers, bounded in time.
     assert!(windows.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__"));
-    assert!(guard.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ = pendingConfirmation"));
-    assert!(editor.contains("useNativeWindowCloseGuard(dirty ?"));
-    assert!(windows.contains("tokio::time::timeout(CLOSE_GUARD_TIMEOUT, rx)"));
-    assert!(windows.contains("const CLOSE_GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);"));
-
-    // A user close is prevented, asked, and retired only after a confirmed discard.
-    let close = &windows[windows
-        .find("if let tauri::WindowEvent::CloseRequested { api, .. } = event {")
-        .expect("App window close handler")..];
-    let close = &close[..close
-        .find("if matches!(event, tauri::WindowEvent::Destroyed)")
-        .expect("close handler end")];
-    let prevented = close.find("api.prevent_close();").expect("close is prevented");
-    let asked = close
-        .find("confirm_discard(&app, &window).await")
-        .expect("close asks the page");
-    let retired = close.find("retire(&app, &label, &entry).await").expect("close retires");
-    assert!(prevented < asked && asked < retired);
-    assert!(close.contains("if discard {"), "a cancelled close keeps the window");
-    assert!(
-        !close.contains("retired.store(true"),
-        "a close must not retire the window before the user answers"
-    );
-
-    // The dialog is native, parented to the asking window, with the page's two buttons.
-    let dialog = &windows[windows.find("async fn confirm_discard(").expect("confirm_discard")..];
-    let dialog = &dialog[..dialog.find("\n}\n").expect("confirm_discard end")];
-    for required in [
-        ".parent(window)",
-        "MessageDialogButtons::OkCancelCustom(",
-        "rx.await.unwrap_or(false)",
-    ] {
-        assert!(dialog.contains(required), "close dialog is missing {required}");
-    }
-
-    // Every user quit asks the same question before any Runtime choice or exit.
-    let lifecycle = &shell[shell.find("fn request_runtime_lifecycle(").expect("lifecycle")..];
-    let lifecycle = &lifecycle[..lifecycle
-        .find("\nfn continue_runtime_lifecycle(")
-        .expect("lifecycle continuation")];
-    let asked = lifecycle
-        .find("app_windows::confirm_discard_all(&app).await")
-        .expect("quit asks App windows");
-    let continued = lifecycle
-        .find("continue_runtime_lifecycle(app, quit);")
-        .expect("quit continues");
-    assert!(asked < continued);
-    assert!(lifecycle.contains(".dialog_pending.store(false, Ordering::SeqCst)"));
+    assert!(guard.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ ="));
 }

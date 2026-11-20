@@ -1961,8 +1961,16 @@ fn build_main_window(
         .ok()?
         .incognito(disposable)
         .initialization_script(DESKTOP_SHELL_MARKER)
-        .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
-        .initialization_script(app_windows::PROTOCOL_SCRIPT)
+        .initialization_script(DESKTOP_APP_WINDOWS_MARKER);
+    // Only the native owner answers a launch request. A `devUrl` build runs
+    // without it, so the page keeps its immediate in-page fallback instead of
+    // waiting on a request nothing will answer.
+    let builder = if instance_client::enabled(app) {
+        builder.initialization_script(app_windows::PROTOCOL_SCRIPT)
+    } else {
+        builder
+    };
+    let builder = builder
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)

@@ -9,6 +9,7 @@ import {
   readVoiceInputSelection,
   requestVoiceInputStream,
   SYSTEM_DEFAULT_VOICE_INPUT,
+  VOICE_INPUT_FALLBACK_EVENT,
   writeVoiceInputSelection,
 } from './voiceInput';
 
@@ -61,6 +62,34 @@ describe('voice input selection', () => {
 
     expect(onDeviceFallback).toHaveBeenCalledOnce();
     expect(getUserMedia).toHaveBeenNthCalledWith(2, { audio: true });
+  });
+
+  it('announces a recording fallback once, only after the system input opens', async () => {
+    writeVoiceInputSelection('usb');
+    const getUserMedia = vi.mocked(navigator.mediaDevices.getUserMedia);
+    const announced = vi.fn();
+    window.addEventListener(VOICE_INPUT_FALLBACK_EVENT, announced);
+    try {
+      getUserMedia
+        .mockRejectedValueOnce(new DOMException('missing', 'OverconstrainedError'))
+        .mockResolvedValueOnce(stream());
+      await requestVoiceInputStream();
+      expect(announced).toHaveBeenCalledOnce();
+      expect(readVoiceInputSelection()).toBe('usb');
+
+      const blocked = new DOMException('blocked', 'NotAllowedError');
+      getUserMedia
+        .mockRejectedValueOnce(new DOMException('missing', 'NotFoundError'))
+        .mockRejectedValueOnce(blocked);
+      await expect(requestVoiceInputStream()).rejects.toBe(blocked);
+      getUserMedia
+        .mockRejectedValueOnce(new DOMException('missing', 'NotFoundError'))
+        .mockResolvedValueOnce(stream());
+      await requestVoiceInputStream({ onDeviceFallback: vi.fn() });
+      expect(announced).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener(VOICE_INPUT_FALLBACK_EVENT, announced);
+    }
   });
 
   it('does not replace permission or busy errors with another device', async () => {

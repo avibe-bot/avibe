@@ -801,21 +801,25 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
             // User close uses the same store-completion owner as replacement,
             // after the page agrees to lose any unsaved state.
             api.prevent_close();
-            if !cleanup_entry.retired.load(Ordering::SeqCst) && !cleanup_entry.asking.swap(true, Ordering::SeqCst) {
-                let app = cleanup_app.clone();
-                let label = cleanup_label.clone();
-                let entry = cleanup_entry.clone();
-                tauri::async_runtime::spawn(async move {
-                    let discard = match app.get_webview_window(&label) {
-                        Some(window) => confirm_discard(&app, &window).await,
-                        None => true,
-                    };
-                    if discard {
+            let app = cleanup_app.clone();
+            let label = cleanup_label.clone();
+            let entry = cleanup_entry.clone();
+            tauri::async_runtime::spawn(async move {
+                settle_close(
+                    &entry.retired,
+                    &entry.asking,
+                    async {
+                        match app.get_webview_window(&label) {
+                            Some(window) => confirm_discard(&app, &window).await,
+                            None => true,
+                        }
+                    },
+                    || async {
                         let _ = retire(&app, &label, &entry).await;
-                    }
-                    entry.asking.store(false, Ordering::SeqCst);
-                });
-            }
+                    },
+                )
+                .await;
+            });
         }
         if matches!(event, tauri::WindowEvent::Destroyed) {
             // Destruction is not evidence of cookie erasure. Keep the receipt
@@ -991,21 +995,56 @@ pub(crate) async fn confirm_discard_all(app: &AppHandle) -> bool {
         .expect("app windows")
         .windows
         .iter()
-        .map(|(label, entry)| (label.clone(), entry.clone()))
+        .filter(|(_, entry)| !entry.retired.load(Ordering::SeqCst))
+        .filter_map(|(label, entry)| Some((entry.clone(), app.get_webview_window(label)?)))
         .collect();
-    for (label, entry) in entries {
-        if entry.retired.load(Ordering::SeqCst) {
-            continue;
-        }
-        let Some(window) = app.get_webview_window(&label) else {
-            continue;
-        };
-        if entry.asking.swap(true, Ordering::SeqCst) {
+    confirm_in_turn(
+        &entries,
+        |(entry, _)| &entry.asking,
+        |(_, window)| {
+            let app = app.clone();
+            let window = window.clone();
+            async move { confirm_discard(&app, &window).await }
+        },
+    )
+    .await
+}
+/// One user close at a time. Only a confirmed discard retires the window; a
+/// cancel leaves it live, and a later close asks again.
+async fn settle_close<R>(
+    retired: &AtomicBool,
+    asking: &AtomicBool,
+    discard: impl std::future::Future<Output = bool>,
+    retire: impl FnOnce() -> R,
+) where
+    R: std::future::Future<Output = ()>,
+{
+    if retired.load(Ordering::SeqCst) || asking.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if discard.await {
+        retire().await;
+    }
+    asking.store(false, Ordering::SeqCst);
+}
+/// Asks each window in turn. A cancel, or a window still answering its own
+/// close, ends the round with every later window unasked.
+async fn confirm_in_turn<W, F>(
+    windows: &[W],
+    asking: impl Fn(&W) -> &AtomicBool,
+    mut discard: impl FnMut(&W) -> F,
+) -> bool
+where
+    F: std::future::Future<Output = bool>,
+{
+    for window in windows {
+        let gate = asking(window);
+        if gate.swap(true, Ordering::SeqCst) {
             return false;
         }
-        let discard = confirm_discard(app, &window).await;
-        entry.asking.store(false, Ordering::SeqCst);
-        if !discard {
+        let confirmed = discard(window).await;
+        gate.store(false, Ordering::SeqCst);
+        if !confirmed {
             return false;
         }
     }
@@ -1159,6 +1198,62 @@ mod tests {
             input.request_id = Some(id.into());
             assert!(input.target(true).is_err());
         }
+    }
+    #[tokio::test]
+    async fn a_cancelled_close_keeps_the_window_live_and_askable() {
+        let (retired, asking) = (AtomicBool::new(false), AtomicBool::new(false));
+        let retires = AtomicU64::new(0);
+        let retire = || async {
+            retires.fetch_add(1, Ordering::SeqCst);
+            retired.store(true, Ordering::SeqCst);
+        };
+        settle_close(&retired, &asking, async { false }, retire).await;
+        assert_eq!(retires.load(Ordering::SeqCst), 0);
+        assert!(!retired.load(Ordering::SeqCst) && !asking.load(Ordering::SeqCst));
+
+        // A close while another is still asking does not ask or retire again.
+        asking.store(true, Ordering::SeqCst);
+        settle_close(&retired, &asking, async { unreachable!("asked twice") }, retire).await;
+        assert_eq!(retires.load(Ordering::SeqCst), 0);
+        asking.store(false, Ordering::SeqCst);
+
+        settle_close(&retired, &asking, async { true }, retire).await;
+        assert_eq!(retires.load(Ordering::SeqCst), 1);
+        assert!(retired.load(Ordering::SeqCst) && !asking.load(Ordering::SeqCst));
+        settle_close(
+            &retired,
+            &asking,
+            async { unreachable!("asked after retiring") },
+            retire,
+        )
+        .await;
+        assert_eq!(retires.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn a_quit_stops_at_the_first_window_that_keeps_its_state() {
+        let windows: Vec<(bool, AtomicBool)> = [true, false, true]
+            .into_iter()
+            .map(|answer| (answer, AtomicBool::new(false)))
+            .collect();
+        let asked = Mutex::new(Vec::new());
+        let ask = |window: &(bool, AtomicBool)| {
+            asked.lock().unwrap().push(window.0);
+            let answer = window.0;
+            async move { answer }
+        };
+        assert!(!confirm_in_turn(&windows, |window| &window.1, ask).await);
+        assert_eq!(*asked.lock().unwrap(), vec![true, false]);
+        assert!(windows.iter().all(|window| !window.1.load(Ordering::SeqCst)));
+
+        // A window still answering its own close ends the quit unasked.
+        windows[0].1.store(true, Ordering::SeqCst);
+        asked.lock().unwrap().clear();
+        assert!(!confirm_in_turn(&windows, |window| &window.1, ask).await);
+        assert!(asked.lock().unwrap().is_empty());
+        windows[0].1.store(false, Ordering::SeqCst);
+
+        assert!(confirm_in_turn(&windows[..1], |window| &window.1, ask).await);
+        assert!(confirm_in_turn(&windows[..0], |window| &window.1, ask).await);
     }
     #[test]
     fn close_asks_only_for_a_showable_page_confirmation() {
