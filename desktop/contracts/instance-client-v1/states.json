@@ -51,7 +51,14 @@
     "consent": null,
     "remote_auxiliary": "local",
     "current_instance": null,
-    "instance_update": null
+    "instance_update": null,
+    "sign_in": {
+      "providers": [
+        "google",
+        "github"
+      ],
+      "passkey": false
+    }
   },
   "signed_in": {
     "version": 1,

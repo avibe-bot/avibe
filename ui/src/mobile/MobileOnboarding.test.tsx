@@ -22,7 +22,7 @@ const mobile = vi.hoisted(() => ({
   returnToInstance: vi.fn<() => Promise<null>>(),
   selectInstance: vi.fn(),
   signInWithProvider: vi.fn<(provider: string) => Promise<MobileSessionState>>(),
-  readProviders: vi.fn<() => Promise<{ providers?: ('google' | 'github' | 'apple')[] }>>(),
+  readProviders: vi.fn<() => Promise<{ providers?: ('google' | 'github' | 'apple')[]; passkey?: boolean }>>(),
   signInWithPassword: vi.fn<
     (email: string, password: string) => Promise<MobilePasswordSignInResult>
   >(),
@@ -962,11 +962,84 @@ describe('mobile onboarding', () => {
     expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
   });
 
+  // ui/design: mobile-app/passkey/passkey-link; the body is shared with the Desktop's first page.
+  it('keeps the App\'s brand row and its own subtitle on Welcome', async () => {
+    mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut' });
+    render(<MobileOnboarding />);
+    await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+    expect(screen.getByText('mobileApp.brand.agentOs')).toBeTruthy();
+    expect(screen.getByRole('heading').textContent).toBe('mobileApp.welcome.titleLine1mobileApp.welcome.titleLine2');
+    expect(document.body.textContent).toContain('mobileApp.welcome.bodyLine1mobileApp.welcome.bodyLine2');
+    expect(document.body.textContent).not.toContain('desktopClient.welcomeLine1');
+  });
+
+  describe('AUTH-SETUP-185 the ways in on Welcome follow the signed-out answer', () => {
+    const marks = {
+      google: 'mobileApp.welcome.continueWithGoogle',
+      github: 'mobileApp.welcome.continueWithGitHub',
+      apple: 'mobileApp.welcome.continueWithApple',
+    } as const;
+    const offered = () => ({
+      providers: (Object.keys(marks) as (keyof typeof marks)[])
+        .filter((provider) => screen.queryByRole('button', { name: marks[provider] })),
+      passkey: Boolean(screen.queryByRole('button', { name: 'signIn.passkey.use' })),
+    });
+
+    // A signed-out answer names native's read of avibe.bot's configuration, in time or the last
+    // one: `providers` is the mobile broker's list, `passkey` passkey sign-in's switch. Only exact
+    // names and `true` count; before any read, email alone.
+    it.each([
+      ['only Google', { providers: ['google'], passkey: false }, { providers: ['google'], passkey: false }],
+      ['Apple off', { providers: ['google', 'github'], passkey: false }, { providers: ['google', 'github'], passkey: false }],
+      ['all off', { providers: [], passkey: false }, { providers: [], passkey: false }],
+      ['not read', {}, { providers: [], passkey: false }],
+      ['passkey on', { providers: [], passkey: true }, { providers: [], passkey: true }],
+      ['malformed', { providers: ['google', 'facebook', 1], passkey: 'true' }, { providers: ['google'], passkey: false }],
+    ])('AUTH-SETUP-185 %s', async (_name, answer, expected) => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', ...answer } as MobileSessionState);
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(offered()).toEqual(expected);
+    });
+
+    it('AUTH-SETUP-185 coming back to Welcome keeps passkey with the list when the new answer names none', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github'], passkey: true });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: marks.github });
+      mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
+      fireEvent.click(screen.getByRole('button', { name: marks.github }));
+      // The account is gone by the next refresh, and native had never read the switches it names.
+      mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.instances.refresh' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(offered()).toEqual({ providers: ['google', 'github'], passkey: true });
+    });
+
+    it('AUTH-SETUP-185 a read on Welcome turns passkey sign-in on and off with the list', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: marks.google });
+      expect(offered()).toEqual({ providers: ['google'], passkey: false });
+      mobile.readProviders.mockResolvedValueOnce({ providers: ['google'], passkey: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await screen.findByRole('button', { name: 'signIn.passkey.use' });
+      // An answer without the list leaves both as they are; the next list sets both.
+      mobile.readProviders.mockResolvedValueOnce({});
+      document.dispatchEvent(new Event('visibilitychange'));
+      await waitFor(() => expect(mobile.readProviders).toHaveBeenCalledTimes(3));
+      expect(offered()).toEqual({ providers: ['google'], passkey: true });
+      mobile.readProviders.mockResolvedValueOnce({ providers: [], passkey: false });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'signIn.passkey.use' })).toBeNull());
+      expect(offered()).toEqual({ providers: [], passkey: false });
+    });
+  });
+
   describe('Google, GitHub and Apple on Welcome', () => {
     const openWelcome = async () => {
       mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github', 'apple'] });
       render(<MobileOnboarding />);
-      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithApple' });
     };
 
     const marks = () => ['Google', 'GitHub', 'Apple']

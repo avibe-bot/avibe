@@ -12,6 +12,8 @@ enum MobileAuthTransportOperation: CaseIterable, Equatable {
     case pushManagement
     case providerStart
     case providerExchange
+    /// Passkey sign-in with no email first: options, verify (then the session read), cancel.
+    case primaryPasskey
 }
 
 enum MobileAuthTransportStage: String, CaseIterable, Equatable {
@@ -28,6 +30,10 @@ enum MobileAuthTransportStage: String, CaseIterable, Equatable {
     case start
     /// `POST /api/mobile/auth/exchange`.
     case exchange
+    /// `POST /api/passkey-primary/options`.
+    case passkeyOptions = "passkey_options"
+    /// `POST /api/passkey-primary/verify`.
+    case passkeyVerify = "passkey_verify"
 }
 
 struct MobileAuthTransportDeadlines: Equatable {
@@ -187,10 +193,10 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         return try decodeDiscovery(response)
     }
 
-    func advertisedProviders() async -> [MobileSignInProvider]? {
+    func signInMethods() async -> MobileSignInMethods? {
         guard
             let response = try? await evaluateJSON(
-                Self.advertisedProvidersScript,
+                Self.signInMethodsScript,
                 operation: .fetchSession,
                 arguments: [:]
             ),
@@ -202,7 +208,10 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         let names = response["providers"] as? [Any] ?? []
         // Known names, once each, in the App's own order.
         let advertised = Set(names.compactMap { ($0 as? String).flatMap(MobileSignInProvider.init(rawValue:)) })
-        return MobileSignInProvider.allCases.filter(advertised.contains)
+        return MobileSignInMethods(
+            providers: MobileSignInProvider.allCases.filter(advertised.contains),
+            passkey: response.boolean("passkey")
+        )
     }
 
     func providerStart(
@@ -301,6 +310,56 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         return MobileProviderExchange(
             discovery: try decodeDiscovery(response),
             accountCreated: response.boolean("accountCreated")
+        )
+    }
+
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart {
+        let response = try await evaluateJSON(
+            Self.primaryPasskeyOptionsScript,
+            operation: .primaryPasskey,
+            arguments: [:]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .primaryPasskey, response: response)
+        }
+        guard
+            let flow = response.string("flow"),
+            !flow.isEmpty,
+            flow.utf8.count <= 256,
+            var options = response["options"] as? [String: Any]
+        else {
+            throw MobileAccountError.network
+        }
+        // Discoverable: the person picks the account in the system sheet.
+        options.removeValue(forKey: "allowCredentials")
+        return MobilePrimaryPasskeyStart(
+            flow: flow,
+            request: try MobilePasskeyRequest(options: options)
+        )
+    }
+
+    func primaryPasskeyVerify(
+        flow: String,
+        response assertion: [String: Any]
+    ) async throws {
+        let response = try await evaluateJSON(
+            Self.primaryPasskeyVerifyScript,
+            operation: .primaryPasskey,
+            arguments: [
+                "flow": flow,
+                "assertion": assertion,
+            ]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .primaryPasskey, response: response)
+        }
+    }
+
+    func primaryPasskeyCancel(flow: String) async {
+        _ = try? await evaluateJSON(
+            Self.primaryPasskeyCancelScript,
+            operation: .primaryPasskey,
+            arguments: ["flow": flow]
         )
     }
 
@@ -468,7 +527,8 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
              .passkeyChallenge,
              .verifySecondFactor,
              .providerStart,
-             .providerExchange:
+             .providerExchange,
+             .primaryPasskey:
             return deadlines.requestMilliseconds
         case .pushManagement:
             return deadlines.requestMilliseconds
@@ -590,6 +650,9 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                     && stage == MobileAuthTransportStage.start.rawValue
                 || operation == .providerExchange
                     && stage == MobileAuthTransportStage.exchange.rawValue
+                || operation == .primaryPasskey
+                    && (stage == MobileAuthTransportStage.passkeyOptions.rawValue
+                        || stage == MobileAuthTransportStage.passkeyVerify.rawValue)
         {
             return MobileAccountError(
                 code: "rate_limited",
@@ -691,6 +754,27 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                 return .invalidOrExpired
             case (403, MobileAccountError.providerEmailUnverified.code):
                 return .providerEmailUnverified
+            default:
+                return .network
+            }
+        case .primaryPasskey:
+            // avibe.bot's primary passkey answers (`lib/passkey-primary/http.ts`); the rest is
+            // `network`.
+            guard
+                stage == MobileAuthTransportStage.passkeyOptions.rawValue
+                    || stage == MobileAuthTransportStage.passkeyVerify.rawValue
+            else {
+                return .network
+            }
+            switch (status, response.string("code")) {
+            case (503, _):
+                // Off. A 403 is the HTTP boundary refusing the request, not an audience answer
+                // (that one is verify's `verification_failed`): it stays `network`.
+                return .providerUnavailable
+            case (400, "verification_failed"):
+                return .passkeyRejected
+            case (409, "flow_cancelled"), (410, "flow_expired"):
+                return .passkeyCancelled
             default:
                 return .network
             }
@@ -1177,8 +1261,9 @@ extension MobileAuthTransport: WKNavigationDelegate {
     )
 
     // Reads which providers the mobile broker accepts now (`mobile_providers` in the auth
-    // config), fresh each time, so a provider appears as soon as avibe.bot enables it.
-    private static let advertisedProvidersScript = boundedScript(
+    // config) and passkey sign-in's switch, fresh each time, so a way in appears as soon as
+    // avibe.bot enables it.
+    private static let signInMethodsScript = boundedScript(
         initialStage: .session,
         body: """
           const response = await boundedFetch(new URL("/api/config/auth", window.location.origin), {
@@ -1189,7 +1274,8 @@ extension MobileAuthTransport: WKNavigationDelegate {
           const providers = Array.isArray(config?.mobile_providers)
             ? config.mobile_providers.filter((name) => typeof name === "string")
             : [];
-          return JSON.stringify({ok: response.ok, stage, status: response.status, providers});
+          const passkey = config?.passkey_login_enabled === true;
+          return JSON.stringify({ok: response.ok, stage, status: response.status, providers, passkey});
         """
     )
 
@@ -1260,6 +1346,80 @@ extension MobileAuthTransport: WKNavigationDelegate {
           const discovered = JSON.parse(await discover());
           if (discovered.ok) discovered.accountCreated = accountCreated;
           return JSON.stringify(discovered);
+        """
+    )
+
+    /// The context avibe.bot's primary passkey flow binds: none of the web's continuation, next
+    /// page or language.
+    private static let primaryPasskeyContext = "{continuation: null, next: null, lang: null}"
+
+    // Passkey sign-in's start. `Accept` is exactly what the boundary requires; the binding
+    // cookie stays in this store for verify.
+    private static let primaryPasskeyOptionsScript = boundedScript(
+        initialStage: .passkeyOptions,
+        body: """
+          const response = await boundedFetch(new URL("/api/passkey-primary/options", window.location.origin), {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: {"Content-Type": "application/json", "Accept": "application/json"},
+            body: JSON.stringify({context: \(primaryPasskeyContext)})
+          });
+          const payload = await response.json().catch(() => null);
+          if (!response.ok) {
+            return JSON.stringify({
+              ok: false,
+              stage,
+              status: response.status,
+              code: typeof payload?.error === "string" ? payload.error : null,
+              retryAfter: Number(response.headers.get("retry-after")) || null
+            });
+          }
+          if (payload?.ok !== true || typeof payload.flow !== "string" || !payload.options) {
+            return failed("invalid_response", response.status, "Passkey sign-in returned an invalid response.");
+          }
+          return JSON.stringify({ok: true, stage, status: response.status, flow: payload.flow, options: payload.options});
+        """
+    )
+
+    // Passkey sign-in's verify: the assertion for this flow. A 200 sets the session cookies in
+    // this store; the session is read separately, with its own deadline.
+    private static let primaryPasskeyVerifyScript = boundedScript(
+        initialStage: .passkeyVerify,
+        body: """
+          const response = await boundedFetch(new URL("/api/passkey-primary/verify", window.location.origin), {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: {"Content-Type": "application/json", "Accept": "application/json"},
+            body: JSON.stringify({flow, response: assertion, context: \(primaryPasskeyContext)})
+          });
+          if (!response.ok) {
+            const answer = await response.json().catch(() => null);
+            return JSON.stringify({
+              ok: false,
+              stage,
+              status: response.status,
+              code: typeof answer?.error === "string" ? answer.error : null,
+              retryAfter: Number(response.headers.get("retry-after")) || null
+            });
+          }
+          return JSON.stringify({ok: true, stage, status: response.status});
+        """
+    )
+
+    // Ends an abandoned passkey sign-in flow; its answer is not read.
+    private static let primaryPasskeyCancelScript = boundedScript(
+        initialStage: .passkeyOptions,
+        body: """
+          await boundedFetch(new URL("/api/passkey-primary/cancel", window.location.origin), {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: {"Content-Type": "application/json", "Accept": "application/json"},
+            body: JSON.stringify({flow})
+          }).catch(() => null);
+          return JSON.stringify({ok: true, stage, status: 200});
         """
     )
 

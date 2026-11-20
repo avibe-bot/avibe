@@ -17,7 +17,8 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await page.addInitScript((lng) => localStorage.setItem('i18nextLng', lng), lang);
     await installBridge(page, clientState());
     await page.goto(`${ACCOUNT}?theme=${theme}`);
-    await expect(page.locator('#desktop-auth-field')).toBeVisible();
+    const start = page.getByRole('button', { name: lang === 'en' ? 'Continue with email' : '使用邮箱继续' });
+    await expect(start).toBeVisible();
     const card = page.locator('main > div');
     const initial = (await card.boundingBox())!;
     await page.screenshot({ animations: 'disabled', path: info.outputPath('login-1200.png') });
@@ -34,7 +35,7 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     expect(Math.abs(centered.top - centered.bottom)).toBeLessThanOrEqual(2);
     await page.setViewportSize({ width: 880, height: 600 });
     await page.getByRole('button', { name: lang === 'en' ? 'Continue on this Mac' : '继续使用本机' }).scrollIntoViewIfNeeded();
-    await expect(page.locator('#desktop-auth-field')).toBeInViewport();
+    await expect(start).toBeInViewport();
     await page.screenshot({ animations: 'disabled', path: info.outputPath('login-880.png') });
     expect(await page.locator('main').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
     expect(denied).toEqual([]);
@@ -53,6 +54,16 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await trigger.evaluate(async (node) => { await Promise.all(node.getAnimations().map((animation) => animation.finished)); });
     await expect(trigger).toHaveCSS('scale', '1');
     await page.mouse.up();
+    // The dot and the name are one group centred in the hover wash, with no hover tip (Max,
+    // 2026-11-20).
+    const gaps = await trigger.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const glyph = node.querySelector('[data-line-glyph]')!.getBoundingClientRect();
+      const label = node.querySelector('[data-account-label]')!.getBoundingClientRect();
+      return { left: glyph.left - box.left, right: box.right - label.right };
+    });
+    expect(Math.abs(gaps.left - gaps.right)).toBeLessThanOrEqual(1);
+    await expect(trigger).not.toHaveAttribute('title');
     await expect(trigger).not.toHaveAttribute('aria-expanded');
     await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
     await expect(page.locator('[data-instance-menu]')).toHaveCount(0);
