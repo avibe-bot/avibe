@@ -458,11 +458,12 @@ final class DirectPathControllerTests: XCTestCase {
 
     @MainActor
     func testEachEventClosesOnlyWhatItsRowSaysAndCountsOneClosurePerHost() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
 
         // Before the path is usable, a connection goes to the public origin.
         let viaPublic = LoopbackClient(port: port)
@@ -552,11 +553,12 @@ final class DirectPathControllerTests: XCTestCase {
 
     @MainActor
     func testTheBackgroundClosesDirectRelaysAndTheClosureAndStatusWaitForTheReturn() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
         harness.transport.report(.usable(generation: "g1"), for: target)
         let client = LoopbackClient(port: port)
         let stream = try await establishDirect(client, harness: harness)
@@ -609,11 +611,12 @@ final class DirectPathControllerTests: XCTestCase {
 
     @MainActor
     func testAPortSomeoneElseTookOnTheReturnMeansDirectIsNeverAuthorizedAgain() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
         harness.transport.report(.usable(generation: "g1"), for: target)
         let selections = harness.transport.selections.count
 
@@ -766,11 +769,12 @@ final class DirectPathControllerTests: XCTestCase {
 
     @MainActor
     func testANetworkChangeCancelsAnOlderDirectRaceAndTheConnectGoesToThePublicOrigin() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
         harness.transport.report(.usable(generation: "g1"), for: target)
         // The direct stream never opens, and the hedge is a minute long.
         harness.transport.streams.setMode(.hang)
@@ -797,11 +801,12 @@ final class DirectPathControllerTests: XCTestCase {
     /// completes, and are then settled once.
     @MainActor
     func testASecondReturnDuringTheReBindKeepsTheResumeHeld() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
         harness.transport.report(.usable(generation: "g1"), for: target)
         let client = LoopbackClient(port: port)
         let stream = try await establishDirect(client, harness: harness)
@@ -836,11 +841,12 @@ final class DirectPathControllerTests: XCTestCase {
     /// transport is told to stop, which closes its streams.
     @MainActor
     func testTheBackgroundCountsItsClosureBeforeTheTransportClosesItsStreams() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
         harness.transport.report(.usable(generation: "g1"), for: target)
         let client = LoopbackClient(port: port)
         let stream = try await establishDirect(client, harness: harness)
@@ -867,11 +873,12 @@ final class DirectPathControllerTests: XCTestCase {
     /// the return settles. Its own observer, when it comes, changes nothing.
     @MainActor
     func testABackgroundTheTransportReportsFirstIsTheControllersBackground() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
         harness.transport.report(.usable(generation: "g1"), for: target)
         let client = LoopbackClient(port: port)
         let stream = try await establishDirect(client, harness: harness)
@@ -997,11 +1004,12 @@ final class DirectPathControllerTests: XCTestCase {
     /// there; a host without a route stays open.
     @MainActor
     func testTheLoadGateOfARoutedRuntimeEndsAsTheFaultWhenTheReBindFails() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let runtime = try XCTUnwrap(harness.lastOpened)
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
 
         harness.enterBackground()
         try await eventually { await !LoopbackClient.canConnect(to: port) }
@@ -1230,10 +1238,11 @@ final class DirectPathControllerTests: XCTestCase {
     /// delivered, once, and the next return does not try to bind again.
     @MainActor
     func testAReBindThatFailedIsTheFaultEvenWhenItsCompletionArrivesInTheBackground() async throws {
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
-        let port = try harness.listenerPort()
+        let port = try harness.listenerPort(since: listening)
         let selections = harness.transport.selections.count
 
         harness.enterBackground()
@@ -1434,17 +1443,9 @@ private final class Harness {
         return replies
     }
 
-    /// The port the controller's listener serves on, from the controller,
-    /// not from a scan of this process's sockets, which cannot tell it from
-    /// a listener an earlier test left behind on a port the system then gave
-    /// out again.
-    func listenerPort() throws -> NWEndpoint.Port {
-        let value = try XCTUnwrap(controller.listenerPort, "No listener serves.")
-        XCTAssertTrue(
-            try listeningSockets().contains(ListeningSocket(address: "127.0.0.1", port: value)),
-            "The listener on port \(value) is not listening on 127.0.0.1."
-        )
-        return try XCTUnwrap(NWEndpoint.Port(rawValue: value))
+    func listenerPort(since baseline: Set<ListeningSocket>) throws -> NWEndpoint.Port {
+        let socket = try XCTUnwrap(try newListeners(since: baseline).first)
+        return try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
     }
 
     func origin(_ instanceID: String) -> WebOrigin {

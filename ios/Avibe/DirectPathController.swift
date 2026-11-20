@@ -362,9 +362,7 @@ final class DirectPathController {
     private var lifecycleObservers: [NSObjectProtocol] = []
 
     private var listener: DirectConnectListener?
-    /// The port the serving listener is bound to, once its first bind is
-    /// confirmed. Read by tests to reach the listener.
-    private(set) var listenerPort: UInt16?
+    private var listenerPort: UInt16?
     /// The bind of `listener` that serves: route publication names it.
     private var listenerGeneration: Int?
     private var listenerStart: Task<Bool, Never>?
