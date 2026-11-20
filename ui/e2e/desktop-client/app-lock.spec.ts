@@ -451,3 +451,73 @@ test('E22 Quit Keep and Stop choices do not request an unlock', async () => {
     expect(after.locked).toBe(true);
   }
 });
+
+test('E30 Ask Vibey defers its real queue and file reads, then delivers through WKWebView to the shipped composer receiver', async () => {
+  await peer.send('composePage');
+  type Observed = { lines: string[]; files: { name: string; text: string }[]; notices: string[]; opened: number };
+  await expect.poll(() => peer.send<Observed | null>('composeRead')).toMatchObject({ lines: [], files: [] });
+  const baseline = await peer.send<{ admitted: number }>('composeQueue');
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: null });
+  await peer.send('ask', { value: 'discarded older selection' });
+  const pending = await peer.send('ask', { value: 'The selected contract clause.' });
+  expect(pending.locked).toBe(true);
+  expect(pending.pending).toBe(true);
+  expect(pending.windows.every((window) => !window.pendingLabel.includes('contract clause'))).toBe(true);
+  expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted, queued: 0 });
+  expect((await peer.send<Observed>('composeRead')).lines).toEqual([]);
+  await peer.send('outcome', { value: 'cancelled' });
+  await peer.send('unlock');
+  expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted, queued: 0 });
+  await peer.send('outcome', { value: 'success' });
+  await peer.send('unlock');
+  await expect.poll(async () => (await peer.send<Observed>('composeRead')).lines).toEqual(['"The selected contract clause."']);
+  await expect.poll(() => peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 1, queued: 0 });
+
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: null });
+  await peer.send('askFile', { value: null });
+  await peer.send('ask', { kind: 'file' }); // deliberately absent when selected
+  expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 1, queued: 0 });
+  expect((await peer.send<Observed>('composeRead')).files).toEqual([]);
+  // If enqueue/content opened the file while locked, it would be permanently
+  // Refused(unreadable). Creating it now proves validation waits for unlock.
+  await peer.send('askFile', { value: 'File becomes available while locked.' });
+  expect((await peer.send('outcome', { value: 'success' })).locked).toBe(false);
+  await expect.poll(async () => (await peer.send<Observed>('composeRead')).files).toEqual([
+    { name: 'ask-fixture.txt', text: 'File becomes available while locked.' },
+  ]);
+  await expect.poll(() => peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 2, queued: 0 });
+  const observed = await peer.send<Observed>('composeRead');
+  expect(observed.notices).toEqual([]);
+  expect(observed.lines).toEqual(['"The selected contract clause."']);
+  expect(observed.opened).toBe(2);
+  // With App Lock Off the same consumer still inserts without any LA call.
+  await peer.send('reset');
+  await peer.send('ask', { kind: 'url', value: 'https://example.com/contract' });
+  await expect.poll(async () => (await peer.send<Observed>('composeRead')).lines).toEqual([
+    '"The selected contract clause."', 'https://example.com/contract',
+  ]);
+  expect((await peer.send('snapshot')).authCalls).toBe(0);
+  await expect.poll(() => peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 3, queued: 0 });
+
+  // Also exercise an already admitted share whose receiver was not ready when
+  // the user left. The production pump must wait while the window is locked.
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('unlock');
+  await peer.send('composeRead', { paused: true });
+  await peer.send('ask', { value: 'Queued before departure.' });
+  expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 4, queued: 1 });
+  await peer.send('leave', { time: 10 });
+  await peer.send('composeRead', { paused: false });
+  await new Promise((resolve) => setTimeout(resolve, 2200)); // one real pump retry
+  expect((await peer.send<Observed>('composeRead')).lines).toHaveLength(2);
+  expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 4, queued: 1 });
+  // A manual attempt while inactive returns through the same bounded window.
+  await peer.send('unlock');
+  await peer.send('arrive', { time: 11 });
+  await expect.poll(async () => (await peer.send<Observed>('composeRead')).lines).toEqual([
+    '"The selected contract clause."', 'https://example.com/contract', '"Queued before departure."',
+  ]);
+  await expect.poll(() => peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 4, queued: 0 });
+});

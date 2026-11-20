@@ -199,7 +199,7 @@ merely to cancel verification.
 | E22 | Quit Keep/Stop, unasked quit, termination | Cancel verification through E19 if needed; never demand unlock; discard memory-only state on exit | No unlock; an independently existing absence survives until exit |
 | E28 | Dock/tray/menu/deep link/cold launch pending link | Passive E27; if locked replace pending intent, request foreground then E07 when eligible; a request is not Arrive | Preserve A; actual OS activation determines new visit |
 | E29 | Mini/global shortcut press/release | Passive E27; locked press queues one action, release alone does not deliver; paired replay after unlock | Preserve A/P until real begin/return; Mini hidden |
-| E30 | Ask Vibey (after #4035 integration) | Passive E27 and Content defer before file read/compose enqueue; memory only until unlock | Preserve A/P; content delivery cannot unlock |
+| E30 | Ask Vibey (#4035 integrated) | Passive E27 and Content defer before file read/compose enqueue; memory only until unlock | Preserve A/P; content delivery cannot unlock |
 | E31 | Window/content/title/order/visibility/resize/key-window; Mini/Show/Vault | Passive E27 plus cover synchronization; arbitrary focus cannot run E39 | Preserve A/P; never new owner initialization |
 | E32 | Deferred action/document-load completion | Passive E27; deliver only when unlocked, otherwise retain | Preserve A/P; page load is not foreground |
 | E33 | Runtime stop/restart/rebind, instance switch, account sign-out/auth-page replacement | Passive E27; preserve owner/device policy; menu entry obeys E28 | Preserve A/P; account sign-out is not OS session loss |

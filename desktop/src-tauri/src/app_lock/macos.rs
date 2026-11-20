@@ -20,7 +20,6 @@ use tauri::{AppHandle, Manager, Webview};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EntryKind {
     Navigation,
-    #[allow(dead_code)] // Ask Vibey integrates this arm when its independent lane merges.
     Content,
     Action,
 }

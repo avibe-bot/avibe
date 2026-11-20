@@ -212,6 +212,14 @@ fn chunks(size: u64) -> usize {
 }
 
 pub fn enqueue(app: &AppHandle, input: Input) {
+    // Retain only the Services intent while locked. In particular, content()
+    // must not open selected files or publish a composer share before unlock.
+    let pending = input.clone();
+    if crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Content, move |app| {
+        enqueue(app, pending)
+    }) {
+        return;
+    }
     let Some(queue) = app.try_state::<Queue>() else {
         return;
     };
@@ -393,11 +401,17 @@ pub(crate) async fn eval(view: &Webview, script: String) -> Option<String> {
 }
 
 async fn deliver(app: &AppHandle, id: &str, content: &Content) -> Outcome {
+    if crate::app_lock::is_locked(app) {
+        return Outcome::NotReady;
+    }
     let Some((view, origin)) = current(app) else {
         return Outcome::NotReady;
     };
     let label = view.label().to_owned();
-    let live = || current(app).is_some_and(|(now, now_origin)| now.label() == label && now_origin == origin);
+    let live = || {
+        !crate::app_lock::is_locked(app)
+            && current(app).is_some_and(|(now, now_origin)| now.label() == label && now_origin == origin)
+    };
     // No receiver yet: still loading, or a Workbench without Ask Vibey.
     let token = match eval(&view, identify(&origin)).await {
         Some(token) if !token.is_empty() => token,
@@ -406,11 +420,12 @@ async fn deliver(app: &AppHandle, id: &str, content: &Content) -> Outcome {
     };
     let fence = |call: &str| fenced(&token, &origin, call);
     let id_json = serde_json::to_string(id).expect("id");
-    let (content, mut files) = reopen(content);
-    // The content goes out only while this document is still the current Runtime's.
+    // A share accepted before locking also waits. Check again after the async
+    // receiver lookup, before opening files or delivering bytes to its page.
     if !live() {
         return Outcome::NotReady;
     }
+    let (content, mut files) = reopen(content);
     let started = eval(&view, fence(&format!("c.begin({})", begin(id, &content)))).await;
     match started.as_deref() {
         Some("ok") => {}
@@ -432,7 +447,7 @@ async fn deliver(app: &AppHandle, id: &str, content: &Content) -> Outcome {
             let mut sent = 0_u64;
             for _ in 0..chunks(*size) {
                 let wanted = CHUNK.min((*size - sent) as usize);
-                if file.read_exact(&mut buffer[..wanted]).is_err() || !live() {
+                if !live() || file.read_exact(&mut buffer[..wanted]).is_err() {
                     return Outcome::Retry;
                 }
                 sent += wanted as u64;
@@ -474,6 +489,13 @@ async fn poll(view: &Webview, status: &str) -> Outcome {
 
 fn notify(app: &AppHandle, notice: crate::AskVibeyNotice) {
     crate::notifications::notice(app, "Avibe".to_owned(), crate::ask_vibey_notice(notice));
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_queue_state(app: &AppHandle) -> serde_json::Value {
+    let queue = app.state::<Queue>();
+    serde_json::json!({"queued": queue.shares.lock().expect("compose queue").len(),
+        "admitted": queue.next.load(Ordering::SeqCst)})
 }
 
 #[cfg(test)]

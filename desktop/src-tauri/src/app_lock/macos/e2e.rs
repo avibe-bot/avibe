@@ -6,6 +6,24 @@ use super::*;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
+// The receiver fixture needs the shell's presentation state, but it must never
+// resolve, probe or start an actual Runtime. These dependencies fail loudly if
+// a future test accidentally crosses that boundary.
+struct NoRuntime;
+#[async_trait::async_trait]
+impl avibe_runtime_host::HealthProbe for NoRuntime {
+    async fn presence(&self, _: &avibe_runtime_host::LoopbackOrigin, _: Option<&str>) -> avibe_runtime_host::Presence {
+        panic!("App Lock peer must not probe a Runtime")
+    }
+}
+impl avibe_runtime_host::RuntimeLauncher for NoRuntime {
+    fn resolve(
+        &self,
+    ) -> Result<std::sync::Arc<dyn avibe_runtime_host::ResolvedRuntimeLauncher>, avibe_runtime_host::LaunchError> {
+        panic!("App Lock peer must not resolve or launch a Runtime")
+    }
+}
+
 struct Peer {
     time: f64,
     active: bool,
@@ -14,6 +32,7 @@ struct Peer {
     outcome: Option<Outcome>,
     pending: Option<(u64, Authentication)>,
     calls: usize,
+    compose_loaded: bool,
     executed: Vec<String>,
     centers: [Retained<NSNotificationCenter>; 3],
     native_windows: Vec<Retained<NSWindow>>,
@@ -343,6 +362,82 @@ fn handle(app: &AppHandle, request: Value) {
                 }
                 Ok(snapshot(app))
             }
+            "composePage" => {
+                let window = app.get_window(crate::MAIN_WINDOW).unwrap();
+                if app.get_webview(crate::MAIN_WINDOW).is_none() {
+                    let directory = machine(app).path.parent().unwrap().join("webview");
+                    window
+                        .add_child(
+                            tauri::webview::WebviewBuilder::new(
+                                crate::MAIN_WINDOW,
+                                tauri::WebviewUrl::External(
+                                    "http://127.0.0.1:5267/e2e/desktop-client/app-lock-compose.html"
+                                        .parse()
+                                        .unwrap(),
+                                ),
+                            )
+                            .data_directory(directory)
+                            .incognito(true)
+                            .on_page_load(|_, payload| {
+                                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                                    PEER.with_borrow_mut(|p| p.as_mut().unwrap().compose_loaded = true);
+                                }
+                            }),
+                            tauri::LogicalPosition::new(0.0, 0.0),
+                            tauri::LogicalSize::new(500.0, 400.0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(snapshot(app))
+            }
+            "composeRead" => {
+                // Wry queues early scripts without their callback until the
+                // first document loads. Wait for the real page-load event.
+                if !PEER.with_borrow(|p| p.as_ref().unwrap().compose_loaded) {
+                    output(id.clone(), Ok(Value::Null));
+                    return Ok(Value::Null);
+                }
+                let view = app
+                    .get_webview(crate::MAIN_WINDOW)
+                    .ok_or("compose fixture not loaded")?;
+                let id = id.clone();
+                let pause = request["paused"]
+                    .as_bool()
+                    .map(|paused| format!("window.__APP_LOCK_COMPOSE_PAUSED__ = {paused};"))
+                    .unwrap_or_default();
+                view.eval_with_callback(
+                    format!("{pause} JSON.stringify(window.__APP_LOCK_COMPOSE_OBSERVED__ ?? null)"),
+                    move |raw| {
+                        let parsed = serde_json::from_str::<String>(&raw)
+                            .ok()
+                            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                            .unwrap_or(Value::Null);
+                        output(id.clone(), Ok(parsed));
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(Value::Null)
+            }
+            "composeQueue" => Ok(crate::compose::e2e_queue_state(app)),
+            "ask" => {
+                use avibe_runtime_host::selection::Input;
+                let input = match request["kind"].as_str() {
+                    Some("file") => Input::Files(vec![machine(app).path.parent().unwrap().join("ask-fixture.txt")]),
+                    Some("url") => Input::Url(request["value"].as_str().ok_or("URL required")?.into()),
+                    _ => Input::Text(request["value"].as_str().ok_or("text required")?.into()),
+                };
+                crate::compose::enqueue(app, input);
+                Ok(snapshot(app))
+            }
+            "askFile" => {
+                let path = machine(app).path.parent().unwrap().join("ask-fixture.txt");
+                if let Some(text) = request["value"].as_str() {
+                    std::fs::write(path, text).map_err(|e| e.to_string())?;
+                } else if path.exists() {
+                    std::fs::remove_file(path).map_err(|e| e.to_string())?;
+                }
+                Ok(snapshot(app))
+            }
             "source" => {
                 match request["value"].as_str().ok_or("source required")? {
                     "dock" => crate::focus_or_restore_main_window(app),
@@ -526,7 +621,7 @@ fn handle(app: &AppHandle, request: Value) {
             _ => Err(format!("unknown fixture operation: {op}")),
         }
     })();
-    if !matches!(op, "setPolicy" | "quitAlert" | "chrome") || result.is_err() {
+    if !matches!(op, "setPolicy" | "quitAlert" | "chrome" | "composeRead") || result.is_err() {
         output(id, result);
     }
 }
@@ -547,6 +642,7 @@ pub(crate) fn run() {
             outcome: Some(Outcome::Success),
             pending: None,
             calls: 0,
+            compose_loaded: false,
             executed: Vec::new(),
             centers: std::array::from_fn(|_| NSNotificationCenter::new()),
             native_windows: Vec::new(),
@@ -554,6 +650,17 @@ pub(crate) fn run() {
     });
     let app = tauri::Builder::default()
         .setup(move |app| {
+            app.manage(crate::compose::Queue::default());
+            let notifications = crate::notifications::Notifications::new(path.with_file_name("notifications.json"));
+            notifications
+                .set_enabled(false)
+                .expect("isolated notification preference");
+            app.manage(notifications);
+            let inert = std::sync::Arc::new(NoRuntime);
+            app.manage(crate::Shell::new(
+                avibe_runtime_host::RuntimeHost::new(inert.clone(), inert, Default::default()),
+                avibe_runtime_host::BootstrapLog::disabled(),
+            ));
             app.manage(Owner {
                 machine: Mutex::new(Machine::new(Policy::Off, available)),
                 pending: Mutex::new(None),

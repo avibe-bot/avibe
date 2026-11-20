@@ -2,7 +2,8 @@
 
 ## Contract
 
-Based on origin/master `3913091383` (including #4031). The approved product
+Based on origin/master `1da3fb05d7` (including #4031, Ask Vibey #4035 at
+`c553f1004e`, and the shared/iOS App Lock #4040 at `1df64a3d7a`). The approved product
 specification is the orchestrator's `app-lock-plan.md` and `app-lock-design/`.
 All seven recommendations were accepted on 2026-11-20.
 
@@ -27,12 +28,13 @@ Web unlock API. Background Runtime and Agent operations continue.
 
 - Native implementation: `desktop/src-tauri`, including AppKit, LocalAuthentication,
   lifecycle, capabilities, main-document markers and entry routing.
-- Shared Web panel, types, translations and adapters: iOS lane, cherry-picked
-  from the orchestrator-provided commit before the freeze.
+- Shared Web panel, types, translations and adapters: iOS lane, now inherited
+  from master without lane-specific edits.
 - Vault's existing view-retirement checks must distinguish a temporary lock
   cover from actual replacement; locked content must never accept input.
-- W1 and Ask Vibey are independent lanes. Their final integration must retain
-  the common native entry gate; Ask Vibey payloads remain memory-only until unlock.
+- Ask Vibey uses the common native Content entry gate before enqueue or file
+  inspection; its raw intent remains memory-only until unlock. W1 remains an
+  independent lane and must preserve the common gate when integrated.
 
 ## Validation and delivery
 
@@ -106,7 +108,11 @@ misclassified as a departure. Main stopped local patching and required the full
 event/state contract. Table revision 1 (`53cd2d432a`) failed review; main resolved
 T1-T4. Revision 2 (`3bccb5f035`) passed independent review, receipt `86028c1feb52`.
 This implementation follows that approved table, including S1/S2 clarifications.
-Exact-head native review is the next gate; no freeze is claimed yet.
+The native implementation at `dfde9a5ce5` passed independent review (CLEAN,
+receipt `5b87cb526e7c`). Rebasing onto the merged shared/Ask changes produces
+`2aa4475691`; the Machine remains unchanged. The only rebase conflict retained
+Ask Vibey's crate-visible main-focus entry together with the existing lock gate.
+The Ask integration requires a new exact-head review before freezing.
 
 Shared updates are copied without independent edits from `50c57df6` (availability
 contract docs/type comment) and `3431474f` (theme-token lock-frame sizes). The
@@ -114,12 +120,13 @@ AppKit sizes follow that kit; shared copy remains the embedded en/zh catalogs.
 
 ## Current local evidence
 
-The event-table implementation passes 220 Desktop library tests (14 App Lock
+The integrated implementation passes 237 Desktop library tests (14 App Lock
 scenario groups, including the core event matrix across all three policies),
-246 runtime-host tests (three pre-existing ignored), 25 desktop-client e2e cases,
-and 28 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
-warnings denied. Rust formatting, desktop-client TypeScript, UI build and design
-typecheck pass. The release guard compiles the normal release and proves that a
+252 runtime-host tests (three pre-existing ignored), 26 desktop-client e2e cases,
+and 41 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
+warnings denied. Rust formatting, desktop-client TypeScript, and UI build pass.
+Design typecheck passed for the native baseline; the integration does not change
+design files. The release guard compiles the normal release and proves that a
 release containing authentication substitutes is rejected. Updated native
 light/dark captures were inspected.
 
@@ -167,9 +174,18 @@ a signed TEST RC:
   locking; the saved preference survives and resumes when authentication becomes
   available again.
 
-Ask Vibey #4035 is not in the current base. After it merges, this lane must rebase
-and put the content-kind gate before `compose::enqueue` reads files or writes the
-share queue, add its integration test, and describe the semantic integration in
-the eventual PR. Main confirmed this ownership on 2026-11-20. The generic pending
-content test does not claim actual Ask Vibey integration. W1 #4036 needs the
+Ask Vibey #4035 is integrated at the start of `compose::enqueue`, before file
+validation or share allocation. Its consumer test E30 uses the production queue,
+WKWebView transport, and shipped composer receiver. It proves latest-intent
+replacement, cancellation retention, deferred file opening (a selected file is
+created only after the request), Off behavior, and a previously admitted share
+waiting through a lock. Only the final composer target records input instead of
+sending a message. The peer uses a nonpersistent WKWebView store, test-owned file
+and notification preferences, and Runtime dependencies that panic if used.
+The eventual PR must describe this semantic integration.
+
+For acceptance, select text, a URL, and files through the actual Ask Vibey Service
+while locked: no selected content appears on the lock screen; cancel retains it;
+success places the newest selection in the input without sending. Also verify
+an already queued selection waits through a subsequent lock. W1 #4036 needs the
 corresponding window/menu acceptance checks after integration.
