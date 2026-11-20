@@ -7717,6 +7717,62 @@ def web_push_status():
     )
 
 
+async def _live_activity_http(operation: str, activity_id: str = ""):
+    from core.web_push_notifications import web_push_authorization_context_record
+    from storage import live_activity_service, workbench_sessions_service
+    from vibe import internal_client
+
+    payload = {"session_id": request.args.get("session_id")} if operation == "turn" else (
+        {} if operation == "get" else request.json
+    )
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    if operation in {"turn", "put"} and not (
+        isinstance(payload.get("session_id"), str) and 0 < len(payload["session_id"]) <= 200
+    ):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    owner = _web_push_user_key()
+    context = getattr(g, "authorization_context", None)
+
+    def authorize():
+        engine = _projects_engine()
+        try:
+            with engine.connect() as conn:
+                sid = payload.get("session_id")
+                if operation == "get":
+                    row = live_activity_service.get(conn, activity_id)
+                    if row is None or row["owner_user_key"] != owner:
+                        raise LookupError("not_found")
+                    sid = row["session_id"]
+                if sid:
+                    workbench_sessions_service.get_session(conn, sid, authorization_context=context)
+        finally:
+            engine.dispose()
+
+    try:
+        await asyncio.to_thread(authorize)
+    except LookupError:
+        return jsonify({"ok": False, "error": "not_found" if operation == "get" else "session_not_found"}), 404
+    try:
+        result = await internal_client.live_activity_request(
+            operation, owner, activity_id, payload,
+            authorization=web_push_authorization_context_record(owner, context),
+        )
+    except internal_client.InternalServerUnavailable:
+        return jsonify({"ok": False, "error": "service_unavailable"}), 503
+    return jsonify(result["body"]), result["status_code"]
+
+
+@app.route("/api/web-push/live-activities/turn", methods=["GET"])
+async def live_activity_turn():
+    return await _live_activity_http("turn")
+
+
+@app.route("/api/web-push/live-activities/<activity_id>", methods=["GET", "PUT", "DELETE"])
+async def live_activity_tracking(activity_id: str):
+    return await _live_activity_http(request.method.lower(), activity_id)
+
+
 @app.route("/api/web-push/vapid-public-key", methods=["GET"])
 def web_push_vapid_public_key():
     from core.web_push import load_or_create_vapid_keys

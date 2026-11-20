@@ -36,7 +36,7 @@ DEFAULT_BADGE_VAPID_EXPIRY_SECONDS = 12 * 60 * 60
 NATIVE_PUSH_RELAY_ORIGIN = "https://avibe.bot"
 _NATIVE_PUSH_ENDPOINT_RE = re.compile(r"^/api/push/apns/([A-Za-z0-9_-]{43})$")
 _NATIVE_BADGE_REQUEST_RE = re.compile(
-    r"^/api/push/apns/[A-Za-z0-9_-]{43}/badge$"
+    r"^/api/push/apns/[A-Za-z0-9_-]{43}/(?:badge|live-activity)$"
 )
 
 
@@ -57,7 +57,8 @@ class _BadgeRelayHttpxLogFilter(logging.Filter):
             and _NATIVE_BADGE_REQUEST_RE.fullmatch(parsed.path)
         ):
             redacted = list(args)
-            redacted[1] = f"{NATIVE_PUSH_RELAY_ORIGIN}/api/push/apns/<redacted>/badge"
+            operation = parsed.path.rsplit("/", 1)[-1]
+            redacted[1] = f"{NATIVE_PUSH_RELAY_ORIGIN}/api/push/apns/<redacted>/{operation}"
             record.args = tuple(redacted)
         return True
 
@@ -382,3 +383,36 @@ def send_web_push(
         timeout=timeout,
         ttl=ttl,
     )
+
+
+def send_live_activity_update(
+    *, subscription: dict[str, Any], body: dict[str, Any],
+    vapid_keys: VapidKeys | None = None, client: httpx.Client | None = None,
+    timeout: float = DEFAULT_WEB_PUSH_TIMEOUT_SECONDS,
+) -> None:
+    """Send strict metadata to the fixed native relay; never invalidate a device."""
+    registration = _native_relay_registration_id(subscription)
+    if registration is None:
+        raise ValueError("native_relay_subscription_required")
+    keys = vapid_keys or load_or_create_vapid_keys()
+    headers = {"Authorization": _badge_vapid_authorization(
+        keys=keys, subject="mailto:notifications@avibe.bot",
+        expires_at=int(time.time()) + DEFAULT_BADGE_VAPID_EXPIRY_SECONDS,
+    ), "Content-Type": "application/json"}
+    url = f"{NATIVE_PUSH_RELAY_ORIGIN}/api/push/apns/{registration}/live-activity"
+    content = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    if client is None:
+        with httpx.Client() as owned:
+            response = owned.post(url, content=content, headers=headers, timeout=timeout)
+    else:
+        response = client.post(url, content=content, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    if response.status_code != 201 or response.headers.get("content-type", "").split(";", 1)[0] != "application/json":
+        raise ValueError("invalid_live_activity_relay_response")
+    result = response.json()
+    if not (
+        isinstance(result, dict) and set(result) == {"ok", "registration_id", "apns_status"}
+        and result["ok"] is True and result["registration_id"] == registration
+        and type(result["apns_status"]) is int and result["apns_status"] == 200
+    ):
+        raise ValueError("invalid_live_activity_relay_response")

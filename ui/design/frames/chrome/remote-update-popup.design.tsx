@@ -1,9 +1,11 @@
-// This computer's update panel while the desktop app shows another computer: a popup
+// The update panel while the desktop app shows another computer's instance: a popup
 // the shell draws in its own small window over the main one (desktop/src-tauri
 // update_popover.rs), the panel at its bottom-left just above the sidebar's bottom
-// row. Drawn as the user sees it: the real window, and the shipped popup page
-// (UpdatePopoverView with DesktopUpdatePanel) in a box placed where the shell puts
-// its 336 × 520 window, 8 px in from the left and 40 px above the bottom.
+// row. It has a section for that instance and one for this computer's desktop app
+// (ui/design: update/instance-and-app, which draws every state). Drawn as the user
+// sees it: the real window, and the shipped popup page (UpdatePopoverView with
+// DesktopUpdatePanels) in a box placed where the shell puts its window, 8 px in
+// from the left and 40 px above the bottom.
 import { Route, Routes } from 'react-router-dom';
 
 import en from '@/i18n/en.json';
@@ -11,7 +13,8 @@ import zh from '@/i18n/zh.json';
 import { AppShell, AppShellFooter } from '@/components/AppShell';
 import { Workbench } from '@/components/Workbench';
 import { DesktopAccountRowView } from '@/desktop/DesktopAccountRowView';
-import { DesktopUpdatePanel, UpdatePopoverView } from '@/desktop/AccountApp';
+import { InstanceVersionChipView } from '@/desktop/InstanceVersionChip';
+import { DesktopUpdatePanels, UpdatePopoverView } from '@/desktop/AccountApp';
 import type { DesktopClientProjection, DesktopClientState } from '@/desktop/bridge';
 
 import { frames, type FrameSpec } from '../../frame';
@@ -35,13 +38,21 @@ const projection: DesktopClientProjection = {
   remote_auxiliary: 'disabled_incomplete',
 };
 
-// The popup page reads the full client state; only its update fields matter here.
-const state = { ...projection, account: { ...projection.account, email: null, gate: null, methods: [] } } as unknown as DesktopClientState;
-const install = { failed: false, accept: () => {}, reset: () => {} } as Parameters<typeof DesktopUpdatePanel>[0]['install'];
+// The popup page reads the full client state; only its update fields matter here. The shell reads the
+// instance's own version and offer with the app's sign-in.
+const state = {
+  ...projection,
+  account: { ...projection.account, email: null, gate: null, methods: [] },
+  instance_update: {
+    instance_id: 'studio', status: 'ready', can_manage: true, request: null, fetched_at: '2026-11-01T07:52:00Z',
+    snapshot: { current: '3.2.7', latest: '3.2.8', has_update: true, error: null, prereleases: false, auto_update: false },
+  },
+} as unknown as DesktopClientState;
+const install = { failed: false, accept: () => {}, reset: () => {} } as Parameters<typeof DesktopUpdatePanels>[0]['install'];
 
 const designFrames = frames((['zh', 'en'] as const).map((lang): FrameSpec => ({
   name: `open-${lang}`,
-  title: `版本面板 · 连接另一台电脑时也是弹出层（本机桌面应用绘制）· ${lang}`,
+  title: `版本面板 · 连接另一台电脑的实例时：弹出层由本机桌面应用绘制，先是实例，再是这台电脑上的桌面应用 · ${lang}`,
   width: 1200,
   height: 800,
   status: 'shipped',
@@ -56,7 +67,8 @@ const designFrames = frames((['zh', 'en'] as const).map((lang): FrameSpec => ({
     <div className="relative h-full">
       <Routes>
         <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}>
-          <DesktopAccountRowView state={projection} onPresent={() => {}} localUpdater={null} />
+          <DesktopAccountRowView state={projection} onPresent={() => {}} localUpdater={null}
+            instanceVersion={<InstanceVersionChipView name="Studio" version="3.2.7" attention />} />
         </AppShellFooter>} />}>
           <Route path="/" element={<Workbench />} />
         </Route>
@@ -65,7 +77,7 @@ const designFrames = frames((['zh', 'en'] as const).map((lang): FrameSpec => ({
       {/* Spacing-scale sizes: w-84 is 336 px and h-130 is 520 px, the shell's window. */}
       <div className="absolute bottom-10 left-2 z-50 h-130 w-84 transform-gpu">
         <UpdatePopoverView label={lang === 'en' ? en.dashboard.versionAndUpdate : zh.dashboard.versionAndUpdate} onClose={() => {}}>
-          <DesktopUpdatePanel state={state} act={async () => true} busy={false} install={install} close={() => {}} />
+          <DesktopUpdatePanels state={state} act={async () => true} busy={false} install={install} close={() => {}} />
         </UpdatePopoverView>
       </div>
     </div>

@@ -1717,3 +1717,25 @@ message_answer_operations = Table(
     Column("receipt_json", Text, nullable=True),
     Index("ix_message_answer_operations_winner", "session_id", "request_id", "delivery_id"),
 )
+
+
+live_activity_trackings = Table(
+    "live_activity_trackings",
+    metadata,
+    Column("activity_id", String, primary_key=True),
+    *[Column(name, String, nullable=False) for name in (
+        "owner_user_key", "session_id", "turn_id", "push_registration_id",
+        "activity_token", "status", "last_phase",
+    )],
+    Column("stop_reason", String),
+    *[Column(name, Integer, nullable=False) for name in (
+        "last_timestamp", "confirmed_at", "requested_at", "created_at", "updated_at", "expires_at", "started_at",
+    )],
+    Column("ended_at", Integer),
+    Column("authorization_json", Text),
+    Column("pending_state", Text),
+    Column("retry_count", Integer, nullable=False, server_default="0"),
+    Column("retry_at", Integer, nullable=False, server_default="0"),
+    Index("ix_live_activity_status", "status", "expires_at"),
+    Index("ix_live_activity_registration", "push_registration_id", "status"),
+)

@@ -1,7 +1,8 @@
 # The update panel names whose version it shows
 
-Status: **approved** by the owner on 2026-11-20 (`ui/design:
-update/instance-and-app`); implementation follows this plan.
+Status: **approved** by the owner on 2026-11-20 and built (`ui/design:
+update/instance-and-app`, drawn by the shipped components). Not yet run on a
+real desktop app: see the last Todo item.
 
 ## Background
 
@@ -40,7 +41,10 @@ carries only the desktop app's last check (`vibe/desktop_update_status.py`).
 - An instance update shows as running until it ends, wherever it was started.
   Known limit: an install started at a desktop-managed host itself is not
   reported by that host today (see Background); relaying it is a later shell
-  change, outside these three PRs.
+  change, outside these three PRs. Pressing Update from another surface
+  during such an install installs nothing twice: the host's updater is busy
+  and does not take the request, which expires unanswered, and the panel says
+  the host's desktop app did not respond (not that another update is running).
 - No new setting, no confirmation dialog, and the existing boundary holds: the
   panel is drawn by the local shell, and a remote page never drives this
   computer's updater.
@@ -49,8 +53,9 @@ carries only the desktop app's last check (`vibe/desktop_update_status.py`).
 
 ## Design
 
-Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
-`ui/design/kit/update-subjects.tsx`.
+Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn by the
+shipped components (`UpdateSubjectsPanel`, `InstanceVersionChipView`,
+`DesktopUpdatePanels`).
 
 1. **Bottom row.** While the app shows another computer's instance, the chip
    beside the instance's name shows the instance's version, read by the
@@ -66,8 +71,8 @@ Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
    its button directly under its state. With two
    sections each button names its target ("Update alex", "Update this app");
    one section alone keeps "Update". An offer says what installing it does to
-   that subject: the instance restarts, usually within a minute or two, its
-   sessions and settings are kept, and work in progress may be interrupted
+   that subject: the instance restarts, usually within a minute or two, and
+   work in progress may be interrupted
    (Vibey continues its own Turn after the restart; a Claude Code or Codex Turn
    ends with a Retry notice); this computer's Avibe restarts and the instance
    is not affected. An account that cannot manage the instance sees its
@@ -119,6 +124,16 @@ page, a new desktop app can update an old instance.
 
 Implementation gate: confirm the native client's session passes the instance's
 origin and CSRF checks for these POSTs without weakening them.
+
+## A later shell change worth making
+
+The popup decides whether an install the shell sent is still under way from the
+shell's receipt, the instance's last answer and the time elapsed
+(`ui/src/desktop/instanceUpdateModel.ts`), mirroring the shell's own rule
+(`unsettled` in `instance_update.rs`) from less than the shell knows: it is not
+told the version the install started from. A test walks every combination and
+holds the section to that rule as far as the page can know it. Having the shell
+state it (`request.following: boolean`) would replace the mirror with the fact.
 
 ## Also needed
 
@@ -241,10 +256,12 @@ Actions, in the account bridge's v1 envelope, beside the four `update_*` ones:
 - The bottom row and the narrow-window badge are the instance's page: they
   read the page's own `/api/version`, and still only ask the shell to present
   the panel. The page reads it when it loads, when its window comes back to
-  the front or becomes visible, every two seconds from the moment it asks the
+  the front or becomes visible, every five seconds from the moment it asks the
   shell for the panel until its window is in front again (the panel is another
-  window, and takes the focus), and every two seconds while an install or its
-  restart is reported. When the Runtime then answers with a version other than
+  window, and takes the focus), and every three seconds while an install or its
+  restart is reported. A standalone Runtime looks its latest release up on
+  every version read, which is why these are no faster; caching that lookup in
+  the Runtime is a possible later change. When the Runtime then answers with a version other than
   the one the install started from, the page loads itself again, since its
   interface changed with the version; an install that ends on the same version
   changes nothing on the page.
@@ -273,8 +290,8 @@ instance runs a build that contains 3.
 ## Todo
 
 - [x] Owner reviews the frames.
-- [ ] Runtime: in-progress report for standalone installs (contract A).
-- [ ] Shell: instance update actions on the account bridge; popup sizing (B1).
-- [ ] Interface: `UpdatePanel` sections, bottom row, narrow-window badge, i18n;
+- [x] Runtime: in-progress report for standalone installs (contract A).
+- [x] Shell: instance update actions on the account bridge; popup sizing (B1).
+- [x] Interface: `UpdatePanel` sections, bottom row, narrow-window badge, i18n;
       the frames switch to the shipped components and the kit copy is deleted (B2).
 - [ ] One run on a real desktop app connected to a remote instance.

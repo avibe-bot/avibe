@@ -1375,6 +1375,15 @@ def create_app(
                 content={"ok": False, "error": "show_access_internal_failure"},
             )
 
+    @app.post("/internal/live-activities")
+    async def _live_activities(request: Request) -> Any:
+        from core.live_activities import controller_service
+        payload = await _bounded_json_object(request, limit=4096)
+        return await controller_service(controller).handle(
+            payload["operation"], payload["owner"], payload["activity_id"], payload["payload"],
+            authorization=payload.get("authorization"),
+        )
+
     @app.get("/internal/turn-state/{session_id}")
     async def _turn_state(session_id: str) -> Any:
         """HTTP adapter: whether a turn is running, delegated to the turn owner

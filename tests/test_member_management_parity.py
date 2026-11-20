@@ -181,8 +181,17 @@ def test_complete_registered_api_management_inventory():
     # + 1 voice consent answer (Editor, with the voice routes it gates).
     # + 2 system schedule device claim/receipt methods (Editor).
     # + 7 independent device routes and 2 Owner-only mobile metadata routes.
+    # + 4 personal Live Activity methods (Viewer; controller enforces ownership and session access).
     # + 1 Model Hub reset card use (Owner role, classified in _RETAINED_OWNER_ROUTES).
-    assert len(endpoints) == 350
+    assert len(endpoints) == 354
+    for method, path in (
+        ("GET", "/api/web-push/live-activities/turn"),
+        ("GET", "/api/web-push/live-activities/{activity_id}"),
+        ("PUT", "/api/web-push/live-activities/{activity_id}"),
+        ("DELETE", "/api/web-push/live-activities/{activity_id}"),
+    ):
+        assert (method, path) in endpoints
+        assert http_authorization_policy(method, path).minimum_role == "viewer"
     for path in ("/api/system-schedule/claim", "/api/system-schedule/receipt"):
         assert ("POST", path) in endpoints
         assert http_authorization_policy("POST", path).minimum_role == "editor"
@@ -242,6 +251,12 @@ def test_complete_registered_api_management_inventory():
     baseline_read_roles = json.loads(
         (Path(__file__).parent / "fixtures/member_management_existing_read_roles.json").read_text()
     )
+    baseline_read_roles.update({
+        "GET /api/web-push/live-activities/turn": "viewer",
+        "GET /api/web-push/live-activities/example": "viewer",
+        "PUT /api/web-push/live-activities/example": "viewer",
+        "DELETE /api/web-push/live-activities/example": "viewer",
+    })
     actual_read_roles = {}
     owners = {
         (method, raw)
