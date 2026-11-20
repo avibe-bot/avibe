@@ -2945,6 +2945,8 @@ describe('SettingsModelsPage reset cards', () => {
     await user.dblClick(confirmButton());
     expect(redeem).toHaveBeenCalledTimes(1);
     expect(redeem).toHaveBeenCalledWith('src_claude', 'fable');
+    // The pressed button is gone; focus stays in the block rather than falling to the page.
+    expect(document.activeElement).toBe(within(account()).getByRole('region', { name: /^Limit resets$|^重置卡$/ }));
     expect((within(account()).getByRole('button', { name: /^Using…$|^使用中…$/ }) as HTMLButtonElement).disabled).toBe(true);
     expect(cardUseButton('Full').disabled).toBe(true);
 

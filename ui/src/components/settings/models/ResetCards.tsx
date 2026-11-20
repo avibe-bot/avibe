@@ -54,7 +54,10 @@ export const ResetCardsBlock: React.FC<{
   React.useLayoutEffect(() => {
     const target = focusNext.current;
     focusNext.current = null;
-    if (target) block.current?.querySelector<HTMLElement>(`[data-reset-focus="${target}"]`)?.focus();
+    if (!target) return;
+    // The pressed button is gone; focus stays in this block (the section itself once a use is sent).
+    const found = block.current?.querySelector<HTMLElement>(`[data-reset-focus="${target}"]`);
+    (found ?? block.current)?.focus();
   });
 
   const name = (kind: ResetCardKind) => t(`settings.models.quota.resetCards.kind.${kind}`) as string;
@@ -122,7 +125,7 @@ export const ResetCardsBlock: React.FC<{
   };
 
   return (
-    <section ref={block} className="mt-3.5 rounded-lg border border-border bg-surface" aria-label={t('settings.models.quota.resetCards.title') as string} data-reset-cards>
+    <section ref={block} tabIndex={-1} className="mt-3.5 rounded-lg border border-border bg-surface outline-none" aria-label={t('settings.models.quota.resetCards.title') as string} data-reset-cards>
       <h3 className={`flex items-center gap-1.5 border-b border-border px-3 py-2 font-medium text-muted ${NOTE}`}>
         <Ticket className="size-3.5" aria-hidden />
         {t('settings.models.quota.resetCards.title')}
@@ -155,7 +158,7 @@ export const ResetCardsBlock: React.FC<{
                   </div>
                   {confirming ? (
                     <div className="flex shrink-0 items-center gap-2">
-                      <Button size="compact" aria-describedby={noteId} onClick={() => intent({ type: 'confirm', kind: card.kind }, '')}>
+                      <Button size="compact" aria-describedby={noteId} onClick={() => intent({ type: 'confirm', kind: card.kind }, 'block')}>
                         {t('settings.models.quota.resetCards.confirm')}
                       </Button>
                       <Button size="compact" variant="ghost" aria-describedby={noteId} data-reset-focus={`cancel:${card.kind}`} onClick={() => intent({ type: 'cancel' }, `use:${card.kind}`)}>
