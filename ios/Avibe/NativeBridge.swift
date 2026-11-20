@@ -1357,7 +1357,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 reply(replyHandler, error: .forbidden)
                 return
             }
-            guard healthBinding else {
+            // A description the page can't report yet (no installation id)
+            // asks for nothing: an unused ticket would hold the instance's
+            // 30-second slot from the report that follows.
+            guard healthBinding, description["installation_id"] != nil else {
                 reply(replyHandler, result: description)
                 return
             }

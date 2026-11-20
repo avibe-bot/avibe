@@ -225,7 +225,11 @@ final class DeviceDescriptionTests: XCTestCase {
         let instance = try XCTUnwrap(WebOrigin.parseConfigured(one))
         // Synthetic: 43 base64url characters.
         let issued = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-"
-        var answer: [String: Any]? = ["kind": "iphone_app", "display_name": "iPhone 16 Pro", "aliases": []]
+        let reportable: [String: Any] = [
+            "kind": "iphone_app", "display_name": "iPhone 16 Pro", "aliases": [],
+            "installation_id": "5eeb24aca55730b9f93cc16472af8b16",
+        ]
+        var answer: [String: Any]? = reportable
         var ticket: String? = issued
         var asked = 0
         var duringTheWait: () -> Void = {}
@@ -293,6 +297,14 @@ final class DeviceDescriptionTests: XCTestCase {
               return JSON.stringify({code: error.code});
             }
             """
+        // Not reportable yet (no installation id): nothing is asked.
+        answer = ["kind": "iphone_app", "display_name": "iPhone 16 Pro", "aliases": []]
+        let unreportable = try await run(ask, in: webView)
+        XCTAssertEqual(unreportable["code"] as? String, "ok")
+        XCTAssertEqual(unreportable["ticket"] as? Bool, false)
+        XCTAssertEqual(asked, 1)
+        answer = reportable
+
         // No ticket: the property is left out, not null.
         ticket = nil
         let without = try await run(ask, in: webView)

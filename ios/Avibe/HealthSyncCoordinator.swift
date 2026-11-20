@@ -534,7 +534,7 @@ final class HealthSyncCoordinator: ObservableObject {
 
     /// The ticket in an issue answer: 43 base64url characters (32 bytes,
     /// unpadded), and not yet expired.
-    static func bindingTicket(from response: [String: Any], now: Date) -> String? {
+    nonisolated static func bindingTicket(from response: [String: Any], now: Date) -> String? {
         guard let ticket = response["health_binding_ticket"] as? String, ticket.utf8.count == 43,
               ticket.unicodeScalars.allSatisfy({ ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "-" || $0 == "_" }),
               let text = response["expires_at"] as? String,

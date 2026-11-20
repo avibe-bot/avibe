@@ -118,7 +118,7 @@ async function refusedTicket(response: Response): Promise<boolean> {
  * without a device list answers 404; nothing here may block or surface.
  * `post` is the API client, passed in so push code reading the label does not
  * load it. With a Health binding ticket, a refusal of the ticket sends the
- * same description once more without it; a ticket is never sent twice.
+ * same description once more without it; a refused ticket is never sent again.
  */
 export function reportNativeDevice(
   post: (input: string, init: RequestInit) => Promise<Response>,

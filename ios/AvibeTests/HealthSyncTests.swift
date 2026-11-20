@@ -1502,6 +1502,25 @@ final class HealthSyncTests: XCTestCase {
     }
 
     @MainActor
+    func testNoTicketIsAskedForAPausedDelistedOrOtherAccountsPairing() async throws {
+        let changes: [(HealthCoordinatorFixture) -> Void] = [
+            // A second factor is owed: authority paused.
+            { $0.coordinator.accountEvent(.authorizationUnavailable) },
+            // The account's list has the instance at another origin.
+            { $0.coordinator.instancesProvider = { ["instance-1": "https://renamed.invalid"] } },
+            // Another account is current.
+            { $0.coordinator.accountIDProvider = { "account-2" } },
+        ]
+        for change in changes {
+            let fixture = try await connectedInFront()
+            change(fixture)
+            let none = await ticket(fixture)
+            XCTAssertNil(none)
+            XCTAssertTrue(fixture.client.ticketCalls.isEmpty)
+        }
+    }
+
+    @MainActor
     func testNoTicketAnswerChangesTheHealthConnection() async throws {
         let failures: [Error] = [
             HealthSyncError.http(401, "device_unauthorized", nil),
@@ -1523,7 +1542,8 @@ final class HealthSyncTests: XCTestCase {
             ["health_binding_ticket": "short", "expires_at": "2099-01-01T00:00:00Z"],
             HealthFakeClient.issuedTicket(expires: Date().addingTimeInterval(-1)),
         ]
-        let answers = failures.map { Result<[String: Any], Error>.failure($0) } + malformed.map { .success($0) }
+        let answers = failures.map { Result<[String: Any], Error>.failure($0) }
+            + malformed.map { Result<[String: Any], Error>.success($0) }
         for answer in answers {
             let fixture = try await connectedInFront()
             fixture.client.ticketAnswers = [answer]
@@ -1592,6 +1612,8 @@ final class HealthSyncTests: XCTestCase {
             { $0.coordinator.setBackground() },
             { $0.coordinator.accountEvent(.signedOut(explicit: true)) },
             { _ in binding = UUID() },
+            // The account's list now has the instance at another origin.
+            { $0.coordinator.instancesProvider = { ["instance-1": "https://renamed.invalid"] } },
         ]
         for change in changes {
             let fixture = try await connectedInFront()
