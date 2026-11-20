@@ -26,10 +26,17 @@
 .pet-mini-column {
   /* Between Vibey's bubble and the input below it: room for the bubble's tail. */
   --pet-input-gap:14px;
+  /* The column is the one width source for everything in it. Each item draws
+     its outer border this gutter in from the column edge: the collapsed stack
+     and the speech slot as padding, the expanded panel as 6px padding plus
+     12px scroll padding. Activity cards, Vibey's reply bubble and the composer
+     (or the voice marquee in its place) therefore share one width: 280 CSS px,
+     or less in a narrow window. */
+  --pet-mini-gutter:18px;
   position:absolute;
   left:50%;
   bottom:147px;
-  width:min(440px,94vw);
+  width:min(calc(280px + 2 * var(--pet-mini-gutter)),94vw);
   transform:translateX(-50%);
   display:flex;
   flex-direction:column;
@@ -53,7 +60,7 @@
   position:relative;
   display:block;
   width:100%;
-  padding:0 18px;
+  padding:0 var(--pet-mini-gutter);
   text-align:left;
   pointer-events:auto}
 
@@ -168,7 +175,8 @@ to {
   flex-direction:column;
   overflow-y:auto;
   overscroll-behavior:contain;
-  padding:0 12px;
+  /* With the panel's 6px padding, the column gutter. */
+  padding:0 calc(var(--pet-mini-gutter) - 6px);
   scrollbar-width:none}
 .pet-mini-scroll::-webkit-scrollbar {
   display:none}
@@ -351,7 +359,7 @@ to {
 }
 .pet-mini-slot-body {
   width:100%;
-  padding:0 18px;
+  padding:0 var(--pet-mini-gutter);
   opacity:0;
   transform:translateY(var(--pet-rise)) scale(.97);
   transition:opacity 180ms ease,transform 300ms var(--settle)}

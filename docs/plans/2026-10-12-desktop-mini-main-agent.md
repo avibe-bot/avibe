@@ -70,8 +70,11 @@ the main agent; there is no Follow up on cards.
   in the window. Near the top of the display it opens **downward** instead
   (owner decision, 2026-10-23, §9.1): Vibey and the dock sit at the top of the
   window and the whole column is mirrored below them.
-- **Column width:** `min(440px, 94vw)`. Activity cards, the marquee and the input
-  bubble are **the same width**: the column minus 18px on each side.
+- **Column width:** `min(280px + 2 × 18px, 94vw)`, the one width source for
+  everything in it. Activity cards, Vibey's reply bubble, the marquee and the
+  input are **the same width**: the column minus the 18px gutter on each side,
+  so 280 CSS px, or less in a narrow window. The input keeps that width with
+  nothing drawn above it.
   - Expanded: 6px panel padding plus 12px scroll padding.
   - Collapsed: 18px stack padding.
 - A card's width never depends on its content or on the number of cards.
@@ -79,7 +82,9 @@ the main agent; there is no Follow up on cards.
   capped at **280 CSS px** (Owner, 2026-11-11 15:35 Asia/Shanghai), or the
   available slot width when narrower. Their edges align in the collapsed and
   expanded stack. Text and avatar do not scale. A status word alone can remain
-  compact (§4.2); the composer retains its existing width.
+  compact (§4.2). The composer and the voice marquee share the same 280 CSS px
+  border (Owner, 2026-11-20 10:03 Asia/Shanghai), superseding the earlier
+  decision that kept the composer at the full column width.
 - **Long text never widens anything.** Every flex/grid item on the path from
   the list to a text node needs `min-width: 0`, and grid rows need
   `grid-template-columns: minmax(0, 1fr)`. (A grid column sized by a long
@@ -253,7 +258,8 @@ their height limits; buttons wrap within the narrower bubble.
 cards (running, authorization, and replied) also use a 280 CSS px outer border,
 aligned with the main reply. This changes geometry only: exposure timers,
 persisted expiry, sorting, authorization, stop, close, and reference behavior
-remain unchanged. Composer and non-Mini Workbench cards keep their widths.
+remain unchanged. Non-Mini Workbench cards keep their widths; the Mini composer
+later joined the same width (2026-11-20, §3.1).
 
 **Remaining diagnosis boundary (2026-11-11).** An isolated WKWebView proves
 that unanswered suggestions hold a collapsed reply after its budget expires.

@@ -1145,7 +1145,7 @@ const PetSurface: React.FC = () => {
       )}
       <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div
-          className={clsx('pet-mini-cards max-w-79', voice.busy && 'is-hidden')}
+          className={clsx('pet-mini-cards', voice.busy && 'is-hidden')}
           inert={voice.busy || undefined}
           aria-label={cardsExpanded ? t('pet.panel') : undefined}
           style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}
@@ -1232,32 +1232,16 @@ const PetSurface: React.FC = () => {
           {inputShown && <div ref={inputAreaRef}>{voice.busy ? <Marquee text={voice.finishing ? '' : voice.preview} listeningLabel={t(voice.finishing ? 'pet.voice.finishing' : 'pet.voice.listening')} /> : (
           <>
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
-          <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-            {draftReferences.length > 0 && <div className="pet-mini-references">
-              {draftReferences.map((reference) => <span key={reference.session_id} className="pet-mini-reference-chip">
-                <span title={reference.title ?? reference.session_id}># {reference.title ?? reference.session_id}</span>
-                <button type="button" aria-label={t('pet.removeReference', { title: reference.title ?? reference.session_id })} onClick={() => setDraft(draft.replaceAll(referenceToMarker(reference), '').trim())}><X size={12} /></button>
-              </span>)}
-            </div>}
-            <div className="pet-mini-input-row">
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={inputDraft}
-              onChange={(event) => setDraft([...draftMarkers, event.target.value].join(' '))}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !isComposingKey(event)) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder={t('pet.inputPlaceholder')}
-              aria-label={t('pet.inputPlaceholder')}
-            />
-            {voice.available && <button type="button" className="pet-mini-input-button" onClick={() => voice.start()} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
-            <button type="submit" className="pet-mini-send" disabled={!draft.trim() || sending || uncertain} aria-label={t('pet.send')}><SendIcon /></button>
-            </div>
-          </form>
+          <PetComposerInput
+            inputRef={inputRef}
+            references={draftReferences}
+            value={inputDraft}
+            onValueChange={(value) => setDraft([...draftMarkers, value].join(' '))}
+            onRemoveReference={(reference) => setDraft(draft.replaceAll(referenceToMarker(reference), '').trim())}
+            onSubmit={() => void submit()}
+            onVoice={voice.available ? () => voice.start() : null}
+            sendDisabled={!draft.trim() || sending || uncertain}
+          />
           </>
           )}</div>}
         </SpeechSlot>
@@ -1267,6 +1251,49 @@ const PetSurface: React.FC = () => {
   );
 };
 
+
+/** The Mini's composer, drawn from props alone so a design frame can render it. */
+export const PetComposerInput: React.FC<{
+  inputRef?: React.Ref<HTMLTextAreaElement>;
+  references: SessionReference[];
+  value: string;
+  onValueChange: (value: string) => void;
+  onRemoveReference: (reference: SessionReference) => void;
+  onSubmit: () => void;
+  /** Null when voice input is unavailable. */
+  onVoice: (() => void) | null;
+  sendDisabled: boolean;
+}> = ({ inputRef, references, value, onValueChange, onRemoveReference, onSubmit, onVoice, sendDisabled }) => {
+  const { t } = useTranslation();
+  return (
+    <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      {references.length > 0 && <div className="pet-mini-references">
+        {references.map((reference) => <span key={reference.session_id} className="pet-mini-reference-chip">
+          <span title={reference.title ?? reference.session_id}># {reference.title ?? reference.session_id}</span>
+          <button type="button" aria-label={t('pet.removeReference', { title: reference.title ?? reference.session_id })} onClick={() => onRemoveReference(reference)}><X size={12} /></button>
+        </span>)}
+      </div>}
+      <div className="pet-mini-input-row">
+      <textarea
+        ref={inputRef}
+        rows={1}
+        value={value}
+        onChange={(event) => onValueChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !isComposingKey(event)) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
+        placeholder={t('pet.inputPlaceholder')}
+        aria-label={t('pet.inputPlaceholder')}
+      />
+      {onVoice && <button type="button" className="pet-mini-input-button" onClick={onVoice} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
+      <button type="submit" className="pet-mini-send" disabled={sendDisabled} aria-label={t('pet.send')}><SendIcon /></button>
+      </div>
+    </form>
+  );
+};
 
 function useReducedMotion() {
   const [reduced, setReduced] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
@@ -1796,7 +1823,7 @@ export const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open
   // bubble lays out bottom-up: the toggle keeps its place at the bottom and
   // the history opens above it, so expanding never moves what was clicked.
   return (
-    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main max-w-70', compact && 'is-compact')} data-pet-hit>
+    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main', compact && 'is-compact')} data-pet-hit>
       <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open} aria-controls={detailId}>
         <span className="pet-mini-bubble-speaker">{speaker}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
         <p title={summary}>{props.running && <span className="pet-mini-running-dot" aria-hidden />}<span className="pet-mini-reply-summary">{summary}</span></p>

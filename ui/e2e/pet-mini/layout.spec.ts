@@ -2185,7 +2185,7 @@ test('quick suggestions: updating suggestions and reconnecting retain the same r
   await expect(page.locator('.pet-mini-detail.is-open').getByRole('button', { name: '再次查看', exact: true })).toBeVisible();
 });
 
-// Reply and activity borders align while input keeps the column width.
+// Reply, activity and composer borders share one width.
 // Long content and action labels must fit in both engines.
 for (const width of [460, 280]) {
   for (const lang of ['en', 'zh']) {
@@ -2213,7 +2213,10 @@ for (const width of [460, 280]) {
       await page.locator('.pet-mini-reply-toggle').click();
       await expect(page.locator('.pet-mini-detail.is-open')).toBeVisible();
       await settleMotion(page);
-      expect((await page.locator('.pet-mini-input').boundingBox())!.width).toBeCloseTo(width * 0.94 - 36, 1);
+      const input = (await page.locator('.pet-mini-input').boundingBox())!;
+      const opened = (await bubble.boundingBox())!;
+      expect(input.width).toBeCloseTo(opened.width, 1);
+      expect(input.x).toBeCloseTo(opened.x, 1);
       const history = page.locator('.pet-mini-bubble-history');
       const metrics = await history.evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight, fullHeight: node.scrollHeight }));
       expect(metrics.scroll).toBe(metrics.client);
@@ -2230,6 +2233,34 @@ for (const width of [460, 280]) {
     });
   }
 }
+
+// With nothing above it the composer keeps the width it has under a reply or
+// a card, so it does not jump when one appears.
+for (const width of [460, 280]) {
+  test(`composer keeps the card width with nothing above it (${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 600 });
+    await page.goto('/e2e/pet-mini/fixture.html?main=false&activities=0');
+    await page.locator('.pet-mini-avatar-button').click();
+    await expect(page.getByRole('textbox')).toBeVisible();
+    await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
+    await settleMotion(page);
+    const input = (await page.locator('.pet-mini-input').boundingBox())!;
+    expect(input.width).toBeCloseTo(Math.min(280, width * 0.94 - 36), 1);
+    expect(input.x + input.width / 2).toBeCloseTo(width / 2, 1);
+  });
+}
+
+test('composer lines up with the expanded activity cards above it', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  await page.locator('.pet-mini-card').first().locator('.pet-mini-card-reference').click();
+  await expect(page.locator('.pet-mini-reference-chip')).toHaveCount(1);
+  await settleMotion(page);
+  const input = (await page.locator('.pet-mini-input').boundingBox())!;
+  const card = (await page.locator('.pet-mini-card').first().boundingBox())!;
+  expect(input.width).toBeCloseTo(card.width, 1);
+  expect(input.x).toBeCloseTo(card.x, 1);
+});
 
 for (const lang of ['en', 'zh']) {
   test(`280px activity stack aligns with reply and keeps controls (${lang})`, async ({ page }) => {
