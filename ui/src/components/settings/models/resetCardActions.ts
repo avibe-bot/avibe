@@ -17,9 +17,10 @@ type Phases = Readonly<Record<string, ResetCardPhase>>;
 /** What a failed request says about the card. */
 const failurePhase = (error: unknown, kind: ResetCardKind): ResetCardPhase => {
   if (error instanceof ApiCallError && error.serverNamed && error.responseStatus !== undefined) {
-    // The server refused before asking the vendor: the account is busy, or holds no usable card of this kind.
+    // `reset_card_locked` / `reset_card_unavailable`: refused before anything was sent (the account
+    // is busy, its lock could not be recorded, or it holds no usable card of this kind).
     if (error.responseStatus === 409) return { phase: 'not_used', kind, reason: 'held' };
-    // Any other request the server named as wrong never reached the vendor.
+    // A request the server named as wrong (a body, a role) never reached the vendor.
     if (error.responseStatus >= 400 && error.responseStatus < 500) return { phase: 'not_used', kind, reason: null };
   }
   // No answer, or the server failed partway: the card may be spent.

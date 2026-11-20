@@ -3008,25 +3008,32 @@ describe('SettingsModelsPage reset cards', () => {
     expect((await within(account()).findByRole('alert')).textContent).toMatch(/^Not used: this account can’t use this kind|^没有用掉：这个账号现在不能用这种卡/);
     await waitFor(() => expect(reads()).toBeGreaterThan(before));
 
-    // No answer: the card may be spent. Nothing is retried, and the quota is read again for the server's lock.
-    before = reads();
-    redeem.mockRejectedValueOnce(new ApiCallError('bad_response', 'Request deadline exceeded', false));
-    await use();
-    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
-    await waitFor(() => expect(reads()).toBeGreaterThan(before));
-    expect(cardUseButton('Fable').disabled).toBe(true);
-    expect(cardUseButton('Full').disabled).toBe(true);
-    expect(redeem).toHaveBeenCalledTimes(3);
-
-    // The account's own refresh lands a current reading: the count is the server's, and the cards are free again.
+    // No answer, or a server failure that names no outcome: the card may be spent. Nothing is
+    // retried, the quota is read again for the server's lock, and the account's own refresh
+    // landing a current reading frees the cards again.
     const force = vi.mocked(modelsApi.refreshQuota);
-    force.mockResolvedValueOnce(quotaWith({ fable: 2, used: 0 }));
-    await user.click(refreshButton('Claude Max'));
-    await waitFor(() => expect(within(account()).queryByRole('alert')).toBeNull());
-    expect(force).toHaveBeenCalledTimes(1);
-    expect(within(account()).getByText('×2')).toBeTruthy();
-    expect(cardUseButton('Fable').disabled).toBe(false);
-    expect(redeem).toHaveBeenCalledTimes(3);
+    const failures = [
+      new ApiCallError('bad_response', 'Request deadline exceeded', false),
+      new ApiCallError('internal_error', undefined, true, [], [], [], 500),
+    ];
+    for (const [index, failure] of failures.entries()) {
+      before = reads();
+      redeem.mockRejectedValueOnce(failure);
+      await use();
+      expect((await within(account()).findByRole('alert')).textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
+      await waitFor(() => expect(reads()).toBeGreaterThan(before));
+      expect(cardUseButton('Fable').disabled).toBe(true);
+      expect(cardUseButton('Full').disabled).toBe(true);
+      expect(redeem).toHaveBeenCalledTimes(3 + index);
+
+      force.mockResolvedValueOnce(quotaWith({ fable: 2, used: 0 }));
+      await user.click(refreshButton('Claude Max'));
+      await waitFor(() => expect(within(account()).queryByRole('alert')).toBeNull());
+      expect(force).toHaveBeenCalledTimes(1 + index);
+      expect(within(account()).getByText('×2')).toBeTruthy();
+      expect(cardUseButton('Fable').disabled).toBe(false);
+    }
+    expect(redeem).toHaveBeenCalledTimes(4);
   });
 
   it('MH-QUOTA-062: only a reader the server lets spend cards is offered 「使用」; everyone else keeps the list and the refresh', async () => {

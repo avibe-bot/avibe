@@ -198,6 +198,24 @@ describe('reset cards in the quota card', () => {
     for (const kind of ['all', 'fable']) {
       for (const button of within(row('claude', kind)).getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(true);
     }
+ 
+    // A lock on an account whose cards are not read yet, or whose kind matches no row, is said for the block.
+    const sentence = '没收到供应商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。';
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <QuotaTab
+          quota={readyRegion({ refresh_interval_seconds: 300, sources: [
+            account('unread', 'anthropic', { state: 'unread', lock: { reason: 'unconfirmed', kind: 'all', since: iso(NOW) }, cards: [] }),
+            account('other-kind', 'anthropic', held([card({ kind: 'fable' })], { lock: { reason: 'unconfirmed', kind: 'weekly', since: iso(NOW) } })),
+          ] })}
+          now={NOW}
+          canUseResetCards
+        />
+      </I18nextProvider>,
+    );
+    expect(within(block('unread')!).getByRole('alert').textContent).toBe(sentence);
+    expect(within(block('other-kind')!).getByRole('alert').textContent).toBe(sentence);
+    expect((within(block('other-kind')!).getByRole('button', { name: '使用 Fable 重置卡' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('MH-QUOTA-055: says what a use did in the vendor\'s words, or that no card was spent and why, in zh and en', async () => {
