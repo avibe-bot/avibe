@@ -32,7 +32,10 @@ pub fn inset_script(config: &tauri::Config) -> String {
 }
 
 fn configured_controls(config: &tauri::Config) -> Option<(f64, f64)> {
-    config.app.windows.iter()
+    config
+        .app
+        .windows
+        .iter()
         .find(|window| window.label == crate::MAIN_WINDOW)
         .and_then(|window| window.traffic_light_position.as_ref())
         .map(|position| (position.x, position.y))
@@ -131,11 +134,12 @@ mod tests {
             let config: tauri::Config = serde_json::from_value(serde_json::json!({
                 "identifier":"bot.avibe.titlebar-test",
                 "app":{"windows":[{"label":"main","trafficLightPosition":{"x":x,"y":17.0}}]}
-            })).unwrap();
+            }))
+            .unwrap();
             let script = inset_script(&config);
             assert!(script.contains(&format!("'--shell-window-controls-left', '{x}px'")));
             assert!(script.contains("'--shell-titlebar-inset', '28px'"));
-            assert_eq!(configured_controls(&config),Some((x,17.0)));
+            assert_eq!(configured_controls(&config), Some((x, 17.0)));
         }
         assert!(!inset_script(&tauri::Config::default()).contains("--shell-window-controls-left"));
     }
