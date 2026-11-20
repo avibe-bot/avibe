@@ -293,7 +293,7 @@ def test_unclaimed_create_expires_but_claimed_create_awaits_device(isolated_stat
     waiting = _get("claimed", now=NOW + timedelta(seconds=31))
     assert waiting["state"] == "awaiting_device"
     assert waiting["status_message"] == (
-        "Waiting for your iPhone to return the result."
+        "Waiting for your device to return the result."
     )
     assert waiting["create"]["terminal_state"] is None
     assert claim_next(
@@ -323,6 +323,7 @@ def test_device_binding_is_sticky_and_exclusions_allow_cancel_to_pass_create(
         device_id="device-a",
         exclude_lease_tokens=[create_claim["leaseToken"]],
         allow_create=False,
+        kinds=[],
         now=NOW,
     ) is None
 
@@ -338,6 +339,7 @@ def test_device_binding_is_sticky_and_exclusions_allow_cancel_to_pass_create(
         device_id="device-a",
         exclude_lease_tokens=[create_claim["leaseToken"]],
         allow_create=False,
+        kinds=[],
         now=NOW + timedelta(seconds=1),
     )
     assert cancel_claim["action"] == "cancel"
@@ -918,3 +920,24 @@ def test_attempt_rows_keep_every_cancel_generation(isolated_state):
         (1, "failed", '["wake-up","cancel",1]'),
         (2, "failed", '["wake-up","cancel",2]'),
     ]
+
+
+@pytest.mark.parametrize("vector", json.loads(CONTRACT_VECTORS.read_text())["claimFilters"], ids=lambda vector: vector["name"])
+def test_claim_kinds_filter_only_unbound_creates(isolated_state, vector):
+    kinds, expected = vector["kinds"], vector["firstKind"]
+    for kind in ("reminder", "alarm"):
+        create_operation(
+            session_id="ses-schedule", instance_id="instance-a", operation_id=f"kind-{kind}",
+            kind=kind, title=kind, fire_at=FIRE_AT, time_zone="America/Los_Angeles", now=NOW - timedelta(seconds=1) if kind == "reminder" else NOW,
+        )
+    claim = claim_next(instance_id="instance-a", device_id="device-a", kinds=kinds, now=NOW)
+    assert (claim["request"]["kind"] if claim else None) == expected
+    if claim:
+        assert claim_next(instance_id="instance-a", device_id="device-a", kinds=[], now=NOW) == claim
+
+
+@pytest.mark.parametrize("kinds", ["alarm", ["calendar"], ["alarm", "alarm"], [None], {}])
+def test_claim_rejects_invalid_kinds(isolated_state, kinds):
+    with pytest.raises(SystemScheduleServiceError) as caught:
+        claim_next(instance_id="instance-a", device_id="device-a", kinds=kinds, now=NOW)
+    assert caught.value.code == "invalid_kinds"

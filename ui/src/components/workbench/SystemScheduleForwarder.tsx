@@ -7,6 +7,7 @@ import {
   hasNativeCapability,
   nativeAppInfo,
   nativeSystemScheduleCancel,
+  nativeSystemScheduleKinds,
   nativeSystemScheduleRequest,
   type NativeSystemScheduleCancel,
   type NativeSystemScheduleReceipt,
@@ -59,6 +60,7 @@ async function claimNext(
   identity: NativeIdentity,
   excludeLeaseTokens: string[],
   allowCreate: boolean,
+  kinds: Array<'alarm' | 'reminder'>,
 ): Promise<ScheduleClaim | null> {
   return withApiDeadline(CLAIM_TIMEOUT_MS, undefined, async (signal) => {
     const response = await apiFetch('/api/system-schedule/claim', {
@@ -69,6 +71,7 @@ async function claimNext(
         device_id: identity.deviceId,
         exclude_lease_tokens: excludeLeaseTokens,
         allow_create: allowCreate,
+        kinds,
       }),
       signal,
     });
@@ -107,7 +110,7 @@ async function deliverReceipt(pending: PendingReceipt): Promise<'accepted' | 'di
   return 'retry';
 }
 
-/** Forwards durable Runtime requests through independent trusted iOS bridge leases. */
+/** Forwards durable Runtime requests through independent trusted native bridge leases. */
 export const SystemScheduleForwarder: FC = () => {
   const { connectWorkbenchEvents } = useApi();
   const { capabilities } = useInstanceAuthorization();
@@ -219,6 +222,7 @@ export const SystemScheduleForwarder: FC = () => {
         startReceiptDelivery(key, pending);
       }
 
+      const kinds = await nativeSystemScheduleKinds();
       for (let index = 0; index < MAX_CLAIMS_PER_RECONCILE; index += 1) {
         const inFlight = [...inFlightLeasesRef.current.values()];
         const excludeLeaseTokens = [
@@ -233,6 +237,7 @@ export const SystemScheduleForwarder: FC = () => {
           identity,
           [...new Set(excludeLeaseTokens)],
           allowCreate,
+          kinds,
         );
         if (!claim) break;
         startClaim(identity, claim);

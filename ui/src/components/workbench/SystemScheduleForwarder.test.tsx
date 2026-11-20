@@ -21,6 +21,7 @@ const { apiFetch, native, activity, events } = vi.hoisted(() => ({
   native: {
     hasNativeCapability: vi.fn(),
     nativeAppInfo: vi.fn(),
+    nativeSystemScheduleKinds: vi.fn(),
     nativeSystemScheduleRequest: vi.fn(),
     nativeSystemScheduleCancel: vi.fn(),
   },
@@ -105,6 +106,7 @@ beforeEach(() => {
     instance: { id: 'instance-1', name: 'Studio' },
     device: { id: 'device-1' },
   });
+  native.nativeSystemScheduleKinds.mockResolvedValue(['alarm']);
   native.nativeSystemScheduleRequest.mockResolvedValue(receipt);
   native.nativeSystemScheduleCancel.mockResolvedValue(receipt);
   activity.onPageReactivated.mockReturnValue(() => undefined);
@@ -391,6 +393,7 @@ describe('SystemScheduleForwarder', () => {
       device_id: 'device-1',
       exclude_lease_tokens: [],
       allow_create: true,
+      kinds: ['alarm'],
     });
     expect(JSON.parse(callsFor('/api/system-schedule/receipt')[0][1].body)).toEqual({
       instance_id: 'instance-1',
@@ -984,3 +987,14 @@ describe('SystemScheduleForwarder', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 });
+
+it.each(contractVectors.claimFilters.filter((vector: { kinds: unknown }) => vector.kinds !== null))(
+  'sends supported kinds from the shared $name vector',
+  async (vector: { kinds: Array<'alarm' | 'reminder'> }) => {
+    native.nativeSystemScheduleKinds.mockResolvedValue(vector.kinds);
+    apiFetch.mockResolvedValue(Response.json({ ok: true, claim: null }));
+    render(<SystemScheduleForwarder />);
+    await waitFor(() => expect(callsFor('/api/system-schedule/claim').length).toBeGreaterThan(0));
+    expect(JSON.parse(callsFor('/api/system-schedule/claim')[0][1].body).kinds).toEqual(vector.kinds);
+  },
+);

@@ -1,0 +1,303 @@
+"""MESSAGE-DELIVERY-340: D2 authority through HTTP, SQLite and controller admission."""
+
+from __future__ import annotations
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
+import threading
+
+import httpx
+import pytest
+from sqlalchemy import select
+
+from storage import messages_service
+from storage.db import create_sqlite_engine
+from storage.models import message_deliveries
+from tests.test_ui_session_stream import _make_session, isolated_state  # noqa: F401
+from tests.ui_server_test_helpers import csrf_headers
+
+
+def revision(options):
+    return hashlib.sha256(json.dumps(options, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+@pytest.fixture
+def answer_route(isolated_state, tmp_path, monkeypatch):
+    from core import internal_server
+    from tests.test_internal_server import _bind_test_native_start, _build_controller_double
+    from vibe.ui_server import app
+
+    scope, session = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        question = messages_service.append(
+            conn,
+            scope_id=scope,
+            session_id=session,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Continue?",
+            content={"kind": "result", "quick_replies": ["继续 ✅", "Stop"]},
+        )
+    controller = _build_controller_double()
+    internal_app = internal_server.create_app(controller)
+    manager = controller.session_turns
+    starts, dispatches = [], []
+
+    async def run(sid, context, text, *, logical_turn_id=None, **_kwargs):
+        starts.append(text)
+        _bind_test_native_start(engine, context)
+        manager._terminalize_durable_turn(
+            logical_turn_id,
+            "completed",
+            settled_by="terminal_result",
+            evidence_kind="test_terminal",
+        )
+
+    manager._run = run
+    entered, release = threading.Event(), threading.Event()
+    release.set()
+
+    async def dispatch(payload):
+        dispatches.append(payload)
+        entered.set()
+        await asyncio.to_thread(release.wait, 10)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=internal_app), base_url="http://testserver"
+        ) as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+        return {"status_code": response.status_code, "body": response.json()}
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", dispatch)
+
+    def post(operation="op-one", *, text="继续 ✅", free=False, legacy=False, **extra):
+        body = {"text": text}
+        if free:
+            body["in_reply_to"] = question["id"]
+        else:
+            body["metadata"] = {"quick_reply_for": question["id"]}
+        if not legacy:
+            body.update(operation_id=operation, revision=revision(["继续 ✅", "Stop"]))
+        body.update(extra)
+        client = app.test_client()
+        return client.post(f"/api/sessions/{session}/messages", json=body, headers=csrf_headers(client))
+
+    return dict(
+        post=post,
+        engine=engine,
+        session=session,
+        scope=scope,
+        question=question,
+        starts=starts,
+        dispatches=dispatches,
+        entered=entered,
+        release=release,
+    )
+
+
+@pytest.mark.parametrize("second", ["choice", "text", "legacy", "replay"])
+def test_concurrent_answers_reserve_before_dispatch(answer_route, second):
+    r = answer_route
+    r["release"].clear()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(r["post"])
+        assert r["entered"].wait(5)
+        try:
+            another = executor.submit(
+                r["post"],
+                "op-one" if second == "replay" else "op-two",
+                free=second == "text",
+                legacy=second == "legacy",
+            )
+            # The losing request must finish while the first IPC is still blocked.
+            response = another.result(timeout=3)
+            assert response.get_json()["answer"]["outcome"] == (
+                "duplicate" if second == "replay" else "already_handled"
+            )
+        finally:
+            r["release"].set()
+        assert first.result(timeout=10).status_code in (201, 202)
+    assert len(r["dispatches"]) == len(r["starts"]) == 1
+    with r["engine"].connect() as conn:
+        assert (
+            len(conn.execute(select(message_deliveries).where(message_deliveries.c.session_id == r["session"])).all())
+            == 1
+        )
+
+
+def test_operation_replay_is_durable_and_bound_to_input(answer_route):
+    r = answer_route
+    first = r["post"]()
+    assert first.get_json()["answer"]["outcome"] == "accepted"
+    r["engine"].dispose()
+    replay = r["post"]()
+    assert replay.get_json()["answer"]["outcome"] == "duplicate"
+    assert replay.get_json()["answer"]["original_outcome"] == "accepted"
+    changed = r["post"](text="Stop")
+    assert changed.status_code == 409
+    assert changed.get_json()["error"]["code"] == "operation_conflict"
+    assert len(r["dispatches"]) == len(r["starts"]) == 1
+
+
+@pytest.mark.parametrize("cause", ["revision", "user", "agent", "pending", "missing", "archived"])
+def test_stale_and_missing_answers_do_not_dispatch(answer_route, cause):
+    from sqlalchemy import update
+    from storage.models import agent_sessions
+    from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
+
+    r = answer_route
+    extra = {}
+    with r["engine"].begin() as conn:
+        if cause in ("user", "agent"):
+            messages_service.append(
+                conn,
+                scope_id=r["scope"],
+                session_id=r["session"],
+                platform="avibe",
+                author=cause,
+                source=cause,
+                message_type="user" if cause == "user" else "result",
+                text="New conversation",
+            )
+        if cause == "pending":
+            admit_input(
+                conn,
+                InputEnvelope(
+                    session_id=r["session"],
+                    scope_id=r["scope"],
+                    sender=InputSender("user"),
+                    kind="user",
+                    provenance=InputProvenance("web_composer"),
+                    dispatch_text="Unsent input",
+                    text="Unsent input",
+                ),
+                delivery_id="delivery-newer-input",
+            )
+        if cause == "archived":
+            conn.execute(update(agent_sessions).where(agent_sessions.c.id == r["session"]).values(status="archived"))
+    if cause == "revision":
+        extra["revision"] = "0" * 64
+    if cause == "missing":
+        extra["metadata"] = {"quick_reply_for": "missing"}
+    response = r["post"](**extra)
+    assert response.status_code == (404 if cause == "missing" else 409)
+    assert response.get_json()["answer"]["outcome"] == ("not_found" if cause == "missing" else "stale")
+    assert r["dispatches"] == []
+
+
+def test_text_answer_is_ordinary_input_and_preserves_composer_draft(answer_route):
+    from storage import message_deliveries as deliveries
+
+    r = answer_route
+    with r["engine"].begin() as conn:
+        deliveries.set_draft(conn, r["session"], "Still editing")
+    response = r["post"](free=True, text="稍后，我再想想")
+    assert response.get_json()["answer"]["outcome"] == "accepted"
+    assert response.get_json()["draft_advanced"] is False
+    assert response.get_json()["draft"]["text"] == "Still editing"
+    assert r["dispatches"][0]["message_kind"] == "original"
+    assert "quick_reply_for" not in r["dispatches"][0]["metadata"]
+    assert r["post"]("another").get_json()["answer"]["outcome"] == "already_handled"
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "timeout", "lost_ack"])
+def test_dispatch_failure_releases_only_proven_unaccepted_answers(answer_route, monkeypatch, failure):
+    from vibe import internal_client
+
+    r = answer_route
+    real_dispatch = internal_client.dispatch_async
+
+    async def failed(payload):
+        if failure == "lost_ack":
+            await real_dispatch(payload)
+        if failure == "unavailable":
+            raise internal_client.InternalServerUnavailable("not connected")
+        raise internal_client.InternalServerTimeout("ack lost")
+
+    monkeypatch.setattr(internal_client, "dispatch_async", failed)
+    assert r["post"]().status_code in (502, 504)
+    monkeypatch.setattr(internal_client, "dispatch_async", real_dispatch)
+    replay = r["post"]().get_json()["answer"]
+    assert replay["outcome"] == "duplicate"
+    assert replay["original_outcome"] == ("accepted" if failure == "lost_ack" else None)
+    contender = r["post"]("second")
+    if failure == "unavailable":
+        assert contender.get_json()["answer"]["outcome"] == "accepted"
+    else:
+        assert contender.get_json()["answer"]["outcome"] == "already_handled"
+    assert len(r["starts"]) == (0 if failure == "timeout" else 1)
+
+
+def test_question_revision_shared_vectors(answer_route):
+    from pathlib import Path
+    from core.message_answers import revision as runtime_revision
+
+    vectors = json.loads((Path(__file__).parent / "fixtures/message_answer_contract_vectors.json").read_text())
+    for question in vectors["questions"]:
+        assert runtime_revision(question["options"]) == question["revision"]
+    assert answer_route["question"]["content"]["quick_reply_revision"] == vectors["questions"][1]["revision"]
+
+
+def test_revoked_chat_permission_precedes_operation_replay(answer_route, tmp_path):
+    from tests.ui_server_test_helpers import _save_config, remote_session_cookie
+    from vibe import remote_access
+    from vibe.ui_server import app
+
+    r = answer_route
+    config = _save_config(tmp_path, paired=True)
+    client = app.test_client()
+    body = {
+        "text": "继续 ✅",
+        "metadata": {"quick_reply_for": r["question"]["id"]},
+        "operation_id": "same-operation",
+        "revision": revision(["继续 ✅", "Stop"]),
+    }
+    for role, expected in (("owner", 201), ("viewer", 403)):
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(config, "owner@example.com", "same-user", role=role),
+            domain="alex.avibe.bot",
+        )
+        response = client.post(
+            f"/api/sessions/{r['session']}/messages",
+            json=body,
+            headers=csrf_headers(client, "https://alex.avibe.bot"),
+            base_url="https://alex.avibe.bot",
+            environ_base={"REMOTE_ADDR": "203.0.113.10"},
+        )
+        assert response.status_code == expected
+    assert len(r["dispatches"]) == len(r["starts"]) == 1
+    assert "answer" not in response.get_json()  # The outer auth guard discloses no saved receipt.
+
+
+def test_answer_migration_preserves_existing_rows_and_epoch(answer_route):
+    import sqlite3
+    from alembic import command
+    from storage.migrations import alembic_config
+
+    r = answer_route
+    path = r["engine"].url.database
+    from pathlib import Path
+
+    config = alembic_config(Path(path))
+    command.downgrade(config, "20261118_0091")
+
+    def snapshot():
+        with sqlite3.connect(path) as conn:
+            names = [
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                if row[0] not in {"alembic_version", "message_answer_operations"}
+            ]
+            return {name: conn.execute('SELECT * FROM "' + name.replace('"', '""') + '"').fetchall() for name in names}
+
+    before = snapshot()
+    command.upgrade(config, "head")
+    assert snapshot() == before
+    command.downgrade(config, "20261118_0091")
+    assert snapshot() == before
+    command.upgrade(config, "head")

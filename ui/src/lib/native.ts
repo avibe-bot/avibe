@@ -285,6 +285,19 @@ export async function nativeHealthConnect(params: { requestId: string; pairingCo
   return callNative('health', 'health.connect', params);
 }
 
+/** Kinds supported for NEW schedules; recovery/cancel retain device ownership. */
+export async function nativeSystemScheduleKinds(): Promise<Array<'alarm' | 'reminder'>> {
+  // Unknown capabilities prohibit NEW creates, while device-bound recovery and
+  // cancellation still reach Runtime with an empty kinds list.
+  const result = await callNative<{ contract: number; supportedKinds: unknown }>(
+    'systemSchedule', 'systemSchedule.capabilities',
+  ).catch(() => null);
+  const kinds = result?.supportedKinds;
+  if (result?.contract !== 1 || !Array.isArray(kinds)
+    || kinds.some((kind) => kind !== 'alarm' && kind !== 'reminder')) return [];
+  return [...new Set(kinds)] as Array<'alarm' | 'reminder'>;
+}
+
 export async function nativeSystemScheduleRequest(
   request: NativeSystemScheduleRequest,
 ): Promise<NativeSystemScheduleReceipt | null> {

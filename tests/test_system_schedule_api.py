@@ -177,3 +177,28 @@ def test_system_schedule_routes_reject_unknown_shapes_and_map_permanent_receipt_
     )
     assert stale.status_code == 409
     assert stale.get_json() == {"ok": False, "error": "stale_receipt"}
+
+
+def test_system_schedule_claim_accepts_optional_kinds_with_real_storage(monkeypatch, tmp_path):
+    from tests.test_system_schedule_service import NOW, FIRE_AT
+    from storage.importer import ensure_sqlite_state
+    from storage.system_schedule_service import create_operation
+    from storage.db import create_sqlite_engine
+    from tests.test_ui_session_stream import _make_session
+
+    ensure_sqlite_state()
+    _, session = _make_session(tmp_path)
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: _paired_config())
+    monkeypatch.setattr("storage.system_schedule_service._utc_now", lambda: NOW)
+    create_operation(session_id=session, instance_id="instance-a", operation_id="remind",
+                     kind="reminder", title="Reminder", fire_at=FIRE_AT, time_zone="UTC", now=NOW)
+    client = app.test_client()
+    body = {"instance_id": "instance-a", "device_id": "device-a", "exclude_lease_tokens": [], "allow_create": True}
+    filtered = client.post("/api/system-schedule/claim", json={**body, "kinds": ["alarm"]}, headers=csrf_headers(client))
+    assert filtered.get_json() == {"ok": True, "claim": None}
+    legacy = client.post("/api/system-schedule/claim", json=body, headers=csrf_headers(client))
+    assert legacy.get_json()["claim"]["request"]["kind"] == "reminder"
+    invalid = client.post("/api/system-schedule/claim", json={**body, "kinds": ["calendar"]}, headers=csrf_headers(client))
+    assert invalid.status_code == 400
+    assert invalid.get_json()["error"] == "invalid_kinds"
+    create_sqlite_engine().dispose()

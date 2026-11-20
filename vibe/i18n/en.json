@@ -1,4 +1,7 @@
 {
+  "systemSchedule": {
+    "waitingForDevice": "Waiting for your device to return the result."
+  },
   "storage": {
     "notice": {
       "epoch3BackupSkipped": "The disk is nearly full, so Avibe updated its database without keeping a backup copy. You can still go back to 3.2.6; 3.2.5 and older can no longer open this database. Freeing some disk space is recommended."
