@@ -48,7 +48,7 @@ def activity(row):
 
 
 def subscription(conn, owner: str, registration: str):
-    return web_push_service.get_enabled_by_endpoint(
+    return web_push_service.get_deliverable_by_endpoint(
         conn,
         user_key=owner,
         endpoint=f"{NATIVE_PUSH_RELAY_ORIGIN}/api/push/apns/{registration}",

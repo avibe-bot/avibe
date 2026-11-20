@@ -4508,18 +4508,55 @@ def start_runtime_monitoring(config: V2Config | None = None) -> None:
     start_resource_acl_sync_polling(config)
 
 
+def _record_device_access_switch(config, enabled):
+    """Record a change of requested access, not a connector restart or outage."""
+    from storage import device_activity
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import remote_device_sessions
+    from sqlalchemy import select
+    from vibe.ui_request_context import has_request_context
+
+    config = config or V2Config.load()
+    if not config.remote_access.vibe_cloud.is_runtime_paired():
+        return
+    binding = device_binding(config)
+    device, subject = 'host', None
+    ensure_sqlite_state()
+    with get_cached_sqlite_engine().begin() as conn:
+        if has_request_context():
+            from vibe.ui_compat import g
+            from vibe.ui_server import _is_direct_loopback_connection
+            identity = getattr(g, 'remote_session_identity', None)
+            if identity:
+                subject = identity['sub']
+                device = conn.scalar(select(remote_device_sessions.c.device_id).where(
+                    remote_device_sessions.c.binding==binding, remote_device_sessions.c.subject==subject,
+                    remote_device_sessions.c.session_id==identity['browser_session_id']))
+                if not device:
+                    return
+            elif not _is_direct_loopback_connection():
+                return
+        device_activity.record(conn,kind='remoteAccessOn' if enabled else 'remoteAccessOff',
+                               binding=binding,subject=None,device=device,now=int(time.time()))
+
+
 def stop(config: V2Config | None = None) -> dict[str, Any]:
     """Stop the connector and withdraw the request that keeps one running."""
 
     try:
         with _connector_lifecycle():
+            requested = _connector_requested_path().is_file()
             try:
                 _connector_requested_path().unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("Could not withdraw the tunnel connector request", exc_info=True)
                 result = _stop_connector(config)
                 return {**result, "ok": False, "error": "remote_access_request_withdraw_failed", "detail": str(exc)}
-            return _stop_connector(config)
+            result = _stop_connector(config)
+            if requested and result.get('ok'):
+                _record_device_access_switch(config, False)
+            return result
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "stopped": False}
 
@@ -4601,7 +4638,11 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
     install_failure = _ensure_cloudflared_pin(loaded)
     try:
         with _connector_lifecycle():
-            return _start(loaded or config, record_request=True, install_failure=install_failure)
+            requested = _connector_requested_path().is_file()
+            result = _start(loaded or config, record_request=True, install_failure=install_failure)
+            if result.get('ok') and not requested and _connector_requested_path().is_file():
+                _record_device_access_switch(loaded or config, True)
+            return result
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "started": False}
 

@@ -2440,6 +2440,8 @@ class Controller:
         # Skill privacy retention remains active when collection/tool retention
         # is disabled; both policies share this bounded maintenance worker.
         engine = get_cached_sqlite_engine()
+        from storage import device_activity
+        device_activity.prune(engine, int(time.time()), cancel_event)
         agent_events_retention.run_skill_retention(engine, cancel_event=cancel_event)
         config = self._agent_events_retention_config()
         if config is None:

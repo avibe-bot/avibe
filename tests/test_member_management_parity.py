@@ -135,6 +135,9 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mobile/pairings"),
     ("GET", "/api/mobile/requests/{request_id}"),
     ("POST", "/api/mobile/device/v1/pair"),
+    ("POST", "/api/mobile/device/v1/binding-ticket"),
+    ("POST", "/api/devices/{device_id}/health/revoke"),
+    ("POST", "/api/devices/unlinked-health/{device_id}/revoke"),
     ("PUT", "/api/mobile/device/v1/manifest"),
     ("PUT", "/api/mobile/device/v1/health/days"),
     ("POST", "/api/mobile/device/v1/requests/claim"),
@@ -180,7 +183,8 @@ def test_complete_registered_api_management_inventory():
     # + 7 independent device routes and 2 Owner-only mobile metadata routes.
     # + 4 account-scoped registry list, self-report and sign-out routes.
     # + 4 personal Live Activity methods (Viewer; controller enforces ownership and session access).
-    assert len(endpoints) == 357
+    # + 7 device function/activity routes and 1 native Health binding-ticket route.
+    assert len(endpoints) == 365
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),
@@ -249,6 +253,11 @@ def test_complete_registered_api_management_inventory():
         (Path(__file__).parent / "fixtures/member_management_existing_read_roles.json").read_text()
     )
     baseline_read_roles.update({
+        "GET /api/devices/activity": "viewer",
+        "GET /api/devices/example/health": "viewer",
+        "GET /api/devices/example/health/reads": "viewer",
+        "PUT /api/devices/example/notifications": "viewer",
+        "PUT /api/devices/example/schedule": "viewer",
         "GET /api/web-push/live-activities/turn": "viewer",
         "GET /api/web-push/live-activities/example": "viewer",
         "PUT /api/web-push/live-activities/example": "viewer",

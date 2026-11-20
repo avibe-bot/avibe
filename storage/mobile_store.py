@@ -283,7 +283,7 @@ class MobileStore:
             if row is None:
                 raise MobileError("device_unauthorized", 401)
 
-    def pair(self, payload: dict, identity: dict) -> dict:
+    def pair(self, payload: dict, identity: dict, *, reserved_device_id: str | None = None) -> dict:
         object_fields(payload, {"pairing_code", "device_name", "platform", "app_version", "metrics"},
                       {"installation_id"})
         code = text(payload["pairing_code"], limit=100)
@@ -310,7 +310,8 @@ class MobileStore:
                     (installation,),
                 ).fetchall():
                     self._revoke_device(conn, old["id"], now)
-            device_id, credential = "mdev_" + secrets.token_hex(16), secrets.token_urlsafe(32)
+            device_id = reserved_device_id or 'mdev_' + secrets.token_hex(16)
+            credential = secrets.token_urlsafe(32)
             conn.execute(
                 "INSERT INTO devices(id,credential_hash,installation_hash,instance_id,owner,name,"
                 "app_version,metrics,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?)",

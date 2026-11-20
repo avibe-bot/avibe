@@ -20,6 +20,10 @@ ORIGIN = "https://alex.avibe.bot"
 @pytest.fixture
 def install(monkeypatch):
     config = _config()
+    from vibe import permissions
+    from types import SimpleNamespace
+    monkeypatch.setattr(permissions,'get_current_permissions',lambda *_: SimpleNamespace(source='live',
+        projection={'instance':{'id':config.remote_access.vibe_cloud.instance_id},'access':{'owner':{'email':'owner@test.invalid'}}}))
     monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
     return config
 
@@ -210,6 +214,33 @@ def test_inflight_push_registration_cannot_restore_signed_out_delivery(install, 
     assert post(path).status_code == 401
     with get_cached_sqlite_engine().connect() as conn:
         assert web_push_service.count_enabled(conn, user_key="remote:subject") == 0
+
+
+def test_notification_pause_survives_sync_and_activity_stays_in_subject_scope(install):
+    from storage.web_push_service import count_enabled, list_enabled
+
+    mine = client(login(install, 'my-account', 'viewer'))
+    owner = client(login(install, 'other-account', 'owner'))
+    payload = {'device_id': 'synthetic-push', 'subscription': {'endpoint': 'https://example.invalid/test',
+               'keys': {'auth': 'test', 'p256dh': 'test'}}}
+    def send(c, method, path, data):
+        return getattr(c, method)(path, base_url=ORIGIN, headers=csrf_headers(c, ORIGIN), json=data)
+    assert send(mine, 'post', '/api/web-push/subscriptions', payload).status_code == 200
+    ident = listing(mine)['mine'][0]['id']
+    route = f'/api/devices/{ident}/notifications'
+    assert send(owner, 'put', route, {'on': False}).status_code == 403
+    assert send(mine, 'put', route, {'on': False}).get_json()['function']['on'] is False
+    assert send(mine, 'post', '/api/web-push/subscriptions', payload).status_code == 200
+    with get_cached_sqlite_engine().connect() as conn:
+        assert count_enabled(conn, user_key='remote:my-account') == 1
+        assert list_enabled(conn, user_key='remote:my-account') == []
+    assert send(mine, 'put', route, {'on': True}).get_json()['function']['on'] is True
+    items = mine.get('/api/devices/activity', base_url=ORIGIN).get_json()['items']
+    assert [(e['kind'], e['device_id']) for e in items] == [('signedIn', ident)]
+    assert sign_out(owner, ident + '/sign-out').status_code == 200
+    items = owner.get('/api/devices/activity?device_id=' + ident, base_url=ORIGIN).get_json()['items']
+    assert [e['kind'] for e in items] == ['signedOut', 'signedIn']
+    assert items[0]['actor_device_id'] == listing(owner)['mine'][1]['id']
 
 
 def test_self_describe_changes_only_own_session_and_checks_reports(install):

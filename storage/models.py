@@ -291,9 +291,16 @@ system_schedule_operations = Table(
     Column("title", String, nullable=False),
     Column("fire_at", String, nullable=False),
     Column("time_zone", String, nullable=False),
+    Column('registry_activity_id', Integer),
+    Index('uq_sso_registry_activity', 'registry_activity_id', unique=True),
+    Column('blocked_by_schedule_gate', Integer),
+    Column("registry_binding", String),
+    Column("registry_subject", String),
+    Column("registry_device", String),
     Column("bound_device_id", String, nullable=True),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
+    Index("ix_sso_registry", "registry_binding", "registry_subject", "created_at"),
     Index("idx_system_schedule_operations_session", "session_id", "created_at"),
 )
 
@@ -1407,6 +1414,43 @@ media_object_references = Table(
     Index("ix_media_object_references_session", "session_id"),
 )
 
+device_health_links = Table(
+    "device_health_links", metadata,
+    Column("mobile_id", String, primary_key=True),
+    Column("binding", String), Column("subject", String), Column("device_id", String),
+    Column("linked_at", String),
+    Column("ticket_hash", String, unique=True), Column("ticket_binding", String),
+    Column("issued_at", Integer), Column("expires_at", Integer),
+    Column("code_hash", String, unique=True), Column("issuer_sid", String),
+    Index("ix_dhl_device", "binding", "subject", "device_id"),
+)
+
+device_activity_events = Table(
+    "device_activity_events", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("at", Integer, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("binding", String, nullable=False),
+    Column("subject", String),
+    Column("device_id", String, nullable=False),
+    Column("actor_id", String),
+    Column("actor_subject", String),
+    Index("ix_dae_time", "at"),
+    Index("ix_dae_instance", "binding", "at"),
+    Index("ix_dae_person", "binding", "subject", "at"),
+    Index("ix_dae_device", "binding", "device_id", "at"),
+)
+
+device_function_settings = Table(
+    "device_function_settings", metadata,
+    Column("binding", String, primary_key=True),
+    Column("subject", String, primary_key=True),
+    Column("device_id", String, primary_key=True),
+    Column("schedule_on", Integer, nullable=False, server_default="1"),
+    Column("schedule_capable", Integer, nullable=False, server_default="0"),
+    Column("notifications_on", Integer, nullable=False, server_default="1"),
+)
+
 remote_device_push_links = Table(
     "remote_device_push_links", metadata,
     Column("subscription_id", String, primary_key=True),
@@ -1441,6 +1485,8 @@ remote_device_sessions = Table(
     Column("identity_source", String, nullable=False),
     Column("described_at", Integer),
     Column("health_alias_hash", String),
+    Column("ticket_attempts", Integer),
+    Column("ticket_window", Integer),
     Column("schedule_alias", String),
     Column("push_id", String),
     Column("kind", String, nullable=False),

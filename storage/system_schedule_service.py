@@ -319,6 +319,8 @@ def _operation_public(conn, row: Mapping[str, Any], now: datetime) -> dict[str, 
         if state == "awaiting_device"
         else None
     )
+    if row.get('blocked_by_schedule_gate') and row['bound_device_id'] is None and state in ('pending','expired'):
+        status_message = 'Alarms and reminders were turned off on an eligible device. Ask the user to enable Alarms and reminders in Devices before proposing another.'
     return {
         "contract": CONTRACT_VERSION,
         "operation_id": row["operation_id"],
@@ -752,6 +754,7 @@ def claim_next(
     allow_create: bool = True,
     kinds: object = None,
     claimant=None,
+    device_viewer=None,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
     instance_id = _bounded_identifier(instance_id, field="instance_id")
@@ -776,6 +779,10 @@ def claim_next(
     def write() -> dict[str, Any] | None:
         with engine.begin() as conn:
             _advance_pending_deadlines(conn, now)
+            registration, gate = None, True
+            if device_viewer and device_viewer[3]:
+                from storage.device_functions import schedule_claimant
+                registration, gate = schedule_claimant(conn, device_viewer, int(now.timestamp()))
             attempt = _sticky_attempt(
                 conn,
                 action="cancel",
@@ -807,6 +814,10 @@ def claim_next(
                     kinds=allowed_kinds,
                     claimant=claimant,
                 )
+                if attempt and not gate:
+                    conn.execute(system_schedule_operations.update().where(system_schedule_operations.c.operation_id==attempt['operation_id'],
+                        system_schedule_operations.c.blocked_by_schedule_gate.is_(None)).values(blocked_by_schedule_gate=1))
+                    return None
             if attempt is None:
                 return None
             operation = _load_operation(conn, attempt["operation_id"])
@@ -826,7 +837,8 @@ def claim_next(
                             == operation["operation_id"]
                         )
                         .where(system_schedule_operations.c.bound_device_id.is_(None))
-                        .values(bound_device_id=device_id, updated_at=_iso(now))
+                        .values(bound_device_id=device_id, updated_at=_iso(now),blocked_by_schedule_gate=None,
+                                registry_activity_id=secrets.randbelow(2**62)+1 if registration else None, **(registration or {}))
                     )
                 conn.execute(
                     system_schedule_attempts.update()
