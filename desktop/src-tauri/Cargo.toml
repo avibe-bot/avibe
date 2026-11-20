@@ -115,11 +115,18 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
+  "NSAccessibilityProtocols",
   "NSApplication",
   "NSBitmapImageRep",
   "NSButton",
+  "NSColor",
   "NSControl",
+  "NSFont",
+  "NSFontDescriptor",
   "NSImage",
+  "NSKeyValueBinding",
+  "NSParagraphStyle",
+  "NSTextField",
   "NSImageRep",
   "NSImageView",
   "NSLayoutConstraint",

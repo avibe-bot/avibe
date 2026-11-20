@@ -60,6 +60,9 @@ mod probe {
     const SESSION: &str = "ses-probe";
 
     thread_local! {
+        /// Main thread only: a closed window, watched without keeping it.
+        #[allow(clippy::type_complexity)]
+        static WATCHED: std::cell::RefCell<Option<(objc2::rc::Weak<objc2_app_kit::NSWindow>, Vec<objc2::rc::Weak<objc2_app_kit::NSView>>)>> = const { std::cell::RefCell::new(None) };
         /// Main thread only: the open share menu.
         static PICKER: std::cell::RefCell<Option<native::Picker>> = const { std::cell::RefCell::new(None) };
     }
@@ -134,6 +137,7 @@ document.getElementById('show').addEventListener('load', () => {
                 std::thread::sleep(Duration::from_millis(500));
                 steps(&window, &origin, focus);
                 title_bar(&window, &ready);
+                released(&handle, &origin);
                 println!("{}", json!({ "done": true }));
                 handle.exit(0);
             });
@@ -358,6 +362,136 @@ document.getElementById('show').addEventListener('load', () => {
             "back-on-route-it-is-heard-again",
             back.as_deref() == Some("share-open"),
             json!(back),
+        );
+        title(window);
+    }
+
+    /// The drawn title (macOS 26 and later): whole while it fits, cut off
+    /// before the share button when it does not, hidden when nothing useful
+    /// fits, and always the window's own title.
+    fn title(window: &tauri::WebviewWindow) {
+        let os = native::os_version();
+        if os.0 < 26 {
+            check("title-is-the-system-s-before-macos-26", true, json!(os));
+            return;
+        }
+        let state = |title: Option<&'static str>, width: Option<f64>| {
+            if let Some(title) = title {
+                window.set_title(title).unwrap();
+            }
+            if let Some(width) = width {
+                window.set_size(tauri::LogicalSize::new(width, 600.0)).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            on_main(window, |webview, _, tx| {
+                let window = webview.window().expect("window");
+                let _ = tx.send((
+                    window.title().to_string(),
+                    crate::macos_show_titlebar::title_state(&window),
+                ));
+            })
+        };
+        let gap = |end: f64, start: f64| start - end;
+
+        let (title, drawn) = state(Some("Q4 漏斗看板"), Some(1040.0));
+        let (text, shown, end, start, natural, passes) = drawn.expect("a drawn title");
+        check(
+            "a-short-title-is-drawn-whole",
+            text == title && shown && end - 82.0 >= natural,
+            json!({ "text": text, "shown": shown, "room": end - 82.0, "natural": natural }),
+        );
+        check("a-click-on-the-title-reaches-the-title-bar", passes, json!(passes));
+
+        const LONG: &str =
+            "2026 年第四季度全渠道销售漏斗与转化归因分析看板（含区域拆分、渠道对比、周环比明细与下季度目标拆解）";
+        let (title, drawn) = state(Some(LONG), Some(720.0));
+        let (text, shown, end, start2, natural, _) = drawn.expect("a drawn title");
+        check(
+            "a-long-title-is-cut-off-before-the-button",
+            text == title && title == LONG && shown && natural > end - 82.0 && gap(end, start2) >= 8.0,
+            json!({ "shown": shown, "room": end - 82.0, "natural": natural, "gap": gap(end, start2), "button": start2, "wide_button": start }),
+        );
+
+        let (title, drawn) = state(None, Some(160.0));
+        let (text, shown, ..) = drawn.expect("a drawn title");
+        check(
+            "too-narrow-for-any-title-shows-none",
+            text == title && !shown,
+            json!({ "shown": shown }),
+        );
+        let (_, drawn) = state(None, Some(800.0));
+        check(
+            "wide-again-the-title-is-back",
+            drawn.is_some_and(|(_, shown, ..)| shown),
+            json!(null),
+        );
+    }
+
+    /// What a closed window leaves behind, after `destroy`, as the shell
+    /// retires a Show window: whether the window is still referenced, by how
+    /// many, and how many of the title-bar views are still alive.
+    fn closed(app: &tauri::AppHandle, origin: &str, label: &str, titled: bool) -> (Option<usize>, usize, usize) {
+        let window = WebviewWindowBuilder::new(
+            app,
+            label,
+            WebviewUrl::External(format!("{origin}/workbench").parse().unwrap()),
+        )
+        .inner_size(720.0, 480.0)
+        .position(-4000.0, -4000.0)
+        .visible(true)
+        .focused(false)
+        .incognito(true)
+        .build()
+        .unwrap();
+        if titled {
+            crate::macos_show_titlebar::install(&window, "Share".to_owned(), "/workbench".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        let views = on_main(&window, |webview, _, tx| {
+            objc2::rc::autoreleasepool(|_| {
+                let window = webview.window().expect("window");
+                let views: Vec<_> = crate::macos_show_titlebar::installed(&window)
+                    .iter()
+                    .map(objc2::rc::Weak::from_retained)
+                    .collect();
+                let count = views.len();
+                WATCHED.with(|watched| *watched.borrow_mut() = Some((objc2::rc::Weak::from_retained(&window), views)));
+                let _ = tx.send(count);
+            });
+        });
+        window.destroy().unwrap();
+        drop(window);
+        std::thread::sleep(Duration::from_millis(1500));
+        let (tx, rx) = mpsc::channel();
+        app.run_on_main_thread(move || {
+            objc2::rc::autoreleasepool(|_| {
+                let left = WATCHED.with(|watched| {
+                    let (window, views) = watched.borrow_mut().take().expect("watched");
+                    // One reference is this load's own.
+                    let references = window.load().map(|window| {
+                        let count: usize = unsafe { objc2::msg_send![&*window, retainCount] };
+                        count - 1
+                    });
+                    (references, views.iter().filter(|view| view.load().is_some()).count())
+                });
+                let _ = tx.send(left);
+            });
+        })
+        .unwrap();
+        let (references, alive) = rx.recv_timeout(Duration::from_secs(10)).expect("main thread answered");
+        (references, views, alive)
+    }
+
+    /// A Show window closed through Tauri, as the shell retires it, keeps no
+    /// title-bar object and no extra reference to the window: it is left
+    /// exactly as a window without them is.
+    fn released(app: &tauri::AppHandle, origin: &str) {
+        let (plain, _, _) = closed(app, origin, "closing-plain", false);
+        let (titled, installed, alive) = closed(app, origin, "closing-titled", true);
+        check(
+            "a-closed-show-window-keeps-nothing-of-its-title-bar",
+            installed >= 1 && alive == 0 && titled == plain,
+            json!({ "installed": installed, "alive": alive, "window_references": titled, "plain_window_references": plain }),
         );
     }
 
