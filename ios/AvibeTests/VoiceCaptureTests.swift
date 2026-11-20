@@ -1318,6 +1318,9 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.unsentCount, 0)
         XCTAssertEqual(after.instance.posts, 0)
         XCTAssertTrue(after.earlier.last?.contains("sendUnknown") == true, "\(after.earlier)")
+        // Nothing is left to retry: the notice the earlier run scheduled goes.
+        XCTAssertEqual(after.unsentNotices.count, 1)
+        XCTAssertNil(after.unsentNotices.last ?? Date())
         XCTAssertTrue(VoiceCaptureOutbox(directory: after.outboxDirectory).entries().isEmpty)
         before.instance.release()
         await send.value
@@ -1558,6 +1561,97 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(after.instance.statusCalls, 0, "it waits for Retry")
         await controller.sendKept(.retry)
         XCTAssertEqual(after.instance.sent, ["hello"])
+    }
+
+    /// An expired instance session does not destroy a kept take: found
+    /// signed out when it is asked again (also after a relaunch), it waits,
+    /// and is sent once the session is back.
+    func testAKeptTakeSurvivesAnExpiredSession() async {
+        let before = World()
+        await keepATake(before, before.controller())
+
+        let after = World()
+        after.outboxDirectory = before.outboxDirectory
+        after.instance.statusResult = .failure(Failure.signIn)
+        let controller = after.controller()
+        await controller.restoreOutbox()
+        XCTAssertEqual(controller.unsentCount, 1, "not destroyed")
+        XCTAssertEqual(VoiceCaptureOutbox(directory: after.outboxDirectory).entries().count, 1)
+        XCTAssertNil(controller.retryTask, "it waits for the App to be signed in")
+        XCTAssertEqual(after.instance.transcribed, 0)
+
+        // Signed in again: Retry asks afresh (not the answer from before) and sends.
+        reachable(after)
+        let asked = after.instance.statusCalls
+        await controller.sendKept(.retry)
+        XCTAssertEqual(after.instance.statusCalls, asked + 1)
+        XCTAssertEqual(after.instance.sent, ["hello"])
+        XCTAssertEqual(controller.unsentCount, 0)
+
+        // The same for the take on its island, in this run.
+        let world = World()
+        let other = world.controller()
+        await keepATake(world, other)
+        world.instance.statusResult = .failure(Failure.signIn)
+        await other.sendKept(.byItself)
+        XCTAssertEqual(other.unsentCount, 1)
+        XCTAssertEqual(world.audio?.discarded, false)
+        XCTAssertEqual(world.activities.first?.ended?.reason, .signIn)
+    }
+
+    /// The POST is not made unless its marker reached the disk: a POST that
+    /// began without one could be made again after a relaunch.
+    func testNoPostWithoutItsMarkerOnDisk() async throws {
+        let world = World()
+        let controller = world.controller()
+        await keepATake(world, controller)
+        // The record can no longer be written (something sits in its place).
+        let outbox = VoiceCaptureOutbox(directory: world.outboxDirectory)
+        let entry = try XCTUnwrap(outbox.entries().first)
+        let record = world.outboxDirectory.appending(
+            path: "\(String(format: "%010d", entry.sequence))-\(entry.id.uuidString.lowercased()).json"
+        )
+        try FileManager.default.removeItem(at: record)
+        try FileManager.default.createDirectory(at: record, withIntermediateDirectories: true)
+        try Data().write(to: record.appending(path: "x"))
+
+        reachable(world)
+        await controller.sendKept(.byItself)
+        XCTAssertEqual(world.instance.posts, 0, "no marker, no POST")
+        XCTAssertTrue(world.instance.sent.isEmpty)
+        XCTAssertEqual(controller.unsentCount, 1, "kept")
+        XCTAssertEqual(world.audio?.discarded, false)
+    }
+
+    /// A send nobody asked for that outlasts the take's ten minutes (a slow
+    /// transcription, the App suspended meanwhile) posts nothing: the take
+    /// waits for Retry, with its words.
+    func testAnAutomaticSendThatOutlastsTheWindowPostsNothing() async {
+        let world = World()
+        let start = Date()
+        var clock = start
+        world.now = { clock }
+        let controller = world.controller()
+        await keepATake(world, controller)
+        clock = start.addingTimeInterval(9 * 60 + 59)
+        reachable(world)
+        world.instance.holdTranscribe = true
+        let send = Task { await controller.sendKept(.byItself) }
+        await world.instance.untilHolding()
+        clock = start.addingTimeInterval(10 * 60 + 1)
+        world.instance.holdTranscribe = false
+        world.instance.release()
+        await send.value
+        XCTAssertEqual(world.instance.transcribed, 1)
+        XCTAssertEqual(world.instance.posts, 0, "not posted after its window")
+        XCTAssertEqual(controller.unsentCount, 1)
+        XCTAssertNil(controller.retryTask)
+
+        // Retry sends it, without transcribing again, and says when it was spoken.
+        await controller.sendKept(.retry)
+        XCTAssertEqual(world.instance.transcribed, 1)
+        XCTAssertEqual(world.instance.sent, [VoiceCaptureLateNote.message("hello", spoken: start, now: clock)])
+        XCTAssertEqual(controller.unsentCount, 0)
     }
 
     /// Discard in the alert deletes the takes the alert spoke of, not one

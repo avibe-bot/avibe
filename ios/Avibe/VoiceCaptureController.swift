@@ -1215,13 +1215,20 @@ final class VoiceCaptureController {
         case unknown
         /// The account changed meanwhile: nothing more is done with it.
         case superseded
+        /// It was not asked for by the user, and its `automaticWindow` ended
+        /// before the message could be posted: nothing was posted, and it
+        /// waits for Retry.
+        case tooLate
     }
 
     /// Asks the instance, transcribes and posts one take, touching neither
     /// the state nor the island. Nothing leaves the phone before the
     /// instance said yes; an answer that was "unreachable" is asked again
     /// now, not reused.
-    private func send(_ take: inout Take) async -> Sent {
+    /// `byUser`: the user asked for this send (the stop, Retry in the
+    /// alert). Any other send posts only while the take is still within
+    /// `automaticWindow`, however long its requests took.
+    private func send(_ take: inout Take, byUser: Bool) async -> Sent {
         let sendGeneration = generation
         let id = take.id
         // Given up meanwhile (an account change closed its client; it was
@@ -1230,7 +1237,9 @@ final class VoiceCaptureController {
         var current: Bool { generation == sendGeneration && !ended.contains(id) }
         var answer = await take.consent.value
         guard current else { return .superseded }
-        if answer?.transient == true {
+        // "Unreachable" and "sign in" are answers about then, not now:
+        // each is asked again.
+        if answer?.transient == true || answer?.reason == .signIn {
             answer = await Self.refusal(from: take.instance)
             let fresh = answer
             take.consent = Task { fresh }
@@ -1238,7 +1247,11 @@ final class VoiceCaptureController {
         }
         if let refusal = answer {
             // Unreachable is not a no: the take stays on the phone.
-            return refusal.transient ? .kept(.offline, automatic: !refusal.untilReopened) : .refused(refusal)
+            if refusal.transient { return .kept(.offline, automatic: !refusal.untilReopened) }
+            // Neither is an expired session: the take waits for the App to
+            // be signed in again.
+            if refusal.reason == .signIn { return .needsApp(.signIn) }
+            return .refused(refusal)
         }
         // Once the message POST has been made, its outcome may be unknown
         // (a lost response): it is never repeated, so sending again cannot
@@ -1255,15 +1268,24 @@ final class VoiceCaptureController {
             guard let text = take.text else { throw VoiceCaptureInstanceClient.Failure.nothingHeard }
             let path = try await take.instance.mainBotMessagesPath()
             guard current else { return .superseded }
-            posted = true
+            // The requests above may have outlasted the take's window (a
+            // slow transcription, the App suspended meanwhile).
+            guard byUser || isRecent(take) else { return .tooLate }
             // On disk before it is made: after a relaunch the POST is
-            // never made again.
+            // never made again. A marker that cannot be written means no
+            // POST: it could not be told from one that never began.
             if var entry = take.entry {
                 entry.text = take.text
                 entry.posted = true
-                try? environment.outbox?.update(entry)
+                do {
+                    try environment.outbox?.update(entry)
+                } catch {
+                    record("outbox: the POST marker was not written \(error)")
+                    return .kept(.sendFailed, automatic: false)
+                }
                 take.entry = entry
             }
+            posted = true
             let earlier = environment.earlier()
             // Sent later than it was spoken: its first line says when, so
             // the main Bot does not take it for an instruction given now.
@@ -1332,7 +1354,7 @@ final class VoiceCaptureController {
         let deliverGeneration = generation
         state = .sending(take)
         await take.activity?.update(content(for: take, phase: .sending))
-        let result = await send(&take)
+        let result = await send(&take, byUser: true)
         if sending == take.id { sending = nil }
         guard generation == deliverGeneration else { return }
         await settle(result, of: take)
@@ -1345,6 +1367,9 @@ final class VoiceCaptureController {
         switch result {
         case .superseded:
             return
+        case .tooLate:
+            // Its island goes with its window (`scheduleIslandEnd`).
+            await keep(take, reason: take.keptReason ?? .offline, automatic: take.keptAutomatic)
         case .kept(let reason, let automatic):
             await keep(take, reason: reason, automatic: automatic)
         case .sent(let text):
@@ -1397,7 +1422,14 @@ final class VoiceCaptureController {
             parked.append(kept)
             state = .idle
             updateUnsentNotice()
-            await island?.end(notice, dismissal: dismissal)
+            if environment.isInFront() {
+                // The island is not drawn over the App: say it there, and
+                // open the main Bot's conversation, where it can sign in.
+                await island?.end(nil, dismissal: .immediate)
+                surface(Refusal(reason: .signIn, needsApp: true))
+            } else {
+                await island?.end(notice, dismissal: dismissal)
+            }
         case .unknown:
             // It may have arrived; the chat shows whether it did.
             note("sendUnknown", for: take)
@@ -1685,7 +1717,9 @@ final class VoiceCaptureController {
                 !tried.contains($0.id) && sending != $0.id && belongs($0, to: pass.scope)
             }) {
                 tried.insert(next.id)
-                guard await sendOneKept(next.id, showSending: pass.showSending) else { break }
+                guard await sendOneKept(
+                next.id, showSending: pass.showSending, byUser: pass.scope == .retry
+            ) else { break }
             }
             guard let asked = askedMeanwhile else { break }
             askedMeanwhile = nil
@@ -1703,7 +1737,7 @@ final class VoiceCaptureController {
     /// or the island's Discard is never swallowed. False when the instance
     /// could not be reached, or the account changed: the takes after it
     /// wait.
-    private func sendOneKept(_ id: UUID, showSending: Bool) async -> Bool {
+    private func sendOneKept(_ id: UUID, showSending: Bool, byUser: Bool) async -> Bool {
         guard sending != id, var take = kept(id), !ended.contains(id) else { return true }
         sending = id
         take.retries += 1
@@ -1712,7 +1746,7 @@ final class VoiceCaptureController {
         if showSending, let island = take.activity {
             await island.update(content(for: take, phase: .sending))
         }
-        let result = await send(&take)
+        let result = await send(&take, byUser: byUser)
         if sending == id { sending = nil }
         guard generation == sendGeneration else { return false }
         guard kept(id) != nil, !ended.contains(id) else {
@@ -1743,6 +1777,11 @@ final class VoiceCaptureController {
         switch result {
         case .superseded:
             return false
+        case .tooLate:
+            // What it learned (its words) is kept for Retry.
+            var kept = take
+            persist(&kept)
+            replaceKept(kept)
         case .kept(let reason, let automatic):
             var kept = take
             kept.keptReason = reason
@@ -1809,19 +1848,23 @@ final class VoiceCaptureController {
     private func loadOutbox() -> Bool {
         guard let outbox = environment.outbox, !restored else { return false }
         restored = true
+        var removed = false
         for old in outbox.removeExpired(now: environment.now()) {
             noteRestored("expired", old)
+            removed = true
         }
         let account = environment.target()?.accountID
         var found = false
         for entry in outbox.entries() where kept(entry.id) == nil && !ended.contains(entry.id) {
             guard let target = entry.target, account == nil || target.accountID == account else {
                 outbox.remove(entry)
+                removed = true
                 continue
             }
             guard !entry.posted else {
                 noteRestored("sendUnknown", entry)
                 outbox.remove(entry)
+                removed = true
                 continue
             }
             let unreachable = Refusal(reason: .offline, needsApp: false, transient: true)
@@ -1846,6 +1889,11 @@ final class VoiceCaptureController {
         if found {
             record("outbox: \(parked.count) kept from an earlier run")
             updateUnsentNotice()
+        } else if removed, keptTakes.isEmpty {
+            // Nothing is left to retry: the notice the earlier run scheduled
+            // (this run never read when) goes too.
+            unsentNoticeFor = nil
+            environment.scheduleUnsentNotice(nil)
         }
         return found
     }

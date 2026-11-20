@@ -378,14 +378,17 @@ the main Bot acts on the user's computer.
   on its way cannot be taken back, and `capture_earlier` then says
   `sentAfterEnd`). The order survives the App being ended: the next launch
   reads the outbox, asking about voice input afresh; a take whose POST was
-  begun is never posted again.
+  begun is never posted again, and no POST is made unless that marker
+  reached the disk first. An expired instance session destroys nothing: a
+  take found signed out waits for Retry.
 - A take is sent without the user asking only within ten minutes of the
   end of speaking (`automaticWindow`): the schedule above, and once more,
   silently, when Avibe comes to the front. Then its island goes, and a
   lasting notification says 没发出去 · 这条语音没能发出去，打开 Avibe 可以重试。
   (scheduled when the take is kept, so it shows whether or not the App runs
   then; removed once nothing is unsent). From then only Retry sends it, a
-  relaunch included, and it no longer holds newer takes back; neither does
+  relaunch included (a send nobody asked for that outlasts the window, a
+  slow transcription say, posts nothing), and it no longer holds newer takes back; neither does
   one that could not be turned into text. When Avibe comes to the front
   and something is still unsent, one alert says 有一条 3 小时前的语音没能发出去。
   (or 有 3 条语音没能发出去，最早的是 3 小时前。) with 重试 / 全部重试, which sends
