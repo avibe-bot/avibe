@@ -234,8 +234,13 @@ function createDesktopNative(
   const send = vi.fn(async (action: DesktopClientAction) => {
     const started = generation;
     switch (action.type) {
+      // Native starts every first factor from signed out, which drops a code attempt the page
+      // stepped back from, and publishes that state even when the call then fails.
       case 'request_otp':
-        if (account.sendRetryAfter) return reply(false, 'rate_limited', account.sendRetryAfter);
+        if (account.sendRetryAfter) {
+          publish(signedOutAccount, true);
+          return reply(false, 'rate_limited', account.sendRetryAfter);
+        }
         publish({ ...signedOutAccount, status: 'verifying', email: action.email }, true);
         return reply(true);
       case 'verify_otp':
@@ -247,7 +252,10 @@ function createDesktopNative(
         firstFactor();
         return reply(true);
       case 'sign_in_password':
-        if (action.password !== PASSWORD) return reply(false, 'invalid_credentials');
+        if (action.password !== PASSWORD) {
+          publish(signedOutAccount, true);
+          return reply(false, 'invalid_credentials');
+        }
         firstFactor();
         return reply(true);
       case 'verify_second_factor':
@@ -430,6 +438,33 @@ describe.each(HARNESSES)('shared sign-in on $name', ({ name, mount }) => {
     fireEvent.change(screen.getByLabelText(en.mobileApp.password.label), { target: { value: 'nope' } });
     click(en.mobileApp.password.signIn);
     expect(await screen.findByText(en.mobileApp.password.invalid)).toBeTruthy();
+  });
+
+  it(title('keeps a wrong password on its step after stepping back from a sent code'), async () => {
+    mount(service());
+    startEmail();
+    click(en.mobileApp.email.send);
+    await screen.findByText(en.mobileApp.code.title);
+    // Back to the email step: native still holds the code attempt until a new first factor starts.
+    click(en.common.back);
+    click(en.mobileApp.password.entry);
+    fireEvent.change(screen.getByLabelText(en.mobileApp.password.label), { target: { value: 'nope' } });
+    click(en.mobileApp.password.signIn);
+    expect(await screen.findByText(en.mobileApp.password.invalid)).toBeTruthy();
+    expect(screen.getByLabelText(en.mobileApp.password.label)).toBeTruthy();
+  });
+
+  it(title('keeps a refused send on its step after stepping back from a sent code'), async () => {
+    const account = service();
+    mount(account);
+    startEmail();
+    click(en.mobileApp.email.send);
+    await screen.findByText(en.mobileApp.code.title);
+    click(en.common.back);
+    account.sendRetryAfter = 30;
+    click(en.mobileApp.email.send);
+    expect(await screen.findByText(en.mobileApp.code.rateLimited)).toBeTruthy();
+    expect(screen.getByLabelText(en.mobileApp.email.label)).toBeTruthy();
   });
 
   it(title('explains a closed passkey prompt, then signs in with a recovery code'), async () => {
