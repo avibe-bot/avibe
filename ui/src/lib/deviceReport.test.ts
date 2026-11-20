@@ -108,6 +108,88 @@ describe('the device report', () => {
     await expect(reportNativeDevice(apiFetch)).resolves.toBeUndefined();
   });
 
+  describe('with a Health binding ticket', () => {
+    // Synthetic: 43 base64url characters, the shape of 32 random bytes.
+    const ticket = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-';
+    const withTicket = { ...described, health_binding_ticket: ticket };
+    const posted = () => apiFetch.mock.calls.map(([, init]) => JSON.parse(String(init.body)));
+
+    it('asks for it only for the report, sends it once and caches the description without it', async () => {
+      const call = installShell(withTicket);
+
+      await reportNativeDevice(apiFetch);
+      await reportNativeDevice(apiFetch);
+
+      expect(call).toHaveBeenCalledTimes(1);
+      expect(call).toHaveBeenCalledWith('device.describe', { health_binding: true });
+      expect(posted()).toEqual([{ ...described, health_binding_ticket: ticket }]);
+      await expect(nativeDeviceLabel()).resolves.toBe('iPhone 16 Pro');
+      expect(call).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends the description once more without it when the ticket is refused, and never the ticket again', async () => {
+      for (const refusal of [
+        new Response('{"error":"health_binding_not_accepted"}', { status: 403 }),
+        // An older instance that doesn't know the field.
+        new Response('{"error":"invalid_device_description"}', { status: 400 }),
+      ]) {
+        apiFetch.mockClear();
+        installShell(withTicket);
+        apiFetch.mockResolvedValueOnce(refusal);
+
+        await reportNativeDevice(apiFetch);
+        await reportNativeDevice(apiFetch);
+
+        expect(posted()).toEqual([{ ...described, health_binding_ticket: ticket }, described]);
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('sends nothing more on any other answer', async () => {
+      for (const [status, body] of [
+        [403, '{"error":"remote_session_required"}'],
+        [404, '{"error":"device_not_found"}'],
+        [409, '{"error":"installation_mismatch"}'],
+        [429, '{"error":"health_binding_rate_limited"}'],
+        [503, '{"error":"health_binding_unavailable"}'],
+      ] as const) {
+        apiFetch.mockClear();
+        installShell(withTicket);
+        apiFetch.mockResolvedValueOnce(new Response(body, { status }));
+
+        await reportNativeDevice(apiFetch);
+
+        expect(posted()).toEqual([{ ...described, health_binding_ticket: ticket }]);
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('reports without one when the App attaches none, or a malformed one', async () => {
+      for (const answer of [described, { ...described, health_binding_ticket: 'short' }, { ...described, health_binding_ticket: 7 }]) {
+        apiFetch.mockClear();
+        installShell(answer);
+
+        await reportNativeDevice(apiFetch);
+
+        expect(posted()).toEqual([described]);
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('describes as before when an older App refuses the question', async () => {
+      const call = installShell(described);
+      call.mockImplementation(async (_method: string, params?: Record<string, unknown>) => {
+        if (params?.health_binding) throw new Error('device.describe does not accept parameters.');
+        return described;
+      });
+
+      await reportNativeDevice(apiFetch);
+
+      expect(call).toHaveBeenCalledTimes(2);
+      expect(posted()).toEqual([described]);
+    });
+  });
+
   it('sends only the fields of the instance contract', async () => {
     installShell({
       ...described,

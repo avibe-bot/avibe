@@ -2733,6 +2733,37 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// A one-use Health binding ticket for the selected instance's page
+    /// (`device.describe` with `health_binding`): only in front, on the
+    /// settled account, and only from the pairing Health has with that
+    /// instance on that account. nil otherwise, and if any of that changed
+    /// while the ticket was on its way.
+    func healthBindingTicket(instanceID: String) async -> String? {
+        guard
+            UIApplication.shared.applicationState == .active,
+            let healthSync,
+            let accountID = sessionCoordinator.settledAccountID,
+            let instance = sessionCoordinator.selectedInstance,
+            instance.id == instanceID,
+            let origin = WebOrigin(url: instance.url)
+        else {
+            return nil
+        }
+        let ticket = await healthSync.bindingTicket(
+            accountID: accountID, instanceID: instanceID, origin: origin.serialized
+        )
+        guard
+            let ticket,
+            UIApplication.shared.applicationState == .active,
+            sessionCoordinator.settledAccountID == accountID,
+            sessionCoordinator.selectedInstance?.id == instanceID,
+            sessionCoordinator.selectedInstance?.url == instance.url
+        else {
+            return nil
+        }
+        return ticket
+    }
+
     @discardableResult
     func acknowledgePushOpened(id: String, origin: WebOrigin) -> Bool {
         guard
