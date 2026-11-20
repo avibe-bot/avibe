@@ -2215,6 +2215,8 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.showInstances",
                 "badge.set",
                 "direct.handover",
+                "direct.preference",
+                "direct.setPreference",
                 "direct.status",
                 "haptics.impact",
                 "haptics.notify",
