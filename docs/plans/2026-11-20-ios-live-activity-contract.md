@@ -1,0 +1,162 @@
+# iOS Live Activity for one Turn (I5) — three-lane contract
+
+Status: **FROZEN** for implementation on 2026-11-20. Owner decisions (Max, 2026-11-20 10:16 UTC+08:00): track the Turn that is running in a session; the Lock Screen shows the Agent name **and the session title**; "needs you" lights the screen; switching instance ends the activity; the relay and Apple may see the phase and times in the clear; an ended activity stays for one hour. Field names, routes, status codes, and constants below are exact. A lane that needs a change asks the orchestrator for an amendment first; a lane never edits another lane's side of this file.
+
+Vectors shared byte for byte by every lane: `tests/fixtures/live_activity/contract_vectors.json`. Reference rules and the vector checks: `tests/test_live_activity_contract.py`. Design frames: `ui/design: ios/live-activity/*`.
+
+## 1. The flow, once
+
+1. Max opens the 首席安全官 session in the iOS App while a Turn runs and taps **Show on Lock Screen**. The Web UI calls `liveActivity.start({sessionId, agentName, sessionTitle})`.
+2. The App reads the running Turn (`GET /api/web-push/live-activities/turn`), starts an `Activity<TurnActivityAttributes>` with `pushType: .token`, waits for its first push token, and registers it (`PUT /api/web-push/live-activities/<activity_id>`) together with this device's relay registration id.
+3. The instance's controller watches that Turn. On each state change it POSTs a relay request to `https://avibe.bot/api/push/apns/<registration_id>/live-activity`. The relay turns that request into one APNs `liveactivity` push to the activity token. While the Turn keeps running, the controller also sends a low-priority heartbeat every 15 minutes.
+4. The Turn ends. The controller sends `event: end` with a dismissal date one hour later and stops tracking.
+
+The Agent name and session title stay on the phone (ActivityAttributes); they never reach the instance's tracking row, the relay, or Apple.
+
+## 2. iOS (avibe-app `ios/`)
+
+### 2.1 Types (compiled into the App and the `AvibeLiveActivity` extension)
+
+```swift
+struct TurnActivityAttributes: ActivityAttributes {
+    enum Phase: String, Codable, Hashable { case working, needsYou, done, failed, stopped }
+    struct ContentState: Codable, Hashable {
+        var phase: Phase
+        var startedAt: Int      // Unix seconds the Turn started
+        var endedAt: Int?       // Unix seconds the Turn ended; terminal phases only
+        var confirmedAt: Int    // Unix seconds the instance last confirmed this state
+    }
+    var agentName: String       // ≤ 40 grapheme clusters, ellipsized by the App
+    var sessionTitle: String?   // ≤ 60 grapheme clusters; nil when empty or equal to agentName
+    var accountID: String
+    var instanceOrigin: String
+    var sessionID: String
+    var turnID: String
+}
+```
+
+- `ContentState` must stay `Int` seconds. ActivityKit decodes push `content-state` with its default strategies, so a `Date` would read as seconds since 2001.
+- `ContentState` decoding must accept every `content-state` in `relay_cases` (an iOS test decodes each `apns.body_utf8`). Adding a phase is a contract amendment, because an older App cannot decode an unknown case.
+- The session title is captured when tracking starts and is **not** updated afterwards; attributes are immutable. Following a rename would require the title to travel in `content-state` through the relay and APNs in the clear. That is out of scope.
+
+### 2.2 Bridge (Web ↔ App), capability `liveActivities: 1`
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `liveActivity.status` | `{sessionId}` | `{enabled, tracking}`. `enabled` is `ActivityAuthorizationInfo().areActivitiesEnabled`; `tracking` is true when a local activity exists for this session. |
+| `liveActivity.start` | `{sessionId, agentName, sessionTitle}` (`sessionTitle` may be `null`) | `{ok: true}` or `{ok: false, code}`, where `code ∈ disabled \| no_active_turn \| push_unavailable \| failed` |
+| `liveActivity.stop` | `{sessionId}` | `{ok: true}`. Ends the activity `.immediate` and DELETEs with `user_stopped`. |
+| `liveActivity.openSettings` | `{}` | `{ok: true}`. Opens this App's page in Settings. |
+
+The Web passes the title it already shows in the conversation header; for a Bot's session (no title) it passes `null`. The Web shows the entry only when the capability is present and the session's Turn is in flight. When `enabled` is false it shows the Settings entry and never calls `start`.
+
+### 2.3 Lifecycle owned by the App
+
+- **start:** refuse with `disabled` when activities are off. Use this instance's active relay registration id from `NativePushCoordinator`; if there is none, refuse with `push_unavailable`. Then GET the turn (409 maps to `no_active_turn`), `Activity.request(attributes, content: (state from the turn, staleDate: confirmedAt + 2400), pushType: .token)`, wait for the first value of `pushTokenUpdates`, and PUT. Apply the PUT response with `activity.update` locally. A 409 `turn_not_active` ends the activity locally with the returned terminal state. Starting a new activity first ends any other `TurnActivityAttributes` activity (one at a time).
+- Every later value from `pushTokenUpdates` is PUT again with the same body and the new token.
+- **foreground:** for each local activity, GET it and update or end it locally; a 404 ends it `.immediate`.
+- `activityStateUpdates` reporting `.dismissed` or `.ended` that the App did not cause: DELETE with `dismissed`, or `system_ended`. Never re-create an activity for that Turn.
+- **logout, account switch, instance switch, instance removed:** end every `TurnActivityAttributes` activity `.immediate`, then make a best-effort DELETE with `logout`, `account_switch`, or `instance_switch`. Logout also revokes the relay registration, so the instance stops on the relay's 410 even when the DELETE is lost.
+- **tap:** `widgetURL(avibe-app://live-activity/<activityID>)`. The App registers the `avibe-app` scheme in `CFBundleURLTypes` (no entitlement). It resolves the id only against its own `Activity<TurnActivityAttributes>.activities` and opens that account, instance, and `/chat/<sessionID>` through the existing instance-path route. An unknown id opens the App without navigating.
+- The voice capture cleanup stays scoped to `Activity<VoiceCaptureAttributes>`.
+
+### 2.4 What a card shows
+
+- Shown: the Avibe mark, `agentName`, `sessionTitle` (one line, tail-truncated), the phase, the elapsed time (`Text(timerInterval:)` from `startedAt`, counted on the phone), and for an ended Turn the total time.
+- Never shown: message text, tools, files, or the instance name.
+- Stale (`context.isStale`) on a working or needsYou card: the timer stops, and the card reads "May be out of date. Last confirmed working at {confirmedAt}". No timer keeps running for a state nobody confirmed.
+- The words are in the design frames. Lock Screen and island strings live in the extension's xcstrings (zh, en). The alert keys `AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE` and `AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY` live in the App's `Localizable.xcstrings`.
+
+## 3. Relay (avibe-backend)
+
+### 3.1 Route and authorization
+
+`POST /api/push/apns/<registration_id>/live-activity`, with `Authorization: vapid t=<JWT>, k=<key>` and `Content-Type: application/json`. Authentication, ordering, and error codes are those of the frozen badge operation (`docs/plans/badge-only-apns-contract.md` §2): the registration is known and not revoked, the VAPID key hash matches, and `aud` and `exp` are checked. The body is validated only after authentication. No installation management credential is required.
+
+### 3.2 Body (≤ 1024 UTF-8 bytes, strict)
+
+| Field | Required | Rule |
+| --- | --- | --- |
+| `activity_token` | yes | lowercase hex, even length, 16–512 characters |
+| `event` | yes | `update` or `end` |
+| `timestamp` | yes | Unix seconds |
+| `priority` | yes | integer `5` or `10` |
+| `phase` | yes | `update`: `working` or `needsYou`; `end`: `done`, `failed`, or `stopped` |
+| `started_at`, `confirmed_at` | yes | Unix seconds, `started_at ≤ confirmed_at` |
+| `stale_at` | `update` only | `> confirmed_at` |
+| `ended_at`, `dismiss_at` | `end` only | `started_at ≤ ended_at ≤ dismiss_at` |
+| `alert` | optional | only `"needsYou"`, only with `phase: needsYou` and `priority: 10` |
+
+Unix seconds are integers in [1600000000, 4102444800]. Any other key, a `null` in place of an absent field, a float, or a string number fails with `400 invalid_live_activity`. Nothing in the body is free text, so the route cannot carry names or titles.
+
+### 3.3 APNs request (exact; see `relay_cases[].apns`)
+
+- path `/3/device/<activity_token>`, sent to the fixed APNs host of the installation's environment
+- `apns-push-type: liveactivity`
+- `apns-topic: <installation.topic>.push-type.liveactivity`, derived from the installation's already-allowed topic (no new configuration)
+- `apns-priority`: the body's priority
+- `apns-expiration`: `timestamp + 3600` for an update, `timestamp + 14400` for an end
+- no `apns-collapse-id`
+- body, compact JSON in this key order: `{"aps":{"timestamp","event","content-state":{"phase","startedAt"[,"endedAt"],"confirmedAt"}, "stale-date" | "dismissal-date"[, "alert"]}}`. `alert` is exactly `{"title":{"loc-key":"AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE"},"body":{"loc-key":"AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY"},"sound":"default"}`.
+
+### 3.4 Responses
+
+- `201 {"ok":true,"registration_id","apns_status":200}`.
+- Errors: the badge route's registration, VAPID, provider (`apns_provider_invalid`, `apns_token_unavailable`), rate-limit, upstream, and timeout codes, plus:
+  - `400 invalid_live_activity`
+  - `413 apns_payload_too_large`
+  - **`410 activity_token_gone`** when APNs reports BadDeviceToken, DeviceTokenNotForTopic, Unregistered, or 410 for the activity token.
+- **`activity_token_gone` never marks the installation's device token invalid.** One dead activity must not cost the phone its notifications.
+- Rate bucket `push:liveActivityRegistration:<sha256(registration_id)>`, 60 per minute, burst 10.
+- No relay state is added: no table and no migration. The token is never logged; at most a redacted hash is.
+
+## 4. Runtime (avibe-app instance)
+
+### 4.1 API (ui_server; same authorization class as `/api/web-push/subscriptions`, rows scoped to `_web_push_user_key()`)
+
+| Request | Result |
+| --- | --- |
+| `GET /api/web-push/live-activities/turn?session_id=` | `200 {ok, session_id, turn: {turn_id, phase, started_at, confirmed_at}}`, `409 no_active_turn`, or `404 session_not_found` (also when the caller cannot read the session) |
+| `PUT /api/web-push/live-activities/<activity_id>` with `{session_id, turn_id, push_registration_id, activity_token}` | `200 {ok, activity}`, `409 turn_not_active` with the ended `activity`, `409 activity_conflict` (same id, different session/turn/registration), `403 registration_not_owned` (the registration is not a native relay subscription of this caller), `400 invalid_request`, or `404 session_not_found` |
+| `GET /api/web-push/live-activities/<activity_id>` | `200 {ok, activity}` or `404 not_found` |
+| `DELETE /api/web-push/live-activities/<activity_id>` with `{reason}` | `200 {ok, stopped}`. Idempotent. `reason ∈ user_stopped, dismissed, system_ended, logout, account_switch, instance_switch, disabled` |
+
+- `activity` is `{activity_id, session_id, turn_id, phase, started_at, ended_at, confirmed_at, status}`, with `status ∈ tracking, ended, stopped`.
+- `activity_id` is ActivityKit's `Activity.id`: 1–64 characters of `[A-Za-z0-9-]`.
+- The PUT is an upsert. The same activity with a new token replaces the token. A new activity on the same `push_registration_id` stops the previous tracking with reason `replaced`.
+
+### 4.2 Tracking row (SQLite, new table `live_activity_trackings`)
+
+Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`, `push_registration_id`, `activity_token`, `status`, `stop_reason`, `last_phase`, `last_timestamp`, `confirmed_at`, `created_at`, `updated_at`, `expires_at`. The lane may add internal columns. The migration revision number is allocated by the Runtime lane at rebase time (pr-delivery-loop §0). No title or Agent name is stored.
+
+### 4.3 Publisher (controller process)
+
+- **Phase:**
+  - A Turn in `session_turns` that has reached `terminal` maps through `phase_map`.
+  - A Turn still running is `needsYou` while that session has a pending owner request: a pending `vault_requests` row whose requester or delivery `session_id` is the session, or a pending `QuestionUIHandler` question for the session. Otherwise it is `working`.
+- **Sends:**
+  - A phase change sends priority 10. Only entering `needsYou` adds `alert: "needsYou"`.
+  - While the Turn runs, a heartbeat is sent every 900 s at priority 5 with no alert.
+  - The PUT response applies the first state locally, so no push is sent at start.
+- **Times:** `stale_at = confirmed_at + 2400`. At the end, `dismiss_at = ended_at + 3600`. `timestamp = max(now, last_timestamp + 1)`, so the order is strict per activity.
+- **Stop** (status `ended` or `stopped`; never sends again):
+  - after the end push is accepted;
+  - on any 410 from the relay;
+  - on DELETE;
+  - at `expires_at = created_at + 28800`, the system's eight-hour limit, without a push.
+- **Retries:** a phase change retries `429` and `503` at most 3 times, honoring `Retry-After`. A heartbeat is not retried.
+- **Restart:** tracking resumes from the table and sends only if the phase differs from `last_phase`.
+- Sending reuses the VAPID signing of `send_badge_update` and posts the body of §3.2 exactly.
+- The Web entry and its zh/en copy are part of this lane (`ui/src/i18n`).
+
+## 5. Invariants every lane tests
+
+- Through the relay and APNs, only the phase enum and Unix seconds travel in the clear; names and titles stay on the phone.
+- An activity token's death never affects the device's ordinary notifications.
+- A tracked Turn produces at most one `end`, and nothing after it. An activity the person dismissed is never re-created.
+- Logout, account switch, and instance switch leave no `TurnActivityAttributes` activity on the phone.
+- Required end-to-end check: a real instance sends through the deployed relay to a TestFlight build with non-ASCII names (the vectors use `首席安全官` and `依赖审计 · avault 🔒`).
+
+## 6. Out of scope
+
+push-to-start, frequent updates (`NSSupportsLiveActivitiesFrequentUpdates`), several Turns at once, approving on the Lock Screen, step counts, percentages or ETAs, following a session rename, and tracking Tasks, Watches, or PRs.
