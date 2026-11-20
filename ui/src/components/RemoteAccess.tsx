@@ -29,8 +29,13 @@ import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
 import { liveStreamVia, subscribeLiveStreamVia, type LiveStreamVia } from '../lib/liveStreamVia';
-import { deviceDirectLine, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
-import { onNativeDirectPreference, readNativeDirectPath, type NativeDirectPathSnapshot } from '../lib/native';
+import { deviceUsing, deviceUsingText, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import {
+  nativeDirectPathReported,
+  onNativeDirectPreference,
+  readNativeDirectPath,
+  type NativeDirectPathSnapshot,
+} from '../lib/native';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
@@ -319,6 +324,10 @@ export const RemoteAccess: React.FC = () => {
   const publicUrl = status?.public_url;
   const paired = Boolean(status?.paired);
   const running = Boolean(status?.running);
+  // While this page's own stream runs through the direct ingress, Cloudflare is the fallback, not the
+  // path in use: its quality and network path are labelled as the fallback, and the path is folded.
+  const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
+  const cloudflareIsFallback = pageVia === 'direct';
   const pendingPairing = canPair ? status?.pending_pairing : null;
   const showPairingForm = ((!paired || pendingPairing) && !pendingPairing?.can_resume) || (canPair && reconfiguring);
   const connectorState = status?.pid_state === 'unknown'
@@ -525,7 +534,9 @@ export const RemoteAccess: React.FC = () => {
           </a>
         </div>
         <div className="px-5 py-3.5">
-          <div className="text-[12px] text-muted">{t('remoteAccess.quality')}</div>
+          <div className="text-[12px] text-muted">
+            {t(cloudflareIsFallback ? 'remoteAccess.qualityFallback' : 'remoteAccess.quality')}
+          </div>
           <div className="mt-1 flex min-h-5 items-center gap-2">
             <Badge variant={qualityVariant}>{qualityLabel}</Badge>
             {qualityFresh && (requestLatency || quality?.rtt_ms) && (
@@ -544,14 +555,11 @@ export const RemoteAccess: React.FC = () => {
       <RemoteAccessDirectLines direct={status?.direct} />
 
       {running && networkPath && (
-        <div className="border-b border-border px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <Network className="size-4 shrink-0 text-cyan-ink" />
-              <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.networkPath')}</h3>
-            </div>
-            <Badge variant={routeVariant}>{routeLabel}</Badge>
-          </div>
+        <NetworkPathSection
+          fallback={cloudflareIsFallback}
+          title={t(cloudflareIsFallback ? 'remoteAccess.fallbackRoute' : 'remoteAccess.networkPath')}
+          badge={<Badge variant={routeVariant}>{routeLabel}</Badge>}
+        >
 
           <div className="mt-3 grid border-y border-border/70 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] md:items-stretch">
             <div className="min-w-0 py-3 md:pr-4">
@@ -635,7 +643,7 @@ export const RemoteAccess: React.FC = () => {
               )}
             </div>
           </details>
-        </div>
+        </NetworkPathSection>
       )}
 
       {paired && !showPairingForm && (
@@ -960,6 +968,46 @@ export const RemoteAccess: React.FC = () => {
   );
 };
 
+// Cloudflare's network path. While this page runs through the direct ingress it is the fallback route:
+// folded under that name, so it does not read as the path in use (ui/design:
+// settings/remote-access/direct-app-*).
+const NetworkPathSection: React.FC<{
+  fallback: boolean;
+  title: string;
+  badge: React.ReactNode;
+  children: React.ReactNode;
+}> = ({ fallback, title, badge, children }) => {
+  const heading = (
+    <div className="flex min-w-0 items-center gap-2">
+      <Network className={`size-4 shrink-0 ${fallback ? 'text-muted' : 'text-cyan-ink'}`} />
+      <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
+      {fallback && (
+        <ChevronDown className="size-4 shrink-0 text-muted transition-transform group-open/fallback:rotate-180" />
+      )}
+    </div>
+  );
+  if (!fallback) {
+    return (
+      <div className="border-b border-border px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {heading}
+          {badge}
+        </div>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <details className="group/fallback border-b border-border px-5 py-4" data-testid="remote-access-fallback-route">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {heading}
+        {badge}
+      </summary>
+      {children}
+    </details>
+  );
+};
+
 // The direct ingress, as current facts only: the instance's own state and certificate, and how this
 // page's live stream came in (that stream's own handshake; hidden until one has answered). No drop
 // count and no fallback reason: neither the instance nor the page can know them truthfully today.
@@ -969,7 +1017,7 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
   const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
   const [now] = useState(() => Date.now());
   const devicePath = useNativeDirectPath(pageVia);
-  const lines = remoteAccessDirectLines(direct, pageVia, now);
+  const lines = remoteAccessDirectLines(direct, pageVia, now, nativeDirectPathReported());
   if (!lines) return null;
   // Written like other Settings dates: the page's own locale.
   const certificate = lines.certificateDate
@@ -979,12 +1027,8 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
     })
     : null;
   const page = lines.pageKey ? t(lines.pageKey) : null;
-  const device = deviceDirectLine(devicePath, pageVia);
-  const deviceText = device
-    ? device.pathKey
-      ? t('remoteAccess.direct.deviceWithPath', { state: t(device.stateKey), path: t(device.pathKey) })
-      : t('remoteAccess.direct.device', { state: t(device.stateKey) })
-    : null;
+  const using = deviceUsing(devicePath, pageVia);
+  const deviceText = using ? deviceUsingText(t, using) : null;
   const legs = lastConnectionLegs(devicePath);
   const legKeys = {
     none: 'remoteAccess.direct.legNone',

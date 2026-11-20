@@ -235,6 +235,56 @@ final class DirectPathControllerTests: XCTestCase {
     // MARK: The path's kind, stickiness, and the race record
 
     @MainActor
+    /// `direct.status()` says whether the selected path's far end is on a
+    /// local network, and its round-trip time, only when they belong to the
+    /// path it names and only while the path is preferred. The event never
+    /// carries them, and a change of them is not a change of the status.
+    func testTheStatusCarriesThePathsClassAndRoundTripOnlyForThePathItNames() async throws {
+        let harness = try Harness()
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+
+        harness.transport.currentPath = .ipv6
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv6, local: true, rttMs: 4)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let local = harness.status("instance-1")
+        XCTAssertEqual(local.path, .ipv6)
+        XCTAssertEqual(local.jsonObject["path_scope"] as? String, "local")
+        XCTAssertEqual(local.jsonObject["rtt_ms"] as? Int, 4)
+        XCTAssertNil(local.eventObject["path_scope"])
+        XCTAssertNil(local.eventObject["rtt_ms"])
+
+        // Another reading of the same path is not a change of the status.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv6, local: false, rttMs: nil)
+        let global = harness.status("instance-1")
+        XCTAssertEqual(global, local)
+        XCTAssertEqual(global.jsonObject["path_scope"] as? String, "global")
+        XCTAssertNil(global.jsonObject["rtt_ms"], "not measured: not shown")
+
+        // A reading of another kind of path than the one named: neither.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 9)
+        XCTAssertNil(harness.status("instance-1").jsonObject["path_scope"])
+        XCTAssertNil(harness.status("instance-1").jsonObject["rtt_ms"])
+
+        // The relay has a round trip and no class.
+        harness.transport.currentPath = .relay
+        harness.transport.selectedPath = DirectSelectedPath(kind: .relay, local: nil, rttMs: 120)
+        harness.transport.report(.pathChanged(.relay), for: target)
+        let relay = harness.status("instance-1")
+        XCTAssertEqual(relay.path, .relay)
+        XCTAssertNil(relay.jsonObject["path_scope"])
+        XCTAssertEqual(relay.jsonObject["rtt_ms"] as? Int, 120)
+
+        // Another host is never told this host's path.
+        XCTAssertNil(harness.status("instance-2").jsonObject["rtt_ms"])
+
+        // Lost: no path, so neither.
+        harness.transport.report(.lost, for: target)
+        XCTAssertNil(harness.status("instance-1").jsonObject["path_scope"])
+        XCTAssertNil(harness.status("instance-1").jsonObject["rtt_ms"])
+    }
+
     func testThePathKindIsPublishedAndADirectAddressMakesPlansStickyUntilAMiss() async throws {
         let harness = try Harness(test: self)
         try await harness.signIn()
@@ -250,6 +300,10 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(status.path, .relay)
         XCTAssertEqual(status.sequence, 1)
         XCTAssertEqual(status.eventObject["path"] as? String, "relay")
+        // Without a reading of the path's class and round trip, the status
+        // has neither.
+        XCTAssertNil(status.jsonObject["path_scope"])
+        XCTAssertNil(status.jsonObject["rtt_ms"])
         var plan = try XCTUnwrap(harness.controller.plan(for: authority))
         XCTAssertFalse(plan.sticky)
         XCTAssertEqual(plan.path, .relay)
@@ -1623,10 +1677,12 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
     @MainActor private var reporters: [Int: @MainActor (DirectPathReport) -> Void] = [:]
     /// The kind of path the stand-in says its connection runs on.
     @MainActor var currentPath: DirectPathKind?
+    /// That path's class and round-trip time, as the transport reads them.
+    @MainActor var selectedPath: DirectSelectedPath?
 
     @MainActor
     var pathDiagnostics: DirectPathDiagnostics {
-        DirectPathDiagnostics(current: currentPath, attempts: [])
+        DirectPathDiagnostics(current: currentPath, attempts: [], selected: selectedPath)
     }
 
     @MainActor

@@ -574,6 +574,70 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(harness.transport.pathDiagnostics, .empty)
     }
 
+    /// The selected path's class and round trip are read with its kind, and
+    /// kept only while the two readings agree.
+    func testTheSelectedPathsClassAndRoundTripAreReadWithItsKind() async throws {
+        let harness = Harness()
+        let endpoint = harness.engine.prepare()
+        let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        connection.selectedPath = .ipv4
+        connection.selectedPathDetail = DirectSelectedPath(kind: .ipv4, local: false, rttMs: 85)
+        endpoint.connection.resolve(connection)
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID, relay: Self.relayA)
+        )
+        harness.select()
+        try await eventually("the path comes up") { harness.reports == [.usable(generation: "boot:1")] }
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .ipv4)
+        XCTAssertEqual(
+            harness.transport.pathDiagnostics.selected,
+            DirectSelectedPath(kind: .ipv4, local: false, rttMs: 85)
+        )
+
+        // The two readings disagree (the path moved between them): no class.
+        connection.selectedPath = .ipv6
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .ipv6)
+        XCTAssertNil(harness.transport.pathDiagnostics.selected)
+
+        harness.transport.deselect()
+        XCTAssertNil(harness.transport.pathDiagnostics.selected)
+    }
+
+    /// Only the class of the far end's address leaves the binding: local
+    /// (private, unique-local, link-local) or not. Zero round trip is
+    /// "not measured".
+    func testASelectedPathIsClassedByItsRemoteAddressAndNeverKeepsIt() {
+        let local = [
+            "10.0.0.7:4433", "172.16.1.2:1", "172.31.255.255:1", "192.168.1.20:52000", "169.254.3.4:1",
+            "[fd7a:115c:a1e0::1]:4433", "[fc00::1]:1", "[fe80::1%en0]:4433", "[FE80::abcd]:1",
+            "[::ffff:192.168.1.2]:1",
+        ]
+        for address in local {
+            XCTAssertTrue(DirectSelectedPath.isLocalNetwork(socketAddress: address), address)
+        }
+        let global = [
+            "203.0.113.5:4433", "172.32.0.1:1", "172.15.0.1:1", "100.64.0.1:1", "8.8.8.8:53",
+            "[2001:db8::1]:4433", "[::1]:1", "[::ffff:8.8.8.8]:1", "[fec0::1]:1", "not-an-address",
+        ]
+        for address in global {
+            XCTAssertFalse(DirectSelectedPath.isLocalNetwork(socketAddress: address), address)
+        }
+
+        XCTAssertEqual(
+            DirectSelectedPath(isRelay: false, isIp: true, remoteAddress: "[fe80::1]:4433", rttMs: 3),
+            DirectSelectedPath(kind: .ipv6, local: true, rttMs: 3)
+        )
+        XCTAssertEqual(
+            DirectSelectedPath(isRelay: false, isIp: true, remoteAddress: "203.0.113.5:4433", rttMs: 0),
+            DirectSelectedPath(kind: .ipv4, local: false, rttMs: nil)
+        )
+        XCTAssertEqual(
+            DirectSelectedPath(isRelay: true, isIp: false, remoteAddress: "https://relay.example/", rttMs: 140),
+            DirectSelectedPath(kind: .relay, local: nil, rttMs: 140)
+        )
+        XCTAssertNil(DirectSelectedPath(isRelay: false, isIp: false, remoteAddress: "custom", rttMs: 5))
+    }
+
     func testAChangeOfTheConnectionsPathIsReportedOnceAndOnlyWhileThePathIsLive() async throws {
         let harness = Harness()
         let endpoint = harness.engine.prepare()

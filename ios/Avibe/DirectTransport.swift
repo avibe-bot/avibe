@@ -141,6 +141,79 @@ enum DirectPathKind: String, Equatable, Sendable {
     }
 }
 
+/// The path the App's direct connection has selected, for display: its
+/// kind, whether the far end is on a local network, and its round-trip time.
+/// A class and a number, never an address.
+struct DirectSelectedPath: Equatable, Sendable {
+    let kind: DirectPathKind
+    /// For a path to an IPv4 or IPv6 address: whether that address is
+    /// private, unique-local, or link-local (`true`), or anything else
+    /// (`false`). Nil through the relay.
+    let local: Bool?
+    /// The path's round-trip time in milliseconds; nil until measured.
+    let rttMs: Int?
+
+    /// From one of the connection's paths, as the binding reports it. Nil
+    /// for a path that is neither the relay nor a numeric address.
+    init?(isRelay: Bool, isIp: Bool, remoteAddress: String, rttMs: UInt64) {
+        if isRelay {
+            kind = .relay
+            local = nil
+        } else if isIp, let family = DirectPathKind.family(ofSocketAddress: remoteAddress) {
+            kind = family
+            local = Self.isLocalNetwork(socketAddress: remoteAddress)
+        } else {
+            return nil
+        }
+        // Zero is what the binding reports before a measurement.
+        self.rttMs = rttMs > 0 ? Int(min(rttMs, UInt64(Int.max))) : nil
+    }
+
+    init(kind: DirectPathKind, local: Bool?, rttMs: Int?) {
+        self.kind = kind
+        self.local = local
+        self.rttMs = rttMs
+    }
+
+    /// Whether a numeric socket address (`a.b.c.d:port` or `[x:...:x]:port`)
+    /// is on a local network: IPv4 10/8, 172.16/12, 192.168/16, 169.254/16;
+    /// IPv6 fc00::/7 (unique local), fe80::/10 (link-local), or an
+    /// IPv4-mapped address of a local IPv4 one.
+    static func isLocalNetwork(socketAddress address: String) -> Bool {
+        if address.hasPrefix("[") {
+            let inner = address.dropFirst().prefix { $0 != "]" }
+            let host = inner.prefix { $0 != "%" }.lowercased()
+            if host.hasPrefix("::ffff:") {
+                return isLocalIPv4(String(host.dropFirst("::ffff:".count)))
+            }
+            guard
+                let first = host.split(separator: ":", omittingEmptySubsequences: false).first,
+                !first.isEmpty,
+                let hextet = UInt16(first, radix: 16)
+            else {
+                return false
+            }
+            return hextet & 0xFE00 == 0xFC00 || hextet & 0xFFC0 == 0xFE80
+        }
+        return isLocalIPv4(address.split(separator: ":").first.map(String.init) ?? "")
+    }
+
+    private static func isLocalIPv4(_ host: String) -> Bool {
+        let octets = host.split(separator: ".").compactMap { UInt8($0) }
+        guard octets.count == 4 else {
+            return false
+        }
+        switch (octets[0], octets[1]) {
+        case (10, _), (192, 168), (169, 254):
+            return true
+        case (172, let second):
+            return (16...31).contains(second)
+        default:
+            return false
+        }
+    }
+}
+
 /// How many candidate addresses of each family. Counts only.
 struct DirectAddressFamilies: Equatable, Sendable {
     var ipv4 = 0
@@ -284,6 +357,8 @@ struct DirectPathDiagnostics: Equatable, Sendable {
     var current: DirectPathKind?
     /// The last few attempts, oldest first.
     var attempts: [DirectDialAttempt] = []
+    /// The selected path's class and round-trip time, read with `current`.
+    var selected: DirectSelectedPath? = nil
 
     static let empty = DirectPathDiagnostics(current: nil, attempts: [])
     /// How many attempts are kept.

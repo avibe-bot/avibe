@@ -1004,6 +1004,11 @@ export async function nativeDirectHandover(): Promise<NativeDirectHandoverResult
 export type NativeDirectPathSnapshot = {
   preferred: NativeDirectPreference;
   path: NativeDirectPathKind | null;
+  /** For an IPv4 or IPv6 path: whether its far end is on a local network
+   *  (`local`) or not (`global`). Null for the relay, or when not reported. */
+  scope: 'local' | 'global' | null;
+  /** The path's round-trip time in ms, when the shell measured it. */
+  rttMs: number | null;
   /** The last new connection's race, if the shell recorded one. */
   lastConnection: NativeDirectConnection | null;
 };
@@ -1045,7 +1050,16 @@ export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot |
     const last = Array.isArray(connections) && connections.length > 0
       ? parseDirectConnection(connections[connections.length - 1])
       : null;
-    return { preferred: status.preferred, path: status.path, lastConnection: last };
+    const { path_scope: scope, rtt_ms: rttMs } = answer as { path_scope?: unknown; rtt_ms?: unknown };
+    // Both belong to the path the status names; without one they are not shown.
+    const named = status.path !== null;
+    return {
+      preferred: status.preferred,
+      path: status.path,
+      scope: named && status.path !== 'relay' && (scope === 'local' || scope === 'global') ? scope : null,
+      rttMs: named && isCounter(rttMs) && rttMs > 0 ? rttMs : null,
+      lastConnection: last,
+    };
   } catch {
     return null;
   }
