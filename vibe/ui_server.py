@@ -14030,6 +14030,7 @@ async def sessions_messages_create(session_id: str):
         return jsonify({"error": "text or content is required"}), 400
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
+    answer_action = bool(quick_reply_for or payload.get("in_reply_to"))
     message_kind = workbench_message_kind(payload, quick_reply_for)
     if retry_for:
         message_kind = "quick_reply"
@@ -14132,12 +14133,14 @@ async def sessions_messages_create(session_id: str):
 
     switched: dict[str, Any] = {}
 
+    reserved_answer = answer
+
     def _publish_answered_message() -> None:
-        if answer is None:
+        if reserved_answer is None:
             return
         with engine.connect() as conn:
             answered = messages_service.get_message(
-                conn, answer.request_id, session_id=session_id, include_local_error_detail=True,
+                conn, reserved_answer.request_id, session_id=session_id, include_local_error_detail=True,
             )
         if answered is not None:
             from vibe.sse_broker import broker
@@ -14146,7 +14149,7 @@ async def sessions_messages_create(session_id: str):
 
     def _persist_user_row() -> dict | None:
         """Atomically persist one unaccepted submission as a Delivery."""
-        nonlocal answer
+        nonlocal reserved_answer
 
         from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
         from storage import message_deliveries
@@ -14167,7 +14170,7 @@ async def sessions_messages_create(session_id: str):
                 refused = message_answers.prepare(conn, session_id, web_push_user_key, answer)
                 if refused is not None and refused.get("legacy_passthrough"):
                     # Released clients dispatch unmatched targets/options as ordinary input.
-                    answer = None
+                    reserved_answer = None
                 elif refused is not None:
                     # Return after the transaction commits the immutable refusal receipt.
                     return {"_answer_result": refused}
@@ -14229,15 +14232,15 @@ async def sessions_messages_create(session_id: str):
                 )
             else:
                 row = admit_input(conn, envelope, delivery_id=delivery_id).delivery
-            if answer is not None:
-                message_answers.bind(conn, session_id, web_push_user_key, answer, row["id"])
-            if answer is None and not retry_for:
+            if reserved_answer is not None:
+                message_answers.bind(conn, session_id, web_push_user_key, reserved_answer, row["id"])
+            if not answer_action and not retry_for:
                 message_deliveries.set_draft(conn, session_id, None)
             draft = message_deliveries.get_draft_state(conn, session_id)
             workbench_sessions_service.touch_session(conn, session_id)
         result = message_deliveries.public_delivery_payload(row)
         result["draft"] = _session_draft_payload(draft)
-        result["draft_advanced"] = not bool(answer or retry_for)
+        result["draft_advanced"] = not bool(answer_action or retry_for)
         return result
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
@@ -14385,8 +14388,8 @@ async def sessions_messages_create(session_id: str):
                 str(message["id"]),
                 reason=reason,
             )
-            if answer is not None:
-                message_answers.failed(conn, session_id, web_push_user_key, answer, str(message["id"]), reason)
+            if reserved_answer is not None:
+                message_answers.failed(conn, session_id, web_push_user_key, reserved_answer, str(message["id"]), reason)
         return _current_delivery_response()
 
     try:
@@ -14427,13 +14430,13 @@ async def sessions_messages_create(session_id: str):
     status = result.get("status_code", 500)
     body = result.get("body") or {}
     answer_receipt = None
-    if status == 202 and answer is not None:
+    if status == 202 and reserved_answer is not None:
         with engine.begin() as conn:
             from storage.agent_session_rows import reserve_write_lock
 
             reserve_write_lock(conn)
             answer_receipt, newly_acknowledged = message_answers.acknowledge(
-                conn, session_id, web_push_user_key, answer, str(message["id"]),
+                conn, session_id, web_push_user_key, reserved_answer, str(message["id"]),
             )
         if newly_acknowledged:
             _publish_answered_message()

@@ -12,11 +12,11 @@ import json
 import uuid
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal_column, or_, select
 
 from storage import message_deliveries as deliveries, messages_service
 from storage.delivery_states import DELIVERY_STATE_MATRIX
-from storage.models import message_answer_operations as operations, message_deliveries, messages
+from storage.models import MESSAGE_TURN_ID_SQL, message_answer_operations as operations, message_deliveries, messages
 
 
 def revision(options: list[str]) -> str:
@@ -134,7 +134,10 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
         }
 
     target = conn.execute(
-        select(messages.c.author, messages.c.content_json, messages.c.created_at, messages.c.delivered_at)
+        select(
+            messages.c.author, messages.c.content_json, messages.c.created_at, messages.c.delivered_at,
+            literal_column(MESSAGE_TURN_ID_SQL).label("question_turn_id"),
+        )
         .where(messages.c.id == answer.request_id, messages.c.session_id == session_id)
     ).mappings().first()
     if target is None or target.get("author") != "agent":
@@ -193,7 +196,10 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
         )
         .limit(1)
     ).first()
-    pending = conn.execute(
+    # Acceptance is the only conversation order. Live user inputs will precede
+    # this answer, regardless of submission time; only Q's own claimed start is
+    # already consumed by the turn that produced Q.
+    pending_query = (
         select(message_deliveries.c.id)
         .where(
             message_deliveries.c.session_id == session_id,
@@ -201,10 +207,16 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
                 state for state, policy in DELIVERY_STATE_MATRIX.items() if policy.ordering != "terminal"
             ),
             func.json_extract(message_deliveries.c.snapshot_json, "$.author") == "user",
-            message_deliveries.c.submitted_at >= target_order,
         )
         .limit(1)
-    ).first()
+    )
+    question_turn_id = target["question_turn_id"]
+    if question_turn_id is not None:
+        pending_query = pending_query.where(or_(
+            message_deliveries.c.state != "claimed",
+            message_deliveries.c.turn_id.is_distinct_from(question_turn_id),
+        ))
+    pending = conn.execute(pending_query).first()
     if newer or pending:
         return refuse("stale", 409)
     return None

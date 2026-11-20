@@ -238,18 +238,88 @@ def test_queued_input_accepted_after_question_makes_answer_stale(answer_route, m
     assert r["dispatches"] == []
 
 
-def test_answer_freshness_queries_are_bounded_by_live_work(answer_route):
+@pytest.mark.parametrize("state", ["queued", "retired", "claimed_own", "claimed_other", "reserved", "legacy_queued"])
+def test_older_input_freshness_follows_acceptance_lifecycle(answer_route, state):
+    """MESSAGE-DELIVERY-340: older live work precedes answers except Q's own start."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import func
+    from storage import message_deliveries as deliveries
+    from storage.models import messages
+
+    r = answer_route
+    question_at = datetime.fromisoformat(r["question"]["created_at"].replace("Z", "+00:00"))
+    submitted_at = (question_at - timedelta(seconds=1)).isoformat()
+    with r["engine"].begin() as conn:
+        conn.execute(messages.update().where(messages.c.id == r["question"]["id"]).values(
+            metadata_json=func.json_set(messages.c.metadata_json, "$.turn_id", "question-turn"),
+        ))
+        if state == "reserved":
+            deliveries.insert_delivery(
+                conn, delivery_id="older-reserved", session_id=r["session"], priority="p1", state="reserved",
+                snapshot=deliveries.message_snapshot(
+                    scope_id=r["scope"], session_id=r["session"], platform="avibe",
+                    author="user", source="user", text="Earlier input",
+                ),
+                dispatch_text="Earlier input", now=submitted_at,
+            )
+        else:
+            queued = deliveries.enqueue_queued(
+                conn, scope_id=r["scope"], session_id=r["session"], text="Earlier input", now=submitted_at,
+            )
+            if state == "retired":
+                assert deliveries.retire_queued(conn, r["session"], queued["id"])
+            elif state.startswith("claimed_"):
+                deliveries.claim_start_batch(
+                    conn, turn_id="question-turn" if state == "claimed_own" else "other-turn",
+                    session_id=r["session"], backend="codex",
+                    deliveries=[deliveries.get_delivery(conn, queued["id"])], dispatch_text="Earlier input",
+                )
+    response = r["post"](legacy=state == "legacy_queued")
+    fresh = state in {"retired", "claimed_own", "legacy_queued"}
+    assert response.status_code in ((201, 202) if fresh else (409,))
+    assert response.get_json()["answer"]["outcome"] == ("accepted" if fresh else "stale")
+    assert len(r["dispatches"]) == int(fresh)
+
+
+def test_answer_freshness_queries_are_bounded_by_live_work(answer_route, monkeypatch):
+    """MESSAGE-DELIVERY-340: live-state ranges exclude accepted and retired history."""
+    from datetime import datetime, timedelta
     from sqlalchemy import event
     from sqlalchemy.engine import Engine
     from storage import message_deliveries as deliveries
 
     r = answer_route
+    question_at = datetime.fromisoformat(r["question"]["created_at"].replace("Z", "+00:00"))
+    submitted_at = (question_at - timedelta(seconds=2)).isoformat()
+    accepted_at = (question_at - timedelta(seconds=1)).isoformat()
     with r["engine"].begin() as conn:
-        for number in range(200):
+        for number in range(250):
             queued = deliveries.enqueue_queued(
-                conn, scope_id=r["scope"], session_id=r["session"], text=f"Retired input {number}"
+                conn, scope_id=r["scope"], session_id=r["session"], text=f"Retired input {number}", now=submitted_at,
             )
             assert deliveries.retire_queued(conn, r["session"], queued["id"])
+        history = [
+            deliveries.enqueue_queued(
+                conn, scope_id=r["scope"], session_id=r["session"], text=f"Accepted input {number}", now=submitted_at,
+            )
+            for number in range(250)
+        ]
+        claimed = deliveries.claim_start_batch(
+            conn, turn_id="history-turn", session_id=r["session"], backend="codex",
+            deliveries=[deliveries.get_delivery(conn, row["id"]) for row in history], dispatch_text="Historical input",
+        )
+        turn = claimed["turn"]
+        assert deliveries.bind_native_start(
+            conn, turn["id"], expected_version=turn["version"], runtime_key="history-runtime",
+            runtime_turn_id="history-runtime-turn", native_turn_id="history-native-turn",
+        )
+        monkeypatch.setattr(deliveries, "turn_now_iso", lambda: accepted_at)
+        assert len(deliveries.materialize_start_acceptance(
+            conn, turn_id=turn["id"], evidence={"kind": "test_native_acceptance"},
+        )) == 250
+        deliveries.enqueue_queued(
+            conn, scope_id=r["scope"], session_id=r["session"], text="Still pending", now=submitted_at,
+        )
     plans = {}
 
     def capture(conn, cursor, statement, parameters, context, executemany):
@@ -265,10 +335,11 @@ def test_answer_freshness_queries_are_bounded_by_live_work(answer_route):
 
     event.listen(Engine, "before_cursor_execute", capture)
     try:
-        assert r["post"]().get_json()["answer"]["outcome"] == "accepted"
+        assert r["post"]().get_json()["answer"]["outcome"] == "stale"
     finally:
         event.remove(Engine, "before_cursor_execute", capture)
-    assert "session_id=? AND state=? AND submitted_at>?" in plans["pending"], plans
+    assert "ix_message_deliveries_session_state (session_id=? AND state=?)" in plans["pending"], plans
+    assert "submitted_at>?" not in plans["pending"], plans
     assert "session_id=? AND <expr>>?" in plans["transcript"], plans
     assert all("SCAN " not in plan and "TEMP B-TREE" not in plan for plan in plans.values()), plans
 
@@ -371,10 +442,13 @@ def test_legacy_archived_response_preserves_existing_error_code(answer_route):
 
 @pytest.mark.parametrize("cause", ["missing", "no_options", "non_option"])
 def test_legacy_unmatched_quick_reply_keeps_original_dispatch_response(answer_route, cause):
+    """MESSAGE-DELIVERY-340: legacy passthrough preserves the unrelated composer draft."""
+    from storage import message_deliveries as deliveries
     from storage.models import messages, message_answer_operations
 
     r = answer_route
     with r["engine"].begin() as conn:
+        deliveries.set_draft(conn, r["session"], "Still editing")
         if cause == "missing":
             conn.execute(messages.delete().where(messages.c.id == r["question"]["id"]))
         if cause == "no_options":
@@ -382,13 +456,32 @@ def test_legacy_unmatched_quick_reply_keeps_original_dispatch_response(answer_ro
     response = r["post"](legacy=True, text="Other input" if cause == "non_option" else "继续 ✅")
     assert response.status_code in (201, 202)
     assert "answer" not in response.get_json()
+    assert response.get_json()["draft_advanced"] is False
+    assert response.get_json()["draft"]["text"] == "Still editing"
     assert len(r["dispatches"]) == 1
     assert r["dispatches"][0]["message_kind"] == "quick_reply"
     assert r["dispatches"][0]["metadata"]["quick_reply_for"] == r["question"]["id"]
     with r["engine"].connect() as conn:
+        assert deliveries.get_draft_state(conn, r["session"])["text"] == "Still editing"
         assert conn.execute(select(message_answer_operations)).first() is None
         target = messages_service.get_message(conn, r["question"]["id"], session_id=r["session"])
     assert target is None or "quick_reply_chosen" not in target["content"]
+
+
+def test_ordinary_composer_send_advances_draft(answer_route):
+    """MESSAGE-DELIVERY-340: only an ordinary composer send advances its draft."""
+    from storage import message_deliveries as deliveries
+
+    r = answer_route
+    with r["engine"].begin() as conn:
+        deliveries.set_draft(conn, r["session"], "Still editing")
+    response = r["post"](legacy=True, metadata={}, text="Composer message")
+    assert response.status_code in (201, 202)
+    assert "answer" not in response.get_json()
+    assert response.get_json()["draft_advanced"] is True
+    assert response.get_json()["draft"]["text"] == ""
+    with r["engine"].connect() as conn:
+        assert deliveries.get_draft_state(conn, r["session"])["text"] == ""
 
 
 def test_winner_lookup_excludes_refusal_history_and_legacy_refusals_are_not_saved(answer_route):
