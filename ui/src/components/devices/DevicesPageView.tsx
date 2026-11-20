@@ -24,7 +24,7 @@ import { Input } from '../ui/input';
 import { SegmentedRadio } from '../ui/segmented';
 import { clientText, connectionText, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
 import {
-  DOMAIN_SUFFIX, RECENT_ACTIVITY_LIMIT, instanceUrl, TESTFLIGHT_INVITE_URL, activityText, capabilityControl, lockedOut, newestFirst,
+  DOMAIN_SUFFIX, RECENT_ACTIVITY_LIMIT, instanceUrl, TESTFLIGHT_INVITE_URL, activityText, capabilityControl, lockedOutCount, newestFirst,
   othersSignedIn, signOutNeedsConfirm,
 } from './rules';
 import type {
@@ -96,7 +96,7 @@ const healthSyncedKeys = {
   today: 'devices.capability.healthSyncedToday',
   yesterday: 'devices.capability.healthSyncedYesterday',
   other: 'devices.capability.healthSyncedDated',
-} as const satisfies Record<ReturnType<typeof timeParts>['day'], TranslationKey>;
+} as const satisfies Record<NonNullable<ReturnType<typeof timeParts>>['day'], TranslationKey>;
 
 /** Back to the Devices page, as other Settings sub-pages draw it; shown at every width. */
 export function BackToDevices({ onBack }: { onBack?: () => void }) {
@@ -296,9 +296,8 @@ function capabilityDetail(t: TFunction, language: string, device: Device, capabi
       return t(device.kind === 'host' ? 'devices.capability.notificationsHost' : 'devices.capability.notificationsPush');
     case 'health': {
       const data = upperFirst(healthText(t, language, capability.data));
-      if (!capability.syncedAt) return data;
-      const { day, date, time } = timeParts(capability.syncedAt, language);
-      return t(healthSyncedKeys[day], { data, date, time });
+      const synced = capability.syncedAt ? timeParts(capability.syncedAt, language) : null;
+      return synced ? t(healthSyncedKeys[synced.day], { data, date: synced.date, time: synced.time }) : data;
     }
     case 'schedule':
       return t('devices.capability.scheduleDetail');
@@ -570,7 +569,7 @@ export function DevicesPageView({
   const othersSyncHealth = signedIn.some(signOutNeedsConfirm);
   // Until a device besides the computer that runs Avibe is listed, the way to add one is in the list.
   const onlyHost = mine.every((each) => each.kind === 'host');
-  const locked = lockedOut(devices).length;
+  const locked = lockedOutCount(devices);
   const lockedText = locked > 0
     ? host?.name
       ? t('devices.confirm.turnOffLocked', { count: locked, host: host.name })

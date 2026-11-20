@@ -122,7 +122,7 @@ const revertedKeys = {
   today: 'devices.connection.choiceRevertedToday',
   yesterday: 'devices.connection.choiceRevertedYesterday',
   other: 'devices.connection.choiceRevertedDated',
-} as const satisfies Record<ReturnType<typeof timeParts>['day'], TranslationKey>;
+} as const satisfies Record<NonNullable<ReturnType<typeof timeParts>>['day'], TranslationKey>;
 
 const protocolName = (protocol: 'quic' | 'http2') => (protocol === 'quic' ? 'QUIC' : 'HTTP/2');
 
@@ -234,8 +234,8 @@ function PreferenceGroup({ path, preference, onChange }: {
       {preference.reverted && (
         <p role="status" className="border-t border-border bg-gold/10 px-5 py-2.5 text-[11px] leading-relaxed text-foreground">
           {(() => {
-            const { day, date, time } = timeParts(preference.reverted.at, i18n.language);
-            return t(revertedKeys[day], { date, time });
+            const parts = timeParts(preference.reverted.at, i18n.language);
+            return parts ? t(revertedKeys[parts.day], { date: parts.date, time: parts.time }) : t('devices.connection.choiceRevertedUndated');
           })()}
         </p>
       )}

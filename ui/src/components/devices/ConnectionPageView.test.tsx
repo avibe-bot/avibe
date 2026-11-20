@@ -129,4 +129,9 @@ describe('ConnectionPageView', () => {
     const date = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(at);
     expect(screen.getByRole('status').textContent).toBe(`Cloudflare tunnel only could not connect on ${date} at 09:05, so the App went back to Automatic by itself.`);
   });
+
+  it('says the App went back without a time when the time does not parse', () => {
+    render(<ConnectionPageView {...base} viewer="app" path={null} preference={{ mode: 'automatic', reverted: { at: 'soon', reason: 'unreachable' } }} />);
+    expect(screen.getByRole('status').textContent).toBe('「仅 Cloudflare 隧道」连不上，App 已自己改回「自动」。');
+  });
 });

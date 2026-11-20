@@ -44,9 +44,12 @@ export const capabilityControl = (device: Device, capability: DeviceCapability):
 export const othersSignedIn = (devices: Device[]) =>
   devices.filter((each) => each.group === 'mine' && each.kind !== 'host' && !each.self);
 
-/** Everyone's devices that turning remote access off locks out: all but this one and the host. */
-export const lockedOut = (devices: Device[]) =>
-  devices.filter((each) => each.group !== 'unattributed' && each.kind !== 'host' && !each.self);
+/** How many of everyone's devices besides this one turning remote access off locks out: all but
+ *  the host. While this device is not known it is one of them, so it is not counted twice. */
+export const lockedOutCount = (devices: Device[]) => {
+  const remote = devices.filter((each) => each.group !== 'unattributed' && each.kind !== 'host' && !each.self);
+  return devices.some((each) => each.self) ? remote.length : Math.max(0, remote.length - 1);
+};
 
 /** The latest entries first, whatever order they came in. */
 export const newestFirst = (items: DeviceActivity[]) =>

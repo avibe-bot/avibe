@@ -212,8 +212,9 @@ describe('DevicesPageView', () => {
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByText('关闭健康？')).toBeTruthy();
     expect(dialog.textContent).toContain('已同步的健康数据会删除。要再用，在 iPhone 上重新连接健康。');
-    // The action and the dialog's close button share the name 关闭 in zh; the action is the one with text.
-    expect(within(dialog).getAllByRole('button', { name: '关闭' }).filter((each) => !each.querySelector('svg'))).toHaveLength(1);
+    // Named apart from the dialog's own 关闭, so a screen reader tells them apart.
+    expect(within(dialog).getByRole('button', { name: '关闭健康' })).toBeTruthy();
+    expect(within(dialog).getAllByRole('button', { name: '关闭' })).toHaveLength(1);
     rerender(<DevicesPageView reach={on} devices={[self(macbook), healthOff]} detail="iphone" />);
     expect(within(screen.getByRole('dialog')).queryByRole('switch', { name: '健康' })).toBeNull();
   });
@@ -222,7 +223,8 @@ describe('DevicesPageView', () => {
     const { rerender } = render(<DevicesPageView reach={on} devices={[{ ...macbook, name: '' }, iphone, sara]} confirm="turn-off" />);
     let text = screen.getByRole('dialog').textContent ?? '';
     expect(text).not.toContain('你正在用');
-    expect(text).toContain('关闭后这台设备和其他 2 台都打不开，只能回到运行 Avibe 的电脑上重新开启。域名会为你保留。');
+    // This device is one of the two remote ones, so it is not counted among the others.
+    expect(text).toContain('关闭后这台设备和其他 1 台都打不开，只能回到运行 Avibe 的电脑上重新开启。域名会为你保留。');
     rerender(<DevicesPageView reach={on} devices={[macbook, self(iphone), sara, { ...chrome, id: 'push', group: 'unattributed' }]} confirm="turn-off" />);
     text = screen.getByRole('dialog').textContent ?? '';
     expect(text).toContain('你正在用 iPhone 远程打开它。关闭后这台设备和其他 1 台都打不开，只能回到 MacBook 上重新开启。');
@@ -274,5 +276,11 @@ describe('DevicesPageView', () => {
     render(<DevicesPageView reach={on} devices={[self(macbook), synced]} detail="iphone" />);
     const date = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(old);
     expect(screen.getByText(`Steps and sleep · synced ${date} at 08:12`)).toBeTruthy();
+  });
+
+  it('leaves out a sync time it cannot parse, rather than failing the page', () => {
+    const odd: Device = { ...iphone, capabilities: [{ kind: 'health', on: true, data: ['steps'], syncedAt: 'soon' }] };
+    render(<DevicesPageView reach={on} devices={[self(macbook), odd]} detail="iphone" />);
+    expect(within(screen.getByRole('dialog')).getByText('步数')).toBeTruthy();
   });
 });

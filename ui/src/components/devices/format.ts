@@ -16,6 +16,8 @@ const startOfDay = (at: number) => {
 /** Which day an instant falls on, seen from `now`, with its time and date in the locale. */
 export function timeParts(iso: string, language: string, now: number = Date.now()) {
   const at = Date.parse(iso);
+  // An instant that does not parse has no time to say: callers leave the time out.
+  if (!Number.isFinite(at)) return null;
   const time = new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit', hour12: false }).format(at);
   const date = new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(at);
   const today = startOfDay(now);
@@ -36,8 +38,9 @@ export function deviceTime(
   style: 'stamp' | 'date' | 'ago',
   now: number = Date.now(),
 ): string {
-  if (!Number.isFinite(Date.parse(iso))) return iso;
-  const { at, time, date, day } = timeParts(iso, language, now);
+  const parts = timeParts(iso, language, now);
+  if (!parts) return iso;
+  const { at, time, date, day } = parts;
   if (style === 'ago' && day === 'today') return formatRelativeTime(iso, t, now);
   if (day === 'today') return t('devices.time.today', { time });
   if (day === 'yesterday') return t('devices.time.yesterday', { time });
