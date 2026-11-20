@@ -8,7 +8,8 @@
 // The line under a card's name is the vendor's own statement of what the card does, never ours:
 // Anthropic's help page words for its kinds (support.claude.com "What is a limit reset?"), checked
 // against the limits the card's own entry lists. A card whose vendor states nothing (ChatGPT's)
-// shows its name, count and expiry only. After a use or a refusal the count shown is the one read
+// shows its name, count and expiry only; so does an Anthropic card whose entry does not name the
+// limits it clears (the "all limits" kind rests on that entry alone). After a use or a refusal the count shown is the one read
 // again from the vendor; "not used" is said only when that count confirms it.
 import { AlertTriangle, Check, LoaderCircle, RefreshCw, Ticket } from 'lucide-react';
 
@@ -104,9 +105,13 @@ export function ResetCards({ cards, state = { phase: 'idle' } }: { cards: ResetC
                     <span className="truncate">{name(card.kind)}</span>
                     <span className="shrink-0 tabular-nums text-muted">×{card.count}</span>
                   </div>
-                  {(effect(card.kind) || card.expires) && (
-                    <p className="mt-0.5 text-[length:var(--model-hub-usage-label-size)] text-muted">
-                      {[effect(card.kind), card.expires && d(`最早 ${card.expires.zh} 到期`, `First expires ${card.expires.en}`)].filter(Boolean).join(' · ')}
+                  {effect(card.kind) && (
+                    <p className="mt-0.5 text-[length:var(--model-hub-usage-label-size)] text-muted">{effect(card.kind)}</p>
+                  )}
+                  {/* The expiry has its own line, so it never breaks inside its date at any width. */}
+                  {card.expires && (
+                    <p className="mt-0.5 whitespace-nowrap text-[length:var(--model-hub-usage-label-size)] text-muted">
+                      {d(`最早 ${card.expires.zh} 到期`, `First expires ${card.expires.en}`)}
                     </p>
                   )}
                 </div>
