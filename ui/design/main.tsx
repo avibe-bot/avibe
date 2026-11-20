@@ -71,10 +71,14 @@ async function boot() {
   if (shown?.fixtures?.nativeShell) {
     const capabilities = shown.fixtures.nativeShell;
     const instanceName = shown.fixtures.nativeInstanceName;
-    // `app.info` answers as the shell does; every other call answers nothing.
-    const call = async (method: string) => (method === 'app.info'
-      ? { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, ...(instanceName ? { instance: { name: instanceName } } : {}) }
-      : null);
+    const directStatus = shown.fixtures.nativeDirectStatus;
+    // `app.info` and `direct.status` answer as the shell does; every other call answers nothing.
+    const call = async (method: string) => {
+      if (method === 'app.info') {
+        return { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, ...(instanceName ? { instance: { name: instanceName } } : {}) };
+      }
+      return method === 'direct.status' ? directStatus ?? null : null;
+    };
     const mock = { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, call, on: () => () => {} };
     const isolation = (window as unknown as {
       __AVIBE_BROWSER_ISOLATION__?: { setNativeMock: (mock: unknown) => void };

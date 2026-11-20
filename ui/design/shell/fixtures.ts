@@ -60,6 +60,9 @@ export interface WorkbenchFixtures {
   nativeShell?: Record<string, number>;
   /** The selected instance's name the phone app's `app.info` gives (`instancePresentation`). */
   nativeInstanceName?: string;
+  /** What the phone app's `direct.status()` answers (with the `direct` capability): the status, and
+   *  what the shell adds for diagnosis (`path`, `connections`). */
+  nativeDirectStatus?: Record<string, unknown>;
   /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
   storage?: Record<string, string>;
   /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches.
