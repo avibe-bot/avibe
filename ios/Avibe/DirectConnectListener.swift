@@ -1351,6 +1351,9 @@ actor DirectConnectListener {
         let directAttempted = plan.openDirect != nil
         let directSettled = DirectSettledFlag()
         let sticky = directAttempted && plan.sticky
+        // Set when the public candidate starts because the sticky bound
+        // passed with the direct attempt still unsettled.
+        let stickyBoundPassed = DirectSettledFlag()
         let times = DirectRaceTimes()
         let outcome: RaceOutcome = await withTaskGroup(of: CandidateResult.self) { group in
             if let openDirect = plan.openDirect {
@@ -1409,14 +1412,25 @@ actor DirectConnectListener {
                         times.directReady()
                         return .ready(.direct, ready.stream, ready.leftover)
                     } catch {
-                        if error is DirectStickyMiss {
+                        let cancelled = error is CancellationError || Task.isCancelled
+                        // The bound is one fact with two clocks: this
+                        // attempt's own deadline, and the public candidate's
+                        // wait for it. An attempt cancelled after the public
+                        // candidate started for the bound, before its own
+                        // deadline was seen, missed the bound all the same.
+                        let missed = error is DirectStickyMiss
+                            || (cancelled && stickyBoundPassed.isSet)
+                        if missed {
                             times.directTimedOut()
                         } else {
-                            times.directFailed(cancelled: error is CancellationError || Task.isCancelled)
+                            times.directFailed(cancelled: cancelled)
                         }
                         // Lets the public candidate start now instead of
                         // waiting out the hedge.
                         directSettled.set()
+                        if missed {
+                            return .failed(.direct, DirectStickyMiss())
+                        }
                         return .failed(.direct, error)
                     }
                 }
@@ -1438,6 +1452,9 @@ actor DirectConnectListener {
                 }
                 guard !Task.isCancelled else {
                     return .failed(.publicOrigin, CancellationError())
+                }
+                if sticky, !directSettled.isSet {
+                    stickyBoundPassed.set()
                 }
                 times.publicStarted()
                 do {
@@ -1473,12 +1490,10 @@ actor DirectConnectListener {
                 case .failed(let candidate, let error):
                     guard
                         candidate == .direct,
-                        winner == nil,
                         !fenced,
                         // A race cancelled because WebKit went away is no
                         // failure of the path.
-                        !Task.isCancelled,
-                        !(error is CancellationError)
+                        !Task.isCancelled
                     else {
                         continue
                     }
@@ -1487,8 +1502,14 @@ actor DirectConnectListener {
                         // origin takes this CONNECT and plans hedge again;
                         // the path itself is not reported as failed, so
                         // nothing probes it or closes what it carries.
+                        // Recorded whichever result arrived first: the
+                        // public candidate starts at the same bound, and
+                        // may be ready before this miss is collected.
                         directTimedOut = true
                         plan.stickyMissed?()
+                        continue
+                    }
+                    guard winner == nil, !(error is CancellationError) else {
                         continue
                     }
                     if case DirectConnectError.refused(let status) = error {

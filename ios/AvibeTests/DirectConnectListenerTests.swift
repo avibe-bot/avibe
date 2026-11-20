@@ -413,6 +413,41 @@ final class DirectConnectListenerTests: XCTestCase {
         client.close()
     }
 
+    /// The public candidate starts at the same bound that times out the
+    /// direct attempt, so it can be ready before the direct attempt's result
+    /// is collected. Here that order is forced: the direct attempt does not
+    /// end, cancelled or not, until the test releases it.
+    func testAStickyMissIsRecordedWhenThePublicOriginIsReadyBeforeTheDirectAttemptEnds() async throws {
+        let fixture = try await makeListener(
+            limits: limits(hedgeSeconds: 0.05, stickySeconds: 0.3),
+            direct: .hold
+        )
+        fixture.plans.setSticky(true)
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead)
+        // The public origin is dialled: the bound passed with no answer.
+        _ = try await fixture.publicOrigin.waitForStream()
+        // The direct attempt was cancelled (by its own deadline, or for the
+        // public candidate that is ready) and has still not ended, so its
+        // result is not in and no miss is recorded yet.
+        try await eventually { fixture.direct.heldCancellations == 1 }
+        XCTAssertEqual(fixture.plans.stickyMisses, 0)
+        fixture.direct.releaseHeld()
+
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        try await eventually { fixture.plans.stickyMisses == 1 }
+        try await eventually { fixture.plans.races.count == 1 }
+        // Still a miss, not a failure of the path.
+        XCTAssertEqual(fixture.plans.directFailures, 0)
+        let race = try XCTUnwrap(fixture.plans.races.first)
+        XCTAssertEqual(race.direct, .timedOut)
+        XCTAssertEqual(race.winner, .publicOrigin)
+        XCTAssertTrue(race.sticky)
+        client.close()
+    }
+
     func testAStickyPlanWhoseDirectCandidateFailsOutrightTellsTheTransportAndFallsBackAtOnce() async throws {
         let fixture = try await makeListener(
             limits: limits(hedgeSeconds: 30, stickySeconds: 30),
@@ -3448,6 +3483,12 @@ final class StandInStreamSource: @unchecked Sendable {
     private var streams: [StandInDirectStream] = []
     private var calls = 0
     private var held: [CheckedContinuation<Void, Never>] = []
+    private var cancelledWhileHeld = 0
+
+    /// How many opens held by `.hold` have been cancelled, ended or not.
+    var heldCancellations: Int {
+        lock.withLock { cancelledWhileHeld }
+    }
 
     /// Lets every open held by `.hold` return (as a failure).
     func releaseHeld() {
@@ -3498,9 +3539,15 @@ final class StandInStreamSource: @unchecked Sendable {
             try await Task.sleep(for: .seconds(3600))
             throw Unavailable()
         case .hold:
-            await withCheckedContinuation { continuation in
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    lock.withLock {
+                        held.append(continuation)
+                    }
+                }
+            } onCancel: {
                 lock.withLock {
-                    held.append(continuation)
+                    cancelledWhileHeld += 1
                 }
             }
             throw Unavailable()
