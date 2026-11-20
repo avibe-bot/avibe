@@ -7675,7 +7675,7 @@
     "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
     "signOut": "在此设备退出",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
-    "localVersion": "本机 Desktop 版本 {{version}}",
+    "instanceVersion": "{{name}} 的版本 {{version}}",
     "continueLocal": "继续使用本机",
     "loading": "正在加载…",
     "setupReady": "本机已准备好",
@@ -7819,6 +7819,9 @@
       "current": "已是最新版本",
       "available": "有新版本可以安装",
       "availableDetail": "更新后 Avibe 会重新启动，会话和设置都会保留。",
+      "availableInstanceDetail": "更新时 {{name}} 会重新启动，通常一两分钟，正在进行的工作可能中断。",
+      "availableAppDetail": "更新时这台电脑上的 Avibe 会重新启动，{{name}} 不受影响。",
+      "instanceUnauthorized": "这里读不到 {{name}} 的更新状态。",
       "notChecked": "还没有检查过更新",
       "disabled": "这个版本不能自动更新",
       "disabledDetail": "请下载并安装新版本。",
@@ -7834,7 +7837,9 @@
       "restartingHost": "运行 Avibe 的电脑正在重新启动 Avibe，稍后会自动重新连接…",
       "verifying": "正在确认新版本…",
       "updated": "更新已安装",
-      "updatedTo": "已更新到 {{version}}"
+      "updatedTo": "已更新到 {{version}}",
+      "updatedNamed": "{{name}} 已更新",
+      "updatedNamedTo": "{{name}} 已更新到 {{version}}"
     },
     "failure": {
       "failed": {
@@ -7890,13 +7895,18 @@
       "update": "更新",
       "retry": "重试",
       "check": "检查更新",
-      "refreshBuild": "刷新构建信息"
+      "refreshBuild": "刷新构建信息",
+      "updateNamed": "更新 {{name}}",
+      "updateApp": "更新桌面应用"
     },
     "setting": {
       "prereleases": "接收预览版",
       "prereleasesHint": "同时推送 RC 预览版，抢先体验",
       "autoUpdate": "自动更新",
       "autoUpdateHint": "发现新版本后，在 Avibe 空闲时自动安装，不再询问"
+    },
+    "subject": {
+      "app": "这台电脑上的桌面应用"
     },
     "legacyHost": "运行 Avibe 的电脑上的桌面应用版本较旧，不能从这里检查更新或更改设置。请先把那里的桌面应用更新到最新版本。",
     "trustedView": {
