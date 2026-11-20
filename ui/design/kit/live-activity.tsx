@@ -67,7 +67,7 @@ function useTurnCopy() {
       case 'done':
         return { status: t('已完成', 'Done'), detail: t(`用时 ${a.took}，轻点查看回复`, `Took ${a.took}. Tap to read the reply.`) };
       case 'failed':
-        return { status: t('没有完成', "Didn't finish"), detail: t('打开 Avibe 查看原因', 'Open Avibe to see why') };
+        return { status: t('没有完成', "Didn't finish"), detail: t(`运行 ${a.took}，打开 Avibe 查看原因`, `Ran ${a.took}. Open Avibe to see why.`) };
       case 'stopped':
         return { status: t('已停止', 'Stopped'), detail: t(`运行 ${a.took}后停止`, `Stopped after ${a.took}`) };
     }
@@ -93,9 +93,9 @@ function Heading({ activity, onBlack = false }: { activity: TurnActivity; onBlac
   const tone = onBlack && (activity.staleSince || activity.phase === 'stopped') ? 'text-white/60' : statusTone(activity);
   return (
     <div className="min-w-0 flex-1">
-      <div className="truncate text-[15px] font-semibold leading-5">{activity.title ?? activity.agent}</div>
-      {activity.title && <div className={clsx('truncate text-[13px] leading-[18px]', muted)}>{activity.agent}</div>}
-      <div className="mt-1 flex items-start gap-1.5 text-[13px] leading-[18px]">
+      <div className="truncate text-base font-semibold leading-5">{activity.title ?? activity.agent}</div>
+      {activity.title && <div className={clsx('truncate text-sm leading-5', muted)}>{activity.agent}</div>}
+      <div className="mt-1 flex items-start gap-1.5 text-sm leading-5">
         <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className={clsx('mt-0.5 size-3.5 shrink-0', onBlack && activity.staleSince && 'text-white/60')} />
         <span>
           <span className={clsx('font-semibold', tone)}>{copy.status}</span>
@@ -110,11 +110,11 @@ function Heading({ activity, onBlack = false }: { activity: TurnActivity; onBlac
 export function LiveActivityCard({ activity }: { activity: TurnActivity }) {
   const running = activity.phase === 'working' || activity.phase === 'needsYou';
   return (
-    <div className="flex items-start gap-3 rounded-[24px] bg-card/90 p-4 text-card-foreground shadow-elevation-1 backdrop-blur">
+    <div className="flex items-start gap-3 rounded-3xl bg-card/90 p-4 text-card-foreground shadow-elevation-1 backdrop-blur">
       <Mark size="size-9" />
       <Heading activity={activity} />
       {running && !activity.staleSince && (
-        <div className="pt-0.5 font-mono text-[20px] font-semibold tabular-nums leading-none">{activity.elapsed}</div>
+        <div className="pt-0.5 font-mono text-xl font-semibold tabular-nums leading-none">{activity.elapsed}</div>
       )}
     </div>
   );
@@ -125,11 +125,11 @@ export function LockScreen({ children, time = '10:24' }: { children: ReactNode; 
   const t = useDraft();
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-background text-foreground" style={{ background: 'var(--gradient-wizard-platforms)' }}>
-      <div className="mx-auto mt-3 h-[37px] w-[126px] rounded-full bg-black" />
-      <div className="mt-6 text-center text-[17px] font-semibold text-foreground/80">{t('11月20日 星期四', 'Thursday, November 20')}</div>
-      <div className="text-center font-display text-[88px] font-semibold leading-none tracking-tight">{time}</div>
+      <div className="mx-auto mt-3 h-9 w-32 rounded-full bg-black" />
+      <div className="mt-6 text-center text-lg font-semibold text-foreground/80">{t('11月20日 星期四', 'Thursday, November 20')}</div>
+      <div className="text-center font-display text-8xl font-semibold leading-none tracking-tight">{time}</div>
       <div className="mt-auto flex flex-col gap-2 px-3 pb-24">{children}</div>
-      <div className="absolute inset-x-0 bottom-2 mx-auto h-[5px] w-[134px] rounded-full bg-foreground/80" />
+      <div className="absolute inset-x-0 bottom-2 mx-auto h-1 w-32 rounded-full bg-foreground/80" />
     </div>
   );
 }
@@ -138,7 +138,7 @@ export function LockScreen({ children, time = '10:24' }: { children: ReactNode; 
 export function Specimen({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-2">
-      <div className="font-mono text-[11px] text-muted">{label}</div>
+      <div className="font-mono text-xs text-muted">{label}</div>
       {children}
     </div>
   );
@@ -156,10 +156,10 @@ export function SpecimenSheet({ children }: { children: ReactNode }) {
 export function IslandCompact({ activity }: { activity: TurnActivity }) {
   const running = activity.phase === 'working' && !activity.staleSince;
   return (
-    <div className="flex h-[37px] w-[250px] items-center justify-between rounded-full bg-black pr-3 pl-1.5">
+    <div className="flex h-9 w-64 items-center justify-between rounded-full bg-black pr-3 pl-1.5">
       <Mark size="size-6" />
       {running ? (
-        <span className="font-mono text-[14px] font-semibold tabular-nums text-mint">{activity.elapsed}</span>
+        <span className="font-mono text-sm font-semibold tabular-nums text-mint">{activity.elapsed}</span>
       ) : (
         <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className={clsx('size-4', activity.staleSince && 'text-white/60')} />
       )}
@@ -170,7 +170,7 @@ export function IslandCompact({ activity }: { activity: TurnActivity }) {
 /** The minimal island, when another app's activity shares it. */
 export function IslandMinimal({ activity }: { activity: TurnActivity }) {
   return (
-    <div className="flex size-[37px] items-center justify-center rounded-full bg-black">
+    <div className="flex size-9 items-center justify-center rounded-full bg-black">
       <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className="size-4" />
     </div>
   );
@@ -180,10 +180,10 @@ export function IslandMinimal({ activity }: { activity: TurnActivity }) {
 export function IslandExpanded({ activity }: { activity: TurnActivity }) {
   const running = activity.phase === 'working' || activity.phase === 'needsYou';
   return (
-    <div className="flex w-[370px] items-start gap-3 rounded-[44px] bg-black px-5 pt-4 pb-5 text-white">
+    <div className="flex w-full items-start gap-3 rounded-4xl bg-black px-5 pt-4 pb-5 text-white">
       <Mark size="size-9" />
       <Heading activity={activity} onBlack />
-      {running && !activity.staleSince && <div className="pt-0.5 font-mono text-[18px] font-semibold tabular-nums">{activity.elapsed}</div>}
+      {running && !activity.staleSince && <div className="pt-0.5 font-mono text-lg font-semibold tabular-nums">{activity.elapsed}</div>}
     </div>
   );
 }
@@ -197,7 +197,7 @@ export function TrackChip({ state }: { state: TrackChipState }) {
     return (
       <div className="flex items-center gap-2 rounded-2xl border border-edge bg-surface/95 py-2 pr-2 pl-3 shadow-elevation-1">
         <LockKeyhole className="size-4 shrink-0 text-muted" />
-        <span className="min-w-0 flex-1 text-[13px] leading-[18px] text-muted">{t('实时活动在系统设置里关着', 'Live Activities are off in Settings')}</span>
+        <span className="min-w-0 flex-1 text-sm leading-5 text-muted">{t('实时活动在系统设置里关着', 'Live Activities are off in Settings')}</span>
         <Button variant="outline" size="sm" className="shrink-0 gap-1.5 rounded-full"><Settings className="size-3.5" />{t('去设置', 'Settings')}</Button>
       </div>
     );
@@ -206,7 +206,7 @@ export function TrackChip({ state }: { state: TrackChipState }) {
     return (
       <div className="flex items-center gap-2 rounded-full border border-mint/30 bg-mint-soft py-1.5 pr-1.5 pl-3 shadow-elevation-1">
         <LockKeyhole className="size-4 shrink-0 text-mint-ink" />
-        <span className="min-w-0 flex-1 text-[13px] font-medium text-mint-ink">{t('已在锁屏上显示', 'Showing on the Lock Screen')}</span>
+        <span className="min-w-0 flex-1 text-sm font-medium text-mint-ink">{t('已在锁屏上显示', 'Showing on the Lock Screen')}</span>
         <Button variant="ghost" size="sm" className="shrink-0 rounded-full">{t('停止显示', 'Stop')}</Button>
       </div>
     );

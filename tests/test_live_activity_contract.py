@@ -26,7 +26,7 @@ REQUIRED = {"activity_token", "event", "timestamp", "priority", "phase", "starte
 OPTIONAL = {"ended_at", "stale_at", "dismiss_at", "alert"}
 MIN_TIME = 1_600_000_000
 MAX_TIME = 4_102_444_800
-TOKEN_RE = re.compile(r"^(?:[0-9a-f]{2}){8,256}$")
+TOKEN_RE = re.compile(r"(?:[0-9a-f]{2}){8,256}")  # matched with fullmatch()
 UPDATE_EXPIRATION_SECONDS = 3600
 END_EXPIRATION_SECONDS = 14_400
 ALERT = {
@@ -47,9 +47,13 @@ def validate_relay_request(body: Any) -> bool:
     keys = set(body)
     if not REQUIRED <= keys or not keys <= REQUIRED | OPTIONAL:
         return False
-    if not isinstance(body["activity_token"], str) or not TOKEN_RE.match(body["activity_token"]):
+    if not all(isinstance(body[k], str) for k in ("activity_token", "event", "phase")):
         return False
-    if body["priority"] not in (5, 10) or type(body["priority"]) is not int:
+    if "alert" in body and not isinstance(body["alert"], str):
+        return False
+    if not TOKEN_RE.fullmatch(body["activity_token"]):
+        return False
+    if type(body["priority"]) is not int or body["priority"] not in (5, 10):
         return False
     times = [body[k] for k in ("timestamp", "started_at", "confirmed_at", "ended_at", "stale_at", "dismiss_at") if k in body]
     if not all(_time(t) for t in times):
@@ -119,6 +123,22 @@ def test_every_rejection_is_invalid(vectors):
     for case in vectors["relay_rejections"]:
         assert not validate_relay_request(case["request"]), case["name"]
         assert (case["status"], case["error"]) == (400, "invalid_live_activity")
+
+
+WRONG_TYPES = [None, True, 1.5, 7, "", "x", [], ["working"], {}, {"phase": "working"}]
+
+
+def test_validator_answers_false_for_any_wrong_type_in_any_field(vectors):
+    # Malformed input is a 400, never a server error: substitute every JSON type into every field of
+    # every valid case and require a plain boolean back.
+    for case in vectors["relay_cases"]:
+        for key in case["request"]:
+            for value in WRONG_TYPES:
+                body = {**case["request"], key: value}
+                result = validate_relay_request(body)
+                assert isinstance(result, bool), (case["name"], key, value)
+                if type(value) is not type(case["request"][key]) or isinstance(value, bool):
+                    assert result is False, (case["name"], key, value)
 
 
 def test_content_state_carries_no_text_beyond_the_phase(vectors):

@@ -478,6 +478,121 @@
       },
       "status": 400,
       "error": "invalid_live_activity"
+    },
+    {
+      "name": "token_with_trailing_newline",
+      "request": {
+        "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839\n",
+        "event": "update",
+        "timestamp": 1795000900,
+        "priority": 5,
+        "phase": "working",
+        "started_at": 1795000000,
+        "confirmed_at": 1795000900,
+        "stale_at": 1795003300
+      },
+      "status": 400,
+      "error": "invalid_live_activity"
+    },
+    {
+      "name": "phase_as_object_on_update",
+      "request": {
+        "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839",
+        "event": "update",
+        "timestamp": 1795000900,
+        "priority": 5,
+        "phase": {
+          "phase": "working"
+        },
+        "started_at": 1795000000,
+        "confirmed_at": 1795000900,
+        "stale_at": 1795003300
+      },
+      "status": 400,
+      "error": "invalid_live_activity"
+    },
+    {
+      "name": "phase_as_array_on_end",
+      "request": {
+        "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839",
+        "event": "end",
+        "timestamp": 1795002820,
+        "priority": 10,
+        "phase": [
+          "done"
+        ],
+        "started_at": 1795000000,
+        "ended_at": 1795002820,
+        "confirmed_at": 1795002820,
+        "dismiss_at": 1795006420
+      },
+      "status": 400,
+      "error": "invalid_live_activity"
+    },
+    {
+      "name": "event_as_array",
+      "request": {
+        "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839",
+        "event": [
+          "update"
+        ],
+        "timestamp": 1795000900,
+        "priority": 5,
+        "phase": "working",
+        "started_at": 1795000000,
+        "confirmed_at": 1795000900,
+        "stale_at": 1795003300
+      },
+      "status": 400,
+      "error": "invalid_live_activity"
+    },
+    {
+      "name": "alert_as_object",
+      "request": {
+        "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839",
+        "event": "update",
+        "timestamp": 1795001500,
+        "priority": 10,
+        "phase": "needsYou",
+        "started_at": 1795000000,
+        "confirmed_at": 1795001500,
+        "stale_at": 1795003900,
+        "alert": {
+          "needsYou": true
+        }
+      },
+      "status": 400,
+      "error": "invalid_live_activity"
+    },
+    {
+      "name": "priority_as_boolean",
+      "request": {
+        "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839",
+        "event": "update",
+        "timestamp": 1795000900,
+        "priority": true,
+        "phase": "working",
+        "started_at": 1795000000,
+        "confirmed_at": 1795000900,
+        "stale_at": 1795003300
+      },
+      "status": 400,
+      "error": "invalid_live_activity"
+    },
+    {
+      "name": "time_as_boolean",
+      "request": {
+        "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839",
+        "event": "update",
+        "timestamp": true,
+        "priority": 5,
+        "phase": "working",
+        "started_at": 1795000000,
+        "confirmed_at": 1795000900,
+        "stale_at": 1795003300
+      },
+      "status": 400,
+      "error": "invalid_live_activity"
     }
   ],
   "relay_success": {

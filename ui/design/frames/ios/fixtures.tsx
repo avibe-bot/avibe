@@ -12,7 +12,7 @@ function useActivities() {
     working: { ...base, phase: 'working', elapsed: '42:10' },
     needsYou: { ...base, phase: 'needsYou', elapsed: '43:02' },
     done: { ...base, phase: 'done', elapsed: '', took: t('47 分钟', '47 min') },
-    failed: { ...base, phase: 'failed', elapsed: '' },
+    failed: { ...base, phase: 'failed', elapsed: '', took: t('10 分钟', '10 min') },
     stopped: { ...base, phase: 'stopped', elapsed: '', took: t('12 分钟', '12 min') },
     stale: { ...base, phase: 'working', elapsed: '42:10', staleSince: '9:31' },
     botSession: { phase: 'working', agent, elapsed: '42:10' },

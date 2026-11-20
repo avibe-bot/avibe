@@ -62,7 +62,7 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 ### 2.4 What a card shows
 
-- Shown: the Avibe mark, `agentName`, `sessionTitle` (one line, tail-truncated), the phase, the elapsed time (`Text(timerInterval:)` from `startedAt`, counted on the phone), and for an ended Turn the total time.
+- Shown: the Avibe mark, `agentName`, `sessionTitle` (one line, tail-truncated), the phase, and time. A live card shows the elapsed time (`Text(timerInterval:)` from `startedAt`, counted on the phone); every ended card (done, failed, stopped) shows the total time, `endedAt - startedAt`.
 - Never shown: message text, tools, files, or the instance name.
 - Stale (`context.isStale`) on a working or needsYou card: the timer stops, and the card reads "May be out of date. Last confirmed working at {confirmedAt}". No timer keeps running for a state nobody confirmed.
 - The words are in the design frames. Lock Screen and island strings live in the extension's xcstrings (zh, en). The alert keys `AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE` and `AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY` live in the App's `Localizable.xcstrings`.
@@ -71,7 +71,24 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 ### 3.1 Route and authorization
 
-`POST /api/push/apns/<registration_id>/live-activity`, with `Authorization: vapid t=<JWT>, k=<key>` and `Content-Type: application/json`. Authentication, ordering, and error codes are those of the frozen badge operation (`docs/plans/badge-only-apns-contract.md` §2): the registration is known and not revoked, the VAPID key hash matches, and `aud` and `exp` are checked. The body is validated only after authentication. No installation management credential is required.
+`POST /api/push/apns/<registration_id>/live-activity` with `Authorization: vapid t=<ES256 compact JWT>, k=<base64url P-256 key>` and `Content-Type: application/json`. This is the same authorization the relay's existing badge operation uses (`updateBadge` in avibe-backend `lib/push/relay.ts` at `6200b745`; its frozen contract is avibe-backend `docs/plans/badge-only-apns-contract.md` §2). The rules are restated here so this file is complete. Checks run in this order, and no APNs call is made on any failure:
+
+1. No relay configuration: `503 relay_unavailable`.
+2. The registration id is not 43 base64url characters decoding to 32 bytes, or no such registration exists: `410 registration_not_found`. A revoked registration: `410 registration_revoked`.
+3. VAPID, verified against the registration's stored `vapid_key_sha256`:
+   - a malformed header or a bad signature: `400 invalid_vapid`;
+   - a different key: `410 vapid_key_mismatch`;
+   - `aud` is not the exact configured origin: `400 invalid_audience`;
+   - `exp` has passed: `400 vapid_expired`;
+   - `exp` is more than 24 hours ahead: `400 vapid_exp_too_far`.
+4. The body (§3.2), validated only after authentication: `400 invalid_live_activity`.
+5. The installation snapshot:
+   - the device token was marked invalid: `410 apns_provider_invalid`;
+   - no environment or topic: `503 apns_token_unavailable` with `Retry-After: 60`;
+   - an environment or topic outside the configured sets: `502 apns_bad_gateway`.
+6. Rate limit: `429 relay_rate_limited` with `Retry-After`.
+
+No installation management credential is required.
 
 ### 3.2 Body (≤ 1024 UTF-8 bytes, strict)
 
@@ -87,7 +104,7 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 | `ended_at`, `dismiss_at` | `end` only | `started_at ≤ ended_at ≤ dismiss_at` |
 | `alert` | optional | only `"needsYou"`, only with `phase: needsYou` and `priority: 10` |
 
-Unix seconds are integers in [1600000000, 4102444800]. Any other key, a `null` in place of an absent field, a float, or a string number fails with `400 invalid_live_activity`. Nothing in the body is free text, so the route cannot carry names or titles.
+Unix seconds are JSON integers in [1600000000, 4102444800]. The token must match `(?:[0-9a-f]{2}){8,256}` over the whole string, so a trailing newline fails. In TypeScript use `/^(?:[0-9a-f]{2}){8,256}$/` without the `m` flag; in Python use `fullmatch`. The validator type-checks every field before it uses it; a wrong JSON type in any field, including an object or array for `event`, `phase`, or `alert`, is a validation failure and never a server error. Any other key, a `null` in place of an absent field, a float, a boolean, or a string number fails with `400 invalid_live_activity`. Nothing in the body is free text, so the route cannot carry names or titles.
 
 ### 3.3 APNs request (exact; see `relay_cases[].apns`)
 
@@ -101,12 +118,15 @@ Unix seconds are integers in [1600000000, 4102444800]. Any other key, a `null` i
 
 ### 3.4 Responses
 
-- `201 {"ok":true,"registration_id","apns_status":200}`.
-- Errors: the badge route's registration, VAPID, provider (`apns_provider_invalid`, `apns_token_unavailable`), rate-limit, upstream, and timeout codes, plus:
-  - `400 invalid_live_activity`
-  - `413 apns_payload_too_large`
-  - **`410 activity_token_gone`** when APNs reports BadDeviceToken, DeviceTokenNotForTopic, Unregistered, or 410 for the activity token.
-- **`activity_token_gone` never marks the installation's device token invalid.** One dead activity must not cost the phone its notifications.
+- Success: `201 {"ok":true,"registration_id":"<id>","apns_status":200}`. Before the APNs call, failures are those of §3.1.
+- APNs outcome mapping (`classifyApnsResponse`):
+  - `device_gone` (410, BadDeviceToken, DeviceTokenNotForTopic, Unregistered): **`410 activity_token_gone`**;
+  - `payload_too_large`: `413 apns_payload_too_large`;
+  - `upstream_rate_limited`: `503 apns_upstream_rate_limited` with `Retry-After: 60`;
+  - `timeout`: `503 apns_timeout` with `Retry-After: 30`;
+  - `unavailable`: `503 apns_unavailable` with `Retry-After: 30`;
+  - `bad_gateway` or `provider_auth`: `502 apns_bad_gateway`.
+- **`activity_token_gone` never marks the installation's device token invalid** (no `markPushProviderInvalid`). One dead activity must not cost the phone its notifications.
 - Rate bucket `push:liveActivityRegistration:<sha256(registration_id)>`, 60 per minute, burst 10.
 - No relay state is added: no table and no migration. The token is never logged; at most a redacted hash is.
 
@@ -122,6 +142,8 @@ Unix seconds are integers in [1600000000, 4102444800]. Any other key, a `null` i
 | `DELETE /api/web-push/live-activities/<activity_id>` with `{reason}` | `200 {ok, stopped}`. Idempotent. `reason ∈ user_stopped, dismissed, system_ended, logout, account_switch, instance_switch, disabled` |
 
 - `activity` is `{activity_id, session_id, turn_id, phase, started_at, ended_at, confirmed_at, status}`, with `status ∈ tracking, ended, stopped`.
+- Every route above can also answer `503 service_unavailable` when the controller is unreachable, as other controller-backed routes already do. The App treats it as transient: it keeps the local activity and retries on the next foreground or token update.
+- **Serialization:** the controller process is the single owner of tracking rows and sends. The four routes reach it over the existing internal IPC; ui_server does not write the table itself. Registration, token replacement, DELETE, and every send for one `activity_id` are serialized there, so no send uses a token or state that a later PUT or DELETE has already replaced.
 - `activity_id` is ActivityKit's `Activity.id`: 1–64 characters of `[A-Za-z0-9-]`.
 - The PUT is an upsert. The same activity with a new token replaces the token. A new activity on the same `push_registration_id` stops the previous tracking with reason `replaced`.
 
@@ -133,7 +155,9 @@ Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`,
 
 - **Phase:**
   - A Turn in `session_turns` that has reached `terminal` maps through `phase_map`.
-  - A Turn still running is `needsYou` while that session has a pending owner request: a pending `vault_requests` row whose requester or delivery `session_id` is the session, or a pending `QuestionUIHandler` question for the session. Otherwise it is `working`.
+  - A Turn still running is `needsYou` while that session's Turn is blocked on a pending owner decision that the person answers in the App. Otherwise it is `working`.
+  - The definition is this property, not a list of sources. Today the sources are: a pending `vault_requests` row whose requester or delivery `session_id` is the session; a pending agent question held by any registered agent question handler (`PendingQuestion`, keyed by its gate's `base_session_id`); and a pending Computer Use confirmation (`ComputerScriptInteractionManager`).
+  - The lane reads all of these through one chokepoint, so a source added later is covered by registering it there. A test seeds one pending request of every kind that exists and asserts `needsYou` for each.
 - **Sends:**
   - A phase change sends priority 10. Only entering `needsYou` adds `alert: "needsYou"`.
   - While the Turn runs, a heartbeat is sent every 900 s at priority 5 with no alert.

@@ -50,7 +50,7 @@ const entry = (name: string, title: string, state: TrackChipState) => ({
   render: () => (
     <div className="relative h-full">
       {chatPhone()}
-      <div className="absolute inset-x-4 bottom-[150px] z-[100]">
+      <div className="absolute inset-x-4 bottom-36 z-50">
         <TrackChip state={state} />
       </div>
     </div>
