@@ -57,7 +57,6 @@ export function remoteRequestSettled(request: DesktopRemoteUpdateRequest | null 
 export function installRunning(info: UpdateSnapshot | null | undefined): boolean {
   if (!info) return false;
   if (info.install) return true;
-  const request = info.remote_request;
-  return Boolean(request && !remoteRequestSettled(request, info.current)
-    && ['requested', 'acknowledged', 'downloading', 'installing', 'restarting', 'completed'].includes(request.phase));
+  // Every phase before the request settles, the host's check and its wait for someone there included.
+  return Boolean(info.remote_request && !remoteRequestSettled(info.remote_request, info.current));
 }

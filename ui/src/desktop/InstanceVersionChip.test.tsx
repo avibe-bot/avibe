@@ -79,6 +79,24 @@ it('keeps reading while the panel it asked for is open, so an install started th
   expect(chip().querySelector('.animate-spin')).toBeTruthy();
 });
 
+it('stops reading for the panel once the window is back in front, also when that happens during an install', async () => {
+  api.getVersion.mockResolvedValueOnce(idle);
+  mount();
+  await tick();
+  await act(async () => { chip().click(); });
+  api.getVersion.mockResolvedValue(installing);
+  await tick(5000);
+  // Back in the main window while the install runs; it then ends without a new version.
+  vi.setSystemTime(Date.now() + 10_000);
+  await act(async () => { window.dispatchEvent(new Event('focus')); });
+  api.getVersion.mockResolvedValue(idle);
+  await tick(3000);
+  expect(chip().querySelector('.animate-spin')).toBeNull();
+  const reads = api.getVersion.mock.calls.length;
+  await tick(30_000);
+  expect(api.getVersion.mock.calls.length).toBe(reads);
+});
+
 it('loads the page again when a read on return finds the new version before the next poll does', async () => {
   api.getVersion.mockResolvedValueOnce(installing);
   mount();

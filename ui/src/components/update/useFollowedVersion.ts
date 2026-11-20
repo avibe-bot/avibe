@@ -98,15 +98,18 @@ export function useFollowedVersion(): { info: VersionInfo | null; updating: bool
     return () => { active = false; };
   }, [api]);
   useReadOnReturn(true, reread);
+  // The watch ends when this window is in front again, whether or not an install is being followed by then.
+  useEffect(() => {
+    if (!watching) return;
+    const back = () => setWatching(false);
+    window.addEventListener('focus', back);
+    return () => window.removeEventListener('focus', back);
+  }, [watching]);
+  // A followed install has its own, faster reads.
   useEffect(() => {
     if (!watching || updating) return;
     const timer = window.setInterval(reread, WATCH_POLL_MS);
-    const back = () => setWatching(false);
-    window.addEventListener('focus', back);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener('focus', back);
-    };
+    return () => window.clearInterval(timer);
   }, [watching, updating, reread]);
   return { info, updating, watch: useCallback(() => setWatching(true), []) };
 }

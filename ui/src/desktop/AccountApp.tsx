@@ -108,10 +108,16 @@ export function DesktopUpdatePanel({ state, act, busy, install, close }: {
  *  instance there is one thing to update, and the panel is the single one. */
 export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>[0]) {
   const { state, act, busy, install, close } = props;
+  // How long ago the shell sent an install decides whether it is still being followed.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const committed = state.connection.committed;
   const instance = state.instance_update;
   if (committed.kind !== 'remote' || !instance) return <DesktopUpdatePanel {...props} />;
-  const shown = instanceSection(instance);
+  const shown = instanceSection(instance, now);
   const update = state.desktop.update;
   const appTarget = update.latest;
   const accepts = (action: string) => update.hostActions?.includes(action) ?? false;
