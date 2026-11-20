@@ -193,7 +193,12 @@ class LiveActivityService:
             status = getattr(response, "status_code", None)
             with self.engine.begin() as conn:
                 if status == 410:
-                    store.stop(conn, activity_id, "relay_gone", now)
+                    try:
+                        result = response.json()
+                    except ValueError:
+                        result = None
+                    token_gone = isinstance(result, dict) and result.get("error") == "activity_token_gone"
+                    store.stop(conn, activity_id, "token_gone" if token_gone else "registration_gone", now)
                 elif status == 502 or (status is not None and 400 <= status < 500 and status != 429):
                     store.stop(conn, activity_id, "relay_rejected", now)
                 else:

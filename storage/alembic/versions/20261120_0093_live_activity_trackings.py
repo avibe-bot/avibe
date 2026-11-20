@@ -33,6 +33,7 @@ def upgrade() -> None:
             for name in (
                 "last_timestamp",
                 "confirmed_at",
+                "requested_at",
                 "created_at",
                 "updated_at",
                 "expires_at",

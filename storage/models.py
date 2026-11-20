@@ -1729,7 +1729,7 @@ live_activity_trackings = Table(
     )],
     Column("stop_reason", String),
     *[Column(name, Integer, nullable=False) for name in (
-        "last_timestamp", "confirmed_at", "created_at", "updated_at", "expires_at", "started_at",
+        "last_timestamp", "confirmed_at", "requested_at", "created_at", "updated_at", "expires_at", "started_at",
     )],
     Column("ended_at", Integer),
     Column("authorization_json", Text),

@@ -101,7 +101,10 @@ def stop(conn, activity_id: str, reason: str, now: int):
             tracks.c.activity_id == activity_id,
             tracks.c.status == "tracking",
         )
-        .values(status="stopped", stop_reason=reason, confirmed_at=now, pending_state=None, updated_at=now)
+        .values(
+            status="stopped", stop_reason=reason, confirmed_at=now,
+            pending_state=tracks.c.pending_state if reason == "token_gone" else None, updated_at=now,
+        )
     )
     return bool(result.rowcount)
 
@@ -143,10 +146,17 @@ def handle(conn, operation: str, owner: str, activity_id: str, payload: dict, no
 
         result["confirmed_at"] = max(result["confirmed_at"], now)
         return response(activity=result)
-    if operation != "put" or set(payload) != {"session_id", "turn_id", "push_registration_id", "activity_token"}:
+    if operation != "put" or set(payload) != {
+        "session_id", "turn_id", "push_registration_id", "activity_token", "requested_at"
+    }:
         return response(400, error="invalid_request")
-    if not all(isinstance(v, str) and 0 < len(v) <= 512 for v in payload.values()) or not (
-        TOKEN_RE.fullmatch(payload["activity_token"]) and REGISTRATION_RE.fullmatch(payload["push_registration_id"])
+    if not all(
+        isinstance(v, str) and 0 < len(v) <= 512 for key, v in payload.items() if key != "requested_at"
+    ) or not (
+        TOKEN_RE.fullmatch(payload["activity_token"])
+        and REGISTRATION_RE.fullmatch(payload["push_registration_id"])
+        and type(payload["requested_at"]) is int
+        and payload["requested_at"] <= now + 300
     ):
         return response(400, error="invalid_request")
     if subscription(conn, owner, payload["push_registration_id"]) is None:
@@ -159,14 +169,20 @@ def handle(conn, operation: str, owner: str, activity_id: str, payload: dict, no
                 "session_id",
                 "turn_id",
                 "push_registration_id",
+                "requested_at",
             )
         )
     ):
         return response(409, error="activity_conflict")
-    if row and row["status"] == "tracking" and now >= row["expires_at"]:
-        stop(conn, activity_id, "expired", now)
-        row = get(conn, activity_id)
-    if row and row["status"] != "tracking":
+    if now >= payload["requested_at"] + 28800:
+        if row:
+            stop(conn, activity_id, "expired", now)
+        return response(409, error="activity_expired")
+    can_revive = bool(
+        row and row["status"] == "stopped" and row["stop_reason"] == "token_gone"
+        and row["activity_token"] != payload["activity_token"]
+    )
+    if row and row["status"] != "tracking" and not can_revive:
         if row["status"] == "ended":
             return response(409, error="turn_not_active", activity=activity(row))
         return response(activity=activity(row))
@@ -174,9 +190,19 @@ def handle(conn, operation: str, owner: str, activity_id: str, payload: dict, no
     if state is None:
         return response(409, error="turn_not_active")
     terminal = state["ended_at"] is not None
+    if can_revive and terminal:
+        return response(activity=activity(row))
     if row:
         # Rotation never acknowledges an unsent phase, consumes a heartbeat, or extends the lifetime.
         update(conn, activity_id, activity_token=payload["activity_token"], updated_at=now)
+        if terminal:
+            update(
+                conn, activity_id, status="ended", last_phase=state["phase"],
+                confirmed_at=state["confirmed_at"], ended_at=state["ended_at"],
+                pending_state=None, retry_count=0, retry_at=0,
+            )
+        elif can_revive:
+            update(conn, activity_id, status="tracking", stop_reason=None, retry_count=0, retry_at=0)
     else:
         conn.execute(
             tracks.update()
@@ -199,7 +225,7 @@ def handle(conn, operation: str, owner: str, activity_id: str, payload: dict, no
                 confirmed_at=state["confirmed_at"],
                 created_at=now,
                 updated_at=now,
-                expires_at=now + 28800,
+                expires_at=payload["requested_at"] + 28800,
             )
         )
     result = activity(get(conn, activity_id))

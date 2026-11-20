@@ -17,7 +17,10 @@ from tests.ui_server_test_helpers import csrf_headers
 
 REGISTRATION = "r" * 43
 TOKEN = "ab" * 32
-BODY = {"session_id": SESSION, "turn_id": TURN, "push_registration_id": REGISTRATION, "activity_token": TOKEN}
+BODY = {
+    "session_id": SESSION, "turn_id": TURN, "push_registration_id": REGISTRATION, "activity_token": TOKEN,
+    "requested_at": int(datetime.now(timezone.utc).timestamp()),
+}
 
 
 @pytest.fixture
@@ -88,6 +91,9 @@ def test_public_http_register_rotate_end_and_owner_isolation(state, monkeypatch,
         f"{base}/activity-1", json={"reason": stop_reason}, headers=headers
     ).get_json()["stopped"] is False
     assert client.put(f"{base}/activity-1", json=BODY, headers=headers).get_json()["activity"]["status"] == "stopped"
+    assert client.put(
+        f"{base}/activity-1", json={**BODY, "activity_token": "ef" * 32}, headers=headers
+    ).get_json()["activity"]["status"] == "stopped"
 
 
 @pytest.mark.asyncio
@@ -641,3 +647,109 @@ async def test_restart_without_pending_state_waits_for_a_new_heartbeat_period(st
     now[0] += 900
     await restarted.tick()
     assert len(sent) == 1 and sent[0]["priority"] == 5
+
+
+def test_public_http_requested_time_anchors_expiry_and_is_immutable(state, monkeypatch):
+    from vibe import internal_client, ui_server
+    from storage import live_activity_service as tracking_store
+
+    service, now, _ = service_for(state)
+    monkeypatch.setattr(internal_client, "live_activity_request", service.handle)
+    client = ui_server.app.test_client()
+    headers = csrf_headers(client)
+    url = "/api/web-push/live-activities/delayed"
+    body = {**BODY, "requested_at": now[0] - 7200}
+    assert client.put(url, json=body, headers=headers).status_code == 200
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "delayed")
+        assert row["created_at"] == now[0]
+        assert row["requested_at"] == body["requested_at"]
+        assert row["expires_at"] == body["requested_at"] + 28800
+    conflict = client.put(url, json={**body, "requested_at": body["requested_at"] + 1}, headers=headers)
+    assert conflict.status_code == 409 and conflict.get_json()["error"] == "activity_conflict"
+    for invalid in [True, 1.5, "1795000031", None, now[0] + 301]:
+        response = client.put(url, json={**body, "requested_at": invalid}, headers=headers)
+        assert response.status_code == 400
+    now[0] = body["requested_at"] + 28800
+    for target in [url, "/api/web-push/live-activities/expired-new"]:
+        response = client.put(target, json=body, headers=headers)
+        assert response.status_code == 409 and response.get_json()["error"] == "activity_expired"
+    with state.connect() as conn:
+        assert tracking_store.get(conn, "delayed")["stop_reason"] == "expired"
+        assert tracking_store.get(conn, "expired-new") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["activity_token_gone", "registration_gone", None])
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_only_a_new_token_can_revive_token_gone_with_its_pending_state(state, error, terminal):
+    import httpx
+    from storage import live_activity_service as tracking_store
+
+    service, now, sent = service_for(state)
+    await service.handle("put", "local", "activity-1", BODY)
+    service.pending_question = lambda sid: True
+
+    def gone(**kwargs):
+        response = httpx.Response(410, json={"error": error}, request=httpx.Request("POST", "https://avibe.bot"))
+        raise httpx.HTTPStatusError("gone", request=response.request, response=response)
+
+    service.sender = gone
+    await service.tick()
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["stop_reason"] == ("token_gone" if error == "activity_token_gone" else "registration_gone")
+        assert row["status"] == "stopped"
+        pending_state = row["pending_state"]
+        assert bool(pending_state) is (error == "activity_token_gone")
+    same = await service.handle("put", "local", "activity-1", BODY)
+    assert same["body"]["activity"]["status"] == "stopped"
+    if terminal:
+        with state.begin() as conn:
+            message_deliveries.terminalize_turn(
+                conn, TURN, outcome="completed", settled_by="terminal_result", evidence_kind="test"
+            )
+    fresh = await service.handle("put", "local", "activity-1", {**BODY, "activity_token": "cd" * 32})
+    revived = error == "activity_token_gone" and not terminal
+    assert fresh["body"]["activity"]["status"] == ("tracking" if revived else "stopped")
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["pending_state"] == pending_state
+        assert row["expires_at"] == BODY["requested_at"] + 28800
+        if revived:
+            assert row["stop_reason"] is None
+    service.sender = lambda **kwargs: sent.append(kwargs["body"])
+    await service.tick()
+    assert len(sent) == int(revived)
+    if revived:
+        assert sent[0]["activity_token"] == "cd" * 32
+        assert sent[0]["phase"] == "needsYou"
+
+
+@pytest.mark.asyncio
+async def test_terminal_put_settles_pending_end_locally_without_another_push(state):
+    import httpx
+    from storage import live_activity_service as tracking_store
+
+    service, now, sent = service_for(state)
+    await service.handle("put", "local", "activity-1", BODY)
+    with state.begin() as conn:
+        message_deliveries.terminalize_turn(
+            conn, TURN, outcome="completed", settled_by="terminal_result", evidence_kind="test"
+        )
+
+    def unavailable(**kwargs):
+        sent.append(kwargs["body"])
+        raise httpx.ReadTimeout("no answer")
+
+    service.sender = unavailable
+    await service.tick()
+    response = await service.handle("put", "local", "activity-1", BODY)
+    assert response["status_code"] == 409 and response["body"]["error"] == "turn_not_active"
+    assert response["body"]["activity"]["status"] == "ended"
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["status"] == "ended" and row["pending_state"] is None
+    now[0] += 900
+    await service.tick()
+    assert len(sent) == 1
