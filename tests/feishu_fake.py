@@ -79,6 +79,8 @@ class FakeFeishu:
         self.handshakes_refused = 0
         # Seconds to withhold the next endpoint replies, before answering as usual.
         self.endpoint_delays: List[float] = []
+        # Seconds over which to send the next endpoint replies, a few bytes at a time.
+        self.endpoint_trickles: List[float] = []
         self.connections_opened = 0
         self.close_codes: List[Optional[int]] = []
         # The configuration sent with each pong; ``None`` repeats the endpoint's.
@@ -147,9 +149,19 @@ class FakeFeishu:
             f"ws://127.0.0.1:{self._port}/ws/v2"
             f"?fpid=1&aid=2&device_id={7000 + self.connections_opened}&access_key=key&service_id=33554678&ticket=once"
         )
-        return web.json_response(
-            {"code": 0, "msg": "ok", "data": {"URL": socket_url, "ClientConfig": dict(self.client_config)}}
-        )
+        answer = {"code": 0, "msg": "ok", "data": {"URL": socket_url, "ClientConfig": dict(self.client_config)}}
+        if self.endpoint_trickles:
+            # A reply that keeps coming, never silent for long, and takes this long in all.
+            body = json.dumps(answer).encode()
+            pause = self.endpoint_trickles.pop(0) / 20
+            reply = web.StreamResponse(headers={"Content-Type": "application/json", "Content-Length": str(len(body))})
+            await reply.prepare(request)
+            step = -(-len(body) // 20)
+            for start in range(0, len(body), step):
+                await reply.write(body[start : start + step])
+                await asyncio.sleep(pause)
+            return reply
+        return web.json_response(answer)
 
     async def _token(self, _request: web.Request) -> web.Response:
         return web.json_response({"code": 0, "msg": "ok", "tenant_access_token": "t-fake", "expire": 7200})

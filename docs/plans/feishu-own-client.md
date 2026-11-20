@@ -130,12 +130,18 @@ nothing by default.
   0.08 s) and not cached. If loading it fails, the adapter logs a warning and
   imports the whole SDK.
 - The SDK's connections run only through `SdkLongConnection`, one at a time,
-  each on a thread and loop of its own. The SDK shares one module-level loop
-  between all clients, never ends a client's tasks, and asks for its endpoint
-  with a blocking request that has no timeout; a stopped client could come
-  back, and a silent endpoint held its thread for good. The request is bounded
-  at 15 seconds in our copy; a connection that is not gone when asked to stop
-  is reported as not stopped, and the next one waits up to 20 seconds for it.
+  each on a thread and loop of its own. The SDK's client was not written to be
+  stopped: one module-level loop for all clients, tasks that never end, a
+  `start` that runs one step after another, and an endpoint request that
+  blocks the loop's thread with no timeout. A stop is therefore made final at
+  the two points where a stopped client could still do harm: the endpoint
+  request (which runs beside the thread, under a 15-second deadline, and is
+  refused once a stop is asked for, so no connection can open) and the
+  hand-over of an event (refused, so that Feishu sends it again). What is left
+  on the loop is cancelled until the client's `start` has unwound.
+- A process that holds both the SDK and our copy (only tests do) has one
+  `Lark` logger with two handlers. The copy keeps the logger's name, so that
+  Feishu log lines read as before.
 - The event shapes are those of lark-oapi 1.7.5, the release the lock file
   pins; `pyproject.toml` now asks for no older one.
 - A malformed envelope (a schema or uuid that is not text, a 2.0 event without

@@ -19,9 +19,9 @@ in that private package.
 **Its event loop and its waits.** The SDK runs every client on one module-level
 loop, never ends a client's tasks, and asks for its endpoint with a blocking
 request that has no timeout. ``SdkLongConnection`` gives each connection a
-thread and a loop of its own for its whole life, bounds that request, and ends
-every task on the loop when the connection stops, so that a stopped connection
-cannot come back.
+thread and a loop of its own for its whole life and makes a stop final at the
+two points where a stopped connection could still do harm: the endpoint
+request, without which no connection opens, and the hand-over of an event.
 
 ``tests/test_feishu_sdk_footprint.py`` guards the first, ``tests/test_feishu_events.py``
 the second.
@@ -74,11 +74,17 @@ def sdk_ws_client_module() -> Any:
         return _loaded
 
 
+# A private package's search path is a real directory behind this marker: a
+# finder other than ours cannot read it, and so cannot load these files unrenamed.
+_PATH_MARK = "avibe-private-sdk:"
+
+
 class _PrivateSdkFinder(importlib.abc.MetaPathFinder):
     """Finds ``_avibe_lark_oapi[.x.y]`` in the files of ``lark_oapi[.x.y]``; knows no other name.
 
     It stays installed: the SDK's modules import some of their own lazily, at
-    run time.
+    run time. A module it cannot rename (no source file: a zip, a bare
+    ``.pyc``, an extension) is an ``ImportError``, never the unrenamed module.
     """
 
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
@@ -87,18 +93,23 @@ class _PrivateSdkFinder(importlib.abc.MetaPathFinder):
             if real is None or not real.submodule_search_locations:
                 return None
             spec = importlib.machinery.ModuleSpec(_PRIVATE, _OursLoader({}), is_package=True)
-            spec.submodule_search_locations = list(real.submodule_search_locations)
+            spec.submodule_search_locations = [_PATH_MARK + entry for entry in real.submodule_search_locations]
             return spec
         if not fullname.startswith(_PRIVATE + "."):
             return None
         if fullname == _PRIVATE_DISPATCHER:
             # Only named in the client's signature; any object with the handler method serves.
             return importlib.machinery.ModuleSpec(fullname, _OursLoader({"EventDispatcherHandler": object}))
-        # The import system hands over the parent's search path, and file lookup
-        # goes by the last part of the name, which is the same in both packages.
-        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is not None and isinstance(spec.loader, importlib.machinery.SourceFileLoader) and spec.origin:
-            spec.loader = _RenamingLoader(spec.origin)
+        # File lookup goes by the last part of the name, which is the same in both packages.
+        directories = [entry[len(_PATH_MARK) :] for entry in path or () if entry.startswith(_PATH_MARK)]
+        spec = importlib.machinery.PathFinder.find_spec(fullname, directories)
+        if spec is None:
+            return None
+        if not isinstance(spec.loader, importlib.machinery.SourceFileLoader) or not spec.origin:
+            raise ImportError(f"{fullname} has no source file to load under a private name", name=fullname)
+        spec.loader = _RenamingLoader(spec.origin)
+        if spec.submodule_search_locations is not None:
+            spec.submodule_search_locations = [_PATH_MARK + entry for entry in spec.submodule_search_locations]
         return spec
 
 
@@ -142,23 +153,79 @@ class _RenamingLoader(importlib.abc.Loader):
 # one of its connections at a time. A second waits here for the first to end.
 _slot = threading.Lock()
 _SLOT_WAIT_SECONDS = 20.0
-# (connect, read) for the endpoint request; together shorter than the wait for the slot.
+# The endpoint request: (connect, read) for the socket, and a deadline for the
+# whole of it, shorter than the wait for the slot.
 _ENDPOINT_TIMEOUT = (5.0, 10.0)
+_ENDPOINT_DEADLINE_SECONDS = 15.0
 _CLOSE_SECONDS = 3.0
+_STOP_TICK_SECONDS = 0.1
 
 
-class _BoundedRequests:
-    """``requests`` as the client module sees it, with a timeout on the endpoint request."""
+class _Stopped(Exception):
+    """Raised to an event the SDK's client hands over after its connection was asked to stop."""
 
-    def __init__(self, requests: Any) -> None:
+
+class _EndpointRequests:
+    """``requests`` as the client module sees it, for the one request it makes: for its endpoint.
+
+    Every connection the client opens starts with that request, so this is
+    where a stopped connection is kept from opening another. The SDK sends it
+    from the loop's thread with no timeout; here it runs beside that thread,
+    under a deadline, and gives way to a stop at once.
+    """
+
+    def __init__(self, requests: Any, owner: "SdkLongConnection") -> None:
         self._requests = requests
+        self._owner = owner
 
     def post(self, url: str, **kwargs: Any) -> Any:
+        stop = self._owner._stop_requested
+        if stop.is_set():
+            raise asyncio.CancelledError()
         kwargs.setdefault("timeout", _ENDPOINT_TIMEOUT)
-        return self._requests.post(url, **kwargs)
+        outcome: dict = {}
+
+        def send() -> None:
+            try:
+                outcome["reply"] = self._requests.post(url, **kwargs)
+            except BaseException as exc:
+                outcome["error"] = exc
+
+        sender = threading.Thread(target=send, daemon=True, name="feishu-ws-endpoint")
+        sender.start()
+        waited = 0.0
+        while sender.is_alive():
+            sender.join(0.05)
+            waited += 0.05
+            if stop.is_set():
+                raise asyncio.CancelledError()
+            if waited >= _ENDPOINT_DEADLINE_SECONDS and sender.is_alive():
+                raise TimeoutError(f"no endpoint within {_ENDPOINT_DEADLINE_SECONDS:g} s")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["reply"]
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._requests, name)
+
+
+class _UntilStopped:
+    """The event handler as the SDK's client sees it: events are handled until the connection is asked to stop.
+
+    One that arrives after that is refused, so that Feishu sends it again and
+    the connection that replaces this one gets it.
+    """
+
+    def __init__(self, handler: Any, owner: "SdkLongConnection") -> None:
+        self._handler = handler
+        self._owner = owner
+
+    def _do_without_validation(self, payload: bytes) -> Any:
+        if self._owner._stop_requested.is_set():
+            raise _Stopped("the connection is stopping")
+        return self._handler._do_without_validation(payload)
+
+    do_without_validation = _do_without_validation
 
 
 class SdkLongConnection:
@@ -168,8 +235,9 @@ class SdkLongConnection:
     (``_do_without_validation``).
 
     ``stop`` may be called at any time, from any thread, any number of times,
-    before ``start`` included. It only asks: the connection's own thread does
-    the ending, once.
+    before ``start`` included. It only asks. From that moment the client can
+    open no connection and no event is taken; the connection's own thread then
+    ends what is left, once.
     """
 
     def __init__(
@@ -205,13 +273,18 @@ class SdkLongConnection:
         return not self._thread.is_alive()
 
     async def _watch_for_stop(self) -> None:
-        """The one place a stop takes effect: cancel everything else on the loop, once."""
-        while not self._stop_requested.is_set():
-            await asyncio.sleep(0.2)
-        this = asyncio.current_task()
-        for task in asyncio.all_tasks():
-            if task is not this:
-                task.cancel()
+        """Once a stop is asked for, keep cancelling whatever the client runs, until its ``start`` has unwound.
+
+        The client's ``start`` runs one thing after another on the loop; a single
+        sweep would end the one that is running and miss the next.
+        """
+        while True:
+            if self._stop_requested.is_set():
+                this = asyncio.current_task()
+                for task in asyncio.all_tasks():
+                    if task is not this:
+                        task.cancel()
+            await asyncio.sleep(_STOP_TICK_SECONDS)
 
     def _serve(self) -> None:
         # One at a time; give up if stopped, or if the one before never ends.
@@ -225,6 +298,14 @@ class SdkLongConnection:
                     "Feishu WS thread not started: another lark-oapi connection is still running in this process"
                 )
                 return
+        try:
+            self._run_client()
+        except Exception as exc:
+            logger.error("Feishu WS thread could not run: %s", exc, exc_info=True)
+        finally:
+            _slot.release()
+
+    def _run_client(self) -> None:
         loop = asyncio.new_event_loop()
         try:
             # Before the SDK is imported and its client built: the module takes its
@@ -232,15 +313,14 @@ class SdkLongConnection:
             asyncio.set_event_loop(loop)
             sdk = sdk_ws_client_module()
             sdk.loop = loop
-            if sdk.__name__.startswith(_PRIVATE) and not isinstance(sdk.requests, _BoundedRequests):
-                sdk.requests = _BoundedRequests(sdk.requests)
+            sdk.requests = _EndpointRequests(getattr(sdk.requests, "_requests", sdk.requests), self)
             if self._stop_requested.is_set():
                 return
             self._loop = loop
             self._client = sdk.Client(
                 app_id=self._app_id,
                 app_secret=self._app_secret,
-                event_handler=self._event_handler,
+                event_handler=_UntilStopped(self._event_handler, self),
                 log_level=sdk.LogLevel.INFO,
                 domain=self._domain,
             )
@@ -253,14 +333,13 @@ class SdkLongConnection:
             if not self._stop_requested.is_set():
                 logger.error("Feishu WS thread crashed: %s", exc, exc_info=True)
         finally:
-            try:
-                self._close(loop)
-            finally:
-                _slot.release()
+            self._close(loop)
 
     def _close(self, loop: asyncio.AbstractEventLoop) -> None:
         """Close the socket, end whatever the client left on the loop, and close the loop."""
         client = self._client
+        # Whatever ended the client, nothing of it may go on: no connection, no event.
+        self._stop_requested.set()
         try:
             if self._watcher is not None:
                 # From here on nothing cancels but this method: a stop that arrives now only waits.

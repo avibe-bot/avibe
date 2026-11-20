@@ -93,9 +93,40 @@ def beside_an_ordinary_import() -> Dict[str, Any]:
     return report
 
 
+def without_source_files() -> Dict[str, Any]:
+    """An install the copy cannot be made from (here: a client module with no source file)."""
+    import importlib.machinery
+    import logging
+
+    from modules.im.feishu_sdk_ws import sdk_ws_client_module
+
+    warnings = []
+    logging.getLogger("modules.im.feishu_sdk_ws").addFilter(lambda record: warnings.append(record.getMessage()) or True)
+    find_spec = importlib.machinery.PathFinder.find_spec
+
+    def sourceless(fullname: str, path: Any = None, target: Any = None) -> Any:
+        spec = find_spec(fullname, path, target)
+        if spec is not None and fullname.endswith(".ws.client") and fullname.startswith("_avibe_"):
+            spec.loader = importlib.machinery.SourcelessFileLoader(fullname, spec.origin)
+        return spec
+
+    with patch.object(importlib.machinery.PathFinder, "find_spec", sourceless):
+        module = sdk_ws_client_module()
+    return {
+        "module": module.__name__,
+        "warned": any("importing the whole SDK instead" in message for message in warnings),
+        "has_client": hasattr(module, "Client"),
+        "names_the_real_dispatcher": module.EventDispatcherHandler.__module__,
+    }
+
+
 if __name__ == "__main__":
     from tests import network_guard
 
     sys.addaudithook(network_guard.audit)  # loopback only, as in the pytest process
-    scenario = {"adapter": adapter, "beside-an-ordinary-import": beside_an_ordinary_import}[sys.argv[1]]
+    scenario = {
+        "adapter": adapter,
+        "beside-an-ordinary-import": beside_an_ordinary_import,
+        "without-source-files": without_source_files,
+    }[sys.argv[1]]
     print(json.dumps(scenario()))

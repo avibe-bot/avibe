@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,7 +32,7 @@ SDK_MODULE_CEILING = 120
 WHOLE_SDK_FLOOR = 5000
 
 
-def _run(scenario: str) -> Dict[str, Any]:
+def _run(scenario: str) -> Tuple[Dict[str, Any], str]:
     environment = {**os.environ, "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
     done = subprocess.run(
         [sys.executable, "-m", "tests.feishu_footprint_driver", scenario],
@@ -43,12 +43,12 @@ def _run(scenario: str) -> Dict[str, Any]:
         timeout=180,
     )
     assert done.returncode == 0, done.stderr[-3000:]
-    assert "importing the whole SDK instead" not in done.stderr
-    return json.loads(done.stdout.strip().splitlines()[-1])
+    return json.loads(done.stdout.strip().splitlines()[-1]), done.stderr
 
 
 def test_the_adapter_runs_on_its_own_copy_of_the_sdk_client():
-    report = _run("adapter")
+    report, stderr = _run("adapter")
+    assert "importing the whole SDK instead" not in stderr
 
     # It worked: the event arrived, Feishu was answered, the adapter stopped.
     assert report["received_chat"] == "oc_chat"
@@ -61,7 +61,8 @@ def test_the_adapter_runs_on_its_own_copy_of_the_sdk_client():
 
 
 def test_an_ordinary_import_at_the_same_moment_gets_the_sdk_whole_and_its_own():
-    report = _run("beside-an-ordinary-import")
+    report, stderr = _run("beside-an-ordinary-import")
+    assert "importing the whole SDK instead" not in stderr
 
     assert report.pop("sdk_modules_under_its_own_name") > WHOLE_SDK_FLOOR
     assert 0 < report.pop("sdk_modules_in_our_copy") <= SDK_MODULE_CEILING
@@ -72,4 +73,16 @@ def test_an_ordinary_import_at_the_same_moment_gets_the_sdk_whole_and_its_own():
         "both_finished": True,
         "the_sdk_s_client_module_is_its_own": True,
         "the_sdk_s_client_names_the_real_dispatcher": True,
+    }
+
+
+def test_an_install_the_copy_cannot_be_made_from_gets_the_whole_sdk_and_says_so():
+    """A module without a source file cannot be renamed; loading it as it is would bring in the SDK unannounced."""
+    report, _stderr = _run("without-source-files")
+
+    assert report == {
+        "module": "lark_oapi.ws.client",
+        "warned": True,
+        "has_client": True,
+        "names_the_real_dispatcher": "lark_oapi.event.dispatcher_handler",
     }
