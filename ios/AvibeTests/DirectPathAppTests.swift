@@ -2115,6 +2115,27 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     func testSameOriginReturnDoesNotReviveARequestRevokedAtProvisionalStart() async throws {
+        // WebKit can end a page's WebContent process under a test (seen on
+        // CI at its network process's request, run 44658571690). The page's
+        // load or its bridge call in flight then fails, and the scenario
+        // cannot be finished without its page. So it is run once more, from
+        // the start, only when the fixture saw that page's process end; any
+        // other failure, and a second ended process, fails the test.
+        let first = RuntimePageRecord()
+        do {
+            try await sameOriginReturnScenario(recording: first)
+            return
+        } catch where first.page?.webContentProcessTerminated == true {
+            print("[iOS fixture] stage=scenario run again, its page's process ended: \(error)")
+        }
+        // A page whose first load failed was never handed to the scenario,
+        // which closes the ones it gets. Closing twice is harmless.
+        first.page?.close()
+        try await sameOriginReturnScenario(recording: RuntimePageRecord())
+    }
+
+    @MainActor
+    private func sameOriginReturnScenario(recording record: RuntimePageRecord) async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let platform = RuntimeSystemSchedulePlatform()
         let app = try await makeApp(
@@ -2123,7 +2144,7 @@ final class DirectPathAppTests: XCTestCase {
             systemScheduleNow: { now }
         )
         let runtime = try await select("instance-1", in: app)
-        let page = try await showRuntimePage(app, runtime)
+        let page = try await showRuntimePage(app, runtime, recording: record)
         defer { page.close() }
 
         let request = Task { @MainActor in
@@ -6884,11 +6905,14 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     private func showRuntimePage(
         _ app: AppModel,
-        _ runtime: MobileRuntimeContext
+        _ runtime: MobileRuntimeContext,
+        recording record: RuntimePageRecord? = nil
     ) async throws -> RuntimePage {
         let controller = try makeRuntimeController(app, runtime)
         app.registerRuntimeController(controller, for: runtime)
         let page = try RuntimePage(controller: controller)
+        // Recorded before its first load, which is also the page's.
+        record?.page = page
         try await page.load(
             RuntimePage.recordingDocument,
             baseURL: runtime.instance.url
@@ -7379,6 +7403,13 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
     }
 }
 
+/// The page a scenario showed, kept so its caller can ask afterwards
+/// whether WebKit ended that page's process.
+@MainActor
+private final class RuntimePageRecord {
+    var page: RuntimePage?
+}
+
 /// One runtime controller in a window, and its primary WebView.
 @MainActor
 private final class RuntimePage {
@@ -7431,6 +7462,12 @@ private final class RuntimePage {
         webView.navigationDelegate = loader
         self.window = window
         self.webView = webView
+    }
+
+    /// WebKit ended this page's WebContent process at some point: what the
+    /// page was doing then (a load, a bridge call in flight) is lost with it.
+    var webContentProcessTerminated: Bool {
+        loader.processTerminations > 0
     }
 
     func load(_ html: String, baseURL: URL, forwardingNativeNavigation: Bool = false) async throws {
@@ -7686,6 +7723,8 @@ final class PageLoaderTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? PageLoader.LoadError, .webContentProcessTerminated)
         }
+        // Each ended process is counted, whether or not a load was pending.
+        XCTAssertEqual(loader.processTerminations, 2)
 
         let nextNavigation = try view.makeNavigation()
         view.nextNavigation = nextNavigation
@@ -7780,6 +7819,9 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
     private var navigation: WKNavigation?
     private weak var loadingWebView: WKWebView?
     weak var forwardingDelegate: WKNavigationDelegate?
+    /// How many times WebKit ended a WebContent process of this loader's
+    /// WebViews, loading or not.
+    private(set) var processTerminations = 0
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
         forwardingDelegate?.webView?(webView, didStartProvisionalNavigation: navigation)
@@ -7829,6 +7871,7 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        processTerminations += 1
         // Evidence for a page WebKit ends under a test (for example at its
         // network process's request): which page, and whether it was loading.
         print(
