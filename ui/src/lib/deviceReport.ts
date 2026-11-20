@@ -40,13 +40,20 @@ export function parseNativeDeviceDescription(value: unknown): NativeDeviceDescri
 
 let description: Promise<NativeDeviceDescription | null> | null = null;
 let reported: Promise<void> | null = null;
+let reportAttempt = 0;
 
 /** This page's one `device.describe`; null outside the iOS shell or on any failure. */
 export function nativeDeviceDescription(): Promise<NativeDeviceDescription | null> {
-  description ??= nativeDeviceDescribe()
+  const pending = description ?? nativeDeviceDescribe()
     .then(parseNativeDeviceDescription)
     .catch(() => null);
-  return description;
+  description = pending;
+  // Only an answer is kept: a refusal (the App still confirming the account)
+  // is asked again next time.
+  void pending.then((answer) => {
+    if (!answer && description === pending) description = null;
+  });
+  return pending;
 }
 
 /** The name push settings show for this device: the iPhone's model when the shell says. */
@@ -63,9 +70,15 @@ export async function nativeDeviceLabel(): Promise<string> {
 export function reportNativeDevice(
   post: (input: string, init: RequestInit) => Promise<Response>,
 ): Promise<void> {
-  reported ??= (async () => {
+  if (reported) return reported;
+  const attempt = ++reportAttempt;
+  const pending: Promise<void> = (async () => {
     const body = await nativeDeviceDescription();
-    if (!body) return;
+    if (!body) {
+      // Nothing was sent: the next page activation tries again.
+      if (reportAttempt === attempt) reported = null;
+      return;
+    }
     try {
       await post('/api/devices/self', {
         method: 'POST',
@@ -76,7 +89,8 @@ export function reportNativeDevice(
       // Display only: a failed report changes nothing on this page.
     }
   })();
-  return reported;
+  reported = pending;
+  return pending;
 }
 
 export function resetNativeDeviceReportForTests(): void {

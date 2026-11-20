@@ -2441,13 +2441,15 @@ final class AppModel: ObservableObject {
         )
     }
 
-    @discardableResult
     /// `device.describe` for the selected instance's page: nil for any
     /// other instance, or when no account is signed in. Health's id is an
     /// alias only for the instance Health is paired with, on this account.
+    /// A restored account counts before its check confirms it, as for push:
+    /// a cold start opens the instance first, and a different account
+    /// replaces the page.
     func describeDevice(instanceID: String) -> [String: Any]? {
         guard
-            let accountID = sessionCoordinator.healthAccountID,
+            let accountID = sessionCoordinator.currentAccount?.id,
             sessionCoordinator.selectedInstance?.id == instanceID
         else {
             return nil
@@ -2467,6 +2469,7 @@ final class AppModel: ObservableObject {
         )
     }
 
+    @discardableResult
     func acknowledgePushOpened(id: String, origin: WebOrigin) -> Bool {
         guard
             let pendingPushOpened,

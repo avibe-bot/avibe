@@ -132,6 +132,31 @@ final class DeviceDescriptionTests: XCTestCase {
         }
     }
 
+    /// A cold start opens the last instance before the account check
+    /// answers, and keeps it when the check fails: the page there is still
+    /// described (only the instance must be the selected one).
+    @MainActor
+    func testARestoredInstanceIsDescribedBeforeTheAccountCheckConfirms() async throws {
+        let keychain = InMemoryPushKeychainStore()
+        let marker = InMemoryPushInstallationMarkerStore()
+        let suiteName = "DeviceDescriptionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        let first = try await makeAppModel(keychain: keychain, marker: marker, defaults: defaults)
+        _ = try first.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await waitUntil { first.route.runtime?.instance.id == "instance-1" }
+
+        let relaunched = try await makeAppModel(
+            keychain: keychain, marker: marker, defaults: defaults,
+            sessionCheckFails: true, waitForInstances: false
+        )
+        try await waitUntil { relaunched.route.runtime?.instance.id == "instance-1" }
+        XCTAssertNil(relaunched.mobileSessionCoordinator.healthAccountID)
+        let body = try XCTUnwrap(relaunched.describeDevice(instanceID: "instance-1"))
+        XCTAssertEqual(body["kind"] as? String, "iphone_app")
+        XCTAssertNil(relaunched.describeDevice(instanceID: "instance-2"))
+    }
+
     @MainActor
     func testDescribeAnswersOnlyTheInstanceMainFrame() async throws {
         let instance = try XCTUnwrap(WebOrigin.parseConfigured(one))
@@ -206,12 +231,17 @@ final class DeviceDescriptionTests: XCTestCase {
     @MainActor
     private func makeAppModel(
         keychain: InMemoryPushKeychainStore,
-        marker: InMemoryPushInstallationMarkerStore
+        marker: InMemoryPushInstallationMarkerStore,
+        defaults existing: UserDefaults? = nil,
+        sessionCheckFails: Bool = false,
+        waitForInstances: Bool = true
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
+            case ("GET", "/api/mobile/session") where sessionCheckFails:
+                return .status(503)
             case ("GET", "/api/mobile/session"):
                 return .json(
                     """
@@ -234,9 +264,14 @@ final class DeviceDescriptionTests: XCTestCase {
         }
         let baseURL = try await server.start()
         addTeardownBlock { server.stop() }
-        let suiteName = "DeviceDescriptionTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        let defaults: UserDefaults
+        if let existing {
+            defaults = existing
+        } else {
+            let suiteName = "DeviceDescriptionTests.\(UUID().uuidString)"
+            defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        }
         let scheduleDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("DeviceDescription.\(UUID().uuidString)", isDirectory: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: scheduleDirectory) }
@@ -250,9 +285,11 @@ final class DeviceDescriptionTests: XCTestCase {
                 fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
             )
         )
-        try await waitUntil {
-            if case .onboarding(.instances) = appModel.route { return true }
-            return false
+        if waitForInstances {
+            try await waitUntil {
+                if case .onboarding(.instances) = appModel.route { return true }
+                return false
+            }
         }
         return appModel
     }

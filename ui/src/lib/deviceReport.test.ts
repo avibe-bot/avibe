@@ -74,6 +74,25 @@ describe('the device report', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
+  it('asks again after the App refused, and reports once it answers', async () => {
+    let answer: unknown = new Error('forbidden');
+    const call = installShell(undefined);
+    call.mockImplementation(async () => {
+      if (answer instanceof Error) throw answer;
+      return answer;
+    });
+
+    await reportNativeDevice(apiFetch);
+    await expect(nativeDeviceLabel()).resolves.toBe('iPhone App');
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    answer = described;
+    await reportNativeDevice(apiFetch);
+    await reportNativeDevice(apiFetch);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    await expect(nativeDeviceLabel()).resolves.toBe('iPhone 16 Pro');
+  });
+
   it('never lets a failed report surface', async () => {
     installShell(described);
     apiFetch.mockRejectedValueOnce(new Error('offline'));
