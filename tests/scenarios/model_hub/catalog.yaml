@@ -1928,6 +1928,41 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_account_refresh.py::test_a_refusal_from_before_the_refresh_cannot_pause_the_account_again
+  - id: MH-QUOTA-037
+    name: A Gemini account's quota reads as each model group's own 5-hour and weekly limits; a spent bucket reads used up, an untouched one names no reset, and an empty report shows no quota
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_gemini_quota_parser_reads_model_group_windows
+    related_tests:
+      - tests/test_model_hub_quota.py::test_quota_parsers_reject_a_malformed_body_as_one_source_failure
+      - tests/test_model_hub_quota.py::test_quota_parsers_bound_values_from_a_hostile_body
+  - id: MH-QUOTA-038
+    name: A Grok account's quota reads as one weekly or monthly credit limit that resets at its period's end, and is absent rather than invented when the period is unreadable
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_grok_quota_parser_reads_the_one_credit_window
+    related_tests:
+      - tests/test_model_hub_account_refresh.py::test_refresh_keeps_the_pause_only_while_the_vendor_reports_it
+  - id: MH-QUOTA-039
+    name: The engine reads Gemini and Grok quota with the bound grant and its own client identity, Gemini per project with a fallback host, and no grant or project leaves it
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_adapter_reads_gemini_and_grok_quota_as_the_engine_itself_would
+  - id: MH-QUOTA-040
+    name: The quota card names model-group 5-hour and weekly limits and a monthly limit in the same words as every provider
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-040
+  - id: MH-QUOTA-041
+    name: An account whose provider reports no quota says so on its card instead of promising a retry
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-041
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

@@ -1734,12 +1734,14 @@
         "refresh": "Refresh now",
         "refreshing": "Refreshing…",
         "refreshAccount": "Refresh quota",
-        "empty": "No signed-in subscription accounts yet. Add a Claude or ChatGPT subscription under Providers & routing to see its quota here.",
+        "empty": "No signed-in subscription accounts yet. Sign in to a subscription under Providers & routing to see its quota here.",
         "left": "left",
         "window": {
           "session": "5-hour limit",
           "weekly": "Weekly limit",
           "model": "{{model}} weekly limit",
+          "modelSession": "{{model}} 5-hour limit",
+          "monthly": "Monthly limit",
           "span": {
             "hours": "{{hours}}-hour",
             "days": "{{days}}-day"
@@ -1780,7 +1782,7 @@
         },
         "unread": {
           "auth_expired": "Sign-in expired; quota unavailable",
-          "unsupported": "This subscription doesn't report quota",
+          "unsupported": "The provider doesn't report quota for this account",
           "error": "Quota unavailable right now; retrying automatically"
         },
         "ago": {
@@ -1806,7 +1808,7 @@
           "exhaustedNote": "{{name}} · back in {{duration}}",
           "resetsIn": "resets in {{duration}}",
           "weekValue": "Last 7 days at API price",
-          "weekValueNote": "All subscription use, at the vendors’ published API prices",
+          "weekValueNote": "All subscription use, at the providers’ published API prices",
           "payback": "Paid back this period",
           "paybackMultiple": "{{multiple}}×",
           "paybackUnit": "the monthly fee",
@@ -1821,7 +1823,7 @@
         "upcoming": "Resetting soon",
         "footnote": "The bar is the part used; the thin mark is how much of this period has passed. A bar past the mark is spending faster than time.",
         "pending": "Reading quota…",
-        "footnoteValue": "“At API price” is what the same use would cost at the vendor’s published API price — a way to judge the plan, not a charge.",
+        "footnoteValue": "“At API price” is what the same use would cost at the provider’s published API price — a way to judge the plan, not a charge.",
         "priceTableDate": "Price table from {{date}}.",
         "priceTableUnknown": "Price table date unknown.",
         "priceTableFetching": "Fetching the price table…",
@@ -3217,7 +3219,7 @@
       "error": {
         "auth_expired": "Sign-in expired",
         "rate_limited": "The provider is limiting quota reads",
-        "unsupported": "This subscription doesn't report quota",
+        "unsupported": "The provider doesn't report quota for this account",
         "unavailable": "Quota unavailable right now",
         "malformed": "The provider returned an unreadable quota report"
       }

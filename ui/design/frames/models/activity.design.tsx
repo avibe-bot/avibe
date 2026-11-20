@@ -9,7 +9,7 @@ import { UsageTab } from '@/components/settings/models/UsageTab';
 
 import { frames } from '../../frame';
 import { DESIGN_NOW } from '../../shell/clock';
-import { baseApi, demoSources, quotaSummary, settingsPaneClass, switchEvents, usageReport } from './fixtures';
+import { baseApi, demoSources, quotaProviders, quotaSummary, settingsPaneClass, switchEvents, usageReport } from './fixtures';
 
 const quota = (summary: QuotaSummary) => {
   const read = readyRegion(summary);
@@ -59,6 +59,15 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: { api: baseApi },
     render: quota(quotaSummary({ claudeExpired: true })),
+  },
+  {
+    name: 'quota-providers',
+    title: '订阅额度 · Gemini、Grok 与 Kimi',
+    width: 1280,
+    height: 1000,
+    status: 'shipped',
+    fixtures: { api: baseApi },
+    render: quota(quotaProviders()),
   },
   {
     name: 'quota-empty',

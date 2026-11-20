@@ -1734,12 +1734,14 @@
         "refresh": "立即刷新",
         "refreshing": "刷新中…",
         "refreshAccount": "刷新额度",
-        "empty": "还没有已登录的订阅账号。在「供应商与路由」里添加 Claude 或 ChatGPT 订阅后，这里会显示它们的额度。",
+        "empty": "还没有已登录的订阅账号。在「供应商与路由」里登录订阅账号后，这里会显示它们的额度。",
         "left": "剩余",
         "window": {
           "session": "5 小时额度",
           "weekly": "每周额度",
           "model": "{{model}} 每周额度",
+          "modelSession": "{{model}} 5 小时额度",
+          "monthly": "每月额度",
           "span": {
             "hours": "{{hours}} 小时",
             "days": "{{days}} 天"
@@ -1780,7 +1782,7 @@
         },
         "unread": {
           "auth_expired": "登录已过期，读不到额度",
-          "unsupported": "这个订阅不提供额度数据",
+          "unsupported": "供应商没有提供这个账号的额度数据",
           "error": "暂时读不到额度，稍后会自动重试"
         },
         "ago": {
@@ -3216,10 +3218,10 @@
     "quota": {
       "error": {
         "auth_expired": "登录已过期",
-        "rate_limited": "服务商暂时限制了额度查询",
-        "unsupported": "这个订阅不提供额度数据",
+        "rate_limited": "供应商暂时限制了额度查询",
+        "unsupported": "供应商没有提供这个账号的额度数据",
         "unavailable": "暂时读不到额度",
-        "malformed": "服务商返回的额度数据读不懂"
+        "malformed": "供应商返回的额度数据读不懂"
       }
     }
   },

@@ -954,6 +954,9 @@ class _AuthRecord:
     status: str = ""
     status_message: str = ""
     unavailable: bool = False
+    # The Google Cloud project an Antigravity grant is bound to; its quota report
+    # is read per project. Account data: kept out of every repr and log line.
+    project_id: str | None = field(default=None, repr=False)
 
 
 def _response_shape_proves_protocol(
@@ -1415,11 +1418,36 @@ def _oauth_account_call_headers(auth: _AuthRecord, normalized_vendor: str) -> di
 
 # The vendors' own quota reports: the same endpoints their CLIs read for
 # `/usage` and `/status`. Anthropic gates its report behind the OAuth beta.
-_SUBSCRIPTION_QUOTA_URLS = {
-    "anthropic": "https://api.anthropic.com/api/oauth/usage",
-    "openai": "https://chatgpt.com/backend-api/wham/usage",
-    "codex": "https://chatgpt.com/backend-api/wham/usage",
+# Antigravity meters consumer accounts on the daily host and is asked on prod
+# only when daily does not answer (404, 408, 5xx); the two can disagree, and
+# daily's reading is the one its own client shows.
+_SUBSCRIPTION_QUOTA_URLS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("https://api.anthropic.com/api/oauth/usage",),
+    "openai": ("https://chatgpt.com/backend-api/wham/usage",),
+    "codex": ("https://chatgpt.com/backend-api/wham/usage",),
+    "gemini": (
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    ),
+    "xai": ("https://cli-chat-proxy.grok.com/v1/billing?format=credits",),
 }
+
+# The client identity the pinned engine itself sends to each upstream (CLIProxyAPI
+# v8.0.63). Antigravity: `misc.AntigravityUserAgent()` at its fallback release
+# (`internal/misc/antigravity_version.go`). Grok: `applyXAIChatHeaders` for the
+# CLI chat proxy, at `helps.DefaultXAIFallbackClientVersion`
+# (`internal/runtime/executor/xai_executor_request.go`). `/api-call` sends the
+# headers it is given, so the read must name that identity itself.
+_ANTIGRAVITY_USER_AGENT = "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)"
+_GROK_CLI_VERSION = "1.0.46"
+_GROK_CLIENT_HEADERS = {
+    "X-XAI-Token-Auth": "xai-grok-cli",
+    "x-grok-client-version": _GROK_CLI_VERSION,
+    "User-Agent": f"xai-grok-workspace/{_GROK_CLI_VERSION}",
+    "x-grok-client-identifier": "grok-shell",
+}
+# Answers on Antigravity's daily host that send the read on to prod.
+_QUOTA_FALLBACK_STATUSES = frozenset({404, 408})
 
 
 def _retry_after_seconds(headers: object) -> float | None:
@@ -1452,22 +1480,38 @@ def _fetch_subscription_quota(
 ) -> dict[str, Any]:
     """Read one grant's quota report and keep only the parsed windows."""
 
-    url = _SUBSCRIPTION_QUOTA_URLS[vendor]
-    headers = _oauth_account_call_headers(auth, vendor)
-    if vendor == "anthropic":
-        headers["anthropic-beta"] = "oauth-2025-04-20"
-    payload = client.management_request(
-        "POST",
-        "/api-call",
-        payload={
-            "auth_index": auth.auth_index,
-            "method": "GET",
-            "url": url,
-            "header": headers,
-        },
-        timeout=QUOTA_FETCH_TIMEOUT_SECONDS,
-    )
-    status = payload.get("status_code")
+    request: dict[str, Any] = {"auth_index": auth.auth_index, "method": "GET"}
+    if vendor == "gemini":
+        if not auth.project_id:
+            # The report is read per project; without one there is nothing to ask.
+            return {"plan": None, "windows": []}
+        request.update(
+            method="POST",
+            header={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer $TOKEN$",
+                "User-Agent": _ANTIGRAVITY_USER_AGENT,
+            },
+            data=json.dumps({"project": auth.project_id}, separators=(",", ":")),
+        )
+    elif vendor == "xai":
+        request["header"] = {"Accept": "application/json", "Authorization": "Bearer $TOKEN$", **_GROK_CLIENT_HEADERS}
+    else:
+        request["header"] = _oauth_account_call_headers(auth, vendor)
+        if vendor == "anthropic":
+            request["header"]["anthropic-beta"] = "oauth-2025-04-20"
+    urls = _SUBSCRIPTION_QUOTA_URLS[vendor]
+    for index, url in enumerate(urls):
+        payload = client.management_request(
+            "POST",
+            "/api-call",
+            payload={**request, "url": url},
+            timeout=QUOTA_FETCH_TIMEOUT_SECONDS,
+        )
+        status = payload.get("status_code")
+        last = index == len(urls) - 1
+        if last or not isinstance(status, int) or not (status in _QUOTA_FALLBACK_STATUSES or status >= 500):
+            break
     if status in {401, 403}:
         raise SubscriptionQuotaError("auth_expired")
     if status == 429:
@@ -4350,6 +4394,7 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
                 provider=provider,
                 fingerprint=fingerprint,
                 account_id=account_id,
+                project_id=str(item.get("project_id") or "").strip() or None,
                 status=str(item.get("status") or "").strip().lower(),
                 status_message=str(item.get("status_message") or "").strip(),
                 unavailable=bool(item.get("unavailable")),
