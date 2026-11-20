@@ -263,8 +263,11 @@ pub enum ClientAction {
     },
     VerifyPasskey,
     /// Google, GitHub or Apple in the system browser, back through loopback PKCE.
+    /// `locale` is the page's language: the browser's last page speaks it.
     SignInWithProvider {
         provider: SignInProvider,
+        #[serde(default)]
+        locale: UiLocale,
     },
     /// Passkey sign-in with no email first (not the second-factor passkey).
     SignInWithPasskey,
@@ -351,6 +354,15 @@ pub enum CodeMethod {
     Totp,
     Recovery,
 }
+/// The language of the page that asked; the product's two catalogs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLocale {
+    #[default]
+    En,
+    Zh,
+}
+
 /// The other accounts Desktop signs in with, as avibe.bot's login card lists them.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

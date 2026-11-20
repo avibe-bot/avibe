@@ -205,7 +205,8 @@
     "expected_generation": 1,
     "action": {
       "type": "sign_in_with_provider",
-      "provider": "github"
+      "provider": "github",
+      "locale": "en"
     }
   },
   {

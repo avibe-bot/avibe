@@ -46,7 +46,7 @@ export type DesktopClientAction =
   | { type: 'verify_second_factor'; method: 'totp' | 'recovery'; code: string }
   | { type: 'verify_passkey' }
   // Google, GitHub or Apple in the default browser, back through loopback PKCE.
-  | { type: 'sign_in_with_provider'; provider: 'google' | 'github' | 'apple' }
+  | { type: 'sign_in_with_provider'; provider: 'google' | 'github' | 'apple'; locale?: 'en' | 'zh' }
   // Passkey sign-in with no email first (not the second-factor passkey).
   | { type: 'sign_in_with_passkey' }
   // Ends an unfinished sign-in attempt without leaving the account window.

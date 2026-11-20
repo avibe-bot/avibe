@@ -13,6 +13,7 @@ use reqwest::Method;
 use super::{
     account::{AccountFlow, Passkeys, ProviderAttempt, SystemBrowser, CONTROL_PLANE},
     enrollment::EnrollmentFlow,
+    loopback::CallbackCopy,
     protocol::*,
     selection::Selection,
     storage::{ConnectionRecord, ConnectionStore, Credentials, InstanceRecency},
@@ -101,6 +102,10 @@ struct NoBrowser;
 impl SystemBrowser for NoBrowser {
     fn open(&self, _url: &url::Url) -> Result<(), ClientError> {
         Err(ClientError::new("provider_unavailable"))
+    }
+    /// Never shown: with no browser the attempt ends before any redirect.
+    fn callback_copy(&self, _locale: UiLocale) -> CallbackCopy {
+        CallbackCopy::default()
     }
 }
 
@@ -249,6 +254,7 @@ impl Coordinator {
     async fn browse_provider(
         &self,
         provider: SignInProvider,
+        locale: UiLocale,
         expected: u64,
         restoring: bool,
     ) -> Result<(Epoch, ProviderAttempt, String), ClientError> {
@@ -266,7 +272,8 @@ impl Coordinator {
                 return Err(ClientError::new("invalid_action"));
             }
             let epoch = self.advance(Some(expected), restoring)?;
-            match AccountFlow::start_provider_sign_in(provider, self.transport.clone(), epoch.clone()).await {
+            let copy = self.browser.callback_copy(locale);
+            match AccountFlow::start_provider_sign_in(provider, self.transport.clone(), epoch.clone(), &copy).await {
                 Ok(attempt) => (epoch, attempt),
                 Err(error) => {
                     self.end_provider_attempt(&epoch);
@@ -490,9 +497,13 @@ impl Coordinator {
             return self.reply(request.request_id, Err(ClientError::new("passkey_unavailable")));
         }
         let mut provider = None;
-        if let ClientAction::SignInWithProvider { provider: which } = &request.action {
+        if let ClientAction::SignInWithProvider {
+            provider: which,
+            locale,
+        } = &request.action
+        {
             match self
-                .browse_provider(*which, request.expected_generation, restoring)
+                .browse_provider(*which, *locale, request.expected_generation, restoring)
                 .await
             {
                 Ok(found) => provider = Some(found),

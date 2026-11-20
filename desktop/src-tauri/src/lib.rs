@@ -179,8 +179,17 @@ struct DesktopBootstrapCatalog {
     updater: updater::Catalog,
     notifications: notifications::NativeNotificationCatalog,
     pet: pet::NativePetCatalog,
+    #[serde(rename = "providerCallback")]
+    provider_callback: NativeProviderCallbackCatalog,
     #[cfg(feature = "bundled-runtime")]
     uninstall: NativeUninstallCatalog,
+}
+
+/// The browser's last page after a Google, GitHub or Apple sign-in.
+#[derive(Clone, Deserialize)]
+struct NativeProviderCallbackCatalog {
+    done: String,
+    failed: String,
 }
 
 #[derive(Clone, Deserialize)]

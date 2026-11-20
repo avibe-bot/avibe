@@ -145,6 +145,10 @@
       "confirm": "An update is available. Download and install it now? Avibe will restart. Your sessions and settings will be kept.",
       "disabledDetail": "Automatic desktop updates are not configured for this build. Install a newer signed release manually.",
       "error": "Update failed — retry"
+    },
+    "providerCallback": {
+      "done": "You can close this tab and return to Avibe.",
+      "failed": "Sign-in didn’t finish. Return to Avibe to try again."
     }
   },
   "installHint": {

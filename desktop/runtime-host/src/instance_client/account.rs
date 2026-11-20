@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 use super::{
-    loopback::{Callback, Loopback, Secrets, WAIT},
+    loopback::{Callback, CallbackCopy, Loopback, Secrets, WAIT},
     protocol::*,
     transport::{Epoch, NativeSession, Response, Transport},
 };
@@ -34,6 +34,8 @@ pub trait Passkeys: Send + Sync {
 pub trait SystemBrowser: Send + Sync {
     /// `url` is always Supabase's `/auth/v1/authorize` on the configured auth origin.
     fn open(&self, url: &Url) -> Result<(), ClientError>;
+    /// What the browser's last page says, in `locale`, from the product catalogs.
+    fn callback_copy(&self, locale: UiLocale) -> CallbackCopy;
 }
 
 /// A provider sign-in between its start and its code. Its secrets stay here;
@@ -236,6 +238,7 @@ impl AccountFlow {
         provider: SignInProvider,
         transport: Arc<dyn Transport>,
         epoch: Epoch,
+        copy: &CallbackCopy,
     ) -> Result<ProviderAttempt, ClientError> {
         let config = auth_config(transport.clone(), Some(epoch.clone())).await?;
         if config.get(provider.enabled_flag()).and_then(Value::as_bool) != Some(true) {
@@ -244,7 +247,7 @@ impl AccountFlow {
         let (supabase, key) = supabase_session(&config, transport, epoch)?;
         let secrets = Secrets::new()?;
         // Bound before the browser opens, so the redirect always has a listener.
-        let loopback = Loopback::bind().await?;
+        let loopback = Loopback::bind(copy).await?;
         let mut authorize = Url::parse(string(&config, "supabase_url")?)
             .and_then(|origin| origin.join("/auth/v1/authorize"))
             .map_err(|_| ClientError::new("invalid_auth_provider"))?;

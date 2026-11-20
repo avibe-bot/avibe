@@ -145,6 +145,10 @@
       "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
       "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
+    },
+    "providerCallback": {
+      "done": "可以关闭此页，回到 Avibe。",
+      "failed": "登录没有完成，请回到 Avibe 重试。"
     }
   },
   "installHint": {

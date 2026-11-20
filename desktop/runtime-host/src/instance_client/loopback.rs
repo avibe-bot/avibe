@@ -74,14 +74,26 @@ enum Verdict {
     Rejected,
 }
 
+/// What the browser shows once the redirect arrives, in the page's language:
+/// the native catalog's `desktopBootstrap.providerCallback`, as plain text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallbackCopy {
+    /// The sign-in reached Avibe.
+    pub done: String,
+    /// The provider or the person ended it without a code.
+    pub failed: String,
+}
+
 pub struct Loopback {
     listener: TcpListener,
     port: u16,
+    done: String,
+    failed: String,
 }
 
 impl Loopback {
     /// Binds the IPv4 loopback address only, on a port the OS picks.
-    pub async fn bind() -> Result<Self, ClientError> {
+    pub async fn bind(copy: &CallbackCopy) -> Result<Self, ClientError> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .map_err(|_| ClientError::new("provider_unavailable"))?;
@@ -89,7 +101,12 @@ impl Loopback {
             .local_addr()
             .map_err(|_| ClientError::new("provider_unavailable"))?
             .port();
-        Ok(Self { listener, port })
+        Ok(Self {
+            listener,
+            port,
+            done: page(&copy.done),
+            failed: page(&copy.failed),
+        })
     }
 
     /// `http://127.0.0.1:<port>/callback?state=<state>`; Supabase keeps this
@@ -124,7 +141,7 @@ impl Loopback {
             if !peer.ip().is_loopback() {
                 continue;
             }
-            let verdict = respond(stream, &host, state).await;
+            let verdict = respond(stream, &host, state, (&self.done, &self.failed)).await;
             if let Some(Verdict::Done(callback)) = verdict {
                 // A late generation change still wins over a delivered answer.
                 epoch.check()?;
@@ -134,14 +151,14 @@ impl Loopback {
     }
 }
 
-async fn respond(mut stream: TcpStream, host: &str, state: &str) -> Option<Verdict> {
+async fn respond(mut stream: TcpStream, host: &str, state: &str, (done, failed): (&str, &str)) -> Option<Verdict> {
     let head = tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream))
         .await
         .ok()??;
     let verdict = judge(&head, host, state);
     let (status, body) = match &verdict {
-        Verdict::Done(Callback::Code(_)) => ("200 OK", DONE_PAGE),
-        Verdict::Done(_) => ("200 OK", FAILED_PAGE),
+        Verdict::Done(Callback::Code(_)) => ("200 OK", done),
+        Verdict::Done(_) => ("200 OK", failed),
         Verdict::NotFound => ("404 Not Found", ""),
         Verdict::Rejected => ("400 Bad Request", ""),
     };
@@ -242,8 +259,11 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && left.iter().zip(right).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
 }
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Avibe</title><p>You can close this tab and return to Avibe.</p><p>可以关闭此页，回到 Avibe。</p>";
-const FAILED_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Avibe</title><p>Sign-in didn’t finish. Return to Avibe to try again.</p><p>登录没有完成，请回到 Avibe 重试。</p>";
+/// One line of catalog copy as the whole page, escaped.
+fn page(text: &str) -> String {
+    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    format!("<!doctype html><meta charset=\"utf-8\"><title>Avibe</title><p>{escaped}</p>")
+}
 
 #[cfg(test)]
 mod tests {
@@ -251,6 +271,13 @@ mod tests {
     use std::sync::{atomic::AtomicU64, Arc};
 
     const STATE: &str = "s1-state";
+
+    fn copy() -> CallbackCopy {
+        CallbackCopy {
+            done: "Done <here> & now".into(),
+            failed: "没有完成".into(),
+        }
+    }
     /// Tests that check that a port was released run one at a time, so no
     /// other test's listener is on the port they check. Why one such check
     /// once failed in a parallel run is not known; that run's log was not
@@ -379,7 +406,7 @@ mod tests {
         let _ports = PORTS.lock().await;
         let generation = Arc::new(AtomicU64::new(7));
         let epoch = Epoch::new(generation.clone(), 7);
-        let loopback = Loopback::bind().await.unwrap();
+        let loopback = Loopback::bind(&copy()).await.unwrap();
         let port = loopback.port;
         assert_eq!(loopback.redirect_uri(STATE).host_str(), Some("127.0.0.1"));
         let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(5)).await });
@@ -389,24 +416,27 @@ mod tests {
         assert!(wrong.starts_with("HTTP/1.1 400") && !wrong.contains("leaked"));
         let done = get(port, "/callback?state=s1-state&code=secret-code").await;
         assert!(done.starts_with("HTTP/1.1 200") && !done.contains("secret-code"));
+        // The catalog's line, escaped: the copy is text, never markup.
+        assert!(done.ends_with("<p>Done &lt;here&gt; &amp; now</p>"), "{done}");
         assert!(matches!(waiting.await.unwrap(), Ok(Callback::Code(code)) if code == "secret-code"));
         // The listener is gone with the transaction: a late callback cannot land.
         assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
     }
 
-    /// A provider's bare refusal ends the wait at once with the fixed failure page.
+    /// A provider's bare refusal ends the wait at once with the failure page.
     #[tokio::test]
     async fn a_bare_provider_refusal_ends_the_wait_at_once() {
         let _ports = PORTS.lock().await;
         let generation = Arc::new(AtomicU64::new(5));
         let epoch = Epoch::new(generation, 5);
-        let loopback = Loopback::bind().await.unwrap();
+        let loopback = Loopback::bind(&copy()).await.unwrap();
         let port = loopback.port;
         let started = Instant::now();
         let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(3)).await });
         let reply = get(port, "/callback?error=access_denied&error_description=&state=s1-state").await;
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
-        assert!(reply.contains("Sign-in didn’t finish"));
+        // The catalog's failure line, alone: one language, no other text.
+        assert!(reply.ends_with("<title>Avibe</title><p>没有完成</p>"), "{reply}");
         assert!(matches!(waiting.await.unwrap(), Ok(Callback::Failed)));
         assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
         assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
@@ -417,7 +447,7 @@ mod tests {
         let _ports = PORTS.lock().await;
         let generation = Arc::new(AtomicU64::new(3));
         let epoch = Epoch::new(generation.clone(), 3);
-        let loopback = Loopback::bind().await.unwrap();
+        let loopback = Loopback::bind(&copy()).await.unwrap();
         let port = loopback.port;
         let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(5)).await });
         generation.store(4, std::sync::atomic::Ordering::SeqCst);
@@ -429,7 +459,7 @@ mod tests {
     async fn a_deadline_and_a_connection_cap_end_the_wait() {
         let _ports = PORTS.lock().await;
         let generation = Arc::new(AtomicU64::new(1));
-        let loopback = Loopback::bind().await.unwrap();
+        let loopback = Loopback::bind(&copy()).await.unwrap();
         let epoch = Epoch::new(generation.clone(), 1);
         assert_eq!(
             loopback
@@ -439,7 +469,7 @@ mod tests {
                 .code,
             "provider_timeout"
         );
-        let loopback = Loopback::bind().await.unwrap();
+        let loopback = Loopback::bind(&copy()).await.unwrap();
         let port = loopback.port;
         let epoch = Epoch::new(generation, 1);
         let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(10)).await });

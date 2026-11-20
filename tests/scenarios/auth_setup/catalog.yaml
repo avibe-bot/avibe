@@ -1404,7 +1404,9 @@ scenarios:
       success, generation change and timeout) and tests/instance_sign_in.rs
       (the forged callback is never redeemed, the verifier matches the
       challenge, tokens never reach published state, each ending's code, abort
-      frees the port and cannot sign a signed-in account out). The public
+      frees the port and cannot sign a signed-in account out). The browser's
+      last page speaks the asking page's language, from the product catalogs
+      (desktopBootstrap.providerCallback), one language at a time. The public
       switches are avibe.bot's, not the account's: an account change during
       the read does not drop them, a commit or rollback that began earlier
       keeps them, and reads show in the order they started. "Use a different

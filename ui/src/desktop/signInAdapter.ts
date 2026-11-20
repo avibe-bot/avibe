@@ -102,6 +102,8 @@ export const desktopSignInMethods = (state: DesktopClientState): SignInMethods =
 export function createDesktopSignInAdapter(
   send: DesktopSend,
   methods: SignInMethods,
+  /** This page's language: the browser's last page after a provider sign-in speaks it. */
+  locale: 'en' | 'zh' = 'en',
 ): SignInAdapter<DesktopClientState> {
   const run = async (
     action: DesktopClientAction,
@@ -123,7 +125,7 @@ export function createDesktopSignInAdapter(
     verifyCode: (_email, code) => run({ type: 'verify_otp', code }, 'verify'),
     signInWithPassword: (email, password) => run({ type: 'sign_in_password', email, password }, 'password'),
     signInWithProvider: (provider) => methods.providers.includes(provider)
-      ? run({ type: 'sign_in_with_provider', provider }, 'provider')
+      ? run({ type: 'sign_in_with_provider', provider, locale }, 'provider')
       : Promise.reject(failure('provider_unavailable')),
     signInWithPasskey: () => methods.passkey
       ? run({ type: 'sign_in_with_passkey' }, 'primaryPasskey')

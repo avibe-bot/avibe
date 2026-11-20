@@ -84,3 +84,25 @@ it.each([['en', en], ['zh', zh]] as const)('AUTH-SETUP-182 a later step goes bac
   expect(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail })).toBeTruthy();
   expect(screen.queryByRole('button', { name: copy.common.back })).toBeNull();
 });
+
+// The browser's last page after a provider sign-in speaks this page's language (Codex, #4034).
+it.each([['en', en], ['zh', zh]] as const)('AUTH-SETUP-183 a provider sign-in names this page\'s language (%s)', async (lng, copy) => {
+  const i18n = createInstance();
+  await i18n.init({ lng, resources: { [lng]: { translation: copy } } });
+  const send = vi.fn(async () => null);
+  render(
+    <I18nextProvider i18n={i18n}>
+      <DesktopSignIn
+        state={signedOut}
+        send={send}
+        methods={{ providers: ['google', 'github', 'apple'], passkey: false }}
+        onLocal={() => undefined}
+        onDifferentAccount={() => undefined}
+        onOpenSecurity={() => undefined}
+        renderEnroll={() => null}
+      />
+    </I18nextProvider>,
+  );
+  fireEvent.click(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithGitHub }));
+  expect(send).toHaveBeenCalledWith({ type: 'sign_in_with_provider', provider: 'github', locale: lng });
+});

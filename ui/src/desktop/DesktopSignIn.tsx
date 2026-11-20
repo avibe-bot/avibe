@@ -81,16 +81,17 @@ export function DesktopSignIn({
   onOpenSecurity,
   renderEnroll,
 }: DesktopSignInProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const owner = useOperationOwner<SignInBusyAction>();
   const offered = methods ?? desktopSignInMethods(state);
   // One adapter per set of ways in (the switches arrive after the first paint), not per render.
   const providers = offered.providers.join(',');
   const passkey = offered.passkey;
+  const locale = i18n.resolvedLanguage?.startsWith('zh') ? 'zh' : 'en';
   const adapter = useMemo(() => createDesktopSignInAdapter(send, {
     providers: SIGN_IN_PROVIDERS.filter((provider) => providers.split(',').includes(provider)),
     passkey,
-  }), [send, providers, passkey]);
+  }, locale), [send, providers, passkey, locale]);
   const flow = useSignInFlow<DesktopClientState, never>({
     adapter,
     owner,

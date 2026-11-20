@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use avibe_runtime_host::instance_client::{
     account::{Passkeys, SystemBrowser},
     coordinator::{ClientView, Coordinator},
+    loopback::CallbackCopy,
     protocol::*,
     storage::{ConnectionStore, Credentials},
     transport::{Epoch, NativeSession, Request, Response, Transport},
@@ -136,6 +137,8 @@ struct Browser {
     browsing: Mutex<VecDeque<Browsing>>,
     opened: Mutex<Vec<Url>>,
     redirected: Arc<Notify>,
+    /// The bodies of the pages the redirects got back.
+    pages: Arc<Mutex<Vec<String>>>,
 }
 impl SystemBrowser for Browser {
     fn open(&self, url: &Url) -> Result<(), ClientError> {
@@ -154,15 +157,18 @@ impl SystemBrowser for Browser {
             }
         };
         let redirected = self.redirected.clone();
+        let pages = self.pages.clone();
         tokio::spawn(async move {
             let port = redirect.port().unwrap();
             let target = |extra: &str| format!("{}?{}&{extra}", redirect.path(), redirect.query().unwrap());
             match browsing {
                 Browsing::Code(code) => {
-                    get(port, &target(&format!("code={code}"))).await;
+                    let page = get(port, &target(&format!("code={code}"))).await;
+                    pages.lock().unwrap().push(page);
                 }
                 Browsing::Error(query) => {
-                    get(port, &target(query)).await;
+                    let page = get(port, &target(query)).await;
+                    pages.lock().unwrap().push(page);
                 }
                 Browsing::StrayThenCode(code) => {
                     get(port, "/callback?state=forged&code=stolen").await;
@@ -173,6 +179,16 @@ impl SystemBrowser for Browser {
             redirected.notify_one();
         });
         Ok(())
+    }
+    fn callback_copy(&self, locale: UiLocale) -> CallbackCopy {
+        let (done, failed) = match locale {
+            UiLocale::En => ("Fixture done.", "Fixture failed."),
+            UiLocale::Zh => ("夹具完成。", "夹具未完成。"),
+        };
+        CallbackCopy {
+            done: done.into(),
+            failed: failed.into(),
+        }
     }
 }
 async fn get(port: u16, target: &str) -> String {
@@ -273,6 +289,7 @@ fn browsers(browsing: Vec<Browsing>) -> Arc<Browser> {
         browsing: Mutex::new(browsing.into()),
         opened: Mutex::new(vec![]),
         redirected: Arc::new(Notify::new()),
+        pages: Arc::new(Mutex::new(vec![])),
     })
 }
 /// Tests that check that a port was released run one at a time, so no other
@@ -409,6 +426,53 @@ async fn provider_sign_in_signs_in_and_keeps_tokens_out_of_the_published_state()
         !f.private.0.lock().unwrap().is_empty(),
         "the cookie jar is kept natively"
     );
+}
+
+/// The browser's last page speaks the language of the page that asked (the request's
+/// `locale`), from the catalogs the shell supplies; English when a request names none.
+#[tokio::test]
+async fn the_browsers_last_page_speaks_the_asking_pages_language() {
+    let _ports = PORTS.lock().await;
+    let cases = [
+        (
+            json!({"type":"sign_in_with_provider","provider":"google","locale":"zh"}),
+            Browsing::Code("c"),
+            "<p>夹具完成。</p>",
+        ),
+        (
+            json!({"type":"sign_in_with_provider","provider":"google","locale":"zh"}),
+            Browsing::Error("error=server_error&error_description=x"),
+            "<p>夹具未完成。</p>",
+        ),
+        (
+            json!({"type":"sign_in_with_provider","provider":"google"}),
+            Browsing::Error("error=server_error&error_description=x"),
+            "<p>Fixture failed.</p>",
+        ),
+    ];
+    for (request, browsing, line) in cases {
+        let browser = browser(browsing);
+        let f = fixture(
+            vec![
+                ("/api/config/auth", config(true)),
+                ("/auth/v1/token", tokens()),
+                (
+                    "/api/desktop/session",
+                    reply(200, signed_in(), Some("account=fixture; Path=/; Secure; HttpOnly")),
+                ),
+            ],
+            Some(browser.clone()),
+            passkeys(Err("x")),
+        );
+        let _ = act(&f.client, serde_json::from_value(request).unwrap()).await;
+        // The browser has read the whole page once it says it is done.
+        tokio::time::timeout(Duration::from_secs(5), browser.redirected.notified())
+            .await
+            .unwrap();
+        let pages = browser.pages.lock().unwrap().clone();
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].ends_with(line), "{}", pages[0]);
+    }
 }
 
 #[tokio::test]
