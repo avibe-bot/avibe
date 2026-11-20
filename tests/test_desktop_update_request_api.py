@@ -99,6 +99,62 @@ def test_desktop_update_request_role_matrix(monkeypatch, tmp_path, role, expecte
         assert response.get_json()["error"] == "not_desktop_managed"
 
 
+@pytest.mark.parametrize(("path", "body"), [
+    ("/api/upgrade", {"confirm_interrupt": True}),
+    ("/api/update/check", {}),
+    ("/api/update/prereleases", {"enabled": True}),
+    ("/api/update/auto-update", {"enabled": False}),
+    ("/api/desktop/update/request", {"target_version": TARGET, "confirm_interrupt": True}),
+])
+def test_native_instance_update_session_origin_and_csrf(monkeypatch, tmp_path, path, body):
+    """The desktop's native OIDC jar authorizes the same POST as a browser.
+
+    Exercise paired-instance middleware and real endpoints, not a local-owner
+    shortcut. Only the installer, version lookup and desktop ack are fakes.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_COMPUTER_USE_STATE_DIR", str(tmp_path / "desktop"))
+    managed = path == "/api/desktop/update/request"
+    if managed:
+        monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    else:
+        monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+    monkeypatch.setattr(api, "do_upgrade", lambda: {"ok": True})
+    monkeypatch.setattr(api, "get_version_info", _version)
+    async def no_interruptions():
+        return UpgradeInterruptions(0, 0, 0)
+    monkeypatch.setattr("vibe.upgrade_interruptions.count_upgrade_interruptions", no_interruptions)
+    monkeypatch.setattr("vibe.ui_server._wait_for_desktop_update_ack", _acknowledged(allowed=True))
+
+    config = _save_config(tmp_path, paired=True)
+    client = app.test_client()
+    origin = "https://alex.avibe.bot"
+    peer = {"base_url": origin, "environ_base": remote_peer()}
+    for role in ("viewer", "owner"):
+        client.set_cookie(remote_access.SESSION_COOKIE_NAME, remote_session_cookie(
+            config, f"{role}@example.com", role, role=role,
+            access_source="owner" if role == "owner" else "email",
+        ), domain="alex.avibe.bot")
+        session = client.get("/api/session", **peer)
+        assert session.get_json()["capabilities"]["can_manage_instance"] == (role == "owner")
+        token = client.get("/api/csrf-token", **peer).get_json()["csrf_token"]
+        headers = {"Origin": origin, "X-Vibe-CSRF-Token": token}
+        result = client.post(path, json=body, headers=headers, **peer)
+        if role == "viewer":
+            assert result.status_code == 403
+            assert result.get_json()["error"] == "instance_access_forbidden"
+        else:
+            assert result.status_code == 200
+            assert result.get_json()["ok"] is True
+            for headers, reason in [
+                ({"Origin": origin}, "invalid csrf token"),
+                ({**headers, "Origin": "https://other.example"}, "invalid origin"),
+            ]:
+                refused = client.post(path, json=body, headers=headers, **peer)
+                assert refused.status_code == 403
+                assert refused.get_json()["message"] == f"Forbidden: {reason}"
+
+
 def test_desktop_update_request_uses_same_origin_and_csrf_guards(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     monkeypatch.setenv("AVIBE_COMPUTER_USE_STATE_DIR", str(tmp_path))

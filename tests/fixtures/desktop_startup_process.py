@@ -7,7 +7,6 @@ The Rust parent supplies an empty environment with private homes before imports.
 """
 from __future__ import annotations
 
-import faulthandler
 import json
 import os
 from pathlib import Path
@@ -18,9 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import TCPServer
 from types import SimpleNamespace
 
-# A slow import or listener initialization must identify its blocking call in
-# CI before the Rust parent's 15-second fixture initialization deadline.
-faulthandler.dump_traceback_later(10, file=sys.stderr)
+# Leave the last initialization phase in the parent's stderr log. Do not walk
+# a live import thread's frames from a native faulthandler watchdog: the dump
+# itself can crash CPython. The Rust parent owns the initialization deadline.
+print("fixture: importing startup dependencies", file=sys.stderr, flush=True)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from vibe import cli, runtime  # noqa: E402
 from vibe import install_generations  # noqa: E402
@@ -83,6 +83,7 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
         self.server_name, self.server_port = self.server_address[:2]
 
 
+print("fixture: binding loopback listener", file=sys.stderr, flush=True)
 server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
 thread = threading.Thread(target=server.serve_forever, daemon=True)
 thread.start()
@@ -155,7 +156,6 @@ runtime.wait_for_service_ready = wait_service
 install_generations.collect_install_generations = housekeeping_work
 (scratch / "endpoint.tmp").write_text(f"http://127.0.0.1:{port}", encoding="utf-8")
 (scratch / "endpoint.tmp").replace(scratch / "endpoint")
-faulthandler.cancel_dump_traceback_later()
 try:
     invocation = sys.stdin.readline().strip()
     started = time.monotonic()

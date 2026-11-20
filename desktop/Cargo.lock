@@ -290,6 +290,7 @@ dependencies = [
  "chrono",
  "cookie",
  "cookie_store",
+ "libc",
  "minisign-verify",
  "reqwest 0.12.28",
  "semver",

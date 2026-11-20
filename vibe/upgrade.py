@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,7 @@ from vibe.restart_state import RestartState
 from vibe.package_shape import CORE_PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME
 
 from config import paths as config_paths
-from config.atomic_io import read_snapshot
+from config.atomic_io import open_snapshot, read_snapshot, write_atomic
 from core.caller_context import environment_without_caller_context
 from core.install_integrity import (
     IntegrityResult,
@@ -315,13 +316,120 @@ def atomic_uv_install_root() -> Path:
     return config_paths.get_vibe_remote_dir() / "runtime" / "install-generations"
 
 
+def _install_lock_path() -> Path:
+    return atomic_uv_install_root().expanduser().parent / ".install.lock"
+
+
 @contextlib.contextmanager
 def atomic_upgrade_lock(*, timeout_seconds: float = UPGRADE_INSTALL_TIMEOUT_SECONDS):
     """Serialize staged installation, launcher activation, and pruning."""
 
-    lock_path = atomic_uv_install_root().expanduser().parent / ".install.lock"
-    with MigrationFileLock(lock_path, timeout_seconds=timeout_seconds):
+    with MigrationFileLock(_install_lock_path(), timeout_seconds=timeout_seconds):
         yield
+
+
+def _install_details(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    target, started = raw.get("target"), raw.get("started_at")
+    if not isinstance(started, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", started):
+        return None
+    target = target if isinstance(target, str) and 0 < len(target) <= 256 and _parse_version(target) else None
+    return {"target": target, "started_at": started}
+
+
+def _publish_install_locked(details: dict) -> None:
+    # MigrationFileLock writes a fresh PID on every outer acquire, including
+    # launcher maintenance, but not on re-entry. The second line thus belongs
+    # only to this acquisition. Don't replace the inode the OS is locking.
+    try:
+        with _install_lock_path().open("r+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.write(b"\n" + json.dumps(details).encode("ascii"))
+    except OSError:
+        logger.warning("Could not publish install progress", exc_info=True)
+
+
+def record_install_locked(target: str | None) -> None:
+    _publish_install_locked({"target": target, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+
+
+def _active_install() -> dict | None:
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(_install_lock_path(), flags), "rb", buffering=0) as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            # Readers must not look like installers to one another. Probe this
+            # very descriptor with a shared flock, or on Windows just read the
+            # mandatory-locked byte. Neither waits on an installer.
+            if os.name == "nt":
+                try:
+                    handle.read(1)
+                    return None
+                except PermissionError:
+                    pass
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    return None
+                except BlockingIOError:
+                    pass
+            handle.seek(1)
+            _, separator, record = handle.read(4096).partition(b"\n")
+            return _install_details(json.loads(record)) if separator else None
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def _restart_handoff_path() -> Path:
+    return _install_lock_path().with_name("install-restart.json")
+
+
+def _status_record(path: Path) -> dict:
+    try:
+        if not path.is_file():
+            return {}
+        with open_snapshot(path) as handle:
+            raw = json.loads(handle.read(65536))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError, RecursionError):
+        return {}
+
+
+def _save_install_handoff(path: Path, **owner: str) -> None:
+    """Bind the install's display metadata to its exact next owner, before launch."""
+    details = _active_install()
+    if details:
+        try:
+            write_atomic(path, json.dumps({**details, **owner}))
+        except OSError:
+            logger.warning("Could not hand off install progress", exc_info=True)
+
+
+def record_install_restart_locked(job_id: str) -> None:
+    _save_install_handoff(_restart_handoff_path(), job_id=job_id)
+
+
+def resume_deferred_install_locked(candidate: Path) -> None:
+    # Each waiting Windows helper belongs to its own candidate generation.
+    details = _install_details(_status_record(candidate.with_name(".avibe-deferred-install.json")))
+    if details:
+        _publish_install_locked(details)
+
+
+def get_install_status() -> dict | None:
+    record = _status_record(_restart_handoff_path())
+    details = _install_details(record)
+    if details and record.get("job_id"):
+        path = runtime_mod.get_restart_status_path()
+        job = _status_record(path)
+        if job.get("job_id") == record["job_id"] and restart_record_is_pending(job, path):
+            return {"phase": "restarting", **details}
+    active = _active_install()
+    return {"phase": "installing", **active} if active else None
 
 
 def restart_is_pending() -> bool:
@@ -519,6 +627,7 @@ def defer_upgrade_activation(
         command.extend(["--parent-started-at", str(parent_started_at)])
     log_path = config_paths.get_logs_dir() / f"upgrade-activation-{uuid4().hex}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _save_install_handoff(activation.candidate_launcher.with_name(".avibe-deferred-install.json"))
     with log_path.open("a", encoding="utf-8") as log:
         process = subprocess.Popen(
             command,

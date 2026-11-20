@@ -152,10 +152,12 @@
           "maxLength": 128
         },
         "kind": {
-          "description": "session: the shared short window. weekly: the shared weekly window. model_weekly: a weekly window only one model draws on, named by `scope_model`. other: any window the server does not recognise, rendered from `label`.",
+          "description": "session: the shared short (5-hour) window. weekly: the shared weekly window. monthly: the shared monthly window. Spent, each of these three stops the whole account. model_session: a 5-hour window only one model or model group draws on, named by `scope_model`. model_weekly: the same for a weekly window. other: any window the server does not recognise, rendered from `label`. Windows are ordered session, weekly, monthly, then the model-scoped windows model by model (5-hour before weekly), then other.",
           "enum": [
             "session",
             "weekly",
+            "monthly",
+            "model_session",
             "model_weekly",
             "other"
           ]
@@ -167,7 +169,7 @@
           "maxLength": 64
         },
         "scope_model": {
-          "description": "Present exactly for model_weekly: the upstream model name.",
+          "description": "Present exactly for model_session and model_weekly: the upstream model or model-group name (Antigravity's group `displayName`).",
           "type": "string",
           "minLength": 1,
           "maxLength": 64
@@ -199,7 +201,10 @@
       "if": {
         "properties": {
           "kind": {
-            "const": "model_weekly"
+            "enum": [
+              "model_session",
+              "model_weekly"
+            ]
           }
         }
       },

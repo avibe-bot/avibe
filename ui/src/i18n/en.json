@@ -1,5 +1,34 @@
 {
+  "appLock": {
+    "lock": {
+      "lockedTitle": "Avibe is locked",
+      "unlockTouchID": "Unlock with Touch ID",
+      "unlockPassword": "Unlock with Password",
+      "verifying": "Verifying…",
+      "verificationFailed": "Not verified. Try again.",
+      "macNotEnrolled": "No fingerprints are set up on this Mac.",
+      "macLockout": "Touch ID did not recognize you several times. Use your Mac password.",
+      "macUnavailable": "Touch ID is not available right now, for example with the lid closed.",
+      "restoreAllWindows": "Unlocking restores every Avibe window.",
+      "pendingContent": "Something you sent to Vibey is waiting. After you unlock, it goes into the message box for you to review and send.",
+      "pendingLink": "An Avibe link is waiting. It opens after you unlock.",
+      "changeReason": "Confirm the App Lock change",
+      "unlockReason": "Unlock Avibe",
+      "iphone": {
+        "unlockFaceID": "Unlock with Face ID",
+        "unlockPasscode": "Unlock with Passcode",
+        "faceIDNotEnrolled": "This iPhone has no Face ID set up.",
+        "faceIDDenied": "Avibe is not allowed to use Face ID. You can allow it in iOS Settings › Avibe.",
+        "faceIDLockout": "Face ID did not recognize you several times. Use your passcode.",
+        "touchIDLockout": "Touch ID did not recognize you several times. Use your passcode."
+      }
+    }
+  },
   "desktopBootstrap": {
+    "askVibey": {
+      "kept": "Kept on this Mac. It will go into Vibey's message box once you're connected.",
+      "unavailable": "Couldn't open Vibey's conversation on this instance. Nothing was added."
+    },
     "retry": "Try again",
     "installationHelp": "Installation help",
     "notRunningTitle": "Avibe — not running",
@@ -704,6 +733,24 @@
       "remoteInstallWarning": "Remote installs can restart Avibe without someone at the host, interrupt running work, and leave a failed update for someone on the host to repair.",
       "autosaved": "Changes are saved automatically",
       "languageSaveFailed": "The language changed here, but could not be saved for this instance",
+      "appLock": {
+        "title": "App Lock",
+        "descriptionFaceId": "Unlock with Face ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
+        "descriptionTouchIdPhone": "Unlock with Touch ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
+        "descriptionMac": "Unlock with Touch ID or your Mac password when you open Avibe, or come back after the time you choose. Applies to this Mac only; changing it asks you to verify.",
+        "off": "Off",
+        "immediately": "Immediately",
+        "oneMinute": "After 1 minute",
+        "fiveMinutes": "After 5 minutes",
+        "verifying": "Verifying…",
+        "failed": "Not verified. The setting did not change.",
+        "noPasscodePhone": "This iPhone has no passcode, so App Lock cannot work. Set one in iOS Settings › Face ID & Passcode to turn it on.",
+        "noPasswordMac": "This Mac user has no password, so App Lock cannot work. Set one in System Settings › Users & Groups to turn it on.",
+        "faceIdDenied": "Avibe is not allowed to use Face ID, so your passcode unlocks it. You can allow Face ID in iOS Settings › Avibe.",
+        "passwordOnlyMac": "Touch ID is not available on this Mac right now, so your Mac password unlocks Avibe.",
+        "coversPhone": "App Lock covers what is inside the app. Notification previews follow iOS Settings › Notifications; background sync and reminders keep running.",
+        "coversMac": "App Lock covers every Avibe window. The Runtime and Agents on this Mac keep running; notification previews follow System Settings › Notifications."
+      },
       "desktopMini": {
         "title": "Desktop Mini",
         "description": "Show the Desktop Mini pet on your desktop.",
@@ -1734,12 +1781,14 @@
         "refresh": "Refresh now",
         "refreshing": "Refreshing…",
         "refreshAccount": "Refresh quota",
-        "empty": "No signed-in subscription accounts yet. Add a Claude or ChatGPT subscription under Providers & routing to see its quota here.",
+        "empty": "No signed-in subscription accounts yet. Sign in to a subscription under Providers & routing to see its quota here.",
         "left": "left",
         "window": {
           "session": "5-hour limit",
           "weekly": "Weekly limit",
           "model": "{{model}} weekly limit",
+          "modelSession": "{{model}} 5-hour limit",
+          "monthly": "Monthly limit",
           "span": {
             "hours": "{{hours}}-hour",
             "days": "{{days}}-day"
@@ -1780,7 +1829,7 @@
         },
         "unread": {
           "auth_expired": "Sign-in expired; quota unavailable",
-          "unsupported": "This subscription doesn't report quota",
+          "unsupported": "The provider doesn't report quota for this account",
           "error": "Quota unavailable right now; retrying automatically"
         },
         "ago": {
@@ -1806,7 +1855,7 @@
           "exhaustedNote": "{{name}} · back in {{duration}}",
           "resetsIn": "resets in {{duration}}",
           "weekValue": "Last 7 days at API price",
-          "weekValueNote": "All subscription use, at the vendors’ published API prices",
+          "weekValueNote": "All subscription use, at the providers’ published API prices",
           "payback": "Paid back this period",
           "paybackMultiple": "{{multiple}}×",
           "paybackUnit": "the monthly fee",
@@ -1821,7 +1870,7 @@
         "upcoming": "Resetting soon",
         "footnote": "The bar is the part used; the thin mark is how much of this period has passed. A bar past the mark is spending faster than time.",
         "pending": "Reading quota…",
-        "footnoteValue": "“At API price” is what the same use would cost at the vendor’s published API price — a way to judge the plan, not a charge.",
+        "footnoteValue": "“At API price” is what the same use would cost at the provider’s published API price — a way to judge the plan, not a charge.",
         "priceTableDate": "Price table from {{date}}.",
         "priceTableUnknown": "Price table date unknown.",
         "priceTableFetching": "Fetching the price table…",
@@ -3067,6 +3116,7 @@
     "ready": "Ready",
     "stateNeedsAttention": "Needs attention",
     "quality": "Connection quality",
+    "qualityFallback": "Fallback route quality",
     "qualityGood": "Good",
     "qualityFair": "Fair",
     "qualityPoor": "Slow",
@@ -3086,6 +3136,7 @@
     "requestPathUnavailable": "Requests unavailable · {{success}}/{{count}} succeeded",
     "requestPathMeasuring": "Measuring requests · {{count}} samples",
     "networkPath": "Network path",
+    "fallbackRoute": "Fallback route: Cloudflare tunnel",
     "networkBrowserIngress": "Cloudflare ingress for this browser request",
     "networkProvider": "Network",
     "networkConnectorEdges": "Tunnel edges",
@@ -3148,13 +3199,16 @@
       "detail": "{{certificate}} · {{page}}",
       "pageDirect": "This page's live connection: direct",
       "pageOther": "This page's live connection: not direct",
-      "device": "This device's direct path: {{state}}",
-      "deviceWithPath": "This device's direct path: {{state}} · {{path}}",
-      "deviceInUse": "in use",
-      "deviceOn": "on",
-      "pathRelay": "relay",
-      "pathIpv4": "direct IPv4",
-      "pathIpv6": "direct IPv6",
+      "using": "This device is using: {{path}}",
+      "usingTunnel": "Cloudflare tunnel",
+      "usingTunnelRelayUp": "Cloudflare tunnel (relay available, but slower)",
+      "usingRelay": "Relay",
+      "usingLan": "Direct (local network)",
+      "usingPunched": "Direct (hole punching)",
+      "usingDirect": "Direct",
+      "familyIpv4": "IPv4",
+      "familyIpv6": "IPv6",
+      "withDetail": "{{path}} · {{detail}}",
       "lastConnection": "Last connection: direct {{direct}} / Cloudflare {{public}}",
       "legMs": "{{ms}} ms",
       "legNone": "—",
@@ -3212,7 +3266,7 @@
       "error": {
         "auth_expired": "Sign-in expired",
         "rate_limited": "The provider is limiting quota reads",
-        "unsupported": "This subscription doesn't report quota",
+        "unsupported": "The provider doesn't report quota for this account",
         "unavailable": "Quota unavailable right now",
         "malformed": "The provider returned an unreadable quota report"
       }
@@ -3663,7 +3717,8 @@
     "signOut": "Sign out",
     "signingOut": "Signing out…",
     "resizeSidebar": "Resize sidebar",
-    "directTag": "Direct"
+    "directTag": "Direct",
+    "relayTag": "Relay"
   },
   "workbench": {
     "eyebrow": "Agent OS",

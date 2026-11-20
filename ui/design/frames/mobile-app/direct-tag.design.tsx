@@ -1,7 +1,9 @@
-// Approved by Product 2026-11-18 and shipped with #3940: a small 「直连」 tag beside the instance name while this page's live stream runs
-// through the instance's direct ingress, as that stream's own handshake said (`via` on `/api/events`'
-// `connected` frame). Any other way in shows nothing: no vendor name and no counts in the header.
-// The details live in Settings · Remote access (settings/remote-access/direct-*).
+// A small tag beside the instance name while this page's live stream runs through the instance's
+// direct ingress, as that stream's own handshake said (`via` on `/api/events`' `connected` frame),
+// naming the App's kind of path (`direct.status()`, `direct` version 3): 「直连」 only for an IPv4 or
+// IPv6 address, 「中继」 through the relay (Product, 2026-11-19: never 「直连」 for a relayed path).
+// Any other way in, a browser, or a path the App does not name, shows nothing: no vendor name and no
+// counts in the header. The details live in Settings · Remote access (settings/remote-access/direct-*).
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
 import { Workbench } from '@/components/Workbench';
@@ -16,7 +18,13 @@ import { SheetLanguage } from '../../kit/mobile-instance-sheet';
 /** The stream's own handshake, saying how it came in. */
 const handshake = (via: 'direct' | 'other'): DesignStreamEvent => ({ after: 0, event: 'connected', raw: true, data: { sub_id: 1, via } });
 
-function frame(name: string, title: string, lang: 'zh' | 'en', via: 'direct' | 'other'): FrameSpec {
+function frame(
+  name: string,
+  title: string,
+  lang: 'zh' | 'en',
+  via: 'direct' | 'other',
+  path: 'relay' | 'ipv4' | 'ipv6' = 'ipv6',
+): FrameSpec {
   return {
     name,
     title,
@@ -31,7 +39,8 @@ function frame(name: string, title: string, lang: 'zh' | 'en', via: 'direct' | '
       '/api/session': { remote: true, authenticated: true, email: 'max@example.com' },
     }, {
       ...mainRunningFixtures,
-      nativeShell: { ...IOS_APP_CAPABILITIES, instancePresentation: 1 },
+      nativeShell: { ...IOS_APP_CAPABILITIES, instancePresentation: 1, direct: 3 },
+      nativeDirectStatus: { preferred: 'direct', sequence: 3, closure: 0, path },
       nativeInstanceName: 'test-app',
       stream: [handshake(via)],
       copy: copyFor(lang === 'en' ? en : zh),
@@ -41,9 +50,11 @@ function frame(name: string, title: string, lang: 'zh' | 'en', via: 'direct' | '
 }
 
 const designFrames = frames([
-  frame('direct-zh', '本页连接经直连入口：实例名旁一个「直连」小标签', 'zh', 'direct'),
+  frame('direct-zh', '本页经直连入口、App 走 IPv4/IPv6 地址：实例名旁一个「直连」小标签', 'zh', 'direct'),
+  frame('relay-zh', '本页经直连入口、App 走中继：「中继」，从不称为直连', 'zh', 'direct', 'relay'),
   frame('other-zh', '经其他方式（Cloudflare、局域网、本机）：什么都不显示', 'zh', 'other'),
-  frame('direct-en', 'Through the direct ingress: a small "Direct" tag', 'en', 'direct'),
+  frame('direct-en', 'Through the direct ingress on an address: a small "Direct" tag', 'en', 'direct'),
+  frame('relay-en', 'Through the direct ingress over the relay: "Relay"', 'en', 'direct', 'relay'),
 ]);
 
 export default designFrames;

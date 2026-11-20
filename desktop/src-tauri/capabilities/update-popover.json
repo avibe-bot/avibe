@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "update-popover",
-  "description": "This computer's update panel, drawn by the shell as a popup while the main window shows another computer. Bundled page only; Rust additionally verifies the exact page and allows only state and updater actions. The popup closes its own window (Escape or its backdrop); window close takes a label, which only this bundled page's code supplies.",
+  "description": "This computer's update panel, drawn by the shell as a popup while the main window shows another computer. Bundled page only; Rust additionally verifies the exact page and allows only state, this computer's updater and the selected instance's update actions. It reports its panel's height so the shell sizes this window; Rust admits that only from this popup's page. The popup closes its own window (Escape or its backdrop); window close takes a label, which only this bundled page's code supplies.",
   "local": true,
   "windows": [
     "update-popover"
   ],
   "permissions": [
     "allow-desktop-client-request",
+    "allow-update-popover-fit",
     "core:window:allow-close"
   ]
 }

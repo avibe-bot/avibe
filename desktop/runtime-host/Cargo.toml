@@ -12,6 +12,8 @@ base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 cookie = "0.18"
 cookie_store = { version = "0.22", default-features = false, features = ["serde_json"] }
+# O_NOFOLLOW/O_NONBLOCK for opening a selected file (selection::ordinary_open).
+libc = "0.2"
 minisign-verify = "0.3"
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 semver = "1"

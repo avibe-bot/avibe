@@ -236,6 +236,16 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         set { lock.withLock { storedPath = newValue } }
     }
 
+    private var storedDetail: DirectSelectedPath?
+
+    /// The selected path's class and round-trip time, as the binding would
+    /// read them; set apart from `selectedPath`, as the binding reads them
+    /// apart.
+    var selectedPathDetail: DirectSelectedPath? {
+        get { lock.withLock { storedDetail } }
+        set { lock.withLock { storedDetail = newValue } }
+    }
+
     private var pathWatcher: (@Sendable (DirectPathKind?) -> Void)?
 
     func watchSelectedPath(
@@ -565,6 +575,8 @@ final class DirectIrohManualClock: @unchecked Sendable {
 @MainActor
 final class DirectIrohFakeNetwork: DirectIrohNetworkMonitoring {
     private var onChange: (@MainActor () -> Void)?
+    /// What the stand-in says the monitor ignored so far.
+    var ignoredUpdates = 0
 
     var isWatching: Bool {
         onChange != nil

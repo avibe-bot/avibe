@@ -25,10 +25,27 @@ fn shared_protocol_fixtures_roundtrip_and_keep_private_results_out_of_state() {
         let _: ClientRequest = serde_json::from_value(request.clone()).unwrap();
     }
     let states: Value = serde_json::from_str(include_str!("../../contracts/instance-client-v1/states.json")).unwrap();
-    for state in states.as_object().unwrap().values() {
-        let state: ClientState = serde_json::from_value(state.clone()).unwrap();
+    for sample in states.as_object().unwrap().values() {
+        let state: ClientState = serde_json::from_value(sample.clone()).unwrap();
+        let full = serde_json::to_value(&state).unwrap();
+        assert_eq!(&full["instance_update"], &sample["instance_update"]);
+        assert!(full.get("instance_update").is_some());
+        // The sample is exactly what the shell's validator produces from it.
+        if let Some(snapshot) = sample["instance_update"]["snapshot"].as_object() {
+            let snapshot = Value::Object(snapshot.clone());
+            assert_eq!(
+                avibe_runtime_host::instance_client::instance_update::snapshot(&snapshot).unwrap(),
+                snapshot
+            );
+        }
         let projection = state.runtime_projection();
-        for private in ["catalog", "consent", "enrollment", "current_instance"] {
+        for private in [
+            "catalog",
+            "consent",
+            "enrollment",
+            "current_instance",
+            "instance_update",
+        ] {
             assert!(projection.get(private).is_none());
         }
     }

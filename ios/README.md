@@ -255,6 +255,7 @@ The native bridge method surface is fixed:
 | `accountPresentation: 2` | `app.setAccountActionAvailable({available})` | `null`; primary Workbench display hint used to suppress or restore the old-Web native fallback |
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
+| `appLock: 1` | `appLock.status()`, `appLock.setPolicy({policy})` | The contract in `ui/src/lib/appLockContract.ts`: `{policy, available, biometry, biometryState}`, and for a change `{ok, reason?, status}`. A change is saved only after one `.deviceOwnerAuthentication`; see App Lock below |
 | `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
 | `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
 | `haptics: 1` | `haptics.selection()` | `null` |
@@ -1550,6 +1551,32 @@ Changing Apple App ID capabilities or provisioning profiles, signing an archive,
 physical-device validation and TestFlight distribution require separate owner
 approval. Unsigned simulator builds and synthetic-data tests do not establish
 physical-device authorization, locked-device access, or background wake latency.
+
+## App Lock
+
+Settings › General › App Lock (Off by default, Immediately, After 1 minute, After
+5 minutes) is kept in this App's `UserDefaults` and owned by `AppLockController`
+(`AppLock.swift`); behavior and the shared contract: `docs/plans/app-lock.md`.
+
+- The lock is `AppLockWindow`, a second window of the scene above `.alert` that
+  never becomes key. It covers the WebView, the account pages, sheets, and alerts
+  the App presents; those keep presenting on the main window and show after unlock.
+- Going inactive covers the App Switcher snapshot with the logo. Time away starts at
+  `didEnterBackground` on a clock that counts sleep; a return at or past the
+  threshold, or a cold start, is locked. The App asks for Face ID once each time it
+  arrives in front, except while an Action Button take is recording; after a cancel
+  the button waits. Its own verification sheets never re-lock or cover.
+- Routing, notification taps, App Shortcuts, Health sync, reminders, push, and voice
+  capture are not gated: they run under the lock, and the target page is ready when
+  it lifts.
+- No passcode means the lock does not engage; the stored choice applies again once
+  one is set. `NSFaceIDUsageDescription` says only "Use Face ID to unlock Avibe."
+- The lock screen's words are the `appLock.lock.*` keys shared with the Web bundles
+  (`ui/src/i18n/appLockCopy.test.ts` keeps `Localizable.xcstrings` equal); its
+  visual spec is `ui/design: app-lock/lock/*`.
+- Tests: `AppLockTests.swift` (machine, capability decoding, controller with a
+  stand-in authenticator, and the real lock window in the test host). A physical
+  Face ID device, passcode fallback, and Touch ID iPhone remain device checks.
 
 ## Sharing a Show from the iPhone App
 

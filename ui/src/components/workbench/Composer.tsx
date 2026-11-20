@@ -544,6 +544,10 @@ export interface ComposerHandle {
   /** Stage + upload files from outside the composer — e.g. a chat-page-wide
    *  drag-and-drop that drops onto the transcript rather than the input row. */
   addFiles: (files: File[]) => void;
+  /** `addFiles` for a caller that must know whether the composer took the
+   *  files: false while it refuses them (disabled, a send in flight, voice
+   *  capture owns the draft, no session). Upload failures still toast. */
+  stageFiles: (files: File[]) => boolean;
   /** Insert a `#<session>` reference chip at the cursor (e.g. "reference this
    *  session" from the sidebar). No-op when the mention editor isn't active
    *  (the plain-textarea home composer). */
@@ -552,6 +556,10 @@ export interface ComposerHandle {
    *  with a separating space when the composer is non-empty. No-op when the
    *  mention editor isn't active (the plain-textarea home composer). */
   appendText: (text: string) => void;
+  /** Append text on its own line after whatever is already there (typed text
+   *  and staged attachments stay), then focus with the caret at the end. It
+   *  never sends. False while voice capture owns the draft. */
+  appendLine: (text: string) => boolean;
   /** Replace the whole draft from outside and focus the input with the caret at
    *  the end — the home's suggestion cards seed a starting task the user then
    *  edits. It never sends, and refuses while voice capture owns the draft. */
@@ -1985,6 +1993,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // No deps array keeps every exposed operation on the latest render state.
   useImperativeHandle(ref, () => ({
     addFiles: (files: File[]) => void uploadFiles(files),
+    stageFiles: (files: File[]) => {
+      if (!mediaEnabled || disabledRef.current || pendingRef.current || voiceDraftLocked()) return false;
+      void uploadFiles(files);
+      return true;
+    },
     insertSessionReference: (refSessionId: string, title?: string | null) => {
       if (voiceDraftLocked()) return;
       // Same node a typed `#` pick yields: trigger `#`, label = title||id, data
@@ -1993,6 +2006,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     appendText: (text: string) => {
       if (!voiceDraftLocked()) mentionRef.current?.append(text);
+    },
+    appendLine: (text: string) => {
+      if (voiceDraftLocked()) return false;
+      draftEditedRef.current = true;
+      if (useMentions) {
+        mentionRef.current?.append(text, '\n');
+        mentionRef.current?.focus();
+        return true;
+      }
+      const next = valueRef.current ? `${valueRef.current}\n${text}` : text;
+      valueRef.current = next;
+      setHasText(next.trim().length > 0);
+      setValue(next);
+      onDraftChange?.(next);
+      seedFocusRef.current = true;
+      return true;
     },
     setDraft: (text: string) => {
       if (voiceDraftLocked()) return;

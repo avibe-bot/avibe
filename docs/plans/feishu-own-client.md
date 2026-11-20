@@ -22,12 +22,18 @@ reconnects and error texts.
 1. **Message calls** (`modules/im/feishu_api.py`). The five endpoints go over
    aiohttp, like the calls the adapter already sent itself, with the adapter's
    own tenant-token cache.
-2. **Event parsing.** Our own dispatch of the four event types; the SDK keeps
-   only its socket client, loaded without the package `__init__`. A
-   module-count ceiling test guards it. Most of the gain lands here.
-3. **Long connection.** Our own client beside the SDK's behind one switch
-   (`sdk`, `listen`, `parallel`, `own`), a local fake Feishu server, and
-   differential tests that drive both clients with the same script.
+2. **Event parsing.** Our own dispatch of the four event types. The SDK keeps
+   its socket client, imported as before and run so that it can be stopped
+   (`modules/im/feishu_sdk_ws.py`). No gain yet: importing any part of the SDK
+   costs all of it.
+3. **Long connection** (`modules/im/feishu_ws.py`). Our own client beside the
+   SDK's behind one switch, `long_connection` in the Lark config (`sdk`,
+   `listen`, `parallel`, `own`; default `sdk`). Changing it rebuilds the
+   adapter in the running service, like a credential change. A local fake
+   Feishu server and differential tests drive both clients with the same
+   script. Each connection runs on a thread and loop of its own, so that
+   answers do not wait behind the adapter's loop. In `own` the SDK is not
+   imported at all: this is where the start-up and memory gain arrives.
 4. **Removal.** `lark-oapi` moves from the runtime dependencies to the test
    dependencies, where it stays as the reference for the differential tests.
 
@@ -66,10 +72,12 @@ From SDK source:
   as JSON, applied at once.
 - **Fragments.** `sum` is the number of pieces and `seq` the zero-based index;
   pieces share a `message_id` and are joined in order when all have arrived.
-- **Acknowledgement.** The received frame goes back with a `biz_rt` header
-  added and the payload replaced by `{"code":200}`, by `{"code":500}` when the
-  handler failed, or with `"data"` (base64 of the handler's JSON result) for a
-  card callback. Only `type=event` frames are handled.
+- **Acknowledgement.** The received frame goes back with the payload replaced
+  by `{"code": 200}`, by `{"code": 500}` when the handler failed, or with
+  `"data"` (base64 of the handler's JSON result) for a card callback. A handled
+  event also gets a `biz_rt` header (milliseconds spent); a failed one does not.
+  An event in pieces is answered once, on the piece that completed it. Only
+  `type=event` frames are handled.
 - **Reconnect.** After a random wait of up to `ReconnectNonce` seconds, fetch a
   new endpoint and connect; then every `ReconnectInterval` seconds. There is no
   exponential back-off. The server can change all four values.
@@ -88,10 +96,17 @@ nothing by default.
   clients connect to the same fake server and must dispatch the same events and
   send the same acknowledgement bytes.
 - **Shadow on a live instance,** in three stages behind the switch: listen (our
-  decoder runs on the SDK connection's frames and handles nothing), parallel
-  (both connections; whichever receives an event handles it, through one entry
-  and one `event_id` table), own (the SDK connection off, still installed).
-- **Probe against real Feishu** in the regression environment after a merge.
+  codec runs on the SDK connection's frames and handles nothing: it must decode
+  each received frame, join each event and build each answer the same, byte
+  for byte), parallel (both connections; whichever receives an event handles
+  it, through one entry and one `event_id` table), own (the SDK connection off,
+  still installed). Outside `sdk` the adapter logs which connection each event
+  came by (id and type only) and, every ten minutes, each connection's counts.
+- **History check,** outside `sdk`: every ten minutes the history of each
+  direct chat is read back from Feishu and every message a person sent is
+  matched against the message events received. One without an event is logged
+  by id. There is no probe: an app set up by our guide subscribes to no event
+  a bot can cause by itself.
 
 ## Known by design
 
@@ -117,11 +132,64 @@ nothing by default.
 - Calls that miss the token cache together share one token request; the SDK
   got the same effect by blocking the loop while it fetched.
 - The configured `proxy_url` is still not applied to Feishu traffic.
+- Our connection differs from the SDK's client where the SDK was at fault:
+  the endpoint request gives up when the peer says nothing for 30 seconds
+  (the SDK's has no timeout), a stop is a cancellation of the one task that
+  runs the connection, and an event whose last piece is delivered twice is
+  handled once.
+- The endpoint request is still sent with `requests`, on the connection's own
+  thread, as the SDK's client sends it: the proxy it goes through or past and
+  the certificates it trusts then follow from the environment exactly as with
+  the SDK, and one attempt is one request. It carries the app secret, so that
+  is not a place for a second implementation of those rules. As with the
+  SDK's client, the request holds the thread: `stop()` returns false while
+  one is out, the thread ends when it returns, and nothing follows from its
+  reply. Sending it beside the loop was tried and dropped: a request that
+  cannot be cancelled then outlives a stop that has reported success.
+- Nothing the peer says in words is logged by our connection, only kinds of
+  failure and numbers: a refusal can quote the secret or the ticket back in
+  spellings no filter can list.
+- On bytes that are not well-formed protobuf our codec is stricter than the
+  SDK's parser; such a frame is logged as unreadable and not answered.
+- `long_connection` is not validated when the config is loaded: an unknown
+  value means `sdk`, with a warning, so that a slip in a temporary field
+  cannot take Feishu down.
+- The setup wizard's temporary connection refuses every event (answer 500), as
+  the SDK's empty dispatcher did, so that Feishu sends it again and a running
+  adapter receives it.
+- Loading the SDK's socket client without its API tree was tried in three
+  designs (placeholders in `sys.modules`, a deferred package `__init__`, a
+  private renamed copy) and dropped: it is code for a few weeks on the path
+  that carries every Feishu message, and each design needed more machinery
+  than the weeks justify. The gain arrives when our own connection replaces
+  the SDK's.
+- The SDK's connections run only through `SdkLongConnection`, one at a time,
+  each on a thread and loop of its own. The SDK's client was not written to be
+  stopped: one module-level loop for all clients, tasks that never end, a
+  `start` that runs one step after another. What a stop guarantees:
+  - once `stop()` has returned true, nothing of the connection is left (no
+    socket, no task, its loop closed) and it cannot come back;
+  - from the moment `stop()` is called, the client is given no endpoint, so
+    it begins no new connection, and an event whose hand-over begins after
+    that moment is refused, so that Feishu sends it again;
+  - a handshake that already had its endpoint may complete; the socket is
+    closed within moments. An event already handed over is handled to its
+    end, but its answer may not reach Feishu, which then sends it again
+    (at least once, as Feishu's delivery is throughout);
+  - a peer that does not complete the close is cut off after 3 seconds;
+  - `stop()` returns false while the thread is inside a blocking call of the
+    SDK that cannot be interrupted: its endpoint request has no timeout, as
+    before. The thread ends, under the rules above, when that call returns.
+- The event shapes are those of lark-oapi 1.7.5, the release the lock file
+  pins; `pyproject.toml` now asks for no older one.
+- A malformed envelope (a schema or uuid that is not text, a 2.0 event without
+  a header, a body of the wrong shape) is refused as the SDK refused it. Only
+  a well-formed event of a type we do not handle is acknowledged and ignored.
 
 ## Todo
 
-- [ ] 1. Message calls and the 7-hour event memory
-- [ ] 2. Event parsing; SDK socket client loaded without the API tree
+- [x] 1. Message calls and the 7-hour event memory (#4047)
+- [x] 2. Event parsing; the SDK's connection made stoppable (#4057)
 - [ ] 3. Own long connection, fake server, differential tests, switch, probe
 - [ ] 4. Shadow stages on a live instance
 - [ ] 5. `lark-oapi` out of the runtime dependencies

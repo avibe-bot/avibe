@@ -554,5 +554,16 @@ scenarios:
       - tests/test_bot_user_delivery.py::test_an_idle_bot_starts_on_the_users_message_at_once
       - tests/test_bot_user_delivery.py::test_a_working_bot_takes_the_users_message_into_its_turn
       - tests/test_bot_user_delivery.py::test_an_ordinary_session_keeps_the_composers_queue
+  - id: MESSAGE-DELIVERY-340
+    name: Answering one question from concurrent surfaces reserves at most one Delivery; operation replay preserves its receipt, uncertain acceptance cannot release it, and stale or unauthorized input never dispatches
+    status: covered
+    kind: concurrency
+    layer: contract
+    test:
+      - tests/test_message_answers.py::test_concurrent_answers_reserve_before_dispatch
+      - tests/test_message_answers.py::test_operation_replay_is_durable_and_bound_to_input
+      - tests/test_message_answers.py::test_dispatch_failure_releases_only_proven_unaccepted_answers
+      - tests/test_message_answers.py::test_stale_and_missing_answers_do_not_dispatch
+      - tests/test_message_answers.py::test_revoked_chat_permission_precedes_operation_replay
 next_priority:
-  - MESSAGE-DELIVERY-340
+  - MESSAGE-DELIVERY-341
