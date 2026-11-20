@@ -42,9 +42,13 @@ import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { SegmentedRadio } from './ui/segmented';
-import { Select } from './ui/select';
-import { Switch } from './ui/switch';
+import {
+  TunnelAutoRecoverySwitch,
+  TunnelIpFamilyControl,
+  TunnelOutboundSelect,
+  TunnelProfileControl,
+  TunnelProtocolControl,
+} from './remoteAccess/TunnelControls';
 
 const VIBE_CLOUD_URL = 'https://avibe.bot';
 const VIBE_CLOUD_APP_URL = 'https://avibe.bot/app';
@@ -666,17 +670,10 @@ export const RemoteAccess: React.FC = () => {
                     <Badge variant="secondary">{protocolLabel}</Badge>
                   )}
                 </span>
-                <SegmentedRadio
+                <TunnelProtocolControl
                   value={settingsDraft.transport_protocol}
                   onChange={(value) => updateSetting('transport_protocol', value)}
-                  ariaLabel={t('remoteAccess.protocol')}
                   disabled={controlsDisabled}
-                  tone="cyan"
-                  options={[
-                    { id: 'auto', label: t('remoteAccess.protocolAuto') },
-                    { id: 'quic', label: 'QUIC' },
-                    { id: 'http2', label: 'HTTP/2' },
-                  ]}
                 />
               </div>
 
@@ -684,11 +681,9 @@ export const RemoteAccess: React.FC = () => {
                 <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.autoRecovery')}</span>
                 <div className="flex h-9 items-center justify-between border-y border-border/70 px-1">
                   <Activity className="size-4 text-muted" />
-                  <Switch
-                    size="sm"
-                    checked={settingsDraft.auto_recovery}
-                    onCheckedChange={(value) => updateSetting('auto_recovery', value)}
-                    label={t('remoteAccess.autoRecovery')}
+                  <TunnelAutoRecoverySwitch
+                    value={settingsDraft.auto_recovery}
+                    onChange={(value) => updateSetting('auto_recovery', value)}
                     disabled={controlsDisabled}
                   />
                 </div>
@@ -696,49 +691,30 @@ export const RemoteAccess: React.FC = () => {
 
               <div className="min-w-0 space-y-1.5">
                 <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.optimizationProfile')}</span>
-                <SegmentedRadio
+                <TunnelProfileControl
                   value={settingsDraft.optimization_profile}
                   onChange={(value) => updateSetting('optimization_profile', value)}
-                  ariaLabel={t('remoteAccess.optimizationProfile')}
                   disabled={controlsDisabled}
-                  options={[
-                    { id: 'stable', label: t('remoteAccess.profileStable') },
-                    { id: 'balanced', label: t('remoteAccess.profileBalanced') },
-                    { id: 'low_latency', label: t('remoteAccess.profileLowLatency') },
-                  ]}
                 />
               </div>
 
               <div className="min-w-0 space-y-1.5">
                 <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.ipFamily')}</span>
-                <SegmentedRadio
+                <TunnelIpFamilyControl
                   value={settingsDraft.edge_ip_version}
                   onChange={(value) => updateSetting('edge_ip_version', value)}
-                  ariaLabel={t('remoteAccess.ipFamily')}
                   disabled={controlsDisabled}
-                  options={[
-                    { id: '4', label: t('remoteAccess.ipV4') },
-                    { id: 'auto', label: t('remoteAccess.ipAuto') },
-                    { id: '6', label: t('remoteAccess.ipV6') },
-                  ]}
                 />
               </div>
 
               <label className="min-w-0 space-y-1.5 md:col-span-2">
                 <span className="block text-[12px] font-medium text-foreground">{t('remoteAccess.outboundInterface')}</span>
-                <Select
+                <TunnelOutboundSelect
                   value={settingsDraft.edge_bind_address}
-                  onChange={(event) => updateSetting('edge_bind_address', event.target.value)}
+                  onChange={(value) => updateSetting('edge_bind_address', value)}
                   disabled={controlsDisabled}
-                  className="font-mono text-[12px]"
-                >
-                  <option value="">{t('remoteAccess.outboundSystem')}</option>
-                  {networkInterfaces.map((networkInterface) => (
-                    <option key={networkInterface.id} value={networkInterface.address}>
-                      {networkInterface.name} · {networkInterface.address}
-                    </option>
-                  ))}
-                </Select>
+                  interfaces={networkInterfaces}
+                />
               </label>
             </div>
 

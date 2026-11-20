@@ -51,7 +51,10 @@ vi.mock('../context/ToastContext', () => ({
 vi.mock('react-i18next', () => ({
   Trans: ({ i18nKey }: { i18nKey: string }) => <span>{i18nKey}</span>,
   useTranslation: () => ({
-    t: (key: string) => key,
+    // Keys stand for their copy; the interface option is the one template whose values a test reads.
+    t: (key: string, options?: { name?: string; address?: string }) => (
+      key === 'remoteAccess.interfaceOption' ? `${options?.name} · ${options?.address}` : key
+    ),
   }),
 }));
 

@@ -48,7 +48,10 @@ import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { NewProjectDialog } from './NewProjectDialog';
+import { LazyNewProjectDialog } from './LazyNewProjectDialog';
+
+/** Start fetching the new-project dialog ahead of the press that opens it. */
+const preloadNewProjectDialog = () => { void LazyNewProjectDialog.preload().catch(() => {}); };
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
@@ -938,6 +941,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               size="icon"
               className="size-7 shrink-0 text-muted hover:text-foreground"
               aria-label={t('workbench.addProject')}
+              onPointerEnter={preloadNewProjectDialog}
+              onFocus={preloadNewProjectDialog}
               onClick={() => setShowNewProject(true)}
             >
               <FolderPlus className="size-4" />
@@ -1020,7 +1025,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
       </div>
 
       {showNewProject && canCreateProject && (
-        <NewProjectDialog
+        <LazyNewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={() => {
             setShowNewProject(false);

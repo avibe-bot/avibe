@@ -231,6 +231,7 @@ impl Coordinator {
                 .ok_or_else(|| ClientError::new("stale_generation"))?;
             let before = update.clone();
             change(update)?;
+            update.settle_following(instance_update::utc_now());
             if *update == before {
                 return Ok(());
             }
@@ -307,10 +308,15 @@ impl Coordinator {
                 Err(status) => update.status = *status,
             }
             update.reconcile(in_flight);
+            // The same settled receipt as when this read started (`following`
+            // may have been republished meanwhile; it is derived, not the receipt).
+            let same =
+                |a: &Receipt, b: &Receipt| (a.action, a.phase, &a.updated_at) == (b.action, b.phase, &b.updated_at);
             update.request_seen = result.is_ok()
-                && update.request.is_some()
-                && update.request == before
-                && before.as_ref().is_some_and(|request| request.phase != Phase::Sending);
+                && match (update.request.as_ref(), before.as_ref()) {
+                    (Some(now), Some(then)) => same(now, then) && then.phase != Phase::Sending,
+                    _ => false,
+                };
             Ok(())
         })
     }
@@ -365,15 +371,13 @@ impl Coordinator {
             }
             // Nothing else is sent while an install runs: the receipt that
             // follows it to the restarted version must not be replaced.
-            if !snapshot["install"].is_null()
-                || update.unsettled(now)
-                    && update
-                        .request
-                        .as_ref()
-                        .is_some_and(|request| request.action == Action::Install)
-            {
+            // Exactly the published `following`, plus the instance's own report.
+            if !snapshot["install"].is_null() || update.following(now) {
                 return Err(ClientError::new("update_in_progress"));
             }
+            let installed_from = (kind == Action::Install)
+                .then(|| snapshot["current"].as_str().map(str::to_owned))
+                .flatten();
             if let Some(target) = &target {
                 // The exact version on screen at the click, or nothing.
                 if snapshot["has_update"] != true || snapshot["latest"].as_str() != Some(target.as_str()) {
@@ -385,7 +389,6 @@ impl Coordinator {
                 }
             }
             update.request_seen = false;
-            update.install_from = snapshot["current"].as_str().map(str::to_owned);
             update.install_ref = None;
             update.request = Some(Receipt {
                 action: kind,
@@ -393,6 +396,8 @@ impl Coordinator {
                 target: target.clone(),
                 error_code: None,
                 updated_at: instance_update::now(),
+                following: true,
+                installed_from,
             });
             Ok(())
         })?;
@@ -460,11 +465,28 @@ impl Coordinator {
         };
         self.reread_instance_update(wanted).await;
     }
+    /// `following` can end by time alone (the follow limit, or a standalone
+    /// Runtime that did not restart): publish that without a read.
+    fn republish_following(&self) {
+        let state = {
+            let mut inner = self.inner.lock().expect("client state");
+            let Some(update) = inner.state.instance_update.as_mut() else {
+                return;
+            };
+            if !update.settle_following(instance_update::utc_now()) {
+                return;
+            }
+            inner.state.revision += 1;
+            inner.state.clone()
+        };
+        self.view.changed(&state);
+    }
     /// One read when the popup opens.
     pub async fn refresh_instance_update(&self) {
         self.reread_instance_update(|_| true).await;
     }
     async fn reread_instance_update(&self, wanted: impl FnOnce(&InstanceUpdate) -> bool) {
+        self.republish_following();
         let (generation, wanted) = {
             let inner = self.inner.lock().expect("client state");
             (

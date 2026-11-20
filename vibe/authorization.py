@@ -219,6 +219,7 @@ class AuthorizationContext:
             "can_manage_agents": self.can_manage_agents,
             "can_manage_instance": self.can_manage_instance,
             "can_manage_access_members": self.can_manage_access_members,
+            "can_use_model_hub_reset_cards": self.has_role("owner"),
             "can_use_agents": self.can_use_resource("agent"),
             "can_use_skills": self.can_use_resource("skill"),
             "can_use_vault_secrets": self.can_use_resource("vault_secret"),
@@ -450,6 +451,7 @@ _VIEWER_HTTP_RULES = tuple(
     re.compile(pattern)
     for pattern in (
         r"^/api/session$",
+        r"^/api/devices$",
         r"^/api/csrf-token$",
         r"^/api/config$",
         r"^/api/version(?:/local)?$",
@@ -492,6 +494,7 @@ _VIEWER_HTTP_NAMESPACES = (
     "/api/web-push",
 )
 _VIEWER_HTTP_MUTATION_RULES = (
+    ("POST", re.compile(r"^/api/devices/(?:self|sign-out-others|[^/]+/sign-out)$")),
     ("PUT", re.compile(r"^/api/notifications/preferences$")),
     ("PUT", re.compile(r"^/api/home/preferences$")),
     ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),
@@ -759,6 +762,12 @@ def http_authorization_policy(
     if _path_in_namespaces(path, (_REMOTE_ACCESS_HTTP_NAMESPACE,)):
         if _http_rule_matches(normalized_method, path, _REMOTE_ACCESS_MEMBER_HTTP_RULES):
             return HttpAuthorizationPolicy("member")
+        return HttpAuthorizationPolicy("owner")
+    if normalized_method == "POST" and re.fullmatch(r"/api/models/sources/[^/]+/reset-cards/use", path):
+        # Spends a subscription consumable that cannot be given back, so the Owner
+        # role rather than the Member role of other Model Hub changes. Who holds that
+        # role is the instance's one rule for every route: a signed-in Owner, or a
+        # caller the Web server treats as its Owner by where the request comes from.
         return HttpAuthorizationPolicy("owner")
     if _http_rule_matches(normalized_method, path, _MEMBER_HTTP_RULES):
         return HttpAuthorizationPolicy("member", direct_loopback_only=path == "/api/desktop/update/idle")

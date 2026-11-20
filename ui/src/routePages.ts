@@ -15,6 +15,7 @@ import { readLastPwaPath } from './lib/pwaRouteMemory';
 import { DeferredMentionEditor } from './components/workbench/deferredMentionEditor';
 import { DeferredInboxPreview } from './components/workbench/InboxHoverPopover';
 import { DeferredMarkdown } from './components/ui/deferredMarkdown';
+import { LazyNewProjectDialog } from './components/workbench/LazyNewProjectDialog';
 
 // The chat composer's editor arrives with the page, so the composer never waits on it.
 export const ChatPage = lazyPage(() => Promise.all([
@@ -88,7 +89,12 @@ export function preloadInitialRoute(): void {
 // The order a reader is likely to need them: a conversation from the home or
 // the Inbox first (and the Markdown the sidebar's Inbox peek and an editor's
 // preview draw, already downloaded with it), then the tabs, then Settings.
+// Before them, the new-project dialog: its button is on the first screen, its
+// code is small, and a press that finds it loaded opens at once (its own
+// preload, not only the module's arrival with the Projects page, is what
+// spares the first open a suspended frame).
 const PREFETCH_ORDER = [
+  LazyNewProjectDialog,
   ChatPage,
   DeferredInboxPreview,
   DeferredMarkdown,

@@ -60,6 +60,7 @@ import sys
 import threading
 import time
 from bisect import bisect_right
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
@@ -137,6 +138,39 @@ class JobStartError(RuntimeError):
 class JobHandOverUnavailable(RuntimeError):
     """This host has no Watch to hand a job to."""
 
+
+# File reads and process checks for ``wait`` polls (every ≤100 ms per waiting
+# call): off the controller loop every Session shares (a field stall sampled
+# ``meta`` here). An explicit ``enforce_deadline`` has its own pool, so it never
+# queues behind a backlog of polls.
+_PROBE_IO = ThreadPoolExecutor(max_workers=4, thread_name_prefix="avibe-job-probe")
+_ENFORCE_IO = ThreadPoolExecutor(max_workers=2, thread_name_prefix="avibe-job-enforce")
+
+
+
+async def _off_loop(pool: ThreadPoolExecutor, func: Callable[[str], Any], job_id: str) -> tuple[Any, bool]:
+    """``func(job_id)`` on ``pool``; returns ``(result, cancelled)``.
+
+    A cancel withdraws the call if it has not started, and re-raises at once:
+    nothing waits behind a queue. If it has started, its result is still awaited
+    and returned with ``cancelled=True``, so the caller can finish what it owes
+    (a timeout kill) before propagating the cancel.
+    """
+    work = pool.submit(func, job_id)
+    waiter = asyncio.wrap_future(work)
+    try:
+        return await asyncio.shield(waiter), False
+    except asyncio.CancelledError:
+        if work.cancel():
+            raise
+        while not waiter.done():
+            try:
+                await asyncio.wait({waiter})
+            except asyncio.CancelledError:
+                pass
+        if waiter.exception() is not None:
+            raise
+        return waiter.result(), True
 
 def _job_object_name(job_id: str) -> str:
     """The Windows job object of a job's tree; the wrapper creates it under the same name."""
@@ -506,9 +540,18 @@ class LocalJobHost:
         end = None if deadline_s is None else time.monotonic() + max(0.0, deadline_s)
         delay = 0.005
         while True:
-            if await self.enforce_deadline(job_id):
-                return self.status(job_id)
-            current = self.status(job_id)
+            (overdue, current), cancelled = await _off_loop(_PROBE_IO, self._probe, job_id)
+            if overdue:
+                # An owed timeout kill completes even if the caller was cancelled meanwhile.
+                await self.kill(job_id, reason=STOP_TIMEOUT)
+                if cancelled:
+                    raise asyncio.CancelledError
+                final, cancelled = await _off_loop(_PROBE_IO, self.status, job_id)
+                if cancelled:
+                    raise asyncio.CancelledError
+                return final
+            if cancelled:
+                raise asyncio.CancelledError
             if current.state != "running":
                 return current
             if end is not None:
@@ -624,10 +667,18 @@ class LocalJobHost:
         running job may already have ended on time: a live wrapper decides timeout versus exit. The
         host stops the job as the second owner once the wrapper has not, ``_WRAPPER_DECIDES_S`` late.
         """
-        if not self._overdue(job_id):
-            return False
-        await self.kill(job_id, reason=STOP_TIMEOUT)
-        return True
+        overdue, cancelled = await _off_loop(_ENFORCE_IO, self._overdue, job_id)
+        if overdue:
+            await self.kill(job_id, reason=STOP_TIMEOUT)
+        if cancelled:
+            raise asyncio.CancelledError
+        return overdue
+
+    def _probe(self, job_id: str) -> tuple[bool, Optional[JobStatus]]:
+        """One ``wait`` poll, off the loop: overdue (to be killed), else the current status."""
+        if self._overdue(job_id):
+            return True, None
+        return False, self.status(job_id)
 
     def _overdue(self, job_id: str) -> bool:
         deadline_at = self.meta(job_id).get("deadline_at")

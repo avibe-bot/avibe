@@ -22,10 +22,7 @@ pub struct InstanceUpdate {
     /// snapshot can show that request's effect. Native only.
     #[serde(skip)]
     pub(crate) request_seen: bool,
-    /// For an install: the version the instance reported when it was sent,
-    /// and a desktop-managed host's request id. Native only.
-    #[serde(skip)]
-    pub(crate) install_from: Option<String>,
+    /// For an install: a desktop-managed host's request id. Native only.
     #[serde(skip)]
     pub(crate) install_ref: Option<String>,
 }
@@ -44,6 +41,13 @@ pub struct Receipt {
     pub target: Option<String>,
     pub error_code: Option<String>,
     pub updated_at: String,
+    /// The shell refuses another action for this instance now because of this
+    /// request (`update_in_progress`): it is on its way, or being followed.
+    /// Recomputed at every publication, and published when time alone ends it.
+    pub following: bool,
+    /// An install only: the version the instance ran when it was sent (a
+    /// validated version, from the snapshot); null otherwise or when unknown.
+    pub installed_from: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -65,6 +69,11 @@ pub enum Phase {
 /// rereading on its own. A standalone install takes about a minute; a
 /// desktop-managed host's request expires after 30 minutes.
 const FOLLOW_INSTALL: chrono::Duration = chrono::Duration::minutes(30);
+/// A standalone Runtime that still answers on the version it ran when it
+/// accepted an install, without an install of its own in progress, this long
+/// after accepting, did not restart into the new one (its restart could not be
+/// scheduled, or activation was deferred). The shell stops following it.
+const STANDALONE_RESTART: chrono::Duration = chrono::Duration::minutes(5);
 
 impl InstanceUpdate {
     pub fn loading(instance_id: String) -> Self {
@@ -76,7 +85,6 @@ impl InstanceUpdate {
             request: None,
             fetched_at: None,
             request_seen: false,
-            install_from: None,
             install_ref: None,
         }
     }
@@ -100,7 +108,7 @@ impl InstanceUpdate {
             // An accepted install is followed until the instance reports another
             // version (a standalone Runtime answers before its scheduled
             // restart, still on the old one) or its own request ends.
-            (Phase::Accepted, Action::Install) => !self.install_ended(),
+            (Phase::Accepted, Action::Install) => !self.install_ended(at.with_timezone(&Utc), now),
             (Phase::Accepted, _) => {
                 !seen
                     || self
@@ -111,18 +119,47 @@ impl InstanceUpdate {
         }
     }
 
-    fn install_ended(&self) -> bool {
+    /// The shell refuses another action for this instance because of its
+    /// request: exactly what `send_instance` checks, and what it publishes.
+    pub fn following(&self, now: DateTime<Utc>) -> bool {
+        self.request.as_ref().is_some_and(|request| {
+            request.phase == Phase::Sending || (request.action == Action::Install && self.unsettled(now))
+        })
+    }
+
+    /// Brings the published `following` up to date. True when it changed.
+    pub(crate) fn settle_following(&mut self, now: DateTime<Utc>) -> bool {
+        let following = self.following(now);
+        match self.request.as_mut() {
+            Some(request) if request.following != following => {
+                request.following = following;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn install_ended(&self, accepted: DateTime<Utc>, now: DateTime<Utc>) -> bool {
         let Some(snapshot) = self.snapshot.as_ref().filter(|_| self.status == Status::Ready) else {
             return false;
         };
         if running(snapshot, Action::Install) {
             return false;
         }
+        let from = self
+            .request
+            .as_ref()
+            .and_then(|request| request.installed_from.as_deref());
         let remote = &snapshot["remote_request"];
         let refused = self.install_ref.is_some()
             && remote["request_id"].as_str() == self.install_ref.as_deref()
             && matches!(remote["phase"].as_str(), Some("failed" | "declined" | "expired"));
-        refused || snapshot["current"].as_str() != self.install_from.as_deref()
+        // A standalone Runtime still on the old version after its answer was
+        // read, with no install of its own reported, did not take this one.
+        let not_taken = snapshot["managed_by"].is_null()
+            && self.request_seen
+            && now.signed_duration_since(accepted) >= STANDALONE_RESTART;
+        refused || not_taken || snapshot["current"].as_str() != from
     }
 
     /// A receipt left `sending` by a reply that could not be published (its
@@ -389,6 +426,88 @@ pub fn snapshot(v: &Value) -> Result<Value, ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(minutes: i64) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-20T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            + chrono::Duration::minutes(minutes)
+    }
+    /// An install accepted at minute 0 from 3.2.7, its answer read since.
+    fn accepted(snapshot: Value, status: Status) -> InstanceUpdate {
+        InstanceUpdate {
+            status,
+            snapshot: Some(snapshot),
+            can_manage: true,
+            request: Some(Receipt {
+                action: Action::Install,
+                phase: Phase::Accepted,
+                target: Some("3.2.8".into()),
+                error_code: None,
+                updated_at: "2026-11-20T07:00:00Z".into(),
+                following: true,
+                installed_from: Some("3.2.7".into()),
+            }),
+            request_seen: true,
+            ..InstanceUpdate::loading("one".into())
+        }
+    }
+
+    // B1 follow-up: a standalone Runtime that answers on the version it
+    // accepted from, without an install of its own, five minutes on, did not
+    // take it; the shell stops following and says so in `following`.
+    #[test]
+    fn a_standalone_install_that_did_not_restart_stops_being_followed_after_five_minutes() {
+        let old = json!({"current": "3.2.7", "latest": "3.2.8", "has_update": true, "install": null});
+        let mut update = accepted(old.clone(), Status::Ready);
+        assert!(update.following(at(4)));
+        assert!(update.following(at(4) + chrono::Duration::seconds(59)));
+        assert!(!update.following(at(5)));
+        assert!(!update.unsettled(at(5)));
+        // Published as soon as it changes, whatever changed it.
+        assert!(update.settle_following(at(5)));
+        assert!(!update.request.as_ref().unwrap().following);
+        assert!(!update.settle_following(at(6)));
+
+        // Followed as today: the Runtime reports its own install, does not
+        // answer, has not been read since accepting, or is desktop-managed.
+        let mut running = old.clone();
+        running["install"] = json!({"phase": "restarting", "target": "3.2.8", "started_at": "2026-11-20T07:00:30Z"});
+        let mut managed = old.clone();
+        managed["managed_by"] = json!("desktop");
+        let mut unread = accepted(old.clone(), Status::Ready);
+        unread.request_seen = false;
+        for (case, update) in [
+            ("own install", accepted(running, Status::Ready)),
+            ("not answering", accepted(old.clone(), Status::Unreachable)),
+            ("unread", unread),
+            ("desktop-managed", accepted(managed, Status::Ready)),
+        ] {
+            for minute in [5, 29] {
+                assert!(update.following(at(minute)), "{case} at {minute}");
+            }
+            assert!(!update.following(at(30)), "{case}: the follow limit still applies");
+        }
+        // Another version ends it at once, as before.
+        let mut new = old;
+        new["current"] = json!("3.2.8");
+        assert!(!accepted(new, Status::Ready).following(at(1)));
+    }
+
+    #[test]
+    fn following_is_on_its_way_or_a_followed_install_only() {
+        let mut update = accepted(json!({"current": "3.2.7"}), Status::Ready);
+        let request = update.request.as_mut().unwrap();
+        request.action = Action::Check;
+        request.installed_from = None;
+        assert!(!update.following(at(0)));
+        update.request.as_mut().unwrap().phase = Phase::Sending;
+        assert!(update.following(at(0)));
+        update.request.as_mut().unwrap().phase = Phase::Failed;
+        assert!(!update.following(at(0)));
+        update.request = None;
+        assert!(!update.following(at(0)));
+    }
 
     #[test]
     fn versions_are_semver_or_runtime_pep440() {

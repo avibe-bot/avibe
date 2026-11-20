@@ -1,46 +1,26 @@
-import { useContext, useEffect, useRef } from 'react';
-import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { useComposeTarget } from '../context/ComposerBridgeContext';
-import { useStandaloneAppTab } from '../context/StandaloneAppTabContext';
-import { ToastContext } from '../context/ToastContext';
-import { botSessionPath, MAIN_BOT_SESSION_ID } from '../lib/bots';
+import { useEffect, useState, type ComponentType } from 'react';
 import { isDesktopShell, isNativeAppWindow } from '../lib/desktopShell';
-import { createReceiver, RECEIVER } from './desktopComposeReceiver';
 
-/** Installs the receiver in a desktop shell's Workbench document; renders nothing. */
+/**
+ * Installs the Ask Vibey receiver in a desktop shell's Workbench document; renders nothing.
+ *
+ * Only a desktop shell ever calls the receiver, so its code is fetched there and
+ * nowhere else, off the first screen every browser downloads
+ * (docs/plans/web-ui-first-load.md). Until it is here the document has no
+ * receiver, which the shell already reads as "still loading" and tries again
+ * (desktop/src-tauri/src/compose.rs); a fetch that fails leaves it that way
+ * rather than failing the page.
+ */
 export function DesktopCompose() {
-  return isDesktopShell() && !isNativeAppWindow() ? <Receiver /> : null;
-}
-
-function Receiver() {
-  const standalone = useStandaloneAppTab();
-  const { t } = useTranslation();
-  const showToast = useContext(ToastContext)?.showToast;
-  const navigate = useNavigate();
-  const location = useLocation();
-  const target = useComposeTarget();
-  const live = useRef({ target, location, navigate, showToast, t });
-  // The receiver outlives renders; it reads the latest route and target here.
+  const [Mount, setMount] = useState<ComponentType | null>(null);
   useEffect(() => {
-    live.current = { target, location, navigate, showToast, t };
-  });
-
-  useEffect(() => {
-    if (standalone) return;
-    const path = botSessionPath({ session_id: MAIN_BOT_SESSION_ID });
-    const receiver = createReceiver({
-      target: () => live.current.target,
-      openVibey: () => {
-        if (live.current.location.pathname !== path) live.current.navigate(path);
-      },
-      toast: (key) => live.current.showToast?.(live.current.t(key), 'error'),
-    });
-    const host = window as unknown as Record<string, unknown>;
-    host[RECEIVER] = receiver;
-    return () => {
-      if (host[RECEIVER] === receiver) delete host[RECEIVER];
-    };
-  }, [standalone]);
-  return null;
+    if (!isDesktopShell() || isNativeAppWindow()) return undefined;
+    let alive = true;
+    void import('./DesktopComposeMount').then(
+      (module) => { if (alive) setMount(() => module.DesktopComposeMount); },
+      () => {},
+    );
+    return () => { alive = false; };
+  }, []);
+  return Mount ? <Mount /> : null;
 }

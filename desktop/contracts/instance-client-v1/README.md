@@ -40,7 +40,13 @@ display data rebuilt from allow-listed fields with validated versions,
 enumerated phases and error codes; it is in the full state only, never the
 Runtime projection. Its `request` is the last action this shell sent. A
 standalone install answers when it ends; the shell follows `install` and
-`current` in later reads.
+`current` in later reads. `request.following` is exactly when the shell
+refuses another action for the instance because of that request (on its way,
+or an install still followed); it is republished when time alone ends it.
+`request.installed_from` is the version an install started from (null for
+other actions). A standalone Runtime still answering on that version, with no
+`install` report of its own, five minutes after accepting is no longer
+followed.
 
 Native menu/deep-link presentation dispatches `avibe:desktop-present` through
 that document's unsaved-work guard. Its optional `presentationToken` must be

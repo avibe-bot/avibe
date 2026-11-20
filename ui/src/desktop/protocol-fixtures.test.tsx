@@ -877,7 +877,9 @@ it('B1 instance update state and actions are bundled-page protocol only', () => 
   }
   const remote = states.remote_connected as unknown as DesktopClientState;
   expect(remote.instance_update).toMatchObject({ instance_id: remote.connection.committed.instance_id, status: 'ready', can_manage: true,
-    request: { action: 'install', phase: 'sending', target: remote.instance_update?.snapshot?.latest } });
+    request: { action: 'install', phase: 'sending', target: remote.instance_update?.snapshot?.latest,
+      // The shell's own facts: it refuses other actions now, and the install started from what was running.
+      following: true, installed_from: remote.instance_update?.snapshot?.current } });
   expect(remote.instance_update?.snapshot?.install).toEqual({ phase: 'installing', target: '3.2.8rc4', started_at: '2026-11-20T07:03:17Z' });
   expectTypeOf<DesktopClientProjection>().not.toHaveProperty('instance_update');
   // A shell from before B1 sends no field; consumers see null, not undefined.

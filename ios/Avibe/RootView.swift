@@ -399,6 +399,7 @@ private struct BrowserScreen: View {
                         deviceDescription: { appModel.describeDevice(instanceID: instance.id) },
                         directStatus: appModel.directStatusProvider,
                         directHandover: appModel.directHandoverProvider,
+                        directPreference: appModel.directPreferenceProvider,
                         liveActivity: appModel.handleLiveActivity,
                         healthConnect: appModel.connectHealth,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
@@ -424,6 +425,7 @@ private struct BrowserScreen: View {
                             )
                         },
                         pageCache: appModel.runtimePageCacheAccess(for: runtime),
+                        startURL: { appModel.takeRuntimeStartURL(for: runtime) },
                         cachedPageConnected: {
                             appModel.runtimeCachedPageConnected(
                                 attemptID: attemptID,

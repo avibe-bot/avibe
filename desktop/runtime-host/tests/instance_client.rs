@@ -38,7 +38,23 @@ fn shared_protocol_fixtures_roundtrip_and_keep_private_results_out_of_state() {
                 snapshot
             );
         }
+        // The shell's own facts about its request are full-state only, and
+        // `installed_from` is a version or null.
+        if let Some(request) = sample["instance_update"]["request"].as_object() {
+            assert!(request["following"].is_boolean());
+            let from = &request["installed_from"];
+            assert!(
+                from.is_null()
+                    || from
+                        .as_str()
+                        .is_some_and(avibe_runtime_host::instance_client::instance_update::is_version)
+            );
+        }
         let projection = state.runtime_projection();
+        let projected = projection.to_string();
+        for private in ["following", "installed_from"] {
+            assert!(!projected.contains(private), "{private}");
+        }
         for private in [
             "catalog",
             "consent",
