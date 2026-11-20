@@ -370,8 +370,10 @@ code's first line (hash-checked RECORD file, parsed here, never at a stall). Pac
         while codes and len(self._code_labels) < _MAX_OWN_CODES:
             code, qualname = codes.pop()
             # Fixed labels keep precedence. The name must be defined in the shipped
-            # file, starting on this code's first line: a generated replacement
-            # bound under a real name does not match.
+            # file, starting on this code's first line. This is source-location
+            # attribution: a label always names real shipped source, but in-process
+            # code that deliberately recompiles a method at the same file, name and
+            # line would be attributed to that method.
             if id(code) not in self._code_labels and own_code_label(path, qualname, code.co_firstlineno):
                 self._code_labels[id(code)] = (code, (path, qualname))
             codes.extend(
