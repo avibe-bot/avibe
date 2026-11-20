@@ -35,9 +35,11 @@ const fixturesFor = (lang: Lang) => workbenchFixtures({
 type Link = 'connected' | 'offline' | 'switching';
 const STUDIO = { kind: 'remote', name: REMOTE, instance_id: 'studio', canonical_origin: 'https://studio.avibe.bot' } as const;
 
-const projection = (remote: boolean, update: boolean, link: Link = 'connected'): DesktopClientProjection => ({
+const projection = (remote: boolean, update: boolean, link: Link = 'connected', signedIn = true): DesktopClientProjection => ({
   version: 1, revision: 1, generation: 1,
-  account: { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' } },
+  account: signedIn
+    ? { status: 'signed_in', identity: { id: 'fixture', email: 'max@example.test' } }
+    : { status: 'signed_out', identity: null },
   connection: link === 'switching'
     ? { status: 'switching', committed: { kind: 'local', name: LOCAL, instance_id: null }, pending: STUDIO }
     : remote
@@ -51,8 +53,8 @@ const projection = (remote: boolean, update: boolean, link: Link = 'connected'):
   remote_auxiliary: remote ? 'disabled_incomplete' : 'local',
 });
 
-const rowProps = (remote: boolean, update = false, link: Link = 'connected'): Omit<DesktopAccountRowViewProps, 'localUpdater'> => ({
-  state: projection(remote, update, link), onPresent: () => {},
+const rowProps = (remote: boolean, update = false, link: Link = 'connected', signedIn = true): Omit<DesktopAccountRowViewProps, 'localUpdater'> => ({
+  state: projection(remote, update, link, signedIn), onPresent: () => {},
   // The instance's version, as its own page reads it; gold when it or this computer's app can be updated.
   ...(remote ? { instanceVersion: <InstanceVersionChipView name={REMOTE} version="3.2.7" attention={update} /> } : {}),
 });
@@ -72,10 +74,20 @@ const shots: { name: string; title: string; render: () => ReactNode; hover?: str
     name: 'desktop-local', title: '侧边栏底部 · 桌面应用（本机）',
     render: shell(<DesktopAccountRowView {...rowProps(false)} localUpdater={<VersionBadge openUpward />} />),
   },
-  // The trigger's wash shows only under the pointer; the dot keeps the Apps button's inset inside it.
+  // The trigger's wash shows only under the pointer, with the dot and the name centred in it and
+  // the same inset on both sides; no hover tip (Max, 2026-11-20).
   {
     name: 'desktop-local-hover', title: '侧边栏底部 · 桌面应用（本机）· 指针悬停在账户按钮上',
     render: shell(<DesktopAccountRowView {...rowProps(false)} localUpdater={<VersionBadge openUpward />} />),
+    hover: '[data-account-trigger]',
+  },
+  {
+    name: 'desktop-signed-out', title: '侧边栏底部 · 桌面应用 · 未登录（登录或注册）',
+    render: shell(<DesktopAccountRowView {...rowProps(false, false, 'connected', false)} localUpdater={<VersionBadge openUpward />} />),
+  },
+  {
+    name: 'desktop-signed-out-hover', title: '侧边栏底部 · 桌面应用 · 未登录 · 指针悬停在「登录或注册」上',
+    render: shell(<DesktopAccountRowView {...rowProps(false, false, 'connected', false)} localUpdater={<VersionBadge openUpward />} />),
     hover: '[data-account-trigger]',
   },
   {

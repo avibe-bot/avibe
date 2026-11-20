@@ -31,6 +31,13 @@ export type InstanceUpdateState = {
     target: string | null;
     error_code: string | null;
     updated_at: string;
+    /** The shell would refuse another action for this instance now because of this request
+     *  (`update_in_progress`): it is still on its way, or still being followed. Offer the
+     *  instance's Update, check and switches exactly when this is false. */
+    following: boolean;
+    /** An install only: the version the instance ran when the install was accepted. A version,
+     *  validated like every other; null for other actions, and when the shell does not know it. */
+    installed_from: string | null;
   };
   fetched_at: string | null;
 };
@@ -58,6 +65,8 @@ export type DesktopClientState = {
   instance_update: InstanceUpdateState | null;
   consent: null | { instance_id: string; instance_name: string; host: string; scope: string };
   remote_auxiliary: 'local' | 'disabled_incomplete';
+  /** avibe.bot's public sign-in switches as native last read them; absent from older shells. */
+  sign_in?: { providers: ('google' | 'github' | 'apple')[]; passkey: boolean };
 };
 /** Workbench receives presentation only; authentication/enrollment details stay bundled. */
 export type DesktopClientProjection = Pick<DesktopClientState,
@@ -71,6 +80,14 @@ export type DesktopClientAction =
   | { type: 'verify_otp'; code: string }
   | { type: 'verify_second_factor'; method: 'totp' | 'recovery'; code: string }
   | { type: 'verify_passkey' }
+  // Google, GitHub or Apple in the default browser, back through loopback PKCE.
+  | { type: 'sign_in_with_provider'; provider: 'google' | 'github' | 'apple'; locale?: 'en' | 'zh' }
+  // Passkey sign-in with no email first (not the second-factor passkey).
+  | { type: 'sign_in_with_passkey' }
+  // Ends an unfinished sign-in attempt without leaving the account window.
+  | { type: 'abort_sign_in' }
+  // Reads avibe.bot's public sign-in switches into `sign_in`.
+  | { type: 'refresh_sign_in_methods' }
   | { type: 'begin_totp_enrollment' }
   | { type: 'finish_totp_enrollment'; code: string }
   | { type: 'refresh_instances' }

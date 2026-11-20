@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use avibe_runtime_host::{
     deep_link::DeepLinkReturn,
     instance_client::{
-        account::Passkeys,
+        account::{Passkeys, SystemBrowser},
         coordinator::{ClientView, Coordinator},
+        loopback::CallbackCopy,
         protocol::*,
         storage::{ConnectionRecord, ConnectionStore, Credentials},
         transport::{Epoch, HttpTransport, Transport},
@@ -515,15 +516,18 @@ pub fn attach(
         navigation: Mutex::new(None),
         views: Mutex::new(Views::default()),
     });
-    let coordinator = Arc::new(Coordinator::new(
-        config.state,
-        config.record,
-        config.store,
-        transport,
-        credentials,
-        passkeys,
-        view.clone(),
-    ));
+    let coordinator = Arc::new(
+        Coordinator::new(
+            config.state,
+            config.record,
+            config.store,
+            transport,
+            credentials,
+            passkeys,
+            view.clone(),
+        )
+        .with_browser(Arc::new(DefaultBrowser)),
+    );
     app.manage(Client {
         coordinator: coordinator.clone(),
         view,
@@ -546,6 +550,35 @@ pub fn attach(
     });
     coordinator
 }
+/// Provider sign-in opens in the person's default browser, never in a WebView:
+/// providers refuse embedded sign-in, and the browser keeps its own sessions.
+struct DefaultBrowser;
+impl SystemBrowser for DefaultBrowser {
+    fn open(&self, url: &Url) -> Result<(), ClientError> {
+        // Only Supabase's authorization page, over https, reaches the browser.
+        if url.scheme() != "https" || url.path() != "/auth/v1/authorize" {
+            return Err(ClientError::new("invalid_auth_provider"));
+        }
+        tauri_plugin_opener::open_url(url.as_str(), None::<&str>).map_err(|_| ClientError::new("provider_unavailable"))
+    }
+    fn callback_copy(&self, locale: UiLocale) -> CallbackCopy {
+        provider_callback_copy(locale)
+    }
+}
+
+/// The browser's last page in the asking page's language, from the product catalogs.
+fn provider_callback_copy(locale: UiLocale) -> CallbackCopy {
+    let tag = match locale {
+        UiLocale::En => "en",
+        UiLocale::Zh => "zh",
+    };
+    let catalog = crate::native_catalog_for_locales([tag.to_owned()]).provider_callback;
+    CallbackCopy {
+        done: catalog.done,
+        failed: catalog.failed,
+    }
+}
+
 const INSTANCE_UPDATE_POLL: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Read the selected instance's update state now (the popup just opened).
@@ -2451,6 +2484,27 @@ impl ClientView for NativeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The browser's last page comes from the product catalogs, one language at a time.
+    #[test]
+    fn the_provider_callback_copy_is_the_catalogs_in_each_language() {
+        let catalog = |source: &str| {
+            serde_json::from_str::<serde_json::Value>(source).unwrap()["desktopBootstrap"]["providerCallback"].clone()
+        };
+        for (locale, source) in [
+            (UiLocale::En, crate::EN_PRODUCT_CATALOG),
+            (UiLocale::Zh, crate::ZH_PRODUCT_CATALOG),
+        ] {
+            let copy = provider_callback_copy(locale);
+            let expected = catalog(source);
+            assert_eq!(copy.done, expected["done"].as_str().unwrap());
+            assert_eq!(copy.failed, expected["failed"].as_str().unwrap());
+        }
+        assert_ne!(
+            provider_callback_copy(UiLocale::En).done,
+            provider_callback_copy(UiLocale::Zh).done
+        );
+    }
 
     /// Showing or focusing main must target what covers the window. A shown
     /// account page reloads with `loaded == false`; the Runtime under it must

@@ -357,16 +357,16 @@ async def test_partial_upload_cancellation_releases_turn_without_admission(ingre
     """Cancellation during the real body read leaves no Source or usage facts."""
     entered = asyncio.Event()
     left = asyncio.Event()
-    original_json = web.Request.json
+    original_read = web.Request.read
 
-    async def observe_read(request, **kwargs):
+    async def observe_read(request):
         entered.set()
         try:
-            return await original_json(request, **kwargs)
+            return await original_read(request)
         finally:
             left.set()
 
-    monkeypatch.setattr(web.Request, "json", observe_read)
+    monkeypatch.setattr(web.Request, "read", observe_read)
     _reader, writer = await _open_partial_upload(ingress, framing, b'{"model":')
     try:
         await asyncio.wait_for(entered.wait(), timeout=2)

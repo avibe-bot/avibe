@@ -28,6 +28,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let deviceID: () -> String?
     let directStatus: DirectStatusProvider?
     let directHandover: DirectHandoverProvider?
+    let directPreference: DirectPreferenceProvider?
     let directLoadGate: DirectLoadGateProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -46,6 +47,9 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
     let pageCache: RuntimePageCacheAccess?
+    /// A same-origin URL the first load goes to instead of the root (a
+    /// reopen where the page was); asked once, at that load.
+    let startURL: () -> URL?
     let cachedPageConnected: () -> Void
     let cachedPageKeepsShell: () -> Void
     let didCreateController: (WebViewController) -> Void
@@ -67,6 +71,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        directPreference: DirectPreferenceProvider? = nil,
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
@@ -89,6 +94,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
         pageCache: RuntimePageCacheAccess? = nil,
+        startURL: @escaping () -> URL? = { nil },
         cachedPageConnected: @escaping () -> Void = {},
         cachedPageKeepsShell: @escaping () -> Void = {},
         didCreateController: @escaping (WebViewController) -> Void,
@@ -109,6 +115,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.deviceID = deviceID
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.directPreference = directPreference
         self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
@@ -124,6 +131,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.pageColorSchemeChanged = pageColorSchemeChanged
         self.runtimeNavigationChanged = runtimeNavigationChanged
         self.pageCache = pageCache
+        self.startURL = startURL
         self.cachedPageConnected = cachedPageConnected
         self.cachedPageKeepsShell = cachedPageKeepsShell
         self.didCreateController = didCreateController
@@ -151,6 +159,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             deviceID: deviceID,
             directStatus: directStatus,
             directHandover: directHandover,
+            directPreference: directPreference,
             liveActivity: liveActivity,
             healthConnect: healthConnect,
             directLoadGate: directLoadGate,
@@ -166,6 +175,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             pageColorSchemeChanged: pageColorSchemeChanged,
             runtimeNavigationChanged: runtimeNavigationChanged,
             pageCache: pageCache,
+            startURL: startURL,
             cachedPageConnected: cachedPageConnected,
             cachedPageKeepsShell: cachedPageKeepsShell,
             didStartLoading: didStartLoading,

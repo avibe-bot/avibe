@@ -32,6 +32,7 @@
 		100000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* RootView.swift */; };
 		100000000000000000000005 /* WebOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		3C0000000000000000000001 /* RuntimePageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C0000000000000000000002 /* RuntimePageCache.swift */; };
+		3D0000000000000000000001 /* DirectPathPreference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D0000000000000000000002 /* DirectPathPreference.swift */; };
 		100000000000000000000006 /* WebViewContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* WebViewContainer.swift */; };
 		100000000000000000000007 /* WebViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* WebViewController.swift */; };
 		100000000000000000000008 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Localizable.xcstrings */; };
@@ -112,6 +113,7 @@
 		91000000000000000000000F /* NativeBadge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
 		91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000006 /* FixtureNativeBridgeSupport.swift */; };
+		3D0000000000000000000003 /* DirectPathPreference.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 3D0000000000000000000002 /* DirectPathPreference.swift */; };
 		91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
 		910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000001 /* InstanceSheetGestureUITests.swift */; };
 		100000000000000000000141 /* DirectIrohInteropWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000141 /* DirectIrohInteropWire.swift */; };
@@ -227,6 +229,7 @@
 		200000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		200000000000000000000005 /* WebOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebOrigin.swift; sourceTree = "<group>"; };
 		3C0000000000000000000002 /* RuntimePageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimePageCache.swift; sourceTree = "<group>"; };
+		3D0000000000000000000002 /* DirectPathPreference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathPreference.swift; sourceTree = "<group>"; };
 		200000000000000000000006 /* WebViewContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewContainer.swift; sourceTree = "<group>"; };
 		200000000000000000000007 /* WebViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewController.swift; sourceTree = "<group>"; };
 		200000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -452,6 +455,7 @@
 				2000000000000000000000A4 /* PushKeychainStore.swift */,
 				200000000000000000000004 /* RootView.swift */,
 				3C0000000000000000000002 /* RuntimePageCache.swift */,
+				3D0000000000000000000002 /* DirectPathPreference.swift */,
 				200000000000000000000005 /* WebOrigin.swift */,
 				200000000000000000000006 /* WebViewContainer.swift */,
 				200000000000000000000007 /* WebViewController.swift */,
@@ -1035,6 +1039,7 @@
 				1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */,
 				100000000000000000000004 /* RootView.swift in Sources */,
 				3C0000000000000000000001 /* RuntimePageCache.swift in Sources */,
+				3D0000000000000000000001 /* DirectPathPreference.swift in Sources */,
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
 				100000000000000000000006 /* WebViewContainer.swift in Sources */,
 				100000000000000000000007 /* WebViewController.swift in Sources */,
@@ -1131,6 +1136,7 @@
 				8D1000000000000000000004 /* AppLockBridge.swift in Fixture Sources */,
 				91000000000000000000000F /* NativeBadge.swift in Fixture Sources */,
 				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,
+				3D0000000000000000000003 /* DirectPathPreference.swift in Fixture Sources */,
 				910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */,
 				910000000000000000000003 /* MobileAccount.swift in Fixture Sources */,
 				910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */,

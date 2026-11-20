@@ -712,7 +712,10 @@ final class NavigationPolicyTests: XCTestCase {
         // Health restoration is held at its manifest for the whole test.
         let healthDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("NavigationHealth.\(UUID().uuidString)", isDirectory: true)
-        let health = HealthCoordinatorFixture(directory: healthDirectory, savedIdentity: true)
+        // Paired with instance-1 at the origin the account lists for it.
+        let health = HealthCoordinatorFixture(
+            directory: healthDirectory, savedIdentity: true, origin: "https://instance-one.example"
+        )
         health.client.claims = []
         health.client.holdManifest = true
         // Once released, restoration never waits on an unacknowledged upload.

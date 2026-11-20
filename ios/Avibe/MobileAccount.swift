@@ -244,6 +244,11 @@ struct MobileAccountError: Error, Equatable {
         code: "passkey_unavailable",
         message: "No passkey for this account is available on this device."
     )
+    /// Passkey sign-in: avibe.bot did not accept the passkey the person chose.
+    static let passkeyRejected = MobileAccountError(
+        code: "invalid",
+        message: "The passkey was not accepted."
+    )
     /// The person closed the system sign-in window: the page shows nothing.
     static let providerCancelled = MobileAccountError(
         code: "provider_cancelled",
@@ -533,10 +538,11 @@ protocol MobileAuthTransporting: AnyObject {
     func verifySecondFactor(
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
-    /// The providers avibe.bot's mobile broker accepts now: `mobile_providers`
-    /// in `GET /api/config/auth` (missing or malformed is none). `nil` when
-    /// the config could not be read at all. Never throws.
-    func advertisedProviders() async -> [MobileSignInProvider]?
+    /// The ways in avibe.bot offers the App now, from one `GET /api/config/auth`:
+    /// the providers its mobile broker accepts (`mobile_providers`; missing or
+    /// malformed is none) and passkey sign-in (`passkey_login_enabled` exactly
+    /// `true`). `nil` when the config could not be read at all. Never throws.
+    func signInMethods() async -> MobileSignInMethods?
     /// `POST /api/mobile/auth/start`: a browser address for Google and GitHub,
     /// the server's nonce for Apple. Throws `providerUnavailable`,
     /// `rate_limited`, or `network`.
@@ -561,6 +567,21 @@ protocol MobileAuthTransporting: AnyObject {
         authorizationCode: String,
         verifier: String
     ) async throws -> MobileProviderExchange
+    /// `POST /api/passkey-primary/options`: a flow and a discoverable request. Throws
+    /// `providerUnavailable` when passkey sign-in is off (503), `rate_limited`, or `network`
+    /// (a 403 is avibe.bot's HTTP boundary, not an answer about this account).
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart
+    /// `POST /api/passkey-primary/verify` in the same store. Success sets the session cookies
+    /// there; the session is read separately (`fetchSession`). Throws `passkeyRejected` when
+    /// avibe.bot does not accept the passkey (`verification_failed`, which is also its answer for
+    /// an account outside the audience), `passkeyCancelled` for an ended or expired flow,
+    /// `rate_limited`, or `network`.
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws
+    /// `POST /api/passkey-primary/cancel`, best effort: an abandoned flow also expires.
+    func primaryPasskeyCancel(flow: String) async
     func logout() async throws
     func pushManagementRequest(
         _ request: PushManagementRequest
@@ -593,6 +614,8 @@ final class MobileSessionCoordinator {
     /// public configuration, not per account, kept so Welcome can show them
     /// before a fresh read answers (after sign-out, on a cold start).
     private static let advertisedProvidersKey = "avibe.mobile.advertisedProviders"
+    /// Passkey sign-in's switch from the same read, kept with the list.
+    private static let advertisedPasskeyKey = "avibe.mobile.advertisedPasskey"
     /// The last session avibe.bot confirmed (the account and its instances,
     /// no credentials), so a cold start can open the selected instance before
     /// checking again. It follows `snapshot`: gone whenever that is.
@@ -675,6 +698,10 @@ final class MobileSessionCoordinator {
     /// selection and transport ownership have different invariants.
     private var transportOperationToken: UUID?
     private var signedOutStoreIsFresh = false
+    /// The generation whose store holds a passkey sign-in avibe.bot accepted but whose session
+    /// has not been read yet. Memory only: any account transition retires it, and a relaunch
+    /// reads that store's session anyway.
+    private var verifiedPasskeyGeneration: Int?
     /// A replacement page must read the known result even while push/store
     /// cleanup suspends. The publication ID prevents an older continuation
     /// from clearing a newer transition's result.
@@ -749,6 +776,7 @@ final class MobileSessionCoordinator {
         self.defaults = defaults
         self.lastAdvertisedProviders = defaults.stringArray(forKey: Self.advertisedProvidersKey)
             .map { names in MobileSignInProvider.allCases.filter { names.contains($0.rawValue) } }
+        self.lastAdvertisedPasskey = defaults.bool(forKey: Self.advertisedPasskeyKey)
         self.controlPlane = controlPlane
         self.websiteDataStore = websiteDataStore
         self.transportFactory = transportFactory
@@ -962,12 +990,15 @@ final class MobileSessionCoordinator {
 
     /// The last list avibe.bot advertised, persisted; `nil` until one was read.
     private(set) var lastAdvertisedProviders: [MobileSignInProvider]?
+    /// Passkey sign-in's switch from that same read, persisted with it.
+    private(set) var lastAdvertisedPasskey = false
     /// The read in flight, shared by everyone who asks meanwhile.
-    private var advertisedProvidersRead: Task<[MobileSignInProvider]?, Never>?
+    private var advertisedProvidersRead: Task<MobileSignInMethods?, Never>?
 
     /// Starts a read of the advertised sign-ins, or joins the one in flight.
-    /// A server answer, however late, becomes the last-known list.
-    private func readAdvertisedProviders() -> Task<[MobileSignInProvider]?, Never> {
+    /// A server answer, however late, becomes the last-known list (and passkey
+    /// switch): one read of avibe.bot's public configuration carries both.
+    private func readAdvertisedProviders() -> Task<MobileSignInMethods?, Never> {
         if let advertisedProvidersRead {
             return advertisedProvidersRead
         }
@@ -975,35 +1006,37 @@ final class MobileSessionCoordinator {
             return Task { nil }
         }
         let read = Task { @MainActor [weak self] in
-            let providers = await transport.advertisedProviders()
-            guard let self else { return providers }
+            let methods = await transport.signInMethods()
+            guard let self else { return methods }
             self.advertisedProvidersRead = nil
-            if let providers {
-                self.lastAdvertisedProviders = providers
-                self.defaults.set(providers.map(\.rawValue), forKey: Self.advertisedProvidersKey)
+            if let methods {
+                self.lastAdvertisedProviders = methods.providers
+                self.lastAdvertisedPasskey = methods.passkey
+                self.defaults.set(methods.providers.map(\.rawValue), forKey: Self.advertisedProvidersKey)
+                self.defaults.set(methods.passkey, forKey: Self.advertisedPasskeyKey)
             }
-            return providers
+            return methods
         }
         advertisedProvidersRead = read
         return read
     }
 
-    /// The providers Welcome may offer: those avibe.bot advertises for the App
-    /// now when that answers within `seconds`, otherwise the last list it
+    /// The ways in Welcome may offer: those avibe.bot advertises for the App
+    /// now when that answers within `seconds`, otherwise the last ones it
     /// advertised (`nil` when none was ever read). A display gate only; the
-    /// broker still decides each attempt. The read never holds up the answer
-    /// it decorates for longer than `seconds`, and a late answer still updates
-    /// the last-known list.
-    func advertisedProviders(within seconds: Double) async -> [MobileSignInProvider]? {
+    /// broker and avibe.bot still decide each attempt. The read never holds up
+    /// the answer it decorates for longer than `seconds`, and a late answer
+    /// still updates the last-known list.
+    func signInMethods(within seconds: Double) async -> MobileSignInMethods? {
         let read = readAdvertisedProviders()
         final class Once { var settled = false }
         let once = Once()
-        let fresh: [MobileSignInProvider]? = await withCheckedContinuation { continuation in
+        let fresh: MobileSignInMethods? = await withCheckedContinuation { continuation in
             Task { @MainActor in
-                let providers = await read.value
+                let methods = await read.value
                 guard !once.settled else { return }
                 once.settled = true
-                continuation.resume(returning: providers)
+                continuation.resume(returning: methods)
             }
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -1012,7 +1045,14 @@ final class MobileSessionCoordinator {
                 continuation.resume(returning: nil)
             }
         }
-        return fresh ?? lastAdvertisedProviders
+        return fresh ?? lastAdvertisedProviders.map {
+            MobileSignInMethods(providers: $0, passkey: lastAdvertisedPasskey)
+        }
+    }
+
+    /// The providers alone, as `signInMethods(within:)` finds them.
+    func advertisedProviders(within seconds: Double) async -> [MobileSignInProvider]? {
+        await signInMethods(within: seconds)?.providers
     }
 
     /// Whether the signed-in account was created by this generation's provider sign-in, as the
@@ -1300,6 +1340,95 @@ final class MobileSessionCoordinator {
                 )
             }
         }
+    }
+
+    /// Passkey sign-in with no email first (avibe.bot's primary passkey). A login transition like
+    /// the email code: a new generation, the selection cleared, and one fresh signed-out store
+    /// kept through options, the system sheet, verify and the session read, so the binding cookie
+    /// and the new session stay together. Any attempt that does not sign in rotates the store.
+    /// Not the second-factor passkey (`verifyPasskey`), which needs a first factor already.
+    func signInWithPasskey(
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileSessionState {
+        try await runExclusive {
+            // avibe.bot already accepted this store's passkey sign-in and only its session read
+            // failed: read it again in the same store, with no second sheet and no second verify.
+            if let verified = self.verifiedPasskeyGeneration, verified == self.generation {
+                do {
+                    return try await self.readVerifiedPasskeySession(generation: verified)
+                } catch {
+                    if self.generation == verified, self.verifiedPasskeyGeneration != verified {
+                        try await self.replaceWithFreshSignedOutStore(generation: verified)
+                    }
+                    throw error
+                }
+            }
+            let loginGeneration = self.beginAccountTransition(clearSelection: true)
+            do {
+                if !self.signedOutStoreIsFresh {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                let start = try await self.requireTransport().primaryPasskeyStart()
+                try self.requireCurrentGeneration(loginGeneration)
+                // The store holds the binding cookie from here: any ending below retires it.
+                self.signedOutStoreIsFresh = false
+                let assertion: MobilePasskeyAssertion
+                do {
+                    assertion = try await self.passkeyAuthenticator.assert(
+                        start.request,
+                        presentationAnchor: presentationAnchor
+                    )
+                } catch {
+                    if self.generation == loginGeneration, let transport = try? self.requireTransport() {
+                        await transport.primaryPasskeyCancel(flow: start.flow)
+                    }
+                    throw error
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                try await self.requireTransport().primaryPasskeyVerify(
+                    flow: start.flow,
+                    response: assertion.authenticationResponseJSON
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                // The store now holds the session avibe.bot issued (backend §6: never discard it
+                // before it is read). A passing failure to read it keeps the store.
+                self.verifiedPasskeyGeneration = loginGeneration
+                return try await self.readVerifiedPasskeySession(generation: loginGeneration)
+            } catch {
+                if self.generation == loginGeneration, self.verifiedPasskeyGeneration != loginGeneration {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Reads the session an accepted passkey sign-in left in this generation's store: one read,
+    /// and one more after a passing failure, each with the session read's own deadline. Nothing
+    /// is published until a read answers. `401` means the session did not hold: the store is
+    /// no longer kept (the caller retires it). Any other failure keeps it for the next try.
+    private func readVerifiedPasskeySession(generation: Int) async throws -> MobileSessionState {
+        var failure = MobileAccountError.network
+        for _ in 0..<2 {
+            let discovery: MobileSessionDiscovery?
+            do {
+                discovery = try await self.requireTransport().fetchSession()
+            } catch let error as MobileAccountError {
+                try self.requireCurrentGeneration(generation)
+                failure = error
+                continue
+            }
+            try self.requireCurrentGeneration(generation)
+            self.verifiedPasskeyGeneration = nil
+            guard let discovery else {
+                throw MobileAccountError.invalidOrExpired
+            }
+            self.clearStoredSelection()
+            self.secondFactorEmail = nil
+            return try self.state(for: discovery)
+        }
+        throw failure
     }
 
     /// Confirms with one of the account's passkeys: options from avibe.bot,
@@ -2054,6 +2183,7 @@ final class MobileSessionCoordinator {
         clearSelection: Bool
     ) -> Int {
         generation += 1
+        verifiedPasskeyGeneration = nil
         // A sign-in window or sheet still open belongs to the generation that just ended.
         webAuthenticator.cancel()
         appleAuthorizer.cancel()
