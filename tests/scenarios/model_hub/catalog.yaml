@@ -59,6 +59,7 @@ capability:
     - tests/test_model_hub_usage.py
     - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
+    - tests/test_model_hub_card_use.py
     - tests/test_model_hub_account_refresh.py
     - tests/test_model_hub_pricing.py
     - tests/test_models_dev_catalog.py
@@ -1982,47 +1983,141 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_quota.py::test_card_details_failure_preserves_current_windows
   - id: MH-QUOTA-045
-    name: Restart preserves an interrupted card claim until an explicitly newer read
+    name: A use found in flight after a restart is an unknown outcome and is not sent again
     status: covered
     kind: recovery
     layer: unit
-    test: tests/test_model_hub_card_use.py::test_restart_keeps_unconfirmed_until_a_new_user_read
+    test: tests/test_model_hub_card_use.py::test_a_use_found_in_flight_after_a_restart_is_unknown_and_is_not_sent_again
   - id: MH-QUOTA-046
-    name: Concurrent presses and a timeout never cause another vendor use
+    name: A second press on a Source is refused and a use the vendor never answers is not retried
     status: covered
-    kind: recovery
+    kind: concurrency
     layer: unit
-    test: tests/test_model_hub_card_use.py::test_two_presses_share_one_vendor_use_and_a_timeout_is_never_retried
+    test: tests/test_model_hub_card_use.py::test_two_presses_on_one_source_send_one_use_and_a_timeout_is_never_retried
   - id: MH-QUOTA-047
-    name: A card chosen by kind and expiry is sent once and fresh quota resumes a paused source
+    name: A card chosen by kind and expiry is sent once, the limits are read afterwards and a paused account resumes
     status: covered
-    kind: recovery
+    kind: contract
     layer: unit
     test: tests/test_model_hub_card_use.py::test_one_engine_post_picks_matching_kind_and_uses_fresh_quota
   - id: MH-QUOTA-048
-    name: General Model Hub RPC offers no card use operation
+    name: No RPC operation and no CLI command offers a card use
     status: covered
-    kind: recovery
+    kind: security
     layer: unit
     test: tests/test_model_hub_card_use.py::test_general_model_hub_rpc_does_not_offer_card_use
   - id: MH-QUOTA-049
-    name: A non-next grant refusal never substitutes a different card
+    name: A refusal of a grant that is not the vendor's next one is returned once without another grant
     status: covered
-    kind: recovery
+    kind: contract
     layer: unit
     test: tests/test_model_hub_card_use.py::test_non_next_grant_refusal_is_returned_once_without_substitution
   - id: MH-QUOTA-050
-    name: ChatGPT receives only the earliest usable credit with one request id
+    name: ChatGPT is sent the available credit that expires first with one request id
     status: covered
-    kind: recovery
+    kind: contract
     layer: unit
     test: tests/test_model_hub_card_use.py::test_chatgpt_sends_only_the_earliest_available_credit_and_one_request_id
   - id: MH-QUOTA-051
-    name: An already running refresh cannot clear a later uncertain use
+    name: Only a reading the user asked for after the outcome became unknown lifts the lock
     status: covered
     kind: recovery
     layer: unit
-    test: tests/test_model_hub_card_use.py::test_refresh_started_before_unknown_cannot_unlock_the_later_claim
+    test: tests/test_model_hub_card_use.py::test_only_the_users_reading_begun_after_the_unknown_outcome_lifts_the_lock
+  - id: MH-QUOTA-052
+    name: Overlapping presses through two Sources of one account send one use
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_overlapping_presses_through_two_sources_of_one_account_send_one_use
+  - id: MH-QUOTA-053
+    name: Used and not used are told only when the vendor's statement and a fresh count of the same account agree
+    status: covered
+    kind: safety
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_an_outcome_is_told_only_when_the_vendor_and_a_fresh_count_agree
+  - id: MH-QUOTA-054
+    name: Only the vendor's recognised report says an account holds no cards
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_only_a_recognised_report_says_an_account_holds_no_cards
+  - id: MH-QUOTA-055
+    name: A vendor answer is a statement only when recognised and self-consistent
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_a_vendor_answer_is_a_statement_only_when_recognised_and_consistent
+  - id: MH-QUOTA-056
+    name: A use request without a readable 200 is unknown and sent once
+    status: covered
+    kind: timeout_cancel
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_a_use_request_without_a_readable_200_is_unknown_and_sent_once
+  - id: MH-QUOTA-057
+    name: A grant that now belongs to another account is not used
+    status: covered
+    kind: guard
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_a_grant_that_now_belongs_to_another_account_is_not_used
+  - id: MH-QUOTA-058
+    name: A background, unread or foreign reading leaves an unknown outcome locked
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_an_unknown_outcome_is_not_lifted_by_a_background_unread_or_foreign_reading
+  - id: MH-QUOTA-059
+    name: Refreshes of one unknown use share a reading and wait out a vendor rate limit
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_refreshes_of_one_unknown_use_share_a_reading_and_wait_out_a_rate_limit
+  - id: MH-QUOTA-060
+    name: A settlement that cannot be written is the unconfirmed result with the lock held
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_a_settlement_that_cannot_be_written_is_the_unconfirmed_result_with_the_lock_held
+  - id: MH-QUOTA-061
+    name: A use whose answer is lost between the Web process and the controller is unconfirmed, not an error
+    status: covered
+    kind: transport
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_use_whose_answer_is_lost_between_the_processes_is_unconfirmed_not_an_error
+      - tests/test_model_hub_card_use.py::test_a_use_the_controller_refused_or_never_received_keeps_its_own_answer
+  - id: MH-QUOTA-062
+    name: A use request is checked in the Web process, read bounded on the controller and handled off its loop
+    status: covered
+    kind: boundary
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_the_web_process_hands_the_controller_only_a_source_and_a_kind
+      - tests/test_model_hub_card_use.py::test_the_controller_reads_a_use_request_bounded_and_exact
+      - tests/test_model_hub_card_use.py::test_a_use_travels_from_the_web_client_to_the_service_once_and_comes_back_closed
+  - id: MH-QUOTA-063
+    name: A summary asks no vendor who an account is and shows an unnamed lock as locked
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_reading_the_summary_asks_no_vendor_who_an_account_is_and_shows_an_unnamed_lock_as_locked
+  - id: MH-QUOTA-064
+    name: A claim that is not confirmed on disk sends nothing
+    status: covered
+    kind: persistence
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_claim_that_is_not_confirmed_on_disk_sends_nothing
+      - tests/test_model_hub_card_use.py::test_a_press_whose_claim_cannot_be_made_durable_reaches_no_vendor
+  - id: MH-QUOTA-065
+    name: A damaged, unsafe, linked or special fence file locks every account
+    status: covered
+    kind: security
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_fence_document_that_is_not_exactly_the_known_shape_locks_every_account
+      - tests/test_model_hub_card_use.py::test_a_fence_entry_that_is_not_this_users_private_file_locks_every_account
+      - tests/test_model_hub_card_use.py::test_a_store_that_was_never_written_is_empty_and_a_claim_creates_it_private
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

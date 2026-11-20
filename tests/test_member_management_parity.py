@@ -141,6 +141,9 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mobile/device/v1/requests/{request_id}/result"),
     ("DELETE", "/api/mobile/device/v1/health"),
     ("DELETE", "/api/mobile/device/v1/"),
+    # Using a reset card spends a consumable that cannot be given back: a signed-in
+    # Member manages the rest of the Model Hub, not this.
+    ("POST", "/api/models/sources/{source_id}/reset-cards/use"),
 }
 
 
@@ -178,7 +181,8 @@ def test_complete_registered_api_management_inventory():
     # + 1 voice consent answer (Editor, with the voice routes it gates).
     # + 2 system schedule device claim/receipt methods (Editor).
     # + 7 independent device routes and 2 Owner-only mobile metadata routes.
-    assert len(endpoints) == 349
+    # + 1 Model Hub reset card use (Owner role, classified in _RETAINED_OWNER_ROUTES).
+    assert len(endpoints) == 350
     for path in ("/api/system-schedule/claim", "/api/system-schedule/receipt"):
         assert ("POST", path) in endpoints
         assert http_authorization_policy("POST", path).minimum_role == "editor"

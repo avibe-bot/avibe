@@ -814,15 +814,44 @@ class EngineAdapter(Protocol):
         ...
 
     async def reset_card_account_key(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
-        """Opaque correlation of the vendor inventory; only for a local durable claim, never a wire identity."""
+        """Read, fresh, which vendor account this Source's grant belongs to.
+
+        Returns an opaque 64-character lowercase hex key, equal for every Source
+        of one account and useless as an identifier, or None when the account
+        cannot be read now. It keys the controller's local claim on the account
+        and is never sent anywhere.
+        """
         ...
 
-    async def use_reset_card(self, source_id: str, vendor: str, credential_ref: str, kind: str, request_id: str, expected_key: str) -> dict[str, Any]:
-        """Read held cards, choose the earliest usable of kind and transmit once.
+    async def use_reset_card(
+        self,
+        source_id: str,
+        vendor: str,
+        credential_ref: str,
+        kind: str,
+        request_id: str,
+        expected_key: str,
+    ) -> dict[str, Any]:
+        """Use one reset card of ``kind``: the single vendor write of one press.
 
-        Return only a closed statement, the pre-use count and known cleared limits;
-        no credential, account identity, card handle, vendor body or upstream error crosses this boundary.
-        Never retry. The controller owns the durable claim and post-use reconciliation.
+        Reads the held cards, picks the usable one of that kind that expires
+        first, checks that the grant still belongs to the account behind
+        ``expected_key`` and sends one request carrying ``request_id``. Never
+        retried, here or by the caller, and never a different card after a
+        refusal.
+
+        Returns ``{"statement": ...}`` and nothing of the vendor's own:
+        ``no_card`` when nothing was sent (no usable card of that kind, another
+        account, or the inventory could not be read); ``unknown`` when the
+        request was sent and its answer is not a recognised, self-consistent
+        vendor result (no answer, a timeout, a status other than 200, a
+        malformed or contradictory body); otherwise ``ack``, ``not_limited``,
+        ``cooldown``, ``refused`` or ``unavailable`` with ``before`` (the count
+        of that kind read just before the request) and ``cleared`` (the known
+        limit names the vendor reported). A statement is what the vendor said,
+        not what happened: the controller confirms it against a fresh count.
+        No credential, account identity, card handle, vendor body or upstream
+        error text crosses this boundary.
         """
         ...
 
@@ -832,7 +861,12 @@ class EngineAdapter(Protocol):
         The engine makes the model-free account call with the bound grant; only
         parsed ``plan``, ``windows`` and optional ``reset_cards`` (closed per-kind
         counts and eligibility from a separate read) cross this boundary, never the grant or
-        the raw body. ``plan`` is the plan this read named, one without a built-in
+        the raw body. ``reset_cards`` is ``ok`` only when the vendor's own report
+        was recognised: an answer that says nothing about cards is ``unread``,
+        never "none". Beside it, optional ``reset_card_account`` is the opaque
+        key of the account this same reading was made under (as
+        ``reset_card_account_key``), or None; it never reaches an API payload.
+        ``plan`` is the plan this read named, one without a built-in
         fee included, or None when it could not name one; only None keeps the
         last known plan. Raise ``SubscriptionQuotaError`` with a sanitized reason
         (``auth_expired``, ``rate_limited``, ``unsupported``, ``unavailable`` or

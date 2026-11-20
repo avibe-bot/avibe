@@ -523,8 +523,9 @@ def test_all_registered_model_hub_routes_follow_instance_management_roles() -> N
     for method, path in endpoints:
         picker = method == "GET" and re.fullmatch(r"/api/models/agents/[^/]+/models", path)
         minimum_role = http_authorization_policy(method, path).minimum_role
-        card_use = method == 'POST' and path == '/api/models/sources/sample-1/reset-cards/use'
-        assert minimum_role == ('owner' if card_use else "editor" if picker else "member"), (method, path)
+        # Using a reset card spends a consumable: the Owner role, not the Member role of other changes.
+        card_use = method == "POST" and path == "/api/models/sources/sample-1/reset-cards/use"
+        assert minimum_role == ("owner" if card_use else "editor" if picker else "member"), (method, path)
         for kind in ("personal", "organization"):
             for organization_role in ("owner", "admin", "member", None):
                 for role in ("owner", "member", "editor", "viewer", None):
@@ -534,7 +535,11 @@ def test_all_registered_model_hub_routes_follow_instance_management_roles() -> N
                         organization_role=organization_role,
                         is_remote=True,
                     )
-                    expected = role == 'owner' if card_use else (role in {"owner", "member"} or bool(picker and role == "editor"))
+                    expected = (
+                        role == "owner"
+                        if card_use
+                        else role in {"owner", "member"} or bool(picker and role == "editor")
+                    )
                     assert context.has_role(minimum_role) is expected, (
                         kind, organization_role, role, method, path,
                     )

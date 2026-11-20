@@ -1,149 +1,362 @@
-"""Controller-owned card use, with a durable fence and user-only reconciliation."""
+"""Using a reset card: one press, at most one vendor request, an outcome that is never guessed.
+
+A card is the user's consumable and using one cannot be undone, so this module
+is written around what must not happen:
+
+* Two vendor requests for one press, or for two presses that overlap on one
+  account. A press is one call into the adapter's use, never repeated. Presses
+  are admitted in arrival order: a press yields to every earlier press that was
+  still being handled when it arrived and turns out to be on the same account,
+  however late either account could be named (two Sources can share one). The
+  account itself is claimed durably before anything is sent (``card_fences``),
+  which covers a second page, a reload and a restart.
+* "Used" or "not used" said wrongly. Either needs the vendor's own recognised
+  statement and a fresh, recognised count of that same account that agrees with
+  it. Everything else is ``unconfirmed``: the account stays locked.
+* An unknown outcome that goes away by itself. Only a reading the user asked for,
+  begun after the outcome became unknown, recognised and made under that same
+  account, lifts the lock.
+* A use that surfaces as a generic error. Once the claim is taken a press ends
+  as "no usable card" with the claim released, or as the closed use result.
+
+Nothing here runs on behalf of a timer, an Agent or the CLI: the one caller is
+the Web route, through the private controller route that carries it. No vendor
+handle, account identity or upstream text reaches this module; the account is an
+opaque key and the adapter's reply is a closed statement.
+
+The fence is read and written on worker threads, and ``_mutation_lock`` is not
+held while the vendor is called.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
-from .card_fences import FenceUnavailable, KINDS
+from .card_fences import IN_FLIGHT, KINDS, UNCONFIRMED, FenceUnavailable, FenceView
+from .quota import QUOTA_REFRESH_INTERVAL, CardReading, QuotaSourceRef, _iso
 from .reset_cards import VENDORS
 
+if TYPE_CHECKING:
+    from .service import ModelHubService
 
-async def _account(service, source):
-    try:
-        key = await service.adapter.reset_card_account_key(source.source_id, source.vendor, source.credential_ref)
-    except Exception:
+logger = logging.getLogger(__name__)
+
+LIMITS = ("five_hour", "seven_day", "seven_day_overage_included")
+_REFUSALS = frozenset({"not_limited", "cooldown", "refused", "unavailable"})
+_ACCOUNT = re.compile(r"[a-f0-9]{64}")
+_MAX_SOURCE_ID_CHARS = 128
+
+
+@dataclass(eq=False)
+class Press:
+    """One use being handled, from the moment it arrives until its outcome is settled."""
+
+    source_id: str
+    kind: str
+    since: str
+    # The account this press is on, once it could be named; None when it could not.
+    account: "asyncio.Future[Optional[str]]"
+
+
+def _error(code: str, status: int) -> Exception:
+    from .service import ModelHubError
+
+    return ModelHubError(code, status=status)
+
+
+def selection_kind(payload: object) -> str:
+    """The card kind of a use request, whose body is exactly ``{"kind": <kind>}``.
+
+    The Web route and the controller both call this, so nothing else is ever
+    carried between them or parsed on the controller's loop.
+    """
+
+    if (
+        type(payload) is not dict
+        or set(payload) != {"kind"}
+        or type(payload["kind"]) is not str
+        or payload["kind"] not in KINDS
+    ):
+        raise _error("invalid_parameter", 400)
+    return payload["kind"]
+
+
+def checked_source_id(source_id: object) -> str:
+    if type(source_id) is not str or not 0 < len(source_id) <= _MAX_SOURCE_ID_CHARS:
+        raise _error("invalid_parameter", 400)
+    return source_id
+
+
+def unconfirmed_use(kind: str) -> dict[str, Any]:
+    """The use result when it is not known whether a card was spent."""
+
+    return {"kind": kind, "outcome": "unconfirmed", "reason": None, "cleared": []}
+
+
+def empty_summary() -> dict[str, Any]:
+    """A quota summary that reports nothing, for a use result whose summary could not be read."""
+
+    return {"refresh_interval_seconds": int(QUOTA_REFRESH_INTERVAL.total_seconds()), "sources": []}
+
+
+def _held(cards: Mapping[str, Any]) -> Optional[dict[str, int]]:
+    """Cards held per kind, from an inventory the vendor's own report established; None for any other."""
+
+    rows = cards.get("cards")
+    if cards.get("state") != "ok" or type(rows) is not list:
         return None
-    return key if isinstance(key, str) and re.fullmatch("[a-f0-9]{64}", key) else None
+    held: dict[str, int] = {}
+    for row in rows:
+        if (
+            type(row) is not dict
+            or row.get("kind") not in KINDS
+            or row["kind"] in held
+            or type(row.get("count")) is not int
+            or row["count"] < 1
+        ):
+            return None
+        held[row["kind"]] = row["count"]
+    return held
 
 
-def _decision(kind, reply, inventory):
-    result = dict(kind=kind, outcome="unconfirmed", reason=None, cleared=[])
-    if not isinstance(reply, dict) or inventory.get("state") != "ok":
+def _decide(kind: str, reply: Mapping[str, Any], reading: Optional[CardReading], account: str) -> dict[str, Any]:
+    """What a press may tell the user: the vendor's statement, if a fresh count of the same account agrees."""
+
+    result = unconfirmed_use(kind)
+    statement, before, cleared = reply.get("statement"), reply.get("before"), reply.get("cleared", [])
+    if type(before) is not int or before < 1 or type(cleared) is not list:
         return result
-    before, statement = reply.get("before"), reply.get("statement")
-    if type(before) is not int or before <= 0:
+    # The count must be the vendor's own report, read after the request, under this account.
+    if reading is None or reading.account != account:
         return result
-    after = next((card["count"] for card in inventory["cards"] if card["kind"] == kind), 0)
+    held = _held(reading.cards)
+    if held is None:
+        return result
+    after = held.get(kind, 0)
     if statement == "ack" and after < before:
-        allowed = ("five_hour", "seven_day", "seven_day_overage_included")
-        result.update(outcome="used", cleared=[v for v in allowed if v in reply.get("cleared", [])])
-    elif statement in ("not_limited", "cooldown", "refused", "unavailable") and after == before:
+        result.update(outcome="used", cleared=[limit for limit in LIMITS if limit in cleared])
+    elif statement in _REFUSALS and after == before:
         result.update(outcome="not_used", reason=statement)
+    # An acknowledgement without a lower count, a refusal beside a changed one, an
+    # unknown statement: the outcome is not known.
     return result
 
 
-async def use(service, source_id, payload):
-    from .service import ModelHubError
-
-    if (
-        not isinstance(payload, dict)
-        or set(payload) != {"kind"}
-        or not isinstance(payload["kind"], str)
-        or payload["kind"] not in KINDS
-    ):
-        raise ModelHubError("invalid_parameter", status=400)
-    # Remember only claims which overlapped an unresolved press. Two aliases of
-    # the same account can finish their identity GETs in the opposite order.
-    epoch = service._card_epoch
-    kind = payload["kind"]
-    if source_id in service._card_operations:
-        raise ModelHubError("reset_card_locked", status=409)
-
-    async def run():
+async def _card_source(service: "ModelHubService", source_id: str) -> Optional[QuotaSourceRef]:
+    try:
         sources = await asyncio.to_thread(service._quota_sources)
-        source = next((s for s in sources if s.source_id == source_id and s.vendor in VENDORS), None)
-        key = await _account(service, source) if source else None
-        if not key:
-            raise ModelHubError("reset_card_unavailable", status=409)
-        if service._card_epochs.get(key, 0) > epoch:
-            raise ModelHubError("reset_card_locked", status=409)
-        service._card_epoch += 1
-        service._card_epochs[key] = service._card_epoch
+    except Exception:  # noqa: BLE001 - nothing was sent; the press ends as "no usable card"
+        return None
+    return next((source for source in sources if source.source_id == source_id and source.vendor in VENDORS), None)
+
+
+async def _fresh_account(service: "ModelHubService", source: QuotaSourceRef) -> Optional[str]:
+    """Which account the Source's grant belongs to, read now: a claim never rests on a remembered one."""
+
+    reader = getattr(service.adapter, "reset_card_account_key", None)
+    if not callable(reader):
+        return None
+    try:
+        account = await reader(source.source_id, source.vendor, source.credential_ref)
+    except Exception:  # noqa: BLE001 - an unreadable account is no account
+        return None
+    return account if isinstance(account, str) and _ACCOUNT.fullmatch(account) else None
+
+
+async def _send_once(
+    service: "ModelHubService",
+    source: QuotaSourceRef,
+    kind: str,
+    request_id: str,
+    account: str,
+) -> Mapping[str, Any]:
+    """The press's only call into the adapter's use. If it fails the outcome is unknown; it is not made again."""
+
+    try:
+        reply = await service.adapter.use_reset_card(
+            source.source_id, source.vendor, source.credential_ref, kind, request_id, account
+        )
+    except Exception:  # noqa: BLE001 - never the exception's text, never a second call
+        return {}
+    return reply if isinstance(reply, dict) else {}
+
+
+async def _settle(service: "ModelHubService", account: str, request_id: str, *, unknown: bool) -> bool:
+    # The mark is taken now: every reading that began earlier, the press's own
+    # re-read included, is numbered below it and can never lift this lock.
+    mark = service.quota.tick()
+    try:
+        return await asyncio.to_thread(service.card_fences.settle, account, request_id, unknown=unknown, mark=mark)
+    except Exception:  # noqa: BLE001 - not released: the claim on disk keeps the account locked
+        return False
+
+
+async def _summary_after(service: "ModelHubService", fresh: Mapping[str, Any]) -> dict[str, Any]:
+    """The summary a settled use returns. Its failure must not hide what happened to the card."""
+
+    if fresh:
         try:
-            request_id = await asyncio.to_thread(service.card_fences.claim, key, kind, service.now())
-        except FenceUnavailable:
-            raise ModelHubError("reset_card_locked", status=409) from None
-        service._card_pending.pop(source_id, None)
-        finalized = False
-        try:
-            try:
-                reply = await service.adapter.use_reset_card(
-                    source_id, source.vendor, source.credential_ref, kind, request_id, key
-                )
-            except Exception:
-                reply = {}
-            if isinstance(reply, dict) and reply.get("statement") == "no_card":
-                await asyncio.to_thread(service.card_fences.finish, key, request_id, unknown=False)
-                finalized = True
-                raise ModelHubError("reset_card_unavailable", status=409)
+            # The existing rule of a forced read: the account's own fresh reading decides.
+            await service._resume_accounts_with_quota({"sources": [fresh]})
+        except Exception:  # noqa: BLE001
+            logger.warning("Model Hub could not resume an account after a reset card use")
+    try:
+        return await service.quota_summary()
+    except Exception:  # noqa: BLE001
+        logger.warning("Model Hub could not read the quota summary after a reset card use")
+        return empty_summary()
+
+
+async def _transact(service: "ModelHubService", press: Press, source: QuotaSourceRef, account: str) -> dict[str, Any]:
+    try:
+        request_id = await asyncio.to_thread(service.card_fences.claim, account, press.kind, service.now())
+    except FenceUnavailable:
+        # Already claimed, or the claim could not be made durable: nothing is sent.
+        raise _error("reset_card_locked", 409) from None
+    decision = unconfirmed_use(press.kind)
+    nothing_sent = False
+    fresh: Mapping[str, Any] = {}
+    try:
+        reply = await _send_once(service, source, press.kind, request_id, account)
+        if reply.get("statement") == "no_card":
+            nothing_sent = True
+        else:
             fresh = await service.quota.reread(source)
-            same_account = await _account(service, source) == key
-            decision = _decision(kind, reply, fresh.get("reset_cards", {}) if same_account else {})
-            await asyncio.to_thread(
-                service.card_fences.finish, key, request_id, unknown=decision["outcome"] == "unconfirmed"
-            )
-            finalized = True
-            if same_account and fresh:
-                await service._resume_accounts_with_quota({"sources": [fresh]})
-            return {"quota": await service.quota_summary(), "use": decision}
+            # Only the re-read's own answer: a reading another caller put in its place proves nothing here.
+            reading = service.quota.card_reading(source) if fresh else None
+            decision = _decide(press.kind, reply, reading, account)
+    except Exception:  # noqa: BLE001 - whatever went wrong after the claim, the outcome is unknown
+        nothing_sent, decision = False, unconfirmed_use(press.kind)
+        logger.warning("Model Hub reset card use could not be confirmed: source=%s", source.source_id)
+    released = await _settle(
+        service, account, request_id, unknown=not nothing_sent and decision["outcome"] == "unconfirmed"
+    )
+    # Settled: from here the summary shows what the fence holds, not a use in flight.
+    _retire(service, press)
+    if not released:
+        # Unknown, or established but the claim could not be released on disk: the
+        # account stays locked, and the lock is what the user has to act on.
+        decision = unconfirmed_use(press.kind)
+    elif nothing_sent:
+        raise _error("reset_card_unavailable", 409)
+    outcome = decision["outcome"] if decision["reason"] is None else f"{decision['outcome']}:{decision['reason']}"
+    logger.info("Model Hub reset card use: source=%s kind=%s outcome=%s", source.source_id, press.kind, outcome)
+    return {"quota": await _summary_after(service, fresh), "use": decision}
+
+
+def _retire(service: "ModelHubService", press: Press) -> None:
+    if press in service._card_presses:
+        service._card_presses.remove(press)
+
+
+async def _handle(service: "ModelHubService", press: Press, earlier: tuple[Press, ...]) -> dict[str, Any]:
+    try:
+        source: Optional[QuotaSourceRef] = None
+        account: Optional[str] = None
+        try:
+            source = await _card_source(service, press.source_id)
+            if source is not None:
+                account = await _fresh_account(service, source)
         finally:
-            if not finalized:
-                try:
-                    await asyncio.to_thread(service.card_fences.finish, key, request_id, unknown=True)
-                except FenceUnavailable:
-                    pass  # Store is fail-closed.
+            # Later presses compare against it, whatever becomes of this one.
+            press.account.set_result(account)
+        if source is None or account is None:
+            raise _error("reset_card_unavailable", 409)
+        for other in earlier:
+            # It was being handled when this press arrived. If it is on the same
+            # account it wins, even when it has settled and released its claim since.
+            if await other.account == account:
+                raise _error("reset_card_locked", 409)
+        return await _transact(service, press, source, account)
+    finally:
+        _retire(service, press)
 
-    # Shield the whole transaction, including the claim, against a dropped browser connection.
-    service._card_pending[source_id] = dict(reason="in_flight", kind=kind, since=service.now().isoformat())
-    task = asyncio.create_task(run())
-    service._card_operations[source_id] = task
 
-    def finished(done):
-        service._card_operations.pop(source_id, None)
-        service._card_pending.pop(source_id, None)
-        if not service._card_operations:
-            service._card_epochs.clear()
-        if not done.cancelled():
-            done.exception()
+def _observed(task: "asyncio.Task[Any]") -> None:
+    if not task.cancelled():
+        task.exception()
 
-    task.add_done_callback(finished)
+
+async def use(service: "ModelHubService", source_id: object, payload: object) -> dict[str, Any]:
+    """Use one card of the requested kind on the Source's account. See the module docstring."""
+
+    kind = selection_kind(payload)
+    source_id = checked_source_id(source_id)
+    presses = service._card_presses
+    # No await between this check and the append: admission is one step on the loop.
+    if any(press.source_id == source_id for press in presses):
+        raise _error("reset_card_locked", 409)
+    press = Press(source_id, kind, _iso(service.now()), asyncio.get_running_loop().create_future())
+    earlier = tuple(presses)
+    presses.append(press)
+    task = asyncio.create_task(_handle(service, press, earlier), name="model-hub-reset-card-use")
+    task.add_done_callback(_observed)
+    # A page that goes away does not stop a use that may already be at the vendor.
     return await asyncio.shield(task)
 
 
-async def refresh_unknown(service, sources):
-    if not await asyncio.to_thread(service.card_fences.has_locks):
-        return
+async def unknown_floor(service: "ModelHubService") -> Optional[int]:
+    """The point a reading must have begun after to answer every unknown use; None when there is none."""
+
+    return await asyncio.to_thread(service.card_fences.unknown_floor)
+
+
+async def lift_unknown(service: "ModelHubService", sources: list[QuotaSourceRef]) -> None:
+    """After the user's forced read: let each recognised reading answer the unknown use of its own account.
+
+    Only readings the user asked for qualify, and the fence lifts a lock only
+    for a reading that began after its outcome became unknown. A background or
+    cached reading, one that was already under way, an unread inventory or
+    another account's reading leaves the lock where it is.
+    """
+
+    readings = []
     for source in sources:
         if source.vendor not in VENDORS:
             continue
-        key = await _account(service, source)
-        token = await asyncio.to_thread(service.card_fences.refresh_token, key) if key else None
-        if token:
-            # The generation must predate this particular vendor request. Cached, timer and
-            # already-running reads never participate, even if their response arrives later.
-            fresh = await service.quota.reread(source)
-            if fresh.get("reset_cards", {}).get("state") == "ok" and await _account(service, source) == key:
-                await asyncio.to_thread(service.card_fences.confirm_read, key, token)
+        reading = service.quota.card_reading(source)
+        if (
+            reading is not None
+            and reading.forced
+            and reading.account is not None
+            and _held(reading.cards) is not None
+        ):
+            readings.append((reading.account, reading.sequence))
+    if readings:
+        await asyncio.to_thread(service.card_fences.release_after_readings, readings)
 
 
-async def overlay(service, sources, summary):
-    durable = await asyncio.to_thread(service.card_fences.has_locks)
-    if not durable and not service._card_pending:
+def _shown_lock(view: FenceView, account: Optional[str], vendor: str) -> Optional[dict[str, str]]:
+    if account is not None and not view.damaged:
+        lock = view.locks.get(account)
+        return dict(lock) if lock is not None else None
+    if view.locked:
+        # Whose lock it is cannot be told: the account was not read yet, or the
+        # store is unreadable. Shown locked rather than free; a press is decided
+        # by a fresh read of the account either way.
+        return {"reason": UNCONFIRMED, "kind": "all" if vendor == "anthropic" else "account", "since": view.since}
+    return None
+
+
+async def overlay(service: "ModelHubService", sources: list[QuotaSourceRef], summary: dict[str, Any]) -> None:
+    """Put each account's lock on its rows, from memory and the fence: no vendor is asked here."""
+
+    view = await asyncio.to_thread(service.card_fences.view)
+    presses = {press.source_id: press for press in service._card_presses}
+    if not presses and not view.locked:
         return
-    refs = {src.source_id: src for src in sources}
+    by_id = {source.source_id: source for source in sources}
     for row in summary["sources"]:
-        if "reset_cards" not in row:
+        source = by_id.get(row["source_id"])
+        if "reset_cards" not in row or source is None:
             continue
-        pending = service._card_pending.get(row["source_id"])
-        if pending or not durable:
-            row["reset_cards"] = {**row["reset_cards"], "lock": pending}
-            continue
-        key = await _account(service, refs[row["source_id"]])
-        kind = "all" if row["vendor"] == "anthropic" else "account"
-        lock = (
-            await asyncio.to_thread(service.card_fences.public, key, kind)
-            if key
-            else service.card_fences.unresolved_identity(kind)
-        )
+        press = presses.get(row["source_id"])
+        if press is not None:
+            lock: Optional[dict[str, str]] = {"reason": IN_FLIGHT, "kind": press.kind, "since": press.since}
+        else:
+            lock = _shown_lock(view, service.quota.card_account(source), row["vendor"])
         row["reset_cards"] = {**row["reset_cards"], "lock": lock}

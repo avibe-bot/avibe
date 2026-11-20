@@ -23,6 +23,7 @@ import itertools
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Optional, Sequence
@@ -46,6 +47,8 @@ _MAX_UPSTREAM_ROWS: Final = 64
 _MAX_BODY_BYTES: Final = 256 * 1024
 
 QUOTA_VENDORS: Final = frozenset({"anthropic", "openai", "codex", "gemini", "xai"})
+# The vendors whose report can carry reset cards.
+RESET_CARD_VENDORS: Final = frozenset({"anthropic", "openai", "codex"})
 
 # Claude's legacy top-level keys. `seven_day_oauth_apps` is an app-surface limit
 # Claude Code itself does not present, so it is deliberately not a window here.
@@ -609,6 +612,7 @@ _RATE_LIMIT_COOLDOWN_FLOOR: Final = timedelta(minutes=5)
 _RATE_LIMIT_COOLDOWN_CEILING: Final = timedelta(hours=1)
 
 QuotaFetch = Callable[[str, str, str], Awaitable[Mapping[str, Any]]]
+_CARD_ACCOUNT: Final = re.compile(r"[a-f0-9]{64}")
 
 
 @dataclass(frozen=True)
@@ -620,6 +624,21 @@ class QuotaSourceRef:
     account_label: Optional[str]
 
 
+@dataclass(frozen=True)
+class CardReading:
+    """One vendor reading of an account's reset cards, for the decisions that rest on it.
+
+    ``sequence`` orders vendor readings against the moment a card use became
+    unknown; ``forced`` says the user asked for it; ``account`` is the opaque
+    key of the account the same reading was made under. None of it is serialized.
+    """
+
+    sequence: int
+    forced: bool
+    account: Optional[str]
+    cards: Mapping[str, Any]
+
+
 @dataclass
 class _QuotaEntry:
     credential_ref: str
@@ -629,6 +648,13 @@ class _QuotaEntry:
     failure: Optional[QuotaFailure] = None
     cooldown_until: Optional[datetime] = None
     task: Optional[asyncio.Task[None]] = None
+    # The reading last started on this entry, whether or not it has answered.
+    sequence: int = 0
+    forced: bool = False
+    # The reading the snapshot came from, and the account it was made under.
+    snapshot_sequence: int = 0
+    snapshot_forced: bool = False
+    card_account: Optional[str] = None
 
 
 def _cooldown(now: datetime, retry_after_seconds: Optional[float]) -> datetime:
@@ -653,8 +679,28 @@ class SubscriptionQuotaCache:
         self._now = now
         self._entries: dict[str, _QuotaEntry] = {}
         self._fetch_slots = asyncio.Semaphore(QUOTA_MAX_CONCURRENT_FETCHES)
+        self._sequence = itertools.count(1)
 
-    async def summary(self, sources: Sequence[QuotaSourceRef], *, force: bool = False) -> dict[str, Any]:
+    def tick(self) -> int:
+        """A point in the order of vendor readings: every reading started later is numbered above it."""
+
+        return next(self._sequence)
+
+    async def summary(
+        self,
+        sources: Sequence[QuotaSourceRef],
+        *,
+        force: bool = False,
+        newer_than: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Report every Source, re-reading the ones that are due.
+
+        ``newer_than`` is for a forced read while a card use is unknown: an
+        account with cards then needs a reading the user asked for that began
+        after that point, so the forced-refresh interval does not hold one back.
+        A vendor's rate-limit cooldown still does.
+        """
+
         live = {source.source_id for source in sources}
         for source_id in list(self._entries):
             if source_id not in live:
@@ -662,7 +708,7 @@ class SubscriptionQuotaCache:
         pending = [
             task
             for source in sources
-            if (task := self._schedule(source, force=force)) is not None
+            if (task := self._schedule(source, force=force, newer_than=newer_than)) is not None
         ]
         if pending:
             # A slow vendor must not hold the page: whatever has not answered by
@@ -701,25 +747,60 @@ class SubscriptionQuotaCache:
             self._entries[source.source_id] = entry
         return entry
 
-    def _schedule(self, source: QuotaSourceRef, *, force: bool) -> Optional[asyncio.Task[None]]:
+    def _schedule(
+        self,
+        source: QuotaSourceRef,
+        *,
+        force: bool,
+        newer_than: Optional[int] = None,
+    ) -> Optional[asyncio.Task[None]]:
         if source.vendor not in QUOTA_VENDORS:
             return None
         entry = self._entry(source)
+        # Whether this Source still owes the user a reading begun after `newer_than`.
+        owed = (
+            force
+            and newer_than is not None
+            and source.vendor in RESET_CARD_VENDORS
+            and not (entry.forced and entry.sequence > newer_than)
+        )
         if entry.task is not None and not entry.task.done():
-            return entry.task
+            if not owed:
+                # Concurrent reads, and repeated refreshes of one unknown use, share one fetch.
+                return entry.task
+            # The reading in flight began too early to answer; it lands on the detached entry.
+            entry = self._detach(source, entry)
         now = self._now()
         if entry.cooldown_until is not None and now < entry.cooldown_until:
             return None
         interval = QUOTA_FORCED_REFRESH_INTERVAL if force else QUOTA_REFRESH_INTERVAL
-        if entry.attempted_at is not None and now - entry.attempted_at < interval:
+        if not owed and entry.attempted_at is not None and now - entry.attempted_at < interval:
             return None
+        return self._start(source, entry, forced=force)
+
+    def _detach(self, source: QuotaSourceRef, previous: _QuotaEntry) -> _QuotaEntry:
+        """A fresh entry that keeps what was last read and waits for none of what is in flight."""
+
+        entry = _QuotaEntry(
+            credential_ref=source.credential_ref,
+            snapshot=previous.snapshot,
+            fetched_at=previous.fetched_at,
+            snapshot_sequence=previous.snapshot_sequence,
+            snapshot_forced=previous.snapshot_forced,
+            card_account=previous.card_account,
+        )
+        self._entries[source.source_id] = entry
+        return entry
+
+    def _start(self, source: QuotaSourceRef, entry: _QuotaEntry, *, forced: bool) -> asyncio.Task[None]:
+        entry.sequence, entry.forced = self.tick(), forced
         entry.task = asyncio.create_task(
-            self._refresh(source, entry),
+            self._refresh(source, entry, sequence=entry.sequence, forced=forced),
             name=f"model-hub-quota-{source.source_id}",
         )
         return entry.task
 
-    async def _refresh(self, source: QuotaSourceRef, entry: _QuotaEntry) -> None:
+    async def _refresh(self, source: QuotaSourceRef, entry: _QuotaEntry, *, sequence: int, forced: bool) -> None:
         try:
             async with self._fetch_slots:
                 # The throttle counts from the vendor request, not from the queue:
@@ -751,23 +832,57 @@ class SubscriptionQuotaCache:
         entry.snapshot = {"plan": plan, "windows": windows}
         if "reset_cards" in parsed:
             entry.snapshot["reset_cards"] = parsed["reset_cards"]
+        account = parsed.get("reset_card_account")
+        entry.card_account = account if isinstance(account, str) and _CARD_ACCOUNT.fullmatch(account) else None
+        entry.snapshot_sequence, entry.snapshot_forced = sequence, forced
         entry.fetched_at = self._now()
         entry.failure = None
         entry.cooldown_until = None
 
-    async def reread(self, source: QuotaSourceRef) -> dict:
-        """A card decision needs its own new request, never a throttled or joined read."""
-        entry = _QuotaEntry(credential_ref=source.credential_ref)
+    async def reread(self, source: QuotaSourceRef) -> dict[str, Any]:
+        """Read one Source again for a card use: its own vendor request, never a cached or shared one.
+
+        Empty when the Source was re-authenticated or read again meanwhile, so
+        that what came back cannot be taken for this Source's current account.
+        """
+
         previous = self._entries.get(source.source_id)
-        if previous and previous.credential_ref == source.credential_ref:
-            entry.snapshot, entry.fetched_at = previous.snapshot, previous.fetched_at
-        self._entries[source.source_id] = entry
-        entry.task = asyncio.create_task(self._refresh(source, entry))
-        await asyncio.shield(entry.task)
+        if previous is not None and previous.credential_ref == source.credential_ref:
+            entry = self._detach(source, previous)
+        else:
+            entry = _QuotaEntry(credential_ref=source.credential_ref)
+            self._entries[source.source_id] = entry
+        await asyncio.shield(self._start(source, entry, forced=True))
         if self._entries.get(source.source_id) is not entry:
-            # The source was rebound or a newer explicit read replaced this one.
             return {}
         return self._payload(source)
+
+    def card_reading(self, source: QuotaSourceRef) -> Optional[CardReading]:
+        """The current reading of this Source's cards, or None when its last attempt did not answer."""
+
+        entry = self._entries.get(source.source_id)
+        if (
+            entry is None
+            or entry.credential_ref != source.credential_ref
+            or entry.snapshot is None
+            or entry.failure is not None
+            or "reset_cards" not in entry.snapshot
+        ):
+            return None
+        return CardReading(
+            sequence=entry.snapshot_sequence,
+            forced=entry.snapshot_forced,
+            account=entry.card_account,
+            cards=entry.snapshot["reset_cards"],
+        )
+
+    def card_account(self, source: QuotaSourceRef) -> Optional[str]:
+        """The account this Source was last read under. For display only: it decides nothing."""
+
+        entry = self._entries.get(source.source_id)
+        if entry is None or entry.credential_ref != source.credential_ref:
+            return None
+        return entry.card_account
 
     def _payload(self, source: QuotaSourceRef) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -788,11 +903,10 @@ class SubscriptionQuotaCache:
                 windows=entry.snapshot["windows"],
                 fetched_at=_iso(entry.fetched_at) if entry.fetched_at else None,
             )
-        from . import reset_cards
-
-        if source.vendor in reset_cards.VENDORS:
+        if source.vendor in RESET_CARD_VENDORS:
+            # Cards are current or unread: a failed attempt never shows the last count as today's.
             snapshot = entry.snapshot if entry and entry.snapshot and not entry.failure else {}
-            payload['reset_cards'] = snapshot.get('reset_cards', reset_cards.unread())
+            payload["reset_cards"] = snapshot.get("reset_cards") or {"state": "unread", "lock": None, "cards": []}
         failure = entry.failure if entry is not None else None
         if failure is None:
             if entry is None or entry.snapshot is None:

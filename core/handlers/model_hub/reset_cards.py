@@ -1,14 +1,28 @@
-"""Closed, credential-free projections of vendors' reset-card inventories."""
+"""Closed, credential-free projections of vendors' reset-card inventories.
+
+A projection is authoritative or it is not a projection: an answer that cannot
+be recognised as the vendor's own report raises ``malformed`` and is shown as
+``unread``. "No cards" is said only by a recognised report that carries none.
+Using a card and lifting an unknown outcome both rest on that difference.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
 
-from .quota import SubscriptionQuotaError, _iso, _load_object, _moment
+from .quota import (
+    RESET_CARD_VENDORS,
+    SubscriptionQuotaError,
+    _iso,
+    _load_object,
+    _moment,
+    parse_claude_quota,
+    parse_codex_quota,
+)
 
 
-VENDORS = frozenset({"anthropic", "codex", "openai"})
+VENDORS = RESET_CARD_VENDORS
 
 
 def unread() -> dict:
@@ -52,9 +66,20 @@ def _card(kind, count, expiry, stated, blocked, until=None):
     )
 
 
+# A vendor leaves its card block out, or nulls it, for an account that holds no
+# cards. A report that names the block is its own evidence. One that does not
+# must at least carry the usage windows it was asked for: an empty object or
+# another service's answer says nothing about cards, and is not "none".
+
+
 def claude_cards(body: object, now: datetime, *, candidates: list | None = None) -> dict:
-    block = _load_object(body).get("cedar_ember")
+    """Project Claude's card block; ``candidates`` collects (kind, expiry, handle) of usable grants."""
+
+    report = _load_object(body)
+    block = report.get("cedar_ember")
     if block is None:
+        if "cedar_ember" not in report and not parse_claude_quota(body)["windows"]:
+            raise SubscriptionQuotaError("malformed")
         return _ok([])
     if not isinstance(block, dict):
         raise SubscriptionQuotaError("malformed")
@@ -119,8 +144,11 @@ def claude_cards(body: object, now: datetime, *, candidates: list | None = None)
 
 
 def codex_count(body: object) -> int:
-    block = _load_object(body).get("rate_limit_reset_credits")
+    report = _load_object(body)
+    block = report.get("rate_limit_reset_credits")
     if block is None:
+        if "rate_limit_reset_credits" not in report and not parse_codex_quota(body)["windows"]:
+            raise SubscriptionQuotaError("malformed")
         return 0
     if not isinstance(block, dict):
         raise SubscriptionQuotaError("malformed")
@@ -128,6 +156,8 @@ def codex_count(body: object) -> int:
 
 
 def codex_cards(count: int, details: object, now: datetime, *, candidates: list | None = None) -> dict:
+    """Project ChatGPT's credits; ``candidates`` collects (kind, expiry, handle) of available ones."""
+
     if not count:
         return _ok([])
     envelope = _load_object(details, allow_array=True)
@@ -153,7 +183,7 @@ def codex_cards(count: int, details: object, now: datetime, *, candidates: list 
         if (not end or end > now) and isinstance(credit_id, str) and credit_id.strip():
             expires.append(end)
             if candidates is not None:
-                candidates.append(('account', end, credit_id))
+                candidates.append(("account", end, credit_id))
     return _ok(
         [
             _card(

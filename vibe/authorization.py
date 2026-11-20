@@ -761,9 +761,12 @@ def http_authorization_policy(
         if _http_rule_matches(normalized_method, path, _REMOTE_ACCESS_MEMBER_HTTP_RULES):
             return HttpAuthorizationPolicy("member")
         return HttpAuthorizationPolicy("owner")
-    if normalized_method == 'POST' and re.fullmatch(r'/api/models/sources/[^/]+/reset-cards/use', path):
-        # An irreversible subscription consumable, unlike ordinary Model Hub management.
-        return HttpAuthorizationPolicy('owner')
+    if normalized_method == "POST" and re.fullmatch(r"/api/models/sources/[^/]+/reset-cards/use", path):
+        # Spends a subscription consumable that cannot be given back, so the Owner
+        # role rather than the Member role of other Model Hub changes. Who holds that
+        # role is the instance's one rule for every route: a signed-in Owner, or a
+        # caller the Web server treats as its Owner by where the request comes from.
+        return HttpAuthorizationPolicy("owner")
     if _http_rule_matches(normalized_method, path, _MEMBER_HTTP_RULES):
         return HttpAuthorizationPolicy("member", direct_loopback_only=path == "/api/desktop/update/idle")
 
