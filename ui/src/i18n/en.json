@@ -1967,7 +1967,7 @@
             "other": "Not used."
           },
           "recounted": "The count changed; refreshed.",
-          "unconfirmed": "The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; refresh this account in a moment and check the count.",
+          "unconfirmed": "The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; wait at least a minute, then refresh this account and check the count.",
           "blocked": {
             "needs_limit": "Usable once a limit is reached",
             "cooldown": "Usable in {{duration}}",

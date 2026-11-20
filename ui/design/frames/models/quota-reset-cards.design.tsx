@@ -1,5 +1,6 @@
 // 订阅额度 · 重置卡 (approved by the owner 2026-11-20, 「按这稿做」; shipped): the quota tab, with each
-// account's reset cards inside its card and a refresh on the card. One frame per state the owner
+// account's reset cards inside its card and a refresh on the card. That refresh reads every account
+// again (the one forced read there is); its indicator shows on the account that was pressed. One frame per state the owner
 // asked for: none, one kind, both kinds, the line before a use, using, used, not used, an answer
 // that never arrived, and a card the vendor does not let through yet. What the server read (cards,
 // lock) comes from the summary; the page's own step for an account comes from `resetCardPhases`.
@@ -79,6 +80,7 @@ const phone = (name: string, title: string, held: Held, reset = false): FrameSpe
 const both = [full, fable];
 const afterUse = [full, { ...fable, count: 2 }];
 const confirm: ResetCardPhase = { phase: 'confirm', kind: 'fable', stated: true, count: 3 };
+const used: ResetCardPhase = { phase: 'used', kind: 'fable', stated: true, cleared: ['five_hour', 'seven_day_overage_included'] };
 const unconfirmed: ResetCardLock = { reason: 'unconfirmed', kind: 'fable', since: at(-1) };
 
 const designFrames = frames([
@@ -89,7 +91,7 @@ const designFrames = frames([
   desktop('confirm', '使用前', { claude: both, phase: confirm }),
   // What every open page shows while the server holds the use.
   desktop('using', '使用中', { claude: both, lock: { reason: 'in_flight', kind: 'fable', since: at(0) } }),
-  desktop('used', '已使用', { claude: afterUse, phase: { phase: 'used', kind: 'fable', stated: true } }, true),
+  desktop('used', '已使用', { claude: afterUse, phase: used }, true),
   desktop('failed', '没有用掉', { claude: both, phase: { phase: 'not_used', kind: 'fable', reason: 'cooldown' } }),
   desktop('unconfirmed', '结果未确认', { claude: both, lock: unconfirmed }),
   desktop('not-usable', '现在不能用', {
@@ -98,7 +100,7 @@ const designFrames = frames([
   }, true),
   phone('both-kinds', '两种', { claude: both, chatgpt: [chatgpt] }),
   phone('confirm', '使用前', { claude: both, phase: confirm }),
-  phone('used', '已使用', { claude: afterUse, phase: { phase: 'used', kind: 'fable', stated: true } }, true),
+  phone('used', '已使用', { claude: afterUse, phase: used }, true),
   phone('unconfirmed', '结果未确认', { claude: both, lock: unconfirmed }),
 ]);
 

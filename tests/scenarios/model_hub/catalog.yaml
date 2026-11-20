@@ -2286,6 +2286,18 @@ scenarios:
     kind: recovery
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-090
+  - id: MH-QUOTA-091
+    name: A reset-card confirm step whose card a later reading no longer offers, or whose account it shows locked, is dropped for good
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-091
+  - id: MH-QUOTA-092
+    name: A reset-card press sends one POST of kind and count to the encoded Source, and each answer or failure reads as what it says
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-092
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

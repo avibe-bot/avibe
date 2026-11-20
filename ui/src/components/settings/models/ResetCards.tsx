@@ -19,8 +19,9 @@ export type ResetCardPhase =
   /** 「使用」 was pressed: one line says what happens, then 确认使用 or 取消. Nothing is sent yet. */
   | { phase: 'confirm'; kind: ResetCardKind; stated: boolean; count: number }
   | { phase: 'using'; kind: ResetCardKind; stated: boolean }
-  /** The limits and the count on screen are the reading the server returned with this answer. */
-  | { phase: 'used'; kind: ResetCardKind; stated: boolean }
+  /** The limits and the count on screen are the reading the server returned with this answer;
+   *  `cleared` are the limits the vendor reported as cleared. */
+  | { phase: 'used'; kind: ResetCardKind; stated: boolean; cleared: readonly string[] }
   /** The server says no card was spent. `held`: it refused before asking the vendor (the account was busy, or holds no usable card of this kind). */
   | { phase: 'not_used'; kind: ResetCardKind; reason: ResetCardRefusal | 'held' | null }
   /** The server's fresh count differed from the one confirmed on: nothing was sent, the block shows the new count. */
@@ -35,6 +36,14 @@ export type ResetCardIntent =
 
 /** The kinds whose vendor states what they do; ChatGPT's `account` states nothing. */
 type StatedKind = Exclude<ResetCardKind, 'account'>;
+
+/** The limits each `done.*` sentence says are back, as `use.cleared` names them. */
+const DONE_NEEDS: Record<StatedKind, readonly string[]> = {
+  session: ['five_hour'],
+  weekly: ['seven_day'],
+  all: ['five_hour', 'seven_day'],
+  fable: ['five_hour', 'seven_day_overage_included'],
+};
 const NOTE = 'text-[length:var(--model-hub-usage-label-size)]';
 
 type Line = { tone: 'note' | 'done' | 'warn'; text: string } | { tone: 'busy'; text: string };
@@ -93,7 +102,9 @@ export const ResetCardsBlock: React.FC<{
   const usingKind = lock?.reason === 'in_flight' ? lock.kind : phase?.phase === 'using' ? phase.kind : null;
   const unconfirmedKind = lock?.reason === 'unconfirmed' ? lock.kind : phase?.phase === 'unconfirmed' ? phase.kind : null;
   const held = lock !== null || phase?.phase === 'using' || phase?.phase === 'unconfirmed';
-  const asking = phase?.phase === 'confirm' && !held ? phase : null;
+  // A step whose card is no longer listed as usable is not drawn (the page drops it on the next reading).
+  const asking = phase?.phase === 'confirm' && !held
+    && rows.some((card) => card.kind === phase.kind && card.usable) ? phase : null;
 
   const line = (kind: ResetCardKind): Line | null => {
     if (unconfirmedKind === kind) return { tone: 'warn', text: t('settings.models.quota.resetCards.unconfirmed') as string };
@@ -103,7 +114,8 @@ export const ResetCardsBlock: React.FC<{
     if (phase.phase === 'used') {
       return {
         tone: 'done',
-        text: stated(kind, phase.stated)
+        // The kind's sentence only when the vendor reported clearing every limit it names.
+        text: stated(kind, phase.stated) && DONE_NEEDS[kind].every((limit) => phase.cleared.includes(limit))
           ? t('settings.models.quota.resetCards.usedDone', { done: t(`settings.models.quota.resetCards.done.${kind}`) }) as string
           : t('settings.models.quota.resetCards.used') as string,
       };
@@ -207,7 +219,8 @@ export const ResetCardsBlock: React.FC<{
 };
 
 const Message: React.FC<{ line: Line; id?: string }> = ({ line, id }) => {
-  if (line.tone === 'note') return <p id={id} className={`mt-2 text-foreground ${NOTE}`} role="status">{line.text}</p>;
+  // The confirm line is the description of the focused buttons, so it is not a live region too.
+  if (line.tone === 'note') return <p id={id} className={`mt-2 text-foreground ${NOTE}`} role={id ? undefined : 'status'}>{line.text}</p>;
   if (line.tone === 'busy') {
     return (
       <p className={`mt-2 flex items-center gap-1.5 text-muted ${NOTE}`} role="status">

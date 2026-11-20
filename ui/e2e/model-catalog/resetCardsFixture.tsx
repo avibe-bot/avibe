@@ -35,7 +35,8 @@ const summary = ({ claude, chatgpt: gpt, lock = null }: Held, reset = false): Qu
       windows: [
         window('five_hour', 'session', reset ? 0 : 100, reset ? 300 : 130),
         window('seven_day', 'weekly', reset ? 22 : 41, 4 * 24 * 60 + 300),
-        window('seven_day_fable', 'model_weekly', reset ? 0 : 88, 4 * 24 * 60 + 300, 'Fable'),
+        // Fable's own weekly limit, by the id the contract's `cleared` names.
+        window('seven_day_overage_included', 'model_weekly', reset ? 0 : 88, 4 * 24 * 60 + 300, 'Fable'),
       ],
       reset_cards: { state: 'ok', lock, cards: claude },
     },
@@ -44,6 +45,13 @@ const summary = ({ claude, chatgpt: gpt, lock = null }: Held, reset = false): Qu
       fetched_at: at(-1), state: 'ok',
       windows: [window('primary_window', 'session', 22, 47), window('secondary_window', 'weekly', 58, 4 * 24 * 60 + 300)],
       reset_cards: { state: 'ok', lock: null, cards: gpt },
+    },
+    // A long account name: at phone width the status goes under it, so the refresh never truncates it.
+    {
+      source_id: 'src_claude_team', vendor: 'anthropic', display_name: 'Claude Max · Design team', account_label: 'design@example.com', plan: 'max',
+      fetched_at: at(-3), state: 'ok',
+      windows: [window('five_hour', 'session', 64, 130), window('seven_day', 'weekly', 30, 4 * 24 * 60 + 300)],
+      reset_cards: { state: 'ok', lock: null, cards: [] },
     },
   ];
   return { refresh_interval_seconds: 300, sources };
@@ -65,14 +73,16 @@ export function installResetCardsFixture(state: string) {
   installShellFixture();
   modelsApi.getHostedTools = async () => ({ tools: [] });
   const held = STATES[state] ?? both;
-  modelsApi.getQuota = async () => summary(held);
-  modelsApi.refreshQuota = state === 'refreshing' ? never : async () => summary(held);
+  // A card that waits for a limit is drawn, as in the frame, while no limit is reached.
+  const reset = state === 'not-usable';
+  modelsApi.getQuota = async () => summary(held, reset);
+  modelsApi.refreshQuota = state === 'refreshing' ? never : async () => summary(held, reset);
   modelsApi.redeemResetCard = async (_sourceId, kind): Promise<ResetCardUseResult> => {
     if (state === 'using') return never();
     if (state === 'used') {
       return {
         quota: summary({ ...both, claude: [full, { ...fable, count: 2 }] }, true),
-        use: { kind, outcome: 'used', reason: null, cleared: ['five_hour', 'seven_day_fable'] },
+        use: { kind, outcome: 'used', reason: null, cleared: ['five_hour', 'seven_day_overage_included'] },
       };
     }
     if (state === 'not-used') return { quota: summary(both), use: { kind, outcome: 'not_used', reason: 'cooldown', cleared: [] } };

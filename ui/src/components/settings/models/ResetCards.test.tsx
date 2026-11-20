@@ -162,8 +162,9 @@ describe('reset cards in the quota card', () => {
       </I18nextProvider>,
     );
     const confirmRow = within(row('claude', 'fable'));
-    const note = confirmRow.getByRole('status');
-    expect(note.textContent).toBe('用掉 1 张，不能撤销。');
+    // Not a live region of its own: it is the description of the buttons focus lands on.
+    expect(confirmRow.queryByRole('status')).toBeNull();
+    const note = confirmRow.getByText('用掉 1 张，不能撤销。');
     const confirm = confirmRow.getByRole('button', { name: '确认使用' });
     const cancel = confirmRow.getByRole('button', { name: '取消' });
     // Both buttons are described by the line, so it is heard wherever focus lands.
@@ -174,6 +175,17 @@ describe('reset cards in the quota card', () => {
     await userEvent.click(cancel);
     await userEvent.click(confirm);
     expect(intents.slice(1)).toEqual([['claude', { type: 'cancel' }], ['claude', { type: 'confirm', kind: 'fable' }]]);
+
+    // A step whose card the reading no longer lists as usable is not drawn, and holds nothing.
+    const blockedNow = [account('claude', 'anthropic', held([card({ kind: 'all' }), card({ kind: 'fable', count: 3, usable: false, blocked: 'needs_limit' })]))];
+    rerender(
+      <I18nextProvider i18n={i18n}>
+        <QuotaTab quota={readyRegion({ refresh_interval_seconds: 300, sources: blockedNow })} now={NOW} resetCardPhases={phases} onResetCardIntent={onIntent} canUseResetCards />
+      </I18nextProvider>,
+    );
+    expect(within(row('claude', 'fable')).queryByRole('button', { name: '确认使用' })).toBeNull();
+    expect(within(block('claude')!).queryByText('用掉 1 张，不能撤销。')).toBeNull();
+    expect((within(row('claude', 'all')).getByRole('button', { name: '使用 全部额度重置卡' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('MH-QUOTA-081: the server\'s lock holds every 「使用」 of its account, says which card is in use or unconfirmed, and leaves other accounts alone', () => {
@@ -194,13 +206,13 @@ describe('reset cards in the quota card', () => {
         <QuotaTab quota={readyRegion({ refresh_interval_seconds: 300, sources: unconfirmed })} now={NOW} canUseResetCards />
       </I18nextProvider>,
     );
-    expect(within(row('claude', 'fable')).getByRole('alert').textContent).toBe('没收到供应商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。');
+    expect(within(row('claude', 'fable')).getByRole('alert').textContent).toBe('没收到供应商的结果，这张卡可能已经用掉。先别再用，一分钟后再刷新这个账号看张数。');
     for (const kind of ['all', 'fable']) {
       for (const button of within(row('claude', kind)).getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(true);
     }
  
     // A lock on an account whose cards are not read yet, or whose kind matches no row, is said for the block.
-    const sentence = '没收到供应商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。';
+    const sentence = '没收到供应商的结果，这张卡可能已经用掉。先别再用，一分钟后再刷新这个账号看张数。';
     rerender(
       <I18nextProvider i18n={i18n}>
         <QuotaTab
@@ -229,8 +241,11 @@ describe('reset cards in the quota card', () => {
       return [line, free];
     };
     const cases: [ResetCardPhase, string, string, boolean][] = [
-      [{ phase: 'used', kind: 'fable', stated: true }, '用了 1 张。本周用在 Fable 上的额度已退回，5 小时额度已回满。', '1 used. The weekly usage spent on Fable is given back; the 5-hour limit is refilled.', true],
-      [{ phase: 'used', kind: 'all', stated: false }, '用了 1 张。', '1 used.', true],
+      [{ phase: 'used', kind: 'fable', stated: true, cleared: ['five_hour', 'seven_day_overage_included'] }, '用了 1 张。本周用在 Fable 上的额度已退回，5 小时额度已回满。', '1 used. The weekly usage spent on Fable is given back; the 5-hour limit is refilled.', true],
+      // The sentence only when every limit it names was reported cleared.
+      [{ phase: 'used', kind: 'fable', stated: true, cleared: ['five_hour'] }, '用了 1 张。', '1 used.', true],
+      [{ phase: 'used', kind: 'all', stated: true, cleared: [] }, '用了 1 张。', '1 used.', true],
+      [{ phase: 'used', kind: 'all', stated: false, cleared: ['five_hour', 'seven_day'] }, '用了 1 张。', '1 used.', true],
       [{ phase: 'not_used', kind: 'fable', reason: 'not_limited' }, '没有用掉：这个账号现在没到限额。', 'Not used: this account isn’t at a limit now.', true],
       [{ phase: 'not_used', kind: 'fable', reason: 'cooldown' }, '没有用掉：刚用过一张，要等一会儿才能再用。', 'Not used: one was used recently, and the next has to wait.', true],
       [{ phase: 'not_used', kind: 'fable', reason: 'refused' }, '没有用掉：供应商拒绝了这次请求。', 'Not used: the provider refused the request.', true],
@@ -240,7 +255,7 @@ describe('reset cards in the quota card', () => {
       // The count changed before anything was sent: said plainly, as a note, never as a failure.
       [{ phase: 'recounted', kind: 'fable' }, '张数变了，已刷新。', 'The count changed; refreshed.', true],
       // No answer came back: held until the account is read again.
-      [{ phase: 'unconfirmed', kind: 'fable' }, '没收到供应商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。', 'The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; refresh this account in a moment and check the count.', false],
+      [{ phase: 'unconfirmed', kind: 'fable' }, '没收到供应商的结果，这张卡可能已经用掉。先别再用，一分钟后再刷新这个账号看张数。', 'The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; wait at least a minute, then refresh this account and check the count.', false],
     ];
     for (const [phase, zhLine, , free] of cases) expect(said(phase)).toEqual([zhLine, free]);
     await i18n.changeLanguage('en');
@@ -275,7 +290,7 @@ describe('reset cards in the quota card', () => {
   });
 
   it('MH-QUOTA-083: still says what happened when the card used was the last of its kind', () => {
-    draw([account('claude', 'anthropic', held([]))], { phases: { claude: { phase: 'used', kind: 'session', stated: true } } });
+    draw([account('claude', 'anthropic', held([]))], { phases: { claude: { phase: 'used', kind: 'session', stated: true, cleared: ['five_hour'] } } });
     const section = block('claude')!;
     expect(within(section).queryAllByRole('listitem')).toHaveLength(0);
     expect(within(section).getByRole('status').textContent).toBe('用了 1 张。5 小时额度已回满。');

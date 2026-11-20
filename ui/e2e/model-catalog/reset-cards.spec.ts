@@ -39,7 +39,7 @@ const reach = async (page: Page, state: State, lang: CopyLocale) => {
   }
   if (!['confirm', 'using', 'used', 'not-used', 'unconfirmed'].includes(state)) return;
   await useFable.click();
-  await expect(claude.getByRole('status')).toHaveText(hub('quota.resetCards.confirmNote', {}, lang));
+  await expect(claude.getByText(hub('quota.resetCards.confirmNote', {}, lang), { exact: true })).toBeVisible();
   if (state === 'confirm') return;
   await claude.getByRole('button', { name: hub('quota.resetCards.confirm', {}, lang), exact: true }).click();
   const said = {
@@ -59,7 +59,7 @@ for (const lang of ['zh', 'en'] as const) {
         await page.goto(`/e2e/model-catalog/fixture.html?view=reset-cards&state=${state}&lang=${lang}&theme=${theme}`);
         await page.getByRole('tab', { name: hub('shell.tab.quota', {}, lang), exact: true }).click();
         const grid = page.locator('.model-hub-quota-grid');
-        await expect(grid.getByRole('article')).toHaveCount(2);
+        await expect(grid.getByRole('article')).toHaveCount(3);
         await reach(page, state, lang);
 
         const cards = grid.getByRole('region', { name: hub('quota.resetCards.title', {}, lang), exact: true });

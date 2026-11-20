@@ -897,10 +897,20 @@ export const SettingsModelsPage: React.FC = () => {
     phases: resetCardPhases,
     onIntent: onResetCardIntent,
     settleRefresh: settleResetCardRefresh,
+    settleReading: settleResetCardReading,
   } = useResetCardActions({ land: landResetCardQuota, reread: rereadAfterResetCard, afterUse: afterResetCard });
+  // Every reading that lands (a use's answer, a refresh, a poll) can retire a stale confirm step.
+  const shownQuota = foldRegionRead<QuotaSummary, QuotaSummary | null>(quotaRead, {
+    loading: () => null, ready: (data) => data, unread: () => null, degraded: (staleData) => staleData,
+  });
+  React.useEffect(() => {
+    if (shownQuota) settleResetCardReading(shownQuota);
+  }, [settleResetCardReading, shownQuota]);
 
   // The forced quota read resumes an account the vendor reports quota for, so
-  // the Sources and routes it changed are read with it.
+  // the Sources and routes it changed are read with it. An account's own refresh is
+  // this same read of every account (there is no per-Source read); only the pressed
+  // account's control shows it running.
   // The quota tab draws a failed read itself. A press from a provider's detail
   // has that tab hidden behind it, so there the failure is said in a toast.
   const refreshQuotaAndSources = React.useCallback(async (announceFailure = false, sourceId: string | null = null) => {

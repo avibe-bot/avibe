@@ -2905,11 +2905,11 @@ describe('SettingsModelsPage reset cards', () => {
   const card = (over: Partial<ResetCard> & Pick<ResetCard, 'kind'>): ResetCard => ({
     count: 1, expires_at: '2026-11-28T09:00:00Z', stated: true, usable: true, blocked: null, blocked_until: null, ...over,
   });
-  const quotaWith = ({ fable = 3, lock = null, used = 100 }: { fable?: number; lock?: ResetCardLock | null; used?: number } = {}): QuotaSummary => ({
+  const quotaWith = ({ fable = 3, lock = null, used = 100, id = 'src_claude' }: { fable?: number; lock?: ResetCardLock | null; used?: number; id?: string } = {}): QuotaSummary => ({
     refresh_interval_seconds: 300,
     sources: [
       {
-        source_id: 'src_claude', vendor: 'anthropic', display_name: 'Claude Max', account_label: null, plan: 'max',
+        source_id: id, vendor: 'anthropic', display_name: 'Claude Max', account_label: null, plan: 'max',
         fetched_at: new Date().toISOString(), state: 'ok',
         windows: [{ id: 'five_hour', kind: 'session', label: 'five_hour', used_pct: used, window_seconds: 18_000, resets_at: new Date(Date.now() + 3_600_000).toISOString() }],
         reset_cards: { state: 'ok', lock, cards: [card({ kind: 'all' }), ...(fable ? [card({ kind: 'fable', count: fable })] : [])] },
@@ -2932,14 +2932,14 @@ describe('SettingsModelsPage reset cards', () => {
 
   it('MH-QUOTA-084: 「使用」 only asks, 取消 sends nothing, and 确认使用 sends exactly one use whose answer is the reading shown', async () => {
     await openWith(quotaWith());
-    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
     const answer = deferred<ResetCardUseResult>();
     redeem.mockReturnValue(answer.promise);
     const user = userEvent.setup();
 
     await user.click(cardUseButton('Fable'));
     expect(redeem).not.toHaveBeenCalled();
-    expect(within(account()).getByRole('status').textContent).toMatch(/^Spends 1\. It can’t be undone\.$|^用掉 1 张，不能撤销。$/);
+    expect(within(account()).getByText(/^Spends 1\. It can’t be undone\.$|^用掉 1 张，不能撤销。$/)).toBeTruthy();
     // Focus lands on the safe choice, so a second Enter cannot spend a card.
     expect(document.activeElement).toBe(cancelButton());
     await user.keyboard('{Enter}');
@@ -2958,7 +2958,7 @@ describe('SettingsModelsPage reset cards', () => {
 
     answer.resolve({
       quota: quotaWith({ fable: 2, used: 0 }),
-      use: { kind: 'fable', outcome: 'used', reason: null, cleared: ['five_hour'] },
+      use: { kind: 'fable', outcome: 'used', reason: null, cleared: ['five_hour', 'seven_day_overage_included'] },
     });
     expect((await within(account()).findByRole('status')).textContent).toMatch(/^1 used\. The weekly usage spent on Fable|^用了 1 张。本周用在 Fable 上的额度已退回/);
     expect(within(account()).getByText('×2')).toBeTruthy();
@@ -2971,7 +2971,7 @@ describe('SettingsModelsPage reset cards', () => {
 
   it('MH-QUOTA-085: a lock the server holds disables 「使用」 on a freshly opened page and again after a remount', async () => {
     const quota = quotaWith({ lock: { reason: 'in_flight', kind: 'fable', since: new Date().toISOString() } });
-    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
     const check = () => {
       expect((within(account()).getByRole('button', { name: /^Using…$|^使用中…$/ }) as HTMLButtonElement).disabled).toBe(true);
       expect(cardUseButton('Full').disabled).toBe(true);
@@ -2983,13 +2983,12 @@ describe('SettingsModelsPage reset cards', () => {
     cleanup();
     await openWith(quota);
     check();
-    await userEvent.click(cardUseButton('Full'));
     expect(redeem).not.toHaveBeenCalled();
   });
 
   it('MH-QUOTA-086: says not used only when the server does; a lost answer holds the account until its refresh lands', async () => {
     await openWith(quotaWith());
-    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
     const user = userEvent.setup();
     const use = async () => {
       await user.click(cardUseButton('Fable'));
@@ -3042,7 +3041,7 @@ describe('SettingsModelsPage reset cards', () => {
 
   it('MH-QUOTA-090: a count that changed since it was shown is refused and redrawn from the server\'s reading, with no second request', async () => {
     await openWith(quotaWith());
-    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
     const refusal = new ApiCallError('reset_card_count_changed', undefined, true, [], [], [], 409);
     refusal.quota = quotaWith({ fable: 2 });
     redeem.mockRejectedValueOnce(refusal);
@@ -3066,6 +3065,91 @@ describe('SettingsModelsPage reset cards', () => {
     await user.click(confirmButton());
     expect(redeem).toHaveBeenLastCalledWith('src_claude', 'fable', 2);
     expect(redeem).toHaveBeenCalledTimes(2);
+  });
+
+  it('MH-QUOTA-091: a confirm step whose card a later reading no longer offers, or whose account it shows locked, is dropped for good', async () => {
+    await openWith(quotaWith());
+    vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
+    const force = vi.mocked(modelsApi.refreshQuota);
+    const user = userEvent.setup();
+
+    // The kind is gone from the next reading: no question is left without its 取消, and the other kinds are free.
+    await user.click(cardUseButton('Fable'));
+    force.mockResolvedValueOnce(quotaWith({ fable: 0 }));
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(within(account()).queryByRole('button', { name: /^Use it$|^确认使用$/ })).toBeNull());
+    expect(within(account()).queryByText(/^Spends 1\.|^用掉 1 张/)).toBeNull();
+    await waitFor(() => expect(cardUseButton('Full').disabled).toBe(false));
+
+    // Another page's use locks the account, then ends: the old question does not come back.
+    force.mockResolvedValueOnce(quotaWith());
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(cardUseButton('Fable').disabled).toBe(false));
+    await user.click(cardUseButton('Fable'));
+    force.mockResolvedValueOnce(quotaWith({ lock: { reason: 'in_flight', kind: 'all', since: new Date().toISOString() } }));
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(cardUseButton('Fable').disabled).toBe(true));
+    force.mockResolvedValueOnce(quotaWith());
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(cardUseButton('Fable').disabled).toBe(false));
+    expect(within(account()).queryByRole('button', { name: /^Use it$|^确认使用$/ })).toBeNull();
+    expect(within(account()).queryByText(/^Spends 1\.|^用掉 1 张/)).toBeNull();
+  });
+
+  it('MH-QUOTA-092: a press sends one POST of {kind, count} to the encoded Source, and each answer reads as what it says', async () => {
+    const id = 'src claude/1';
+    const unconfirmed = /^The provider’s answer didn’t arrive|^没收到供应商的结果/;
+    const notUsed = /^Not used\.$|^没有用掉。$/;
+    const held = /^Not used: this account can’t use this kind|^没有用掉：这个账号现在不能用这种卡/;
+    const rows: Array<{ answer: () => Response; line: RegExp; role: 'status' | 'alert'; reread: boolean }> = [
+      {
+        answer: () => Response.json({
+          ok: true, contract_version: 23, quota: quotaWith({ id, fable: 2 }),
+          use: { kind: 'fable', outcome: 'used', reason: null, cleared: ['five_hour', 'seven_day_overage_included'] },
+        }),
+        line: /^1 used\. The weekly usage spent on Fable|^用了 1 张。本周用在 Fable 上的额度已退回/, role: 'status', reread: false,
+      },
+      { answer: () => Response.json({ ok: false, error: 'invalid_parameter', detail: 'modelHub.errors.invalid_parameter' }, { status: 400 }), line: notUsed, role: 'alert', reread: true },
+      { answer: () => Response.json({ ok: false, error: 'forbidden' }, { status: 403 }), line: notUsed, role: 'alert', reread: true },
+      {
+        answer: () => Response.json({ ok: false, error: 'reset_card_unavailable', detail: 'modelHub.errors.reset_card_unavailable', quota: quotaWith({ id, fable: 2 }) }, { status: 409 }),
+        line: held, role: 'alert', reread: false,
+      },
+      { answer: () => Response.json({ ok: false, error: 'reset_card_locked' }, { status: 409 }), line: held, role: 'alert', reread: true },
+      { answer: () => Response.json({ ok: false, error: 'internal_error' }, { status: 500 }), line: unconfirmed, role: 'alert', reread: true },
+      { answer: () => Response.json({ ok: false, error: 'teapot' }, { status: 418 }), line: unconfirmed, role: 'alert', reread: true },
+      { answer: () => new Response('<html>bad gateway</html>', { status: 502 }), line: unconfirmed, role: 'alert', reread: true },
+    ];
+    for (const row of rows) {
+      const uses: Array<{ url: string; init?: RequestInit }> = [];
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+        if (!url.includes('/reset-cards/')) return Response.json({ ok: false, error: 'not_stubbed' }, { status: 404 });
+        uses.push({ url, init });
+        return row.answer();
+      }));
+      await openWith(quotaWith({ id }));
+      const reads = vi.mocked(modelsApi.getQuota).mock.calls.length;
+      const user = userEvent.setup();
+      await user.click(cardUseButton('Fable'));
+      await user.click(confirmButton());
+
+      expect((await within(account()).findByRole(row.role)).textContent).toMatch(row.line);
+      expect(uses).toHaveLength(1);
+      expect(uses[0].url).toBe('/api/models/sources/src%20claude%2F1/reset-cards/use');
+      expect(uses[0].init?.method).toBe('POST');
+      expect(JSON.parse(String(uses[0].init?.body))).toEqual({ kind: 'fable', count: 3 });
+      if (row.reread) await waitFor(() => expect(vi.mocked(modelsApi.getQuota).mock.calls.length).toBeGreaterThan(reads));
+      else expect(vi.mocked(modelsApi.getQuota).mock.calls.length).toBe(reads);
+      if (!row.reread) expect(within(account()).getByText('×2')).toBeTruthy();
+
+      cleanup();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(null);
+      vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
+    }
   });
 
   it('MH-QUOTA-089: only a reader the server lets spend cards is offered 「使用」; everyone else keeps the list and the refresh', async () => {

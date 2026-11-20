@@ -329,7 +329,8 @@ const AccountCard: React.FC<{
         <span className={cn('model-hub-quota-status flex shrink-0 items-center gap-1.5', toneClass(statusTone))}>
           <span className="model-hub-quota-dot" aria-hidden />{statusText}
         </span>
-        {/* ui/design: models/quota-reset-cards/refreshing — reads every account again; this one spins. */}
+        {/* ui/design: models/quota-reset-cards/refreshing — a press reads every account again
+            (the one forced read there is); the indicator shows on the pressed account. */}
         <Button
           variant="ghost"
           size="icon"
