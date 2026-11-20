@@ -934,6 +934,36 @@ offers through the top-level `__AVIBE_DESKTOP_PET__` marker. The shell talks
 back with two DOM events, `avibe:pet-summon` and `avibe:pet-bound`, so the
 pet has no event permission. `ui/src/pet/petBridge.ts` is the page contract.
 
+## Ask Vibey (macOS Services)
+
+The macOS Service "Ask Vibey" (zh-Hans 「问 Vibey」) receives only the content
+selected for that Service invocation. The provider does not read the general
+clipboard, monitor selection, or accept paths from a page.
+
+- **Where it goes:** the main window comes to the front and opens the main Bot
+  conversation (`ses_main`) of the instance the window shows. The selection
+  goes into that composer and is never sent.
+- **Formatting:** text is quoted, a link stays bare, and files become composer
+  attachments within the composer's 100 MiB per-file limit.
+- **Order:** each share is appended on its own line.
+- **Not connected yet:** while no Workbench is current (sign-in, account page,
+  unreachable, switching), shares wait in memory in order and one notice says
+  so.
+- **No Vibey conversation:** if the instance can't open Vibey's conversation,
+  a notice says nothing was added.
+- **Delivery channel:** fenced `eval` into the shown Workbench document
+  (`src-tauri/src/compose.rs` ↔ `ui/src/desktop/desktopComposeReceiver.ts`).
+  - Every call is fenced to the current Runtime origin and to the identity of
+    the receiver that document installed.
+  - It adds no Tauri command or capability.
+- **Files:** they follow `selection::ordinary_open` (no final symlink,
+  ordinary files only). At delivery each file must still be the file that was
+  selected.
+- **Menu title and localizations:** the title comes from
+  `src-tauri/macos/{en,zh-Hans}.lproj/ServicesMenu.strings`.
+  `CFBundleLocalizations` is `[en, zh-Hans]`, so English systems keep English
+  system UI strings.
+
 ## Microphone
 
 Workbench voice input records through `getUserMedia` inside the WebView. On

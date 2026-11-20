@@ -552,6 +552,10 @@ export interface ComposerHandle {
    *  with a separating space when the composer is non-empty. No-op when the
    *  mention editor isn't active (the plain-textarea home composer). */
   appendText: (text: string) => void;
+  /** Append text on its own line after whatever is already there (typed text
+   *  and staged attachments stay), then focus with the caret at the end. It
+   *  never sends. False while voice capture owns the draft. */
+  appendLine: (text: string) => boolean;
   /** Replace the whole draft from outside and focus the input with the caret at
    *  the end — the home's suggestion cards seed a starting task the user then
    *  edits. It never sends, and refuses while voice capture owns the draft. */
@@ -1993,6 +1997,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     appendText: (text: string) => {
       if (!voiceDraftLocked()) mentionRef.current?.append(text);
+    },
+    appendLine: (text: string) => {
+      if (voiceDraftLocked()) return false;
+      draftEditedRef.current = true;
+      if (useMentions) {
+        mentionRef.current?.append(text, '\n');
+        mentionRef.current?.focus();
+        return true;
+      }
+      const next = valueRef.current ? `${valueRef.current}\n${text}` : text;
+      valueRef.current = next;
+      setHasText(next.trim().length > 0);
+      setValue(next);
+      onDraftChange?.(next);
+      seedFocusRef.current = true;
+      return true;
     },
     setDraft: (text: string) => {
       if (voiceDraftLocked()) return;

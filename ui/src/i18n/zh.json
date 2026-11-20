@@ -1,5 +1,9 @@
 {
   "desktopBootstrap": {
+    "askVibey": {
+      "kept": "内容已留在本机，连上实例后会放进 Vibey 的输入框。",
+      "unavailable": "这个实例里打不开 Vibey 的对话，内容没有放进去。"
+    },
     "retry": "重试",
     "installationHelp": "安装帮助",
     "notRunningTitle": "Avibe — 未运行",

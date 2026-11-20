@@ -24,7 +24,7 @@ import { BotConversationTitle } from './bots/BotSwitch';
 import { VoiceMark } from '../voice/VoiceMark';
 import type { VoiceTarget } from '../voice/VoiceCard';
 import { isVoiceMessage } from '../../lib/voiceMessage';
-import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
+import { useRegisterComposerTarget, type ComposeTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
@@ -619,7 +619,24 @@ export const ChatPage: React.FC = () => {
         : null,
     [sessionId, session, showPageActive, writable, insertSessionReference],
   );
-  useRegisterComposerTarget(composerTarget);
+  // Ask Vibey (desktop shell) puts a selection into this composer. Unlike the
+  // insert target it is published under a Show Page too, so the source can
+  // switch back to the conversation first. ui/design: composer/ask-vibey/inserted-zh
+  const sessionLoaded = session != null;
+  const composeTarget = useMemo<ComposeTarget | null>(
+    () =>
+      sessionId && sessionLoaded && writable
+        ? {
+            sessionId,
+            composerReady: !showPageActive,
+            showChat: () => selectChatView(sessionId, true),
+            appendLine: (text: string) => composerRef.current?.appendLine(text) ?? false,
+            addFiles: (files: File[]) => composerRef.current?.addFiles(files),
+          }
+        : null,
+    [sessionId, sessionLoaded, writable, showPageActive, selectChatView],
+  );
+  useRegisterComposerTarget(composerTarget, composeTarget);
 
   // Pending vault requests for this session. Provision requests are attached to
   // the Agent reply that announced them; access/sign retain the approval flow.

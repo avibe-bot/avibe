@@ -1,5 +1,9 @@
 {
   "desktopBootstrap": {
+    "askVibey": {
+      "kept": "Kept on this Mac. It will go into Vibey's message box once you're connected.",
+      "unavailable": "Couldn't open Vibey's conversation on this instance. Nothing was added."
+    },
     "retry": "Try again",
     "installationHelp": "Installation help",
     "notRunningTitle": "Avibe — not running",

@@ -1,3 +1,4 @@
+import { DesktopCompose } from '../desktop/DesktopCompose';
 import { DesktopAccountRow } from '../desktop/DesktopAccountRow';
 import { DesktopClientPresentation } from '../desktop/useDesktopClient';
 import { hasDesktopClient } from '../desktop/bridge';
@@ -518,6 +519,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
     <WindowManagerProvider standalone={standaloneAppTab} onWindowForeground={leaveSettingsForWindow}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
+    {!standaloneAppTab && <DesktopCompose />}
     <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
     <DesktopWindowChrome enabled={windowChrome} hidden={settingsOpen}>
