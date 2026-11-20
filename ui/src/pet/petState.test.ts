@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import type { RunningAgent, RunningAgentsResult, WorkbenchMessage } from '@/context/ApiContext';
 
@@ -41,6 +43,9 @@ const result = (overrides: Partial<WorkbenchMessage> = {}) => row(overrides);
 const asking = (chosen?: string) => result({
   content: { quick_replies: ['Yes', 'No'], ...(chosen ? { quick_reply_chosen: chosen } : {}) },
 });
+const answerKinds = JSON.parse(readFileSync(
+  resolve(process.cwd(), '../tests/fixtures/message_answer_contract_vectors.json'), 'utf8',
+)).answerKinds as { answer_kind: string; choice: string | null; storedChoice: string }[];
 
 const quiet: PetStateInputs = {
   session: { agent_status: 'idle' },
@@ -82,6 +87,16 @@ describe('derivePetState', () => {
 });
 
 describe('openQuickReplies', () => {
+  it.each(answerKinds)('closes a $answer_kind-answered group before input enters the transcript', (vector) => {
+    expect(openQuickReplies([user(), result({
+      content: {
+        quick_replies: ['Yes', 'No'],
+        quick_reply_chosen: vector.storedChoice,
+        quick_reply_answer_kind: vector.answer_kind,
+      },
+    })])).toBeNull();
+  });
+
   it('offers the latest result\'s group until an option is chosen', () => {
     expect(openQuickReplies([user(), asking()])?.options).toEqual(['Yes', 'No']);
     expect(openQuickReplies([user(), asking('Yes')])).toBeNull();
