@@ -120,6 +120,7 @@ capabilities:
       - tests/test_model_hub_hosted_images.py
       - tests/test_model_hub_usage.py
       - tests/test_ui_server_fastapi.py
+      - tests/test_model_hub_card_use.py
       - tests/test_model_hub_quota.py
       - tests/test_model_hub_account_refresh.py
       - tests/test_model_hub_pricing.py

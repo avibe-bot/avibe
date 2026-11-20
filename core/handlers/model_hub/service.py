@@ -223,6 +223,8 @@ from .pricing import (
     load_price_table,
     quota_values,
 )
+from . import card_action
+from .card_fences import CardFences
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -791,6 +793,12 @@ class UnavailableEngineAdapter:
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         return None
+
+    async def reset_card_account_key(self, source_id, vendor, credential_ref):
+        return None
+
+    async def use_reset_card(self, source_id, vendor, credential_ref, kind, request_id, expected_key):
+        return {'statement':'no_card'}
 
     async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
         raise SubscriptionQuotaError("unavailable")
@@ -1775,6 +1783,11 @@ class ModelHubService:
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
+        self.card_fences = CardFences(paths.get_state_dir() / 'model_hub_card_fences.json')
+        self._card_operations = {}
+        self._card_pending = {}
+        self._card_epochs = {}
+        self._card_epoch = 0
         self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
         # A cached copy only: the picker read must not wait on the network.
         self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
@@ -9113,6 +9126,9 @@ class ModelHubService:
             )
         return refs
 
+    async def use_reset_card(self, source_id: str, payload: dict) -> dict:
+        return await card_action.use(self, source_id, payload)
+
     async def quota_summary(self, *, force: bool = False) -> dict:
         """Report each hub-held subscription's rate-limit windows.
 
@@ -9126,7 +9142,10 @@ class ModelHubService:
         """
 
         sources = await asyncio.to_thread(self._quota_sources)
+        if force:
+            await card_action.refresh_unknown(self, sources)
         summary = await self.quota.summary(sources, force=force)
+        await card_action.overlay(self, sources, summary)
         if force:
             await self._resume_accounts_with_quota(summary)
         try:

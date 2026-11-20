@@ -813,6 +813,19 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    async def reset_card_account_key(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        """Opaque correlation of the vendor inventory; only for a local durable claim, never a wire identity."""
+        ...
+
+    async def use_reset_card(self, source_id: str, vendor: str, credential_ref: str, kind: str, request_id: str, expected_key: str) -> dict[str, Any]:
+        """Read held cards, choose the earliest usable of kind and transmit once.
+
+        Return only a closed statement, the pre-use count and known cleared limits;
+        no credential, account identity, card handle, vendor body or upstream error crosses this boundary.
+        Never retry. The controller owns the durable claim and post-use reconciliation.
+        """
+        ...
+
     async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
         """Read this subscription's rate-limit windows from the vendor's usage report.
 

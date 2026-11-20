@@ -3764,6 +3764,38 @@ class CLIProxyEngineAdapter:
     async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
         """Read the bound grant's rate-limit windows without starting the engine."""
 
+        client, auth, normalized_vendor = await self._subscription_binding(source_id, vendor, credential_ref)
+        try:
+            return await run_owned_in_thread(_fetch_subscription_quota, client=client, auth=auth, vendor=normalized_vendor)
+        except (EngineClientError, OSError):
+            raise SubscriptionQuotaError('unavailable') from None
+
+    @engine_operation
+    async def reset_card_account_key(self, source_id, vendor, credential_ref):
+        from .card_use import account_key
+
+        try:
+            client, auth, vendor = await self._subscription_binding(source_id, vendor, credential_ref)
+            return await run_owned_in_thread(account_key, client=client, auth=auth, vendor=vendor,
+                                             headers=_oauth_account_call_headers(auth, vendor))
+        except Exception:
+            return None
+
+    @engine_operation
+    async def use_reset_card(self, source_id, vendor, credential_ref, kind, request_id, expected_key):
+        from .card_use import use_once
+
+        try:
+            client, auth, vendor = await self._subscription_binding(source_id, vendor, credential_ref)
+        except SubscriptionQuotaError:
+            return {'statement': 'no_card'}
+        headers = _oauth_account_call_headers(auth, vendor)
+        if vendor == 'anthropic':
+            headers['anthropic-beta'] = 'oauth-2025-04-20'
+        return await run_owned_in_thread(use_once, client=client, auth=auth, vendor=vendor, kind=kind,
+                                         request_id=request_id, headers=headers, expected_key=expected_key)
+
+    async def _subscription_binding(self, source_id, vendor, credential_ref):
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None or normalized_vendor not in _SUBSCRIPTION_QUOTA_URLS:
@@ -3797,15 +3829,7 @@ class CLIProxyEngineAdapter:
         ]
         if len(matches) != 1:
             raise SubscriptionQuotaError("unavailable")
-        try:
-            return await run_owned_in_thread(
-                _fetch_subscription_quota,
-                client=client,
-                auth=matches[0],
-                vendor=normalized_vendor,
-            )
-        except (EngineClientError, OSError):
-            raise SubscriptionQuotaError("unavailable") from None
+        return client, matches[0], normalized_vendor
 
     @engine_operation
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:

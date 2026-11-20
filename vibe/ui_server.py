@@ -5505,6 +5505,20 @@ async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post('/api/models/sources/{source_id}/reset-cards/use', include_in_schema=False)
+async def model_hub_use_reset_card(source_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            result = await _model_hub_service().use_reset_card(source_id, _model_hub_json_object('invalid_parameter'))
+            return _model_hub_success(**result)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.get("/api/models/hosted-tools", include_in_schema=False)
 async def model_hub_hosted_tools_get(starlette_request: FastAPIRequest):
     async def handler():

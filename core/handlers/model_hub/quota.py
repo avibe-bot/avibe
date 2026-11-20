@@ -755,6 +755,20 @@ class SubscriptionQuotaCache:
         entry.failure = None
         entry.cooldown_until = None
 
+    async def reread(self, source: QuotaSourceRef) -> dict:
+        """A card decision needs its own new request, never a throttled or joined read."""
+        entry = _QuotaEntry(credential_ref=source.credential_ref)
+        previous = self._entries.get(source.source_id)
+        if previous and previous.credential_ref == source.credential_ref:
+            entry.snapshot, entry.fetched_at = previous.snapshot, previous.fetched_at
+        self._entries[source.source_id] = entry
+        entry.task = asyncio.create_task(self._refresh(source, entry))
+        await asyncio.shield(entry.task)
+        if self._entries.get(source.source_id) is not entry:
+            # The source was rebound or a newer explicit read replaced this one.
+            return {}
+        return self._payload(source)
+
     def _payload(self, source: QuotaSourceRef) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "source_id": source.source_id,

@@ -1848,6 +1848,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
     # The engine's own log stays beside its config, owner-private and bounded, and carries no bodies.
     assert payload["logging-to-file"] is True and payload["logs-max-total-size-mb"] > 0
+    assert payload["debug"] is False  # /api-call transport errors can name an organization-specific URL in debug logs.
     assert payload["commercial-mode"] is True and payload["request-log"] is False
     assert stat.S_IMODE((instance_dir / "logs").stat().st_mode) == 0o700
     credential_path = next((store.root / "credentials").iterdir())

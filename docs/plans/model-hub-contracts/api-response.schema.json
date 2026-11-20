@@ -36,6 +36,7 @@
     {"method": "GET", "path": "/api/models/agents/<backend>/provenance?model=<id>", "response_schema": "LatestProvenanceResponse", "exercises": [{"path": "/api/models/agents/claude/provenance?model=claude-opus-4-6", "status": 200}, {"path": "/api/models/agents/claude/provenance?model=claude-sonnet-4-6", "status": 200}]},
     {"method": "GET", "path": "/api/models/events?limit=<n>&before=<id>", "response_schema": "EventsResponse", "exercise": {"path": "/api/models/events?limit=20", "status": 200}},
     {"method": "GET", "path": "/api/models/usage?days=<n>", "response_schema": "UsageResponse", "exercises": [{"path": "/api/models/usage?days=30", "status": 200}, {"path": "/api/models/usage?window=24h", "status": 200}]},
+    {"method": "POST", "path": "/api/models/sources/<source_id>/reset-cards/use", "response_schema": "ResetCardResponse", "exercise": {"path": "/api/models/sources/src_conform001/reset-cards/use", "status": 409, "json": {"kind": "session"}}},
     {"method": "GET", "path": "/api/models/quota", "response_schema": "QuotaResponse", "exercise": {"path": "/api/models/quota", "status": 200}},
     {"method": "POST", "path": "/api/models/quota/refresh", "response_schema": "QuotaResponse", "exercise": {"path": "/api/models/quota/refresh", "status": 200}},
     {"method": "GET", "path": "/api/models/hosted-tools", "response_schema": "HostedToolsResponse", "exercise": {"path": "/api/models/hosted-tools", "status": 200}},
@@ -535,6 +536,109 @@
         "contract_version": {"const": 23},
         "usage": {"$ref": "model-hub/usage-summary.schema.json"}
       }
+    },
+    "ResetCardResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "ok",
+            "contract_version",
+            "quota",
+            "use"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "contract_version": {
+              "const": 23
+            },
+            "quota": {
+              "$ref": "model-hub/quota-summary.schema.json"
+            },
+            "use": {
+              "type": "object",
+              "required": [
+                "kind",
+                "outcome",
+                "reason",
+                "cleared"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "all",
+                    "weekly",
+                    "session",
+                    "fable",
+                    "account"
+                  ]
+                },
+                "outcome": {
+                  "enum": [
+                    "used",
+                    "not_used",
+                    "unconfirmed"
+                  ]
+                },
+                "reason": {
+                  "enum": [
+                    null,
+                    "not_limited",
+                    "cooldown",
+                    "refused",
+                    "unavailable"
+                  ]
+                },
+                "cleared": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "five_hour",
+                      "seven_day",
+                      "seven_day_overage_included"
+                    ]
+                  },
+                  "uniqueItems": true
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "ok",
+            "contract_version",
+            "error",
+            "detail"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "ok": {
+              "const": false
+            },
+            "contract_version": {
+              "const": 23
+            },
+            "error": {
+              "enum": [
+                "reset_card_locked",
+                "reset_card_unavailable"
+              ]
+            },
+            "detail": {
+              "enum": [
+                "modelHub.errors.reset_card_locked",
+                "modelHub.errors.reset_card_unavailable"
+              ]
+            }
+          }
+        }
+      ]
     },
     "QuotaResponse": {
       "type": "object",

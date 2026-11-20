@@ -52,7 +52,7 @@ def _card(kind, count, expiry, stated, blocked, until=None):
     )
 
 
-def claude_cards(body: object, now: datetime) -> dict:
+def claude_cards(body: object, now: datetime, *, candidates: list | None = None) -> dict:
     block = _load_object(body).get("cedar_ember")
     if block is None:
         return _ok([])
@@ -97,6 +97,8 @@ def claude_cards(body: object, now: datetime) -> dict:
         else:
             blocked = "unavailable"
         stated = kind != "all" or ("five_hour" in clears and "seven_day" in clears)
+        if blocked is None and candidates is not None:
+            candidates.append((kind, end, grant_id))
         groups.setdefault(kind, []).append((count, end, stated, blocked))
     cards = []
     for kind, grants in sorted(groups.items()):
@@ -125,7 +127,7 @@ def codex_count(body: object) -> int:
     return _count(block.get("available_count"))
 
 
-def codex_cards(count: int, details: object, now: datetime) -> dict:
+def codex_cards(count: int, details: object, now: datetime, *, candidates: list | None = None) -> dict:
     if not count:
         return _ok([])
     envelope = _load_object(details, allow_array=True)
@@ -150,6 +152,8 @@ def codex_cards(count: int, details: object, now: datetime) -> dict:
         credit_id = row.get("id", row.get("credit_id", row.get("creditId")))
         if (not end or end > now) and isinstance(credit_id, str) and credit_id.strip():
             expires.append(end)
+            if candidates is not None:
+                candidates.append(('account', end, credit_id))
     return _ok(
         [
             _card(

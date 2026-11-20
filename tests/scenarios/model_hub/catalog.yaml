@@ -1981,6 +1981,48 @@ scenarios:
     kind: observation
     layer: unit
     test: tests/test_model_hub_quota.py::test_card_details_failure_preserves_current_windows
+  - id: MH-QUOTA-045
+    name: Restart preserves an interrupted card claim until an explicitly newer read
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_restart_keeps_unconfirmed_until_a_new_user_read
+  - id: MH-QUOTA-046
+    name: Concurrent presses and a timeout never cause another vendor use
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_two_presses_share_one_vendor_use_and_a_timeout_is_never_retried
+  - id: MH-QUOTA-047
+    name: A card chosen by kind and expiry is sent once and fresh quota resumes a paused source
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_one_engine_post_picks_matching_kind_and_uses_fresh_quota
+  - id: MH-QUOTA-048
+    name: General Model Hub RPC offers no card use operation
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_general_model_hub_rpc_does_not_offer_card_use
+  - id: MH-QUOTA-049
+    name: A non-next grant refusal never substitutes a different card
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_non_next_grant_refusal_is_returned_once_without_substitution
+  - id: MH-QUOTA-050
+    name: ChatGPT receives only the earliest usable credit with one request id
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_chatgpt_sends_only_the_earliest_available_credit_and_one_request_id
+  - id: MH-QUOTA-051
+    name: An already running refresh cannot clear a later uncertain use
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_refresh_started_before_unknown_cannot_unlock_the_later_claim
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

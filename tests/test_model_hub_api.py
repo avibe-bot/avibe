@@ -904,6 +904,9 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
         and endpoint == "GET /api/models/agents/<backend>/models"
     )
 
+    if route_contract['path'].endswith('/reset-cards/use'):
+        admitted = access in {'local', 'organization-owner'}
+
     def get_service():
         assert admitted, "authorization must deny before entering a Model Hub handler"
         return _as_ui_client(service)
@@ -10365,6 +10368,12 @@ def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tm
 
     assert model_response.status_code == config_response.status_code == 403
     assert model_response.get_json() == config_response.get_json()
+    base = '/api/models/sources/src_example/reset-cards/use'
+    bad_origin = {**csrf_headers(client, base_url), 'Origin': 'https://other.invalid'}
+    for headers in ({'Origin': base_url}, bad_origin):
+        rejected = client.post(base, base_url=base_url, headers=headers, json={'kind':'account'})
+        assert rejected.status_code == 403
+    assert not service.card_fences.path.exists()
 
 
 def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, tmp_path):

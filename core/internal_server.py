@@ -1841,6 +1841,24 @@ def create_app(
             return JSONResponse(status_code=503, content={"ok": False, "error": "session_archive_unavailable"})
         return {"ok": True, "session": session}
 
+    @app.post('/internal/model-hub-ui/reset-card')
+    async def _model_hub_ui_reset_card(request: Request) -> Any:
+        # Private UI-to-controller IPC, deliberately absent from the operation dispatcher.
+        from config.v2_config import is_model_hub_enabled
+        from core.handlers.model_hub import ModelHubError
+
+        body = await _safe_json(request)
+        service = getattr(controller, 'model_hub_service', None)
+        if not is_model_hub_enabled() or service is None:
+            return JSONResponse(status_code=404, content={'ok': False, 'error': 'feature_disabled'})
+        if not isinstance(body, dict) or set(body) != {'source_id', 'selection'} or not isinstance(body['source_id'], str):
+            return JSONResponse(status_code=400, content={'ok': False, 'error':'invalid_parameter'})
+        try:
+            result = await service.use_reset_card(body['source_id'], body['selection'])
+        except ModelHubError as exc:
+            return JSONResponse(status_code=exc.status, content={'ok': False, 'error': exc.code})
+        return {'ok': True, 'result': result}
+
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""

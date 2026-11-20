@@ -65,6 +65,10 @@ def _rpc_sync(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
 
 
 async def _rpc(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
+    return await _post_ui_request('/internal/model-hub', {'operation': operation, 'payload': payload or {}})
+
+
+async def _post_ui_request(path: str, body: dict) -> Any:
     try:
         endpoint = await internal_client._resolve_endpoint_async(None)
         transport = internal_client._async_transport(endpoint)
@@ -74,10 +78,7 @@ async def _rpc(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
             headers=endpoint.headers,
             timeout=httpx.Timeout(MODEL_HUB_RPC_TIMEOUT_SECONDS, connect=2.0),
         ) as client:
-            response = await client.post(
-                "/internal/model-hub",
-                json={"operation": operation, "payload": payload or {}},
-            )
+            response = await client.post(path, json=body)
             internal_client._validate_response(response, endpoint)
     except _TRANSPORT_ERRORS:
         raise ModelHubError("engine_down", status=503) from None
@@ -305,6 +306,9 @@ class ModelHubRemoteService:
         if not payload:
             payload["days"] = USAGE_DEFAULT_WINDOW_DAYS
         return await _rpc("usage_summary", payload)
+
+    async def use_reset_card(self, source_id: str, payload: dict) -> dict:
+        return await _post_ui_request('/internal/model-hub-ui/reset-card', {'source_id': source_id, 'selection': payload})
 
     async def quota_summary(self, *, force: bool = False) -> dict:
         return await _rpc("quota_summary", {"force": force})

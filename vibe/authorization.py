@@ -219,6 +219,7 @@ class AuthorizationContext:
             "can_manage_agents": self.can_manage_agents,
             "can_manage_instance": self.can_manage_instance,
             "can_manage_access_members": self.can_manage_access_members,
+            "can_use_model_hub_reset_cards": self.has_role("owner"),
             "can_use_agents": self.can_use_resource("agent"),
             "can_use_skills": self.can_use_resource("skill"),
             "can_use_vault_secrets": self.can_use_resource("vault_secret"),
@@ -760,6 +761,9 @@ def http_authorization_policy(
         if _http_rule_matches(normalized_method, path, _REMOTE_ACCESS_MEMBER_HTTP_RULES):
             return HttpAuthorizationPolicy("member")
         return HttpAuthorizationPolicy("owner")
+    if normalized_method == 'POST' and re.fullmatch(r'/api/models/sources/[^/]+/reset-cards/use', path):
+        # An irreversible subscription consumable, unlike ordinary Model Hub management.
+        return HttpAuthorizationPolicy('owner')
     if _http_rule_matches(normalized_method, path, _MEMBER_HTTP_RULES):
         return HttpAuthorizationPolicy("member", direct_loopback_only=path == "/api/desktop/update/idle")
 
