@@ -54,7 +54,7 @@ const reach = async (page: Page, state: State, lang: CopyLocale) => {
 for (const lang of ['zh', 'en'] as const) {
   for (const theme of ['light', 'dark'] as const) {
     for (const state of STATES) {
-      test(`MH-QUOTA-051: ${state} holds its layout (${lang}, ${theme})`, async ({ page }, testInfo) => {
+      test(`MH-QUOTA-078: ${state} holds its layout (${lang}, ${theme})`, async ({ page }, testInfo) => {
         const phone = testInfo.project.name === 'mobile';
         await page.goto(`/e2e/model-catalog/fixture.html?view=reset-cards&state=${state}&lang=${lang}&theme=${theme}`);
         await page.getByRole('tab', { name: hub('shell.tab.quota', {}, lang), exact: true }).click();

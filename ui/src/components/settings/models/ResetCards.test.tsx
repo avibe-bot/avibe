@@ -67,7 +67,7 @@ afterEach(async () => {
 });
 
 describe('reset cards in the quota card', () => {
-  it('MH-QUOTA-050: draws no block for an account holding none, a vendor without cards, or cards that could not be read', () => {
+  it('MH-QUOTA-077: draws no block for an account holding none, a vendor without cards, or cards that could not be read', () => {
     draw([
       account('none', 'anthropic', held([])),
       account('vendorless', 'gemini'),
@@ -81,7 +81,7 @@ describe('reset cards in the quota card', () => {
     expect(screen.queryByText(/重置卡/)).toBeNull();
   });
 
-  it('MH-QUOTA-051: lists one row per kind with its count, the vendor\'s own statement or nothing, and the first expiry on its own line', async () => {
+  it('MH-QUOTA-078: lists one row per kind with its count, the vendor\'s own statement or nothing, and the first expiry on its own line', async () => {
     const { unmount } = draw([
       account('claude', 'anthropic', held([
         card({ kind: 'all', expires_at: '2026-12-12T09:00:00Z' }),
@@ -124,7 +124,7 @@ describe('reset cards in the quota card', () => {
     expect(within(cardOf('claude')).getByRole('button', { name: 'Refresh this account' })).toBeTruthy();
   });
 
-  it('MH-QUOTA-052: says why a card cannot be used now instead of offering 「使用」', async () => {
+  it('MH-QUOTA-079: says why a card cannot be used now instead of offering 「使用」', async () => {
     const blocked = [
       card({ kind: 'fable', usable: false, blocked: 'needs_limit' }),
       card({ kind: 'all', usable: false, blocked: 'cooldown', blocked_until: iso(NOW + 130 * MINUTE) }),
@@ -147,7 +147,7 @@ describe('reset cards in the quota card', () => {
     expect(within(row('claude', 'weekly')).getByText('Not allowed by the provider now')).toBeTruthy();
   });
 
-  it('MH-QUOTA-053: the confirm step names what it spends and only asks; the other kinds wait', async () => {
+  it('MH-QUOTA-080: the confirm step names what it spends and only asks; the other kinds wait', async () => {
     const intents: [string, ResetCardIntent][] = [];
     const onIntent = (sourceId: string, intent: ResetCardIntent) => intents.push([sourceId, intent]);
     const sources = [account('claude', 'anthropic', held([card({ kind: 'all' }), card({ kind: 'fable', count: 3 })]))];
@@ -176,7 +176,7 @@ describe('reset cards in the quota card', () => {
     expect(intents.slice(1)).toEqual([['claude', { type: 'cancel' }], ['claude', { type: 'confirm', kind: 'fable' }]]);
   });
 
-  it('MH-QUOTA-054: the server\'s lock holds every 「使用」 of its account, says which card is in use or unconfirmed, and leaves other accounts alone', () => {
+  it('MH-QUOTA-081: the server\'s lock holds every 「使用」 of its account, says which card is in use or unconfirmed, and leaves other accounts alone', () => {
     const cards = [card({ kind: 'all' }), card({ kind: 'fable', count: 3 })];
     const { rerender } = draw([
       account('claude', 'anthropic', held(cards, { lock: { reason: 'in_flight', kind: 'fable', since: iso(NOW) } })),
@@ -218,7 +218,7 @@ describe('reset cards in the quota card', () => {
     expect((within(block('other-kind')!).getByRole('button', { name: '使用 Fable 重置卡' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('MH-QUOTA-055: says what a use did in the vendor\'s words, or that no card was spent and why, in zh and en', async () => {
+  it('MH-QUOTA-082: says what a use did in the vendor\'s words, or that no card was spent and why, in zh and en', async () => {
     const cards = [card({ kind: 'all', stated: false }), card({ kind: 'fable', count: 2 })];
     const said = (phase: ResetCardPhase) => {
       const { unmount } = draw([account('claude', 'anthropic', held(cards))], { phases: { claude: phase } });
@@ -247,7 +247,7 @@ describe('reset cards in the quota card', () => {
     for (const [phase, , enLine, free] of cases) expect(said(phase)).toEqual([enLine, free]);
   });
 
-  it('MH-QUOTA-061: a reader who may not spend cards sees the same list with no use action, whatever the server holds', () => {
+  it('MH-QUOTA-088: a reader who may not spend cards sees the same list with no use action, whatever the server holds', () => {
     const cards = [
       card({ kind: 'all' }),
       card({ kind: 'fable', count: 3 }),
@@ -274,7 +274,7 @@ describe('reset cards in the quota card', () => {
     }
   });
 
-  it('MH-QUOTA-056: still says what happened when the card used was the last of its kind', () => {
+  it('MH-QUOTA-083: still says what happened when the card used was the last of its kind', () => {
     draw([account('claude', 'anthropic', held([]))], { phases: { claude: { phase: 'used', kind: 'session', stated: true } } });
     const section = block('claude')!;
     expect(within(section).queryAllByRole('listitem')).toHaveLength(0);

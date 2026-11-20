@@ -2930,7 +2930,7 @@ describe('SettingsModelsPage reset cards', () => {
     await screen.findByRole('article', { name: 'Claude Max' });
   };
 
-  it('MH-QUOTA-057: 「使用」 only asks, 取消 sends nothing, and 确认使用 sends exactly one use whose answer is the reading shown', async () => {
+  it('MH-QUOTA-084: 「使用」 only asks, 取消 sends nothing, and 确认使用 sends exactly one use whose answer is the reading shown', async () => {
     await openWith(quotaWith());
     const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
     const answer = deferred<ResetCardUseResult>();
@@ -2969,7 +2969,7 @@ describe('SettingsModelsPage reset cards', () => {
     expect(redeem).toHaveBeenCalledTimes(1);
   });
 
-  it('MH-QUOTA-058: a lock the server holds disables 「使用」 on a freshly opened page and again after a remount', async () => {
+  it('MH-QUOTA-085: a lock the server holds disables 「使用」 on a freshly opened page and again after a remount', async () => {
     const quota = quotaWith({ lock: { reason: 'in_flight', kind: 'fable', since: new Date().toISOString() } });
     const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
     const check = () => {
@@ -2987,7 +2987,7 @@ describe('SettingsModelsPage reset cards', () => {
     expect(redeem).not.toHaveBeenCalled();
   });
 
-  it('MH-QUOTA-059: says not used only when the server does; a lost answer holds the account until its refresh lands', async () => {
+  it('MH-QUOTA-086: says not used only when the server does; a lost answer holds the account until its refresh lands', async () => {
     await openWith(quotaWith());
     const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
     const user = userEvent.setup();
@@ -3040,7 +3040,7 @@ describe('SettingsModelsPage reset cards', () => {
     expect(redeem).toHaveBeenCalledTimes(4);
   });
 
-  it('MH-QUOTA-063: a count that changed since it was shown is refused and redrawn from the server\'s reading, with no second request', async () => {
+  it('MH-QUOTA-090: a count that changed since it was shown is refused and redrawn from the server\'s reading, with no second request', async () => {
     await openWith(quotaWith());
     const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
     const refusal = new ApiCallError('reset_card_count_changed', undefined, true, [], [], [], 409);
@@ -3068,7 +3068,7 @@ describe('SettingsModelsPage reset cards', () => {
     expect(redeem).toHaveBeenCalledTimes(2);
   });
 
-  it('MH-QUOTA-062: only a reader the server lets spend cards is offered 「使用」; everyone else keeps the list and the refresh', async () => {
+  it('MH-QUOTA-089: only a reader the server lets spend cards is offered 「使用」; everyone else keeps the list and the refresh', async () => {
     for (const capabilities of [capabilitiesFor('member'), capabilitiesFor('editor'), { ...OWNER_INSTANCE_CAPABILITIES, can_use_model_hub_reset_cards: false }]) {
       await openWith(quotaWith(), capabilities);
       const cards = within(account()).getByRole('region', { name: /^Limit resets$|^重置卡$/ });
@@ -3087,7 +3087,7 @@ describe('SettingsModelsPage reset cards', () => {
     expect(cardUseButton('Fable').disabled).toBe(false);
   });
 
-  it('MH-QUOTA-060: an account\'s own refresh forces one read of every account and spins only on that account', async () => {
+  it('MH-QUOTA-087: an account\'s own refresh forces one read of every account and spins only on that account', async () => {
     await openWith(quotaWith());
     const force = vi.mocked(modelsApi.refreshQuota);
     const read = deferred<QuotaSummary>();
