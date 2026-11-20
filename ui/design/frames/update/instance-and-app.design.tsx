@@ -1,9 +1,9 @@
-// Approved 2026-11-20 (owner). The desktop app connected to an instance on another computer shows two
-// things that update separately: that instance, and this computer's desktop app. Today the
-// sidebar shows the app's version beside the instance's name, and its panel updates the app
-// without saying so (`now-*`, the shipped components). The proposal: the version beside the
-// instance's name is the instance's, and the one panel has a section for each, the instance
-// first, each with its own version, state and button (kit/update-subjects.tsx).
+// The desktop app connected to an instance on another computer shows two things that update
+// separately: that instance, and this computer's desktop app. The version beside the instance's
+// name is the instance's, and the one panel has a section for each, the instance first, each with
+// its own version, state and a button that names what it updates. Approved by the owner on
+// 2026-11-20 and shipped; every frame draws the shipped components.
+// Plan: docs/plans/2026-11-20-update-panel-instance-and-app.md.
 //
 // Nothing changes while the app shows the instance on its own computer (update/panel), or in
 // a browser or on a phone (`elsewhere-*`): there one thing is on screen, and the panel is its.
@@ -19,15 +19,15 @@ import { UpdatePanel } from '@/components/update/UpdatePanel';
 import { modelFromDesktopState, modelFromRuntime, type UpdatePanelModel } from '@/components/update/updatePanelModel';
 import type { VersionInfo } from '@/context/ApiContext';
 import { DesktopAccountRowView } from '@/desktop/DesktopAccountRowView';
-import { DesktopUpdatePanel, UpdatePopoverView } from '@/desktop/AccountApp';
-import type { DesktopClientProjection, DesktopClientState } from '@/desktop/bridge';
+import { DesktopUpdatePanels, UpdatePopoverView } from '@/desktop/AccountApp';
+import type { DesktopClientProjection, DesktopClientState, InstanceUpdateState } from '@/desktop/bridge';
+import { InstanceVersionChipView } from '@/desktop/InstanceVersionChip';
 import type { DesktopUpdateState } from '@/lib/desktopShell';
 
 import { frames, type FrameSpec } from '../../frame';
-import { InstanceVersionRow, UpdateSubjectsPanel, type SubjectLang } from '../../kit/update-subjects';
 import { agentsApi } from '../agents/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
-import { Badges, Captioned, Card, States, type PanelState, type Subjects } from './subjects';
+import { Badges, Captioned, Card, States, SubjectsPanel, type PanelState, type Shown, type SubjectLang, type Subjects } from './subjects';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
 import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
 
@@ -61,9 +61,10 @@ const app = (state: Partial<DesktopUpdateState> = {}, current = APP_OLD): Update
   modelFromDesktopState(updater(state), { current, checkedAt: CHECKED_AT });
 const appCurrent = () => app({ phase: 'current', latest: null }, APP_NEW);
 
-const pair = (first: UpdatePanelModel | null, second: UpdatePanelModel, open?: 'instance' | 'app'): Subjects => ({
-  instance: { name: INSTANCE, model: first, open: open === 'instance' },
-  app: { model: second, open: open === 'app' },
+const pair = (first: UpdatePanelModel | null | Shown, second: UpdatePanelModel, name = INSTANCE): Subjects => ({
+  name,
+  instance: first && 'model' in first ? first : { model: first },
+  app: { model: second },
 });
 
 const bothAvailable = pair(instance(), app());
@@ -90,34 +91,38 @@ const states: PanelState[] = [
       remoteRequest: { requestId: 'request-1', target: APP_NEW, phase: 'downloading', progress: 42, errorCode: null, updatedAt: CHECKED_AT },
     })),
   },
-  { name: 'details', zh: '点名字展开：这一项的上次检查和开关', en: 'A name opens its own last check and switches', subjects: pair(instance(), appCurrent(), 'instance') },
   { name: 'offline', zh: 'alex 连接断开', en: 'alex cannot be reached', subjects: pair(null, appCurrent()) },
   {
     name: 'unauthorized', zh: 'alex 不再接受这台电脑上的应用的登录', en: "alex no longer accepts this app's sign-in",
-    subjects: { instance: { name: INSTANCE, model: null, unavailable: 'unauthorized' }, app: { model: appCurrent() } },
+    subjects: pair({ model: null, unavailable: 'unauthorized' }, appCurrent()),
   },
   {
     name: 'member', zh: '不能管理 alex 的成员：看得到，没有按钮和开关', en: 'A member who cannot manage alex: the state, no button or switches',
-    subjects: {
-      instance: { name: INSTANCE, model: instance({}, { prereleases: null, autoUpdate: null }), canUpdate: false },
-      app: { model: appCurrent() },
-    },
+    subjects: pair({ model: instance({}, { prereleases: null, autoUpdate: null }), canUpdate: false }, appCurrent()),
   },
   {
     name: 'long-name', zh: '实例名字很长：名字和按钮都截断', en: 'A long instance name truncates, in its row and in its button',
-    subjects: { instance: { name: 'mac-mini-in-the-studio-upstairs-office', model: instance() }, app: { model: appCurrent() } },
+    subjects: pair(instance(), appCurrent(), 'mac-mini-in-the-studio-upstairs-office'),
   },
 ];
+
+/** The bottom row with the instance's chip in a given state. */
+const row = (chip: { version: string; attention?: boolean; updating?: boolean }, offline = false) => (
+  <DesktopAccountRowView
+    state={{ ...projection(false), connection: { ...projection(false).connection, status: offline ? 'remote_unreachable' : 'remote_connected' } }}
+    onPresent={() => {}}
+    localUpdater={null}
+    instanceVersion={<InstanceVersionChipView name={INSTANCE} {...chip} />}
+  />
+);
 
 const badgeRows = (lang: SubjectLang): [string, ReactNode][] => {
   const l = label(lang);
   return [
-    [l('现在：实例名旁边是这台电脑上的应用的版本', "Today: this computer's app version beside the instance's name"),
-      <DesktopAccountRowView state={projection(true)} onPresent={() => {}} localUpdater={null} />],
-    [l('提议：alex 的版本，都是最新', "Proposed: alex's version, both up to date"), <InstanceVersionRow lang={lang} name={INSTANCE} version={NEW} />],
-    [l('alex 或这台电脑上的应用有新版本', "An update for alex or for this computer's app"), <InstanceVersionRow lang={lang} name={INSTANCE} version={OLD} attention />],
-    [l('alex 更新中（面板关着也看得到）', 'alex is updating (shown with the panel closed)'), <InstanceVersionRow lang={lang} name={INSTANCE} version={OLD} updating />],
-    [l('alex 连接断开', 'alex cannot be reached'), <InstanceVersionRow lang={lang} name={INSTANCE} version={OLD} offline />],
+    [l('都是最新', 'Both up to date'), row({ version: NEW })],
+    [l('alex 或这台电脑上的应用有新版本', "An update for alex or for this computer's app"), row({ version: OLD, attention: true })],
+    [l('alex 更新中（面板关着也看得到）', 'alex is updating (shown with the panel closed)'), row({ version: OLD, updating: true })],
+    [l('alex 连接断开', 'alex cannot be reached'), row({ version: OLD }, true)],
   ];
 };
 
@@ -133,9 +138,17 @@ const projection = (update: boolean): DesktopClientProjection => ({
   desktop: { version: APP_OLD, update: updater(update ? {} : { phase: 'current', latest: null }) },
   remote_auxiliary: 'disabled_incomplete',
 });
+// What the shell reports for the instance: its own `/api/version`, read with the app's sign-in.
+const instanceUpdate: InstanceUpdateState = {
+  instance_id: 'alex', status: 'ready', can_manage: true, request: null, fetched_at: CHECKED_AT,
+  snapshot: { ...info(), prereleases: true, auto_update: false },
+};
 // The popup page reads the full client state; only its update fields matter here.
-const clientState = { ...projection(true), account: { ...projection(true).account, email: null, gate: null, methods: [] } } as unknown as DesktopClientState;
-const install = { failed: false, accept: () => {}, reset: () => {} } as Parameters<typeof DesktopUpdatePanel>[0]['install'];
+const clientState = {
+  ...projection(true), account: { ...projection(true).account, email: null, gate: null, methods: [] }, instance_update: instanceUpdate,
+} as unknown as DesktopClientState;
+const install = { failed: false, accept: () => {}, reset: () => {} } as Parameters<typeof DesktopUpdatePanels>[0]['install'];
+const popup = <DesktopUpdatePanels state={clientState} act={async () => true} busy={false} install={install} close={() => {}} />;
 
 const windowFixtures = (lang: SubjectLang) => workbenchFixtures({
   ...agentsApi(),
@@ -167,76 +180,71 @@ const panelTitle = (lang: SubjectLang) => (lang === 'en' ? en : zh).dashboard.ve
 
 const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
   {
-    name: `now-${lang}`,
-    title: `现在 · 桌面应用连接另一台电脑的实例：实例名旁边的版本号和面板都是这台电脑上的应用的，界面没有说 · ${lang}`,
+    name: `window-${lang}`,
+    title: `实例名旁边是实例的版本；面板里先是实例，再是这台电脑上的桌面应用，各有各的按钮 · ${lang}`,
     width: 1200,
     height: 800,
     status: 'shipped',
     route: '/',
     fixtures: windowFixtures(lang),
-    render: appWindow(
-      <DesktopAccountRowView state={projection(true)} onPresent={() => {}} localUpdater={null} />,
-      // The shell's window today: 336 × 520 (w-84, h-130).
-      { height: 'h-130', label: panelTitle(lang), content: <DesktopUpdatePanel state={clientState} act={async () => true} busy={false} install={install} close={() => {}} /> },
-    ),
-  },
-  {
-    name: `window-${lang}`,
-    title: `提议 · 实例名旁边是实例的版本；面板里先是实例，再是这台电脑上的桌面应用，各有各的按钮 · ${lang}`,
-    width: 1200,
-    height: 800,
-    status: 'approved',
-    route: '/',
-    fixtures: windowFixtures(lang),
-    render: appWindow(
-      <InstanceVersionRow lang={lang} name={INSTANCE} version={OLD} attention />,
-      // The shell sizes its window to the panel, as tall as it needs; drawn here in the 336 × 520 it has today.
-      { height: 'h-130', label: panelTitle(lang), content: <UpdateSubjectsPanel lang={lang} {...bothAvailable} /> },
-    ),
+    // The shell sizes its window to the panel; drawn here in a 336 × 520 box (w-84, h-130).
+    render: appWindow(row({ version: OLD, attention: true }), { height: 'h-130', label: panelTitle(lang), content: popup }),
   },
   {
     name: `window-updating-${lang}`,
-    title: `提议 · 实例更新中，面板已关：版本号上转圈，直到更新完成 · ${lang}`,
+    title: `实例更新中，面板已关：版本号上转圈，直到更新完成 · ${lang}`,
     width: 1200,
     height: 800,
-    status: 'approved',
+    status: 'shipped',
     route: '/',
     fixtures: windowFixtures(lang),
-    render: appWindow(<InstanceVersionRow lang={lang} name={INSTANCE} version={OLD} updating />),
+    render: appWindow(row({ version: OLD, updating: true })),
   },
   {
     name: `states-${lang}`,
-    title: `提议 · 面板的各个状态 · ${lang}`,
+    title: `面板的各个状态 · ${lang}`,
     width: 1472,
-    height: 1760,
-    status: 'approved',
+    height: 1560,
+    status: 'shipped',
     fixtures: { copy: copy(lang) },
     render: () => <States lang={lang} states={states} />,
   },
   {
+    name: `details-${lang}`,
+    title: `点名字展开：这一项的上次检查和开关 · ${lang}`,
+    width: 384,
+    height: 720,
+    status: 'shipped',
+    fixtures: { copy: copy(lang) },
+    click: ['[data-update-subject="instance"] button[aria-expanded]'],
+    render: () => (
+      <div lang={lang} className="flex h-full items-start justify-center bg-background p-8 text-foreground">
+        <Card><SubjectsPanel subjects={pair(instance(), appCurrent())} /></Card>
+      </div>
+    ),
+  },
+  {
     name: `badge-${lang}`,
-    title: `提议 · 侧边栏底部一行的各个状态（第一行是现在）· ${lang}`,
+    title: `侧边栏底部一行的各个状态 · ${lang}`,
     width: 420,
-    height: 480,
-    status: 'approved',
+    height: 400,
+    status: 'shipped',
     fixtures: { copy: copy(lang) },
     render: () => <Badges lang={lang} rows={badgeRows(lang)} />,
   },
   {
     name: `narrow-${lang}`,
-    title: `提议 · 窗口变窄时，从实例页面自己的版本号打开的是同一块面板 · ${lang}`,
+    title: `窗口变窄时，从实例页面自己的版本号打开的是同一块面板 · ${lang}`,
     width: 480,
     height: 800,
-    status: 'approved',
+    status: 'shipped',
     route: '/settings/general',
     fixtures: settingsFixtures({ '/api/version': info() }, { copy: copy(lang) }),
     render: () => (
       <div className="relative h-full">
         {settingsPage('general', <SettingsGeneralPage />)()}
         <div className="absolute bottom-10 left-2 z-50 h-130 w-84 transform-gpu">
-          <UpdatePopoverView label={panelTitle(lang)} onClose={() => {}}>
-            <UpdateSubjectsPanel lang={lang} {...bothAvailable} />
-          </UpdatePopoverView>
+          <UpdatePopoverView label={panelTitle(lang)} onClose={() => {}}>{popup}</UpdatePopoverView>
         </div>
       </div>
     ),
@@ -246,11 +254,12 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     title: `对照 · 浏览器和手机不变：只有一样东西，面板就是它的；别处发起的更新这里也显示进行中 · ${lang}`,
     width: 800,
     height: 560,
-    status: 'approved',
+    status: 'shipped',
     fixtures: { copy: copy(lang) },
     render: () => {
       const l = label(lang);
-      const elsewhere = instance({}, { installing: true });
+      // The Runtime reports the install itself, so every surface shows it, whoever started it.
+      const elsewhere = instance({ install: { phase: 'installing', target: NEW, started_at: CHECKED_AT } });
       const actions = { check: { run: () => {}, disabled: true }, setPrereleases: () => {}, setAutoUpdate: () => {}, settingsBusy: true, close: () => {} };
       return (
         <div lang={lang} className="flex h-full items-start justify-center gap-8 bg-background p-8 text-foreground">

@@ -2,11 +2,13 @@ import { useEffect } from 'react';
 import { VersionBadge } from '../components/VersionBadge';
 import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 import { DesktopAccountRowView } from './DesktopAccountRowView';
+import { InstanceVersionChip } from './InstanceVersionChip';
 import { useDesktopClientProjection, usePresentDesktopClient } from './useDesktopClient';
 
 /** Nonsecret footer. Account actions present native-owned UI. This computer's update is the shared
  *  update panel (ui/design: update/panel): on a page this computer serves, VersionBadge acts over the
- *  desktop app's IPC; on another computer's page, the version opens the trusted update view. */
+ *  desktop app's IPC. On another computer's page the version is that instance's own, and it opens the
+ *  panel the shell draws for both (ui/design: update/instance-and-app). */
 export function DesktopAccountRow() {
   const state = useDesktopClientProjection();
   const present = usePresentDesktopClient();
@@ -24,5 +26,16 @@ export function DesktopAccountRow() {
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, open);
   }, [remote, present]);
   if (!state) return null;
-  return <DesktopAccountRowView state={state} onPresent={present} localUpdater={<VersionBadge openUpward />} />;
+  const committed = state.connection.committed;
+  return <DesktopAccountRowView
+    state={state}
+    onPresent={present}
+    // The updater's IPC consumer is mounted only on this computer's own page.
+    localUpdater={remote ? null : <VersionBadge openUpward />}
+    instanceVersion={committed.kind === 'remote' && <InstanceVersionChip
+      name={committed.name}
+      appUpdate={state.desktop.update.phase === 'available'}
+      onPresent={() => present('updates')}
+    />}
+  />;
 }

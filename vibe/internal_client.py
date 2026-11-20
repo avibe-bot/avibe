@@ -1182,6 +1182,23 @@ async def turn_state(session_id: str, *, socket_path: Optional[Path] = None) -> 
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def live_activity_request(operation: str, owner: str, activity_id: str, payload: dict, *, authorization: dict | None = None) -> dict:
+    endpoint = await _resolve_endpoint_async(None)
+    try:
+        async with httpx.AsyncClient(
+            transport=_async_transport(endpoint), base_url=endpoint.base_url,
+            headers=endpoint.headers, timeout=httpx.Timeout(15.0, connect=0.2),
+        ) as client:
+            response = await client.post("/internal/live-activities", json={
+                "operation": operation, "owner": owner, "activity_id": activity_id, "payload": payload, "authorization": authorization,
+            })
+            _validate_response(response, endpoint)
+            response.raise_for_status()
+            return response.json()
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+
+
 async def request_preview(
     session_id: str,
     *,

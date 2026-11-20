@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VersionInfo } from '../../context/ApiContext';
 import type { DesktopUpdateState } from '../../lib/desktopShell';
-import { modelFromDesktopRelay, modelFromDesktopState } from './updatePanelModel';
+import { modelFromDesktopRelay, modelFromDesktopState, modelFromRuntime } from './updatePanelModel';
 
 const quiet = { requesting: false, error: null, timedOut: false, disconnected: false };
 const relay = (info: Partial<VersionInfo>): VersionInfo => ({
@@ -68,3 +68,28 @@ describe("the desktop app's own error", () => {
     } }), { current: '3.2.6', installFailed: false }).status).toEqual({ kind: 'update-failed', reason: 'install' });
   });
 });
+
+describe("a standalone Runtime's own report of an install", () => {
+  const idle = { checking: false, installing: false, restarting: false, result: null, prereleases: true, checkedAt: null };
+  const runtime = (install: VersionInfo['install']): VersionInfo => ({
+    current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, install,
+  });
+
+  it('is running on a page that did not start it', () => {
+    const started = '2026-11-20T07:03:17Z';
+    expect(modelFromRuntime(runtime({ phase: 'installing', target: '3.2.8rc4', started_at: started }), idle).status)
+      .toEqual({ kind: 'installing' });
+    // The restart names the version the installer recorded, or the offered one when it recorded none.
+    expect(modelFromRuntime(runtime({ phase: 'restarting', target: '3.2.8-rc.4', started_at: started }), idle).status)
+      .toEqual({ kind: 'updated', version: '3.2.8rc4', restarting: true });
+    expect(modelFromRuntime(runtime({ phase: 'restarting', target: null, started_at: started }), idle).status)
+      .toEqual({ kind: 'updated', version: '3.2.8rc4', restarting: true });
+  });
+
+  it('offers the update again once nothing is reported', () => {
+    expect(modelFromRuntime(runtime(null), idle).status).toEqual({ kind: 'available', version: '3.2.8rc4' });
+    // A Runtime that predates the report sends no field at all.
+    expect(modelFromRuntime(runtime(undefined), idle).status).toEqual({ kind: 'available', version: '3.2.8rc4' });
+  });
+});
+

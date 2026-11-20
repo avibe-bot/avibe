@@ -481,3 +481,68 @@ def test_offline_export_rejects_unsafe_unknown_malformed_and_legacy_lines(caplog
     ):
         invalid.append(prefix + EVENT_MARKER + json.dumps(event | change))
     assert all(parse_watchdog_event(candidate) is None for candidate in invalid)
+
+
+def test_own_code_is_labelled_by_identity_against_the_shipped_build_and_impostors_stay_redacted(caplog, monkeypatch) -> None:
+    # Redacted frames hid most non-GC field stalls. Avibe code gains a label only
+    # when reached from its module's namespace, its file is in the installed
+    # build's RECORD with a matching hash, and the build defines that name on the
+    # code's first line. Clones, aliases, generated replacements and files outside
+    # the build stay redacted; indexing is paced on healthy polls, not at a stall.
+    import base64
+    import copy
+    import hashlib
+    import types
+
+    import core.loop_watchdog_events as events
+    from core.session_turns import SessionTurnManager
+
+    def record(path):
+        digest = hashlib.sha256((events.PACKAGE_ROOT / path).read_bytes()).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+    shipped = {path: record(path) for path in ("core/session_turns.py", "core/loop_watchdog.py")}
+    monkeypatch.setattr(events, "_shipped_hashes", lambda: shipped)
+    events.shipped_vocabulary.cache_clear()
+    caplog.set_level(logging.WARNING, logger="core.loop_watchdog")
+    method = SessionTurnManager.busy_session_ids.__code__
+    nested = next(c for c in EventLoopWatchdog._try_warm_freeze.__code__.co_consts if getattr(c, "co_name", "") == "apply")
+    impostor = method.replace(co_name="busy_session_ids")
+    scope: dict = {}
+    exec(compile("def is_in_flight(self, session_id):\n    return False\n", method.co_filename, "exec"), scope)
+    monkeypatch.setattr(SessionTurnManager, "is_in_flight", scope["is_in_flight"])  # generated, bound under a real name
+    alias = types.ModuleType("core.customer_alias")
+    alias.__file__ = copy.__file__
+    alias.deepcopy = copy.deepcopy
+    monkeypatch.setitem(sys.modules, "core.customer_alias", alias)
+    stack = [method, nested, impostor, scope["is_in_flight"].__code__, copy.deepcopy.__code__.replace()]
+    frames = None
+    for code in reversed(stack):
+        frames = _Frame(code, frames)
+    monkeypatch.setattr(sys, "_current_frames", lambda: {123: frames})
+    watchdog = EventLoopWatchdog(SimpleNamespace(_thread_id=123))
+    try:
+        watchdog._report_stall(2.5, 0.0)  # nothing is indexed at a stall
+        _, event = _formatted_event(caplog)
+        assert all(f["file"] == "<redacted>" for f in event["frames"])
+        for _ in range(20000):
+            watchdog._index_own_step()
+            if not watchdog._own_queue and watchdog._own_seen_count == len(sys.modules):
+                break
+        watchdog._report_stall(2.5, 0.0)
+        line, event = _formatted_event(caplog)
+        assert [(f["file"], f["function"]) for f in event["frames"]] == [
+            ("core/session_turns.py", "SessionTurnManager.busy_session_ids"),
+            ("core/loop_watchdog.py", "EventLoopWatchdog._try_warm_freeze.<locals>.apply"),
+        ] + [("<redacted>", "<redacted>")] * 3
+
+        prefix = line.split(EVENT_MARKER)[0]
+        base = {"version": 1, "kind": "loop_stall", "loop_id": 1, "loop_thread_id": 1, "watchdog_thread_id": 1, "lag_ms": 1,
+                "sampled_at_unix": 1, "gc_active": False, "watchdog_wake_lateness_ms": 0, "sample_status": "ok", "truncated": False}
+        for file, function in (("core/../secret.py", "f"), ("/abs/core/x.py", "f"), ("core/session_turns.py", "秘密"),
+                               ("core/session_turns.py", "PrivateProject"), ("core/jobs_private.py", "helper"),
+                               ("core/controller.py", "Controller.__init__"), ("thirdparty/x.py", "f")):
+            frame = [{"file": file, "function": function, "line": 1}]
+            assert parse_watchdog_event(prefix + EVENT_MARKER + json.dumps(base | {"frames": frame})) is None
+    finally:
+        events.shipped_vocabulary.cache_clear()
