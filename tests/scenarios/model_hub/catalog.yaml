@@ -2192,13 +2192,15 @@ scenarios:
       - tests/test_model_hub_card_use.py::test_a_usage_answer_that_names_another_account_is_no_reading_of_this_one
       - tests/test_model_hub_card_use.py::test_a_reading_about_another_account_neither_confirms_a_use_nor_lifts_its_lock
   - id: MH-QUOTA-076
-    name: Totals that disagree and an acknowledgement about another or an unfinished credit are no evidence
+    name: Totals that disagree and an acknowledgement about another account, grant, credit or request, or an unfinished credit, are no evidence
     status: covered
     kind: safety
     layer: unit
     test:
       - tests/test_model_hub_card_use.py::test_a_card_detail_total_that_disagrees_with_the_usage_count_is_unread
       - tests/test_model_hub_card_use.py::test_an_acknowledgement_about_another_credit_or_an_unfinished_one_is_unknown
+      - tests/test_model_hub_card_use.py::test_a_chatgpt_acknowledgement_about_another_account_or_request_is_unknown
+      - tests/test_model_hub_card_use.py::test_a_claude_acknowledgement_about_another_grant_or_organization_is_unknown
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered
