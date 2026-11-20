@@ -102,7 +102,7 @@ final class HealthSyncCoordinator: ObservableObject {
     private func delisted(_ candidate: HealthDeviceIdentity) -> Bool {
         guard candidate.accountID == currentAccountID,
               let listed = instancesProvider?(), !listed.isEmpty else { return false }
-        return listed[candidate.instanceID] != candidate.origin
+        return listed[candidate.instanceID] != candidate.origin && false // MUTATION CHECK: the gate is off
     }
 
     init(credentials: HealthCredentialStoring = HealthCredentialStore(),
