@@ -483,36 +483,52 @@ def test_offline_export_rejects_unsafe_unknown_malformed_and_legacy_lines(caplog
     assert all(parse_watchdog_event(candidate) is None for candidate in invalid)
 
 
-def test_own_code_is_labelled_by_identity_and_parses_while_impostors_stay_redacted(caplog, monkeypatch) -> None:
-    # Redacted frames hid most non-GC field stalls. Avibe's own code gains a
-    # label only when reached from its module namespace; a clone carrying an
-    # Avibe-looking filename and name is not reachable and must stay redacted.
+def test_own_code_is_labelled_by_identity_against_shipped_source_and_impostors_stay_redacted(caplog, monkeypatch) -> None:
+    # Redacted frames hid most non-GC field stalls. Avibe code gains a label only
+    # when reached from its shipped module's namespace and defined in its shipped
+    # source; clones, aliases and generated code stay redacted, and indexing is
+    # paced on healthy polls rather than done at a stall.
     import copy
+    import types
+
+    import core.session_turns as session_turns
     from core.session_turns import SessionTurnManager
 
     caplog.set_level(logging.WARNING, logger="core.loop_watchdog")
     method = SessionTurnManager.busy_session_ids.__code__
     nested = next(c for c in EventLoopWatchdog._try_warm_freeze.__code__.co_consts if getattr(c, "co_name", "") == "apply")
-    impostor = method.replace(co_filename=method.co_filename, co_name="busy_session_ids")
-    third_party = copy.deepcopy.__code__.replace()
-    frames = _Frame(method, _Frame(nested, _Frame(impostor, _Frame(third_party))))
+    impostor = method.replace(co_name="busy_session_ids")
+    generated = compile("def PrivateProject():\n    pass\n", method.co_filename, "exec")
+    scope: dict = {}
+    exec(generated, scope)
+    monkeypatch.setattr(session_turns, "PrivateProject", scope["PrivateProject"], raising=False)
+    alias = types.ModuleType("core.customer_alias")
+    alias.__file__ = copy.__file__
+    alias.deepcopy = copy.deepcopy
+    monkeypatch.setitem(sys.modules, "core.customer_alias", alias)
+    frames = _Frame(method, _Frame(nested, _Frame(impostor, _Frame(scope["PrivateProject"].__code__, _Frame(copy.deepcopy.__code__.replace())))))
     monkeypatch.setattr(sys, "_current_frames", lambda: {123: frames})
     watchdog = EventLoopWatchdog(SimpleNamespace(_thread_id=123))
+    watchdog._report_stall(2.5, 0.0)  # nothing indexed at a stall
+    _, event = _formatted_event(caplog)
+    assert all(f["file"] == "<redacted>" for f in event["frames"])
+    for _ in range(20000):
+        watchdog._index_own_step()
+        if not watchdog._own_queue and watchdog._own_seen_count == len(sys.modules):
+            break
     watchdog._report_stall(2.5, 0.0)
     _, event = _formatted_event(caplog)
     assert [(f["file"], f["function"]) for f in event["frames"]] == [
         ("core/session_turns.py", "SessionTurnManager.busy_session_ids"),
         ("core/loop_watchdog.py", "EventLoopWatchdog._try_warm_freeze.<locals>.apply"),
-        ("<redacted>", "<redacted>"),
-        ("<redacted>", "<redacted>"),
-    ]
-    assert "copy" not in watchdog._indexed_modules and "core.session_turns" in watchdog._indexed_modules
+    ] + [("<redacted>", "<redacted>")] * 3
 
     line, _ = _formatted_event(caplog)
     prefix = line.split(EVENT_MARKER)[0]
     base = {"version": 1, "kind": "loop_stall", "loop_id": 1, "loop_thread_id": 1, "watchdog_thread_id": 1, "lag_ms": 1,
             "sampled_at_unix": 1, "gc_active": False, "watchdog_wake_lateness_ms": 0, "sample_status": "ok", "truncated": False}
-    for file, function in (("core/../secret.py", "f"), ("/abs/core/x.py", "f"), ("core/x.py", "秘密"),
-                           ("core/x.py", "f.<private>"), ("thirdparty/x.py", "f"), ("core/X.py", "f")):
+    for file, function in (("core/../secret.py", "f"), ("/abs/core/x.py", "f"), ("core/session_turns.py", "秘密"),
+                           ("core/customer_name.py", "PrivateProject"), ("core/session_turns.py", "PrivateProject"),
+                           ("thirdparty/x.py", "f")):
         frame = [{"file": file, "function": function, "line": 1}]
         assert parse_watchdog_event(prefix + EVENT_MARKER + json.dumps(base | {"frames": frame})) is None

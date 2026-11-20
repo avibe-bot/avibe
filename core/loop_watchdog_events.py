@@ -1,15 +1,19 @@
 """Bounded watchdog event vocabulary and an opt-in, offline export boundary.
 
 ``parse_watchdog_event(line)`` accepts one application-logger-formatted warning
-and returns only a validated v1 stall event, or None. It opens no files and does
-not discover logs or start observation. Legacy warnings/recoveries and slow-GC
+and returns only a validated v1 stall event, or None. It reads no logs and does
+not discover logs or start observation; to accept an Avibe-owned label it parses
+that shipped Avibe source file (cached) to confirm the name exists there. Legacy warnings/recoveries and slow-GC
 numeric lines remain separate; callers can keep their existing numeric parser.
 """
 from __future__ import annotations
 
+import ast
+import functools
 import json
 import math
 import re
+from pathlib import Path
 
 # Fixed labels, NOT strings obtained from a frame, function, module or filename.
 # Resolution is limited to these attributes of already-loaded modules. Missing
@@ -39,22 +43,51 @@ SAFE_CODE_LABELS = frozenset(
     for module, attributes in _CODE_TARGETS for attribute in attributes
 )
 REDACTED_LABEL = ("<redacted>", "<redacted>")
-# Avibe's own packages. Their code is labelled only when reached by identity from
-# the module's own namespace (never from a frame's filename or name strings), and
-# the label must also pass this syntax, which admits module paths and qualified
-# names only.
+# Avibe's own packages. A label for their code is (path from the package root,
+# qualified name), and is valid only if that name is defined in the shipped source
+# file at that path: an exact vocabulary read from the installation itself, so a
+# label can never carry a name that is not Avibe source.
 OWN_PACKAGES = ("vibe", "config", "core", "modules", "storage")
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 _OWN_FILE = re.compile(r"(?:vibe|config|core|modules|storage)(?:/[a-z_][a-z0-9_]{0,63}){0,6}\.py")
-_OWN_FUNCTION = re.compile(
-    r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:\.(?:<locals>|<lambda>|<genexpr>|<listcomp>|<dictcomp>|<setcomp>|[A-Za-z_][A-Za-z0-9_]{0,63})){0,11}"
-)
+_COMPREHENSIONS = {ast.GeneratorExp: "<genexpr>", ast.ListComp: "<listcomp>", ast.SetComp: "<setcomp>", ast.DictComp: "<dictcomp>"}
+
+
+@functools.lru_cache(maxsize=512)
+def shipped_qualnames(path: str) -> frozenset[str]:
+    """Qualified names defined in the shipped Avibe source at ``path``; empty if absent."""
+    if type(path) is not str or _OWN_FILE.fullmatch(path) is None:
+        return frozenset()
+    try:
+        tree = ast.parse((PACKAGE_ROOT / path).read_bytes())
+    except (OSError, SyntaxError, ValueError, RecursionError):
+        return frozenset()
+    names: set[str] = set()
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(prefix + child.name)
+                visit(child, f"{prefix}{child.name}.<locals>.")
+            elif isinstance(child, ast.ClassDef):
+                names.add(prefix + child.name)
+                visit(child, f"{prefix}{child.name}.")
+            elif isinstance(child, ast.Lambda):
+                names.add(prefix + "<lambda>")
+                visit(child, f"{prefix}<lambda>.<locals>.")
+            elif type(child) in _COMPREHENSIONS:
+                names.add(prefix + _COMPREHENSIONS[type(child)])
+                visit(child, f"{prefix}{_COMPREHENSIONS[type(child)]}.<locals>.")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
+    return frozenset(names)
 
 
 def own_code_label(file: object, function: object) -> bool:
-    return (
-        type(file) is str and type(function) is str and len(file) <= 200 and len(function) <= 400
-        and _OWN_FILE.fullmatch(file) is not None and _OWN_FUNCTION.fullmatch(function) is not None
-    )
+    return type(function) is str and function in shipped_qualnames(file)
+
 
 MAX_STACK_FRAMES = 30
 MAX_EVENT_BYTES = 8192
