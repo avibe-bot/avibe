@@ -2,15 +2,22 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { AppLaunchSnapshot } from '../../apps/appLaunchProtocol';
+
+type Activity = { event: string; session_id: string; title?: string | null };
 type Handlers = {
   onConnected?: () => void;
-  onSessionActivity?: (data: { event: string; session_id: string }) => void;
+  onSessionActivity?: (data: Activity) => void;
 };
 
+const state = vi.hoisted(() => ({ snapshot: null as AppLaunchSnapshot | null }));
 const handlers = new Set<Handlers>();
-const getSessionResult = vi.fn(async (id: string) => ({ status: 200, session: { id, status: 'active' } }));
+const getSessionResult = vi.fn(async (id: string): Promise<{ status: number; session: { id: string; status: string; title?: string | null } | null }> => ({
+  status: 200,
+  session: { id, status: 'active' },
+}));
 const api = {
   getSessionResult,
   connectWorkbenchEvents: (next: Handlers) => {
@@ -21,7 +28,9 @@ const api = {
 
 vi.mock('../../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../../context/StandaloneAppTabContext', () => ({ useStandaloneAppTab: () => true }));
-vi.mock('../../apps/useAppLaunchSnapshot', () => ({ useAppLaunchSnapshot: () => null }));
+vi.mock('../../apps/useAppLaunchSnapshot', () => ({ useAppLaunchSnapshot: () => state.snapshot }));
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => (key === 'chat.untitled' ? 'Untitled session' : key) }) }));
+vi.mock('./NativeShowShareEntry', () => ({ NativeShowShareEntry: () => null }));
 vi.mock('../workbench/AppsEditorPage', () => ({ AppsEditorPage: () => null }));
 vi.mock('../../apps/registry', async () => {
   const { useContext } = await import('react');
@@ -58,8 +67,14 @@ function renderShow(sessionId: string, manager: WindowManagerValue | null = null
   return () => screen.getByTestId('show-host').getAttribute('data-src');
 }
 
-const emit = (event: Parameters<NonNullable<Handlers['onSessionActivity']>>[0]) =>
+const emit = (event: Activity) =>
   act(() => handlers.forEach((handler) => handler.onSessionActivity?.(event)));
+const reconnect = () => act(() => handlers.forEach((handler) => handler.onConnected?.()));
+
+beforeEach(() => {
+  state.snapshot = null;
+  document.title = 'Avibe';
+});
 
 afterEach(() => {
   cleanup();
@@ -129,5 +144,50 @@ describe('closing a standalone body', () => {
     fireEvent.click(screen.getByRole('button', { name: 'close own' }));
     expect(wm.close).toHaveBeenCalledWith('route-showpage');
     expect(nativeCloses).toEqual([]);
+  });
+});
+
+describe('a native Show window names itself after its Show', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true, configurable: true });
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(window, '__AVIBE_NATIVE_APP_WINDOW__');
+  });
+
+  it('takes the Show title when opened from the route or a deep link, which name nothing', async () => {
+    getSessionResult.mockResolvedValueOnce({ status: 200, session: { id: 'ses-1', status: 'active', title: 'Read name' } });
+    renderShow('ses-1');
+    await waitFor(() => expect(document.title).toBe('Read name'));
+  });
+
+  it('follows a rename, ignoring other sessions, and takes a later re-read over an earlier rename', async () => {
+    getSessionResult.mockResolvedValueOnce({ status: 200, session: { id: 'ses-1', status: 'active', title: 'Q4 漏斗看板' } });
+    renderShow('ses-1');
+    await waitFor(() => expect(document.title).toBe('Q4 漏斗看板'));
+    emit({ event: 'updated', session_id: 'ses-other', title: 'Other' });
+    emit({ event: 'updated', session_id: 'ses-1', title: 'Q4 漏斗看板（终版）' });
+    await waitFor(() => expect(document.title).toBe('Q4 漏斗看板（终版）'));
+    // A rename missed while disconnected arrives with the re-read.
+    getSessionResult.mockResolvedValueOnce({ status: 200, session: { id: 'ses-1', status: 'active', title: 'Q4 定稿' } });
+    reconnect();
+    await waitFor(() => expect(document.title).toBe('Q4 定稿'));
+  });
+
+  it('uses the launcher title until the Show is read, and untitled for a Show without one', async () => {
+    state.snapshot = { appId: 'showpage', sessionId: 'ses-1', title: 'Launcher name', requestId: 'r1', windowId: 'w1', source: 'dock' };
+    getSessionResult.mockResolvedValueOnce({ status: 500, session: null });
+    renderShow('ses-1');
+    await waitFor(() => expect(document.title).toBe('Launcher name'));
+    emit({ event: 'updated', session_id: 'ses-1', title: null });
+    await waitFor(() => expect(document.title).toBe('Untitled session'));
+  });
+
+  it('leaves a browser tab title alone', async () => {
+    Reflect.deleteProperty(window, '__AVIBE_NATIVE_APP_WINDOW__');
+    getSessionResult.mockResolvedValueOnce({ status: 200, session: { id: 'ses-1', status: 'active', title: 'Q4 漏斗看板' } });
+    const src = renderShow('ses-1');
+    await waitFor(() => expect(src()).not.toBe(''));
+    expect(document.title).toBe('Avibe');
   });
 });

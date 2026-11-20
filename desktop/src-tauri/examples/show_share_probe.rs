@@ -38,6 +38,10 @@ fn main() {
 mod macos_show_share;
 
 #[cfg(target_os = "macos")]
+#[path = "../src/show_window_title.rs"]
+mod show_window_title;
+
+#[cfg(target_os = "macos")]
 #[path = "../src/macos_show_titlebar.rs"]
 mod macos_show_titlebar;
 
@@ -138,6 +142,7 @@ document.getElementById('show').addEventListener('load', () => {
                 steps(&window, &origin, focus);
                 title_bar(&window, &ready);
                 released(&handle, &origin);
+                named(&handle, &origin);
                 println!("{}", json!({ "done": true }));
                 handle.exit(0);
             });
@@ -493,6 +498,77 @@ document.getElementById('show').addEventListener('load', () => {
             installed >= 1 && alive == 0 && titled == plain,
             json!({ "installed": installed, "alive": alive, "window_references": titled, "plain_window_references": plain }),
         );
+    }
+
+    /// A Show window opened by an entry that names nothing (a deep link, the
+    /// `/apps/show` route) is named by its page, as the page names it: a long
+    /// Show title is cut off before the share button, a rename follows, and a
+    /// blank document title changes nothing.
+    fn named(app: &tauri::AppHandle, origin: &str) {
+        const LONG: &str =
+            "2026 年第四季度全渠道销售漏斗与转化归因分析看板（含区域拆分、渠道对比、周环比明细与下季度目标拆解）";
+        const RENAMED: &str = "Q4 漏斗看板（终版）";
+        let window = crate::show_window_title::follow(
+            WebviewWindowBuilder::new(
+                app,
+                "named-show",
+                WebviewUrl::External(format!("{origin}/workbench").parse().unwrap()),
+            )
+            .title("Avibe"),
+        )
+        .inner_size(720.0, 480.0)
+        .position(-4000.0, -4000.0)
+        .visible(true)
+        .focused(false)
+        .incognito(true)
+        .build()
+        .unwrap();
+        crate::macos_show_titlebar::install(&window, "Share".to_owned(), "/workbench".to_owned());
+        // Runs `body` in the page, then reads the window's title and drawn title.
+        let titled = |body: &'static str| {
+            script(&window, body, vec![]);
+            std::thread::sleep(Duration::from_millis(500));
+            on_main(&window, |webview, _, tx| {
+                let window = webview.window().expect("window");
+                let _ = tx.send((
+                    window.title().to_string(),
+                    crate::macos_show_titlebar::title_state(&window),
+                ));
+            })
+        };
+        std::thread::sleep(Duration::from_millis(1000));
+        let (title, _) = titled("return true;");
+        check(
+            "a-window-that-was-named-nothing-takes-its-page-s-title",
+            title == "workbench",
+            json!(title),
+        );
+
+        let (title, drawn) = titled("document.title = '2026 年第四季度全渠道销售漏斗与转化归因分析看板（含区域拆分、渠道对比、周环比明细与下季度目标拆解）'; return true;");
+        let os26 = native::os_version().0 >= 26;
+        let cut = drawn.as_ref().is_some_and(|(text, shown, end, start, natural, _)| {
+            text == LONG && *shown && *natural > end - 82.0 && start - end >= 8.0
+        });
+        check(
+            "the-show-s-long-title-is-cut-off-before-the-button",
+            title == LONG && (cut || !os26),
+            json!({ "title_matches": title == LONG, "drawn": drawn.map(|(_, shown, end, start, natural, _)| json!({ "shown": shown, "room": end - 82.0, "natural": natural, "gap": start - end })) }),
+        );
+
+        let (title, drawn) = titled("document.title = 'Q4 漏斗看板（终版）'; return true;");
+        check(
+            "a-rename-reaches-the-window",
+            title == RENAMED
+                && (!os26
+                    || drawn.is_some_and(|(text, shown, end, _, natural, _)| {
+                        text == RENAMED && shown && end - 82.0 >= natural
+                    })),
+            json!(title),
+        );
+
+        let (title, _) = titled("document.title = ''; return true;");
+        check("a-blank-document-title-changes-nothing", title == RENAMED, json!(title));
+        window.destroy().unwrap();
     }
 
     fn serve(listener: TcpListener, ready: mpsc::Sender<String>) {

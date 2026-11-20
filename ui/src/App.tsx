@@ -130,6 +130,7 @@ import {
     takeResumedWebPushLaunchPath,
 } from './lib/webPushLaunch';
 import { applyAppTitle } from './lib/documentTitle';
+import { isNativeAppWindow } from './lib/desktopShell';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
@@ -785,6 +786,8 @@ const LibraryRoute = () => {
 const DocumentTitle = () => {
   const { getConfig } = useApi();
   useEffect(() => {
+    // A native App window's title is the shell's window title; its page names it.
+    if (isNativeAppWindow()) return;
     let cancelled = false;
     getConfig()
       .then((config) => {

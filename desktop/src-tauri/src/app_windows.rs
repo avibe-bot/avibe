@@ -85,6 +85,17 @@ fn optional_mtime<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<O
 fn bounded(value: &str, max: usize) -> bool {
     value.len() <= max && !value.contains('\0')
 }
+/// The title a repeated launch gives the window it reuses: its request's,
+/// except for a Show window. Its page names it after the Show's current
+/// title (`show_window_title`), and a Dock tile, a search result or an
+/// in-flight request may still carry the Show's old name. A new Show window
+/// still starts with the request's title until its page names it.
+fn reused_title<'a>(target: &AppWindowTarget, request: &'a Request) -> Option<&'a str> {
+    match target {
+        AppWindowTarget::ShowPage(_) => None,
+        AppWindowTarget::Builtin(_) => request.title.as_deref().filter(|title| !title.trim().is_empty()),
+    }
+}
 fn request_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -775,7 +786,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         let window = app.get_webview_window(&label).expect("registered app window");
         let snapshot = Snapshot::new(request, &label);
         *entry.snapshot.lock().expect("snapshot") = snapshot.clone();
-        if let Some(title) = request.title.as_deref().filter(|title| !title.trim().is_empty()) {
+        if let Some(title) = reused_title(&target, request) {
             let _ = window.set_title(title);
         }
         // The destination stays unchanged: repeated Editor/Terminal requests
@@ -875,6 +886,10 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
                     let _ = view.eval(snapshot_script(&snapshot, true));
                 }
             });
+    // A Show window is named after its Show, as its page names its document.
+    if matches!(target, AppWindowTarget::ShowPage(_)) {
+        builder = crate::show_window_title::follow(builder);
+    }
     if let Some(path) = path {
         builder = builder.data_directory(path);
     }
@@ -1252,6 +1267,27 @@ mod tests {
         )
         .unwrap()
     }
+    // Review of 9b67dcd0: a Show renamed since a Dock tile, a search result or an
+    // in-flight request took its name must not have that old name written back
+    // when the request reuses the open window. The page names a Show window.
+    #[test]
+    fn a_reused_show_window_keeps_the_title_its_page_gave_it() {
+        let mut stale = request("showpage", json!(null));
+        stale.title = Some("Old name".into());
+        let target = stale.target(true).unwrap();
+        assert_eq!(
+            reused_title(&target, &stale),
+            None,
+            "a stale launcher name is not written back"
+        );
+        // Other App windows are still named by their launch.
+        let mut editor = request("editor", json!({"path":"/tmp/a.md"}));
+        editor.title = Some("a.md".into());
+        assert_eq!(reused_title(&editor.target(true).unwrap(), &editor), Some("a.md"));
+        editor.title = Some("  ".into());
+        assert_eq!(reused_title(&editor.target(true).unwrap(), &editor), None);
+    }
+
     // The old owner accepted only four targets and silently discarded state.
     // This table pins the shared native data boundary, not UI resolution policy.
     #[test]

@@ -32,6 +32,7 @@ mod notifications;
 mod pet;
 mod pet_native;
 mod show_share;
+mod show_window_title;
 mod update_install;
 mod update_popover;
 pub mod updater;

@@ -1,9 +1,10 @@
 import { useApi } from '../../context/ApiContext';
 import { ShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHost';
-import { showPageWindowSource, showPageWindowStatusAfterRead, type ShowPageWindowStatus } from './showPageWindowState';
+import { showPageWindowSource, showPageWindowStatusAfterRead, showPageWindowTitle, type ShowPageWindowStatus } from './showPageWindowState';
 import { isNativeAppWindow } from '../../lib/desktopShell';
 import { useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { APP_REGISTRY, type AppId } from '../../apps/registry';
 import { appBodyParams, requestNativeWindowClose } from '../../apps/appLaunchProtocol';
 import { WindowManagerContext } from '../../context/WindowManagerContext';
@@ -57,29 +58,42 @@ function NativeWindowCloseScope({ windowId, children }: { windowId: string; chil
 
 function StandaloneShowBody({ windowId, params }: { windowId: string; params: Record<string, unknown> }) {
   const api = useApi();
+  const { t } = useTranslation();
   const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
   const [status, setStatus] = useState<ShowPageWindowStatus>('loading');
   const [archived, setArchived] = useState(false);
   const [revalidateVersion, setRevalidateVersion] = useState(0);
+  // The Show's title as last read or renamed: a rename and a (re)read both set it, whichever is later.
+  const [showTitle, setShowTitle] = useState<string | null | undefined>(undefined);
   // The same lifecycle source as the Workbench's Show windows: archive is
   // terminal for the frame and its controls, and every (re)connect re-reads
-  // the session to close the gap the event stream could not cover.
+  // the session to close the gap the event stream could not cover. A rename
+  // arrives on the same stream.
   useEffect(() => api.connectWorkbenchEvents({
     onConnected: () => setRevalidateVersion((version) => version + 1),
     onSessionActivity: (data) => {
-      if (data.event === 'archived' && data.session_id === sessionId) setArchived(true);
+      if (data.session_id !== sessionId) return;
+      if (data.event === 'archived') setArchived(true);
+      else if (data.event === 'updated' && Object.prototype.hasOwnProperty.call(data, 'title')) setShowTitle(data.title ?? null);
     },
   }), [api, sessionId]);
   useEffect(() => {
     let live = true;
     void api.getSessionResult(sessionId).then((result) => {
-      if (live) setStatus((current) => showPageWindowStatusAfterRead(current, result));
+      if (!live) return;
+      setStatus((current) => showPageWindowStatusAfterRead(current, result));
+      if (result.session) setShowTitle(result.session.title ?? null);
     }).catch(() => { if (live) setStatus((current) => showPageWindowStatusAfterRead(current, { status: null, session: null })); });
     return () => { live = false; };
   }, [api, revalidateVersion, sessionId]);
   const Body = APP_REGISTRY.showpage.Component;
   // A native Show window has no web title bar: its share entry is the shell's title-bar button.
   const native = isNativeAppWindow();
+  // Its title is the shell's, which follows this document's title: the Show's own, kept current.
+  const title = showPageWindowTitle(showTitle, params.title, t('chat.untitled'));
+  useEffect(() => {
+    if (native && title) document.title = title;
+  }, [native, title]);
   return <ShowPageAnnotationHost src={showPageWindowSource(sessionId, status, archived)}>
     {native ? <div className="relative h-full w-full">
       <Body windowId={windowId} params={params} />
