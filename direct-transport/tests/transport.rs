@@ -254,6 +254,7 @@ async fn stable_connection_refreshes_device_sample_with_handshake_epoch() {
     let mut previous = started;
     let mut five_second_gap = false;
     let mut closing = false;
+    let mut renewed_ordinal = None;
     loop {
         let line = timeout(Duration::from_secs(7), reports.next_line())
             .await
@@ -266,12 +267,23 @@ async fn stable_connection_refreshes_device_sample_with_handshake_epoch() {
             "connection attribution changed"
         );
         let now = tokio::time::Instant::now();
+        let ordinal = report["ordinal"].as_u64().expect("connection ordinal");
+        if let Some(first) = renewed_ordinal {
+            assert_eq!(ordinal, first);
+            assert_ne!(report["phase"], "open", "duplicate opening record");
+        } else {
+            assert_eq!(
+                report["phase"], "open",
+                "first measurement must establish the connection"
+            );
+        }
         if report["phase"] == "open" {
             sidecar
                 .send(json!({"type":"admission", "endpoint_id":peer, "ttl_seconds":60, "epoch":0}))
                 .await;
+            renewed_ordinal = Some(ordinal);
         } else if report["phase"] == "close" {
-            assert!(closing);
+            assert!(closing && renewed_ordinal == Some(ordinal));
             break;
         } else {
             assert_eq!(report["phase"], "change");
@@ -287,6 +299,22 @@ async fn stable_connection_refreshes_device_sample_with_handshake_epoch() {
         }
         previous = now;
     }
+    // Prove the renewal was consumed, not just written to stdin: a new
+    // handshake by the same peer now freezes zero instead of 31.
+    let next = timeout(WAIT, client.connect(dial_address(&sidecar.ready), ALPN))
+        .await
+        .unwrap()
+        .unwrap();
+    let line = timeout(WAIT, reports.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let report: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(report["phase"], "open");
+    assert!(report["peer"] == peer && report["epoch"] == 0);
+    assert_ne!(report["ordinal"].as_u64(), renewed_ordinal);
+    next.close(0u8.into(), b"done");
     sidecar.stop().await;
 }
 

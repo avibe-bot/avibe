@@ -397,7 +397,7 @@ async fn handle_connection(
     incoming: Incoming,
     handshake_permit: HandshakePermit,
     control: Control,
-    reports: tokio::sync::mpsc::Sender<path_report::Report>,
+    reports: tokio::sync::mpsc::Sender<path_report::Queued>,
     _connection_permit: tokio::sync::OwnedSemaphorePermit,
     config: Arc<StartConfig>,
 ) {
@@ -418,16 +418,13 @@ async fn handle_connection(
     let no_stream = time::sleep(NO_STREAM_TIMEOUT);
     tokio::pin!(no_stream);
     let mode = control.observe.load(std::sync::atomic::Ordering::Relaxed);
-    let terminal = (mode != 0)
-        .then(|| reports.clone().try_reserve_owned().ok())
-        .flatten();
-    let mut observer = terminal
-        .as_ref()
-        .map(|_| path_report::Observer::new(&connection, (mode == 2).then_some(epoch)));
+    let mut output = path_report::Output::default();
+    let mut observer =
+        (mode != 0).then(|| path_report::Observer::new(&connection, (mode == 2).then_some(epoch)));
     let mut changed = false;
     let mut last_report = Instant::now();
     if let Some(obs) = &mut observer {
-        obs.report(&connection, "open", &reports);
+        obs.report(&connection, "open", &reports, &mut output);
     }
     let mut reason = "connection_closed";
     loop {
@@ -443,7 +440,7 @@ async fn handle_connection(
             }
             _ = time::sleep_until(last_report + Duration::from_secs(if changed { 1 } else { 5 })),
                 if observer.is_some() && (changed || mode == 2) => {
-                if let Some(obs) = &mut observer { obs.report(&connection, "change", &reports); }
+                if let Some(obs) = &mut observer { obs.report(&connection, "change", &reports, &mut output); }
                 changed = false;
                 last_report = Instant::now();
             }
@@ -473,8 +470,8 @@ async fn handle_connection(
     connection.close(close_code(), reason.as_bytes());
     stream_tasks.abort_all();
     while stream_tasks.join_next().await.is_some() {}
-    if let (Some(obs), Some(slot)) = (observer, terminal) {
-        slot.send(obs.finish().await);
+    if let Some(obs) = observer {
+        output.finish(obs.finish().await);
     }
     control.peer_closed(&endpoint_id, reason).await;
 }
@@ -619,10 +616,11 @@ async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Resu
     let control_task = tokio::spawn(run_control_reader(stdin, control.clone()));
     let handshake_limit = HandshakeLimit::new();
     let connection_limit = Arc::new(Semaphore::new(config.max_connections as usize));
-    let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(64);
+    let (report_tx, mut report_rx) = path_report::queue(config.max_connections as usize);
     let report_writer = tokio::spawn(async move {
         let mut sink = tokio::io::stderr();
-        while let Some(report) = report_rx.recv().await {
+        while let Some(queued) = report_rx.recv().await {
+            let report = queued.take();
             let mut line =
                 serde_json::to_vec(&Message::PathReport { report }).expect("numeric report");
             line.push(b'\n');

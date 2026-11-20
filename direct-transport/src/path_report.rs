@@ -6,7 +6,11 @@ use iroh::{
     endpoint::{Connection, PathEvent, PathEventStream, PathStats},
 };
 use serde::Serialize;
-use std::{future::poll_fn, pin::Pin};
+use std::{
+    future::poll_fn,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Copy, Serialize, Default)]
@@ -72,6 +76,133 @@ pub(super) struct Report {
     // Fixed order, including paths closed earlier in this connection.
     families: [Counts; 4],
 }
+// At most one queued measurement and one reserved close per connection. A
+// slow sink never blocks QUIC or accumulates a history of obsolete RTTs.
+type Latest = Arc<Mutex<Option<Report>>>;
+pub(super) enum Queued {
+    Sample(Latest),
+    Close(Report),
+}
+impl Queued {
+    pub(super) fn take(self) -> Report {
+        match self {
+            Self::Sample(slot) => slot.lock().unwrap().take().expect("queued measurement"),
+            Self::Close(report) => report,
+        }
+    }
+}
+pub(super) fn queue(limit: usize) -> (mpsc::Sender<Queued>, mpsc::Receiver<Queued>) {
+    mpsc::channel(limit * 2)
+}
+#[derive(Default)]
+pub(super) struct Output {
+    pending: Latest,
+    close: Option<mpsc::OwnedPermit<Queued>>,
+    opened: bool,
+}
+impl Output {
+    fn sample(&mut self, tx: &mpsc::Sender<Queued>, mut report: Report) -> bool {
+        if self.close.is_none() {
+            self.close = tx.clone().try_reserve_owned().ok();
+            if self.close.is_none() {
+                return false;
+            }
+        }
+        let mut pending = self.pending.lock().unwrap();
+        if let Some(previous) = pending.as_ref() {
+            // The consumer must see an open before a change for this ordinal.
+            report.phase = previous.phase;
+            *pending = Some(report);
+            return true;
+        }
+        let Ok(permit) = tx.try_reserve() else {
+            return false;
+        };
+        report.phase = if self.opened { "change" } else { "open" };
+        *pending = Some(report);
+        permit.send(Queued::Sample(self.pending.clone()));
+        self.opened = true;
+        true
+    }
+    pub(super) fn finish(self, report: Report) {
+        if self.opened {
+            self.close
+                .expect("reserved close")
+                .send(Queued::Close(report));
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    fn measurement(ordinal: u64, phase: &'static str, tick: u64) -> Report {
+        let mut families = [Counts::default(); 4];
+        families[0].rx_bytes = tick;
+        Report {
+            device: None,
+            ordinal,
+            phase,
+            selected: "relay",
+            partial: false,
+            families,
+        }
+    }
+
+    #[test]
+    fn every_live_connection_has_sample_room_at_the_64_connection_limit() {
+        let (tx, mut rx) = queue(64);
+        let mut outputs: Vec<_> = (0..64).map(|_| Output::default()).collect();
+        // Deterministic cadence ticks. The real connection test independently
+        // exercises the timer. Stall the writer for the opening burst so all
+        // terminal reservations and all sample slots are occupied together.
+        for tick in [0, 5, 10, 15] {
+            for (id, output) in outputs.iter_mut().enumerate() {
+                assert!(output.sample(&tx, measurement(id as u64, "change", tick)));
+            }
+            assert_eq!(tx.capacity(), 0);
+            // A noisy connection can only replace its own pending measurement.
+            for _ in 0..3 {
+                assert!(outputs[0].sample(&tx, measurement(0, "change", tick + 1)));
+            }
+            for id in 0..64 {
+                let r = rx.try_recv().expect("refresh missing at this tick").take();
+                assert_eq!(r.ordinal, id);
+                assert_eq!(r.phase, if tick == 0 { "open" } else { "change" });
+                assert_eq!(r.families[0].rx_bytes, tick + u64::from(id == 0));
+            }
+            assert!(rx.try_recv().is_err());
+        }
+        for (id, output) in outputs.into_iter().enumerate() {
+            output.finish(measurement(id as u64, "close", 16));
+        }
+        for id in 0..64 {
+            let r = rx.try_recv().unwrap().take();
+            assert_eq!((r.ordinal, r.phase), (id, "close"));
+        }
+    }
+
+    #[test]
+    fn first_deliverable_measurement_opens_after_queue_pressure() {
+        let (tx, mut rx) = queue(1);
+        let mut old = Output::default();
+        assert!(old.sample(&tx, measurement(1, "open", 0)));
+        old.finish(measurement(1, "close", 1));
+        let mut new = Output::default();
+        assert!(!new.sample(&tx, measurement(2, "open", 2))); // Both slots full.
+        assert_eq!(rx.try_recv().unwrap().take().phase, "open");
+        assert!(!new.sample(&tx, measurement(2, "change", 3))); // Only close fits.
+        assert_eq!(rx.try_recv().unwrap().take().phase, "close");
+        assert!(new.sample(&tx, measurement(2, "change", 4)));
+        assert!(new.sample(&tx, measurement(2, "change", 5)));
+        new.finish(measurement(2, "close", 6));
+        let r = rx.try_recv().unwrap().take();
+        assert_eq!((r.ordinal, r.phase, r.families[0].rx_bytes), (2, "open", 5));
+        assert_eq!(rx.try_recv().unwrap().take().phase, "close");
+    }
+}
+
 pub(super) struct Observer {
     device: Option<DeviceSample>,
     ordinal: u64,
@@ -199,7 +330,8 @@ impl Observer {
         &mut self,
         conn: &Connection,
         phase: &'static str,
-        tx: &mpsc::Sender<Report>,
+        tx: &mpsc::Sender<Queued>,
+        output: &mut Output,
     ) {
         let mut families = self.closed;
         let mut selected = None;
@@ -217,8 +349,9 @@ impl Observer {
             }
         }
         let selected = selection(&mut self.selected, selected, phase == "close");
-        if tx
-            .try_send(Report {
+        if !output.sample(
+            tx,
+            Report {
                 device: self.device.clone().map(|mut d| {
                     if selected == "unknown" {
                         d.scope = None;
@@ -231,9 +364,8 @@ impl Observer {
                 selected,
                 partial: self.partial,
                 families,
-            })
-            .is_err()
-        {
+            },
+        ) {
             self.partial = true;
         }
     }
