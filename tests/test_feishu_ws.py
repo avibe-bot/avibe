@@ -16,10 +16,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import random
 import socket
 import threading
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -1288,6 +1289,123 @@ async def test_an_interval_begun_again_gives_each_verdict_once(fake: FakeFeishu,
         for number in range(4):
             fake.wait_acknowledged(fake.push_event(message_event(event_id=f"e{number}", message_id=f"om_{number}")))
         assert (counts.missing, counts.arrived_late) == (0, 4)
+
+
+class _History:
+    """A page of a chat's history, or a refusal, as the adapter's API client gives it."""
+
+    def __init__(self, people: Tuple[str, ...] = (), more: str = "", code: int = 0) -> None:
+        self.code, self.msg = code, "ok" if code == 0 else "system busy"
+        items = [{"message_id": message_id, "sender": {"sender_type": "user"}} for message_id in people]
+        self.data = {"items": items, "has_more": bool(more), "page_token": more}
+
+    def success(self) -> bool:
+        return self.code == 0
+
+
+async def test_the_end_of_the_check_is_one_moment(clock: _Clock, caplog: pytest.LogCaptureFixture):
+    """Counts change and lines are logged only under the check's lock, and not at all after its end."""
+    from modules.im.feishu_history_check import FeishuHistoryCheck, HistoryCounts
+
+    outside_the_lock: List[str] = []
+    pages = {"oc_a": [_History(people=("om_1",))], "oc_b": [_History(code=1)]}
+
+    async def list_messages(chat_id: str, _start: int, _end: int, _page: Optional[str]) -> _History:
+        return pages[chat_id].pop(0) if pages.get(chat_id) else _History()
+
+    with patch("modules.im.feishu_history_check._LIMIT", 3):
+        check = FeishuHistoryCheck(list_messages)
+
+        class Watched(HistoryCounts):
+            def __setattr__(self, name: str, value: Any) -> None:
+                if not check._lock.locked():
+                    outside_the_lock.append(f"count {name}")
+                super().__setattr__(name, value)
+
+        class Watching(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                if not check._lock.locked():
+                    outside_the_lock.append(f"line {record.getMessage()}")
+
+        watching = Watching()
+        logging.getLogger("modules.im.feishu_history_check").addHandler(watching)
+        try:
+            with check._lock:
+                check.counts = Watched()
+            clock.now += 600
+            await check.run_once(["oc_a", "oc_b"])  # a verdict of missing; a reading that fails
+            check.message_event("om_1")  # which arrives after all
+            check.message_event("om_2")
+            check.message_event("om_3")
+            assert check.snapshot() == {
+                "people_messages": 1,
+                "matched": 0,
+                "missing": 0,
+                "arrived_late": 1,
+                "readings_failed": 1,
+                "ended": False,
+            }
+
+            check.message_event("om_4")  # one more than it may hold
+            at_the_end = check.snapshot()
+            lines_at_the_end = len(caplog.records)
+            assert at_the_end == {
+                "people_messages": 1,
+                "matched": 0,
+                "missing": 0,
+                "arrived_late": 1,
+                "readings_failed": 1,
+                "ended": True,
+            }
+            assert caplog.records[-1].getMessage().startswith("Feishu history check: over after 3 ")
+
+            pages["oc_a"] = [_History(people=("om_7",))]
+            pages["oc_b"] = [_History(code=1)]
+            check.message_event("om_1")
+            check.message_event("om_5")
+            clock.now += 600
+            await check.run_once(["oc_a", "oc_b", "oc_c"])
+        finally:
+            logging.getLogger("modules.im.feishu_history_check").removeHandler(watching)
+
+    assert outside_the_lock == []
+    assert (check.snapshot(), len(caplog.records)) == (at_the_end, lines_at_the_end)
+    assert pages["oc_a"] and pages["oc_b"]  # nothing was asked for after the end
+
+
+@pytest.mark.parametrize("comes_back", ["a page with more to come", "a page of nothing", "a failure"])
+async def test_a_reading_under_way_when_the_check_ends_asks_for_nothing_more(
+    clock: _Clock, caplog: pytest.LogCaptureFixture, comes_back: str
+):
+    """The request that is out is let finish; what it brings is not looked at, and no other is begun."""
+    from modules.im.feishu_history_check import FeishuHistoryCheck
+
+    asked: List[str] = []
+    release = asyncio.Event()
+
+    async def list_messages(chat_id: str, _start: int, _end: int, _page: Optional[str]) -> _History:
+        asked.append(chat_id)
+        await release.wait()
+        if comes_back == "a failure":
+            return _History(code=1)
+        return _History(people=("om_lost",), more="2") if comes_back == "a page with more to come" else _History()
+
+    with patch("modules.im.feishu_history_check._LIMIT", 2):
+        check = FeishuHistoryCheck(list_messages)
+        clock.now += 600
+        reading = asyncio.create_task(check.run_once(["oc_a", "oc_b", "oc_c"]))
+        while not asked:
+            await asyncio.sleep(0)
+        for message_id in ("om_1", "om_2", "om_3"):  # the third is one more than it may hold
+            check.message_event(message_id)
+        at_the_end = check.snapshot()
+        lines_at_the_end = len(caplog.records)
+        release.set()
+        await reading
+
+    assert at_the_end["ended"] is True
+    assert asked == ["oc_a"]
+    assert (check.snapshot(), len(caplog.records)) == (at_the_end, lines_at_the_end)
 
 
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):

@@ -3001,7 +3001,7 @@ class FeishuBot(BaseIMClient):
             self._connection_events,
             vars(own.counts) if own is not None else None,
             vars(tap.counts) if tap is not None else None,
-            vars(history.counts) if history is not None else None,
+            history.snapshot() if history is not None else None,
         )
 
     def run(self):

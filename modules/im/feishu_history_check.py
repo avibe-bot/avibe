@@ -46,12 +46,18 @@ class HistoryCounts:
 
 
 class FeishuHistoryCheck:
-    """``list_messages(chat_id, start, end, page_token)`` reads one page of a chat's history, oldest first."""
+    """``list_messages(chat_id, start, end, page_token)`` reads one page of a chat's history, oldest first.
+
+    Events arrive on the connections' threads; the check runs on the adapter's
+    loop. One lock is held for every change to what the check holds or counts
+    and for every line it logs about that, and each such step first looks
+    whether the check is over. So the end is one moment: what was decided
+    before it is counted and logged before it, and nothing is after it.
+    """
 
     def __init__(self, list_messages: Callable[[str, int, int, Optional[str]], Awaitable[Any]]) -> None:
         self._list_messages = list_messages
         self.counts = HistoryCounts()
-        # Events arrive on the connections' threads; the check runs on the adapter's loop.
         self._lock = threading.Lock()
         self._event_at: Dict[str, float] = {}
         self._missing: Dict[str, str] = {}  # message id -> chat id
@@ -63,8 +69,13 @@ class FeishuHistoryCheck:
         self._said: Dict[str, str] = {}
         self._started_at = int(time.time()) + 60  # the connection needs a moment to be there
 
+    def snapshot(self) -> Dict[str, Any]:
+        """The counts as they stand together."""
+        with self._lock:
+            return dict(vars(self.counts))
+
     def _end(self) -> None:
-        """Called with the lock held: no verdict is given from here on, and what was held is let go."""
+        """Called with the lock held: the last thing the check does. What it held is let go."""
         self.counts.ended = True
         self._event_at.clear()
         self._judged.clear()
@@ -85,19 +96,20 @@ class FeishuHistoryCheck:
                 return
             self._event_at[message_id] = time.time()
             chat_id = self._missing.pop(message_id, None)
-        if chat_id is not None:
-            self.counts.arrived_late += 1
-            self.counts.missing -= 1
-            logger.warning(
-                "Feishu history check: the event for message %s in chat %s arrived after the check", message_id, chat_id
-            )
+            if chat_id is not None:
+                self.counts.arrived_late += 1
+                self.counts.missing -= 1
+                logger.warning(
+                    "Feishu history check: the event for message %s in chat %s arrived after the check",
+                    message_id,
+                    chat_id,
+                )
 
     async def run_once(self, direct_chats: Iterable[str]) -> None:
-        if self.counts.ended:
-            return
         end = int(time.time()) - _SETTLE_SECONDS
-        direct_chats = sorted(set(direct_chats))
-        for chat_id in direct_chats:
+        for chat_id in sorted(set(direct_chats)):
+            if self.counts.ended:
+                return
             unfinished = self._unfinished.get(chat_id)
             if unfinished is not None:
                 start, until, page_token = unfinished  # the same interval, from where the reading stopped
@@ -107,37 +119,40 @@ class FeishuHistoryCheck:
                     continue
             try:
                 sent_by_people, next_page = await self._people_messages(chat_id, start, until, page_token)
+            except _Over:
+                return
             except _NotRead as failure:
-                # Tried again next time, over the same interval: nothing is skipped for a failure.
-                self.counts.readings_failed += 1
-                self._unfinished.pop(chat_id, None)  # a page token may be what failed; begin the interval again
-                if self._said.get(chat_id) != str(failure):
-                    self._said[chat_id] = str(failure)
-                    logger.warning("Feishu history check: chat %s could not be read (%s)", chat_id, failure)
-                continue
-            self._said.pop(chat_id, None)
-            if next_page:
-                self._unfinished[chat_id] = (start, until, next_page)
-            else:
-                self._unfinished.pop(chat_id, None)
-                self._checked_until[chat_id] = until
-            for message_id in sent_by_people:
                 with self._lock:
                     if self.counts.ended:
-                        return
+                        return  # what a request still out brings back is not looked at
+                    # Tried again next time, over the same interval: nothing is skipped for a failure.
+                    self.counts.readings_failed += 1
+                    self._unfinished.pop(chat_id, None)  # a page token may be what failed; begin the interval again
+                    if self._said.get(chat_id) != str(failure):
+                        self._said[chat_id] = str(failure)
+                        logger.warning("Feishu history check: chat %s could not be read (%s)", chat_id, failure)
+                continue
+            with self._lock:
+                if self.counts.ended:
+                    return
+                self._said.pop(chat_id, None)
+                if next_page:
+                    self._unfinished[chat_id] = (start, until, next_page)
+                else:
+                    self._unfinished.pop(chat_id, None)
+                    self._checked_until[chat_id] = until
+                for message_id in sent_by_people:
                     if message_id in self._judged:
                         continue  # read before: an interval begun again, or the edge of two
                     if len(self._judged) >= _LIMIT:
                         self._end()
                         return
                     self._judged.add(message_id)
-                    arrived = message_id in self._event_at
-                    if not arrived:
-                        self._missing[message_id] = chat_id
-                self.counts.people_messages += 1
-                if arrived:
-                    self.counts.matched += 1
-                else:
+                    self.counts.people_messages += 1
+                    if message_id in self._event_at:
+                        self.counts.matched += 1
+                        continue
+                    self._missing[message_id] = chat_id
                     self.counts.missing += 1
                     logger.error(
                         "Feishu history check: message %s in chat %s is in the history but no event arrived for it",
@@ -152,10 +167,13 @@ class FeishuHistoryCheck:
 
         Returns them with the token to go on from, when the page limit stopped
         the reading before the interval's end. Raises ``_NotRead`` when Feishu
-        does not give the history, for whatever reason.
+        does not give the history, for whatever reason, and ``_Over`` instead
+        of asking for a page once the check is over.
         """
         found: List[str] = []
         for _ in range(_PAGE_LIMIT):
+            if self.counts.ended:
+                raise _Over()
             try:
                 reply = await self._list_messages(chat_id, start, end, page_token)
             except Exception as exc:
@@ -171,6 +189,10 @@ class FeishuHistoryCheck:
             if not data.get("has_more") or not page_token:
                 return found, None
         return found, page_token
+
+
+class _Over(Exception):
+    """The check ended while a reading was under way."""
 
 
 class _NotRead(Exception):
