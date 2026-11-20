@@ -1,67 +1,75 @@
-import asyncio
+"""The warm freeze: armed once, fires at the first natural full collection after
+the warm-up that ends with no model stream open, and rolls back without restart.
+GC operations are faked; the process heap is never frozen by these tests."""
+
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
-
 from core import loop_watchdog as wd
-from core.session_turns import SessionTurnManager
 
 
-def test_freeze_requires_idle_live_and_durable_turns_then_rolls_back(tmp_path, monkeypatch):
-    engine = create_engine(f"sqlite:///{tmp_path}/turns.sqlite")
-    with engine.begin() as conn:
-        conn.exec_driver_sql("create table session_turns (session_id text, state text)")
-        conn.exec_driver_sql("insert into session_turns values ('restored','active')")
-    manager = SessionTurnManager(SimpleNamespace())
-    monkeypatch.setattr(manager, "_sqlite_engine", lambda: engine)
+def test_freeze_fires_on_warm_full_collection_without_open_streams_even_with_live_turns(monkeypatch):
     calls = []
     monkeypatch.setattr(wd.gc, "freeze", lambda: calls.append("freeze"))
     monkeypatch.setattr(wd.gc, "unfreeze", lambda: calls.append("unfreeze"))
     monkeypatch.setattr(wd.gc, "get_freeze_count", lambda: 0)
     monkeypatch.setattr(wd, "_active_requests", 0)
+    clock = [0.0]
+    w = wd.EventLoopWatchdog(SimpleNamespace(), monotonic=lambda: clock[0])
 
-    async def run():
-        clock = [0.0]
-        w = wd.EventLoopWatchdog(asyncio.get_running_loop(), monotonic=lambda: clock[0])
+    def collect(generation=2):
+        info = dict(generation=generation, collected=0, uncollectable=0)
+        w._observe_gc("start", info)
+        w._observe_gc("stop", info)
+        w._answer()
 
-        def collect(gen=2):
-            info = dict(generation=gen, collected=0, uncollectable=0)
-            w._observe_gc("start", info)
-            w._observe_gc("stop", info)
-            w._answer()
-            return w._freeze_task
+    collect()
+    assert not calls  # not armed
+    assert w.arm_warm_freeze() == "armed"
+    clock[0] = 7199
+    collect()  # before the warm-up
+    clock[0] = 7201
+    collect(1)  # not a full collection
+    monkeypatch.setattr(wd, "_active_requests", 1)
+    collect()  # a model stream is open
+    assert not calls
+    # A stream that opened between the collection and the loop's answer cancels this attempt.
+    monkeypatch.setattr(wd, "_active_requests", 0)
+    info = dict(generation=2, collected=0, uncollectable=0)
+    w._observe_gc("start", info)
+    w._observe_gc("stop", info)
+    monkeypatch.setattr(wd, "_active_requests", 1)
+    w._answer()
+    assert not calls and w._freeze_state == "armed"
+    # Live Turns without an open stream do not hold it back.
+    monkeypatch.setattr(wd, "_active_requests", 0)
+    collect()
+    assert calls == ["freeze"] and w._freeze_state == "frozen"
+    collect()
+    assert calls == ["freeze"]  # one shot
+    assert w.arm_warm_freeze() == "frozen"
+    assert w.rollback_warm_freeze() == "retired" and calls == ["freeze", "unfreeze"]
+    assert w.arm_warm_freeze() == "retired" and w.rollback_warm_freeze() == "retired"
+    assert calls == ["freeze", "unfreeze"]
 
-        assert collect() is None and w.arm_warm_freeze(manager) == "armed"
-        clock[0] = 7199
-        assert collect() is None
-        clock[0] = 7201
-        assert collect(1) is None
-        monkeypatch.setattr(wd, "_active_requests", 1)
-        assert collect() is None
-        monkeypatch.setattr(wd, "_active_requests", 0)
-        manager.in_flight["local"] = object()
-        assert collect() is None
-        manager.in_flight.clear()
-        await collect()
-        assert not calls  # restored owner, absent from in_flight
-        with engine.begin() as conn:
-            conn.exec_driver_sql("delete from session_turns")
-        task = collect()
-        manager.in_flight["just-admitted"] = object()
-        await task
-        assert not calls
-        manager.in_flight.clear()
-        await collect()
-        assert calls == ["freeze"] and collect() is None
-        assert w.rollback_warm_freeze() == "retired" and w.arm_warm_freeze(manager) == "retired"
-        assert w.rollback_warm_freeze() == "retired" and calls == ["freeze", "unfreeze"]
-        other = wd.EventLoopWatchdog(asyncio.get_running_loop(), monotonic=lambda: clock[0])
-        other.arm_warm_freeze(manager)
-        other.rollback_warm_freeze()
-        await other._try_warm_freeze(manager)
-        assert calls == ["freeze", "unfreeze"]
 
-    try:
-        asyncio.run(run())
-    finally:
-        engine.dispose()
+def test_rollback_before_the_freeze_retires_the_arm(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wd.gc, "freeze", lambda: calls.append("freeze"))
+    monkeypatch.setattr(wd.gc, "get_freeze_count", lambda: 0)
+    monkeypatch.setattr(wd, "_active_requests", 0)
+    w = wd.EventLoopWatchdog(SimpleNamespace(), monotonic=lambda: 10_000.0)
+    w._watchdog_birth = 0.0
+    w.arm_warm_freeze()
+    assert w.rollback_warm_freeze() == "retired"
+    info = dict(generation=2, collected=0, uncollectable=0)
+    w._observe_gc("start", info)
+    w._observe_gc("stop", info)
+    w._answer()
+    assert not calls
+
+
+def test_an_existing_freeze_by_someone_else_is_left_alone(monkeypatch):
+    monkeypatch.setattr(wd.gc, "get_freeze_count", lambda: 5)
+    w = wd.EventLoopWatchdog(SimpleNamespace())
+    assert w.arm_warm_freeze() == "off"
+

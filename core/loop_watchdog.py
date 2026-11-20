@@ -60,14 +60,11 @@ _MAX_GC_REPORTS = 64
 _MAX_OWN_CODES = 200_000
 # Written only at Vibey stream boundaries on the controller loop; sampled without a lock by GC.
 _active_requests = 0
-# Only protects in-memory publication and the final freeze instruction; never DB or IPC.
-transient_admission_lock = threading.Lock()
 
 
 def model_stream_opened() -> None:
     global _active_requests
-    with transient_admission_lock:
-        _active_requests += 1
+    _active_requests += 1
 
 
 def model_stream_closed() -> None:
@@ -114,59 +111,46 @@ class EventLoopWatchdog:
         self._trigger_candidates = -1
         self._freeze_state = "off"
         self._freeze_lock = threading.Lock()
-        self._freeze_manager = None
         self._freeze_due = False
-        self._freeze_task = None
         self._freeze_since = float("inf")
         self._trigger_uptime = 0.0
 
-    def arm_warm_freeze(self, manager) -> str:
+    def arm_warm_freeze(self) -> str:
+        """Arm the one-shot freeze of the warmed heap; idempotent, never resets the warm-up.
+
+        It fires at the first natural full collection after two hours of uptime that
+        ends with no model stream open. A live Turn does not hold it back: on a busy
+        machine a Turn is almost always live. What that can strand is bounded: the
+        objects of Turns alive at that moment that later become cyclic garbage stay
+        uncollected until unfreeze or restart; nothing created afterwards is affected.
+        """
         with self._freeze_lock:
             if self._freeze_state == "off" and not gc.get_freeze_count():
-                self._freeze_manager = manager
                 self._freeze_since = max(self._watchdog_birth + 7200, self._monotonic())
                 self._freeze_state = "armed"
             return self._freeze_state
 
     def rollback_warm_freeze(self) -> str:
         with self._freeze_lock:
-            if self._freeze_state == "frozen":
+            was = self._freeze_state
+            if was == "frozen":
                 gc.unfreeze()  # restore normal collection; do not force a full sweep
-            if self._freeze_state in ("armed", "frozen"):
+            if was in ("armed", "frozen"):
                 self._freeze_state = "retired"
-                self._freeze_manager = None
-            return self._freeze_state
+        if was in ("armed", "frozen"):
+            # The boundary a field comparison needs; the freeze itself logs "frozen".
+            logger.warning("Warm GC trial retired: was=%s", was)
+        return self._freeze_state
 
-    def _try_warm_freeze(self, manager) -> asyncio.Future:
-        # The observer can cancel its receipt; only the executor completion
-        # releases the attempt slot. No cancelled Task owns a live DB worker.
-        receipt = self._loop.create_future()
-
-        def apply():
-            with self._freeze_lock, transient_admission_lock:
-                if (self._freeze_state == "armed" and not self._stopped.is_set()
-                        and not _active_requests and not manager.in_flight and not gc.get_freeze_count()
-                        and not receipt.cancelled()):
-                    gc.freeze()
-                    self._freeze_state = "frozen"
-                    self._freeze_manager = None
-
-        def finished(worker):
-            try:
-                worker.result()
-                if self._freeze_state == "frozen":
-                    logger.warning("Warm GC trial frozen: count=%d", gc.get_freeze_count())
-            except Exception:
-                logger.warning("Warm GC trial: quiescence unavailable; freeze skipped")
-            finally:
-                self._freeze_task = None
-                if not receipt.done():
-                    receipt.set_result(None)
-
-        worker = self._loop.run_in_executor(None, manager.with_idle_turn_ledger, apply)
-        self._freeze_task = receipt
-        worker.add_done_callback(finished)
-        return receipt
+    def _apply_warm_freeze(self) -> None:
+        # On the loop thread, which alone opens and closes model streams, so the
+        # stream count cannot change between this check and the freeze.
+        with self._freeze_lock:
+            if self._freeze_state != "armed" or _active_requests or gc.get_freeze_count():
+                return
+            gc.freeze()
+            self._freeze_state = "frozen"
+        logger.warning("Warm GC trial frozen: count=%d", gc.get_freeze_count())
 
     def arm_warm_census(self, controller) -> bool:
         # Called on the controller loop; idempotent even after the sample fires.
@@ -194,8 +178,8 @@ class EventLoopWatchdog:
                 self._trigger_uptime = self._monotonic() - self._watchdog_birth
                 self._census_due = True  # scalar signal only; no object enumeration in a collector callback
             if (self._freeze_state == "armed" and info['generation'] == 2 and started_at >= self._freeze_since
-                    and not _active_requests and self._freeze_manager is not None and not self._freeze_manager.in_flight):
-                self._freeze_due = True
+                    and not _active_requests):
+                self._freeze_due = True  # scalar signal only; applied by the loop at its next answer
             duration = self._monotonic() - started_at
             if duration > GC_SLOW_SECONDS:
                 self._gc_reports.append((
@@ -237,9 +221,7 @@ class EventLoopWatchdog:
         self._loop_thread_id = threading.get_ident()
         if self._freeze_due:
             self._freeze_due = False
-            if (self._freeze_state == "armed" and self._freeze_task is None and not _active_requests
-                    and self._freeze_manager is not None and not self._freeze_manager.in_flight):
-                self._try_warm_freeze(self._freeze_manager)
+            self._apply_warm_freeze()
         self._answered_at = self._monotonic()
         self._asking = False
 
