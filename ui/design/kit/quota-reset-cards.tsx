@@ -1,9 +1,15 @@
 // Proposal: reset cards inside an account's quota card (订阅额度), and a refresh on that card.
 //
-// What a vendor reports per card decides everything drawn here: its kind (what it resets), how
-// many are held, when the first one expires, and whether one can be used now. Nothing is drawn for
-// an account that holds none. Using a card is the user's own press, said in one line before it
-// happens, and the account's limits are read again by themselves afterwards.
+// What a vendor reports per card decides everything drawn here: its kind, how many are held, when
+// the first one expires, and whether one can be used now. Nothing is drawn for an account that
+// holds none. Using a card is the user's own press, said in one line before it happens, and the
+// account's limits and cards are read again by themselves afterwards.
+//
+// The line under a card's name is the vendor's own statement of what the card does, never ours:
+// Anthropic's help page words for its kinds (support.claude.com "What is a limit reset?"), checked
+// against the limits the card's own entry lists. A card whose vendor states nothing (ChatGPT's)
+// shows its name, count and expiry only. After a use or a refusal the count shown is the one read
+// again from the vendor; "not used" is said only when that count confirms it.
 import { AlertTriangle, Check, LoaderCircle, RefreshCw, Ticket } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -28,11 +34,11 @@ export type ResetCardsPhase =
   /** The user pressed 使用: one line says what happens, then 确认使用 or 取消. */
   | { phase: 'confirm'; kind: ResetCardKind }
   | { phase: 'using'; kind: ResetCardKind }
-  /** Used: the vendor's own list of what it reset. The limits above are already the fresh reading. */
+  /** Used: said in the vendor's words for the kind. The limits and the count are already the fresh reading. */
   | { phase: 'used'; kind: ResetCardKind }
-  /** Not used, and the card is still held. */
+  /** Not used: the vendor refused, and the count read again afterwards (the one this row shows) confirms no card was spent. */
   | { phase: 'failed'; kind: ResetCardKind; reason: 'not_limited' | 'cooldown' | 'refused' }
-  /** The vendor's answer never arrived: the card may or may not be spent, so no card of this account can be used until it is read again. */
+  /** The vendor's answer never arrived, or the count could not be read after a refusal: the card may or may not be spent, so no card of this account can be used until it is read again. */
   | { phase: 'unconfirmed'; kind: ResetCardKind };
 
 const useCopy = () => {
@@ -45,18 +51,18 @@ const useCopy = () => {
     account: d('重置卡', 'Limit reset'),
   })[kind];
   const effect = (kind: ResetCardKind) => ({
-    all: d('重置 5 小时额度和每周额度', 'Resets the 5-hour and weekly limits'),
-    fable: d('退回本周 Fable 用掉的额度，并重置 5 小时额度', 'Gives back this week’s Fable use and resets the 5-hour limit'),
-    session: d('重置 5 小时额度', 'Resets the 5-hour limit'),
-    weekly: d('重置每周额度', 'Resets the weekly limit'),
-    account: d('重置这个账号的额度', 'Resets this account’s limits'),
+    all: d('5 小时额度和每周额度回满', 'The 5-hour and weekly limits go back to full'),
+    fable: d('退回本周用在 Fable 上的额度，其他模型用掉的不退；5 小时额度回满', 'Gives back the weekly usage spent on Fable, not on other models; the 5-hour limit is fully refilled'),
+    session: d('5 小时额度回满', 'The 5-hour limit goes back to full'),
+    weekly: d('每周额度回满', 'The weekly limit goes back to full'),
+    account: null,
   })[kind];
   const done = (kind: ResetCardKind) => ({
-    all: d('已重置 5 小时额度和每周额度', '5-hour and weekly limits reset'),
-    fable: d('已退回本周 Fable 用掉的额度，5 小时额度已重置', 'This week’s Fable use given back; 5-hour limit reset'),
-    session: d('已重置 5 小时额度', '5-hour limit reset'),
-    weekly: d('已重置每周额度', 'Weekly limit reset'),
-    account: d('已重置这个账号的额度', 'This account’s limits reset'),
+    all: d('5 小时额度和每周额度已回满', 'The 5-hour and weekly limits are back to full'),
+    fable: d('本周用在 Fable 上的额度已退回，5 小时额度已回满', 'The weekly usage spent on Fable is given back; the 5-hour limit is refilled'),
+    session: d('5 小时额度已回满', 'The 5-hour limit is back to full'),
+    weekly: d('每周额度已回满', 'The weekly limit is back to full'),
+    account: null,
   })[kind];
   return { d, name, effect, done };
 };
@@ -98,10 +104,11 @@ export function ResetCards({ cards, state = { phase: 'idle' } }: { cards: ResetC
                     <span className="truncate">{name(card.kind)}</span>
                     <span className="shrink-0 tabular-nums text-muted">×{card.count}</span>
                   </div>
-                  <p className="mt-0.5 text-[length:var(--model-hub-usage-label-size)] text-muted">
-                    {effect(card.kind)}
-                    {card.expires && <> · {d(`最早 ${card.expires.zh} 到期`, `first expires ${card.expires.en}`)}</>}
-                  </p>
+                  {(effect(card.kind) || card.expires) && (
+                    <p className="mt-0.5 text-[length:var(--model-hub-usage-label-size)] text-muted">
+                      {[effect(card.kind), card.expires && d(`最早 ${card.expires.zh} 到期`, `First expires ${card.expires.en}`)].filter(Boolean).join(' · ')}
+                    </p>
+                  )}
                 </div>
                 {mine && state.phase === 'confirm' ? (
                   <div className="flex shrink-0 items-center gap-2">
@@ -129,23 +136,23 @@ export function ResetCards({ cards, state = { phase: 'idle' } }: { cards: ResetC
               {mine && state.phase === 'used' && (
                 <p className="mt-2 flex items-center gap-1.5 text-[length:var(--model-hub-usage-label-size)] text-mint-ink" role="status">
                   <Check className="size-3.5 shrink-0" aria-hidden />
-                  {d(`用了 1 张。${done(card.kind)}。`, `1 used. ${done(card.kind)}.`)}
+                  {done(card.kind) ? d(`用了 1 张。${done(card.kind)}。`, `1 used. ${done(card.kind)}.`) : d('用了 1 张。', '1 used.')}
                 </p>
               )}
               {mine && state.phase === 'failed' && (
                 <p className="mt-2 flex items-start gap-1.5 text-[length:var(--model-hub-usage-label-size)] text-destructive-ink" role="alert">
                   <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
                   {state.reason === 'not_limited'
-                    ? d('没有用掉：这个账号现在没到限额。卡还在。', 'Not used: this account isn’t at a limit now. You still hold the card.')
+                    ? d('没有用掉：这个账号现在没到限额。', 'Not used: this account isn’t at a limit now.')
                     : state.reason === 'cooldown'
-                      ? d('没有用掉：刚用过一张，要等一会儿才能再用。卡还在。', 'Not used: one was used recently, and the next has to wait. You still hold the card.')
-                      : d('没有用掉：厂商拒绝了这次请求。卡还在。', 'Not used: the vendor refused the request. You still hold the card.')}
+                      ? d('没有用掉：刚用过一张，要等一会儿才能再用。', 'Not used: one was used recently, and the next has to wait.')
+                      : d('没有用掉：供应商拒绝了这次请求。', 'Not used: the provider refused the request.')}
                 </p>
               )}
               {mine && state.phase === 'unconfirmed' && (
                 <p className="mt-2 flex items-start gap-1.5 text-[length:var(--model-hub-usage-label-size)] text-destructive-ink" role="alert">
                   <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
-                  {d('没收到厂商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。', 'The vendor’s answer didn’t arrive, so this card may be spent. Don’t use another yet; refresh this account in a moment and check the count.')}
+                  {d('没收到供应商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。', 'The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; refresh this account in a moment and check the count.')}
                 </p>
               )}
             </li>
