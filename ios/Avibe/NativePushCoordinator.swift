@@ -311,6 +311,21 @@ final class NativePushCoordinator {
     /// permission for the App (`permission`: granted, notDetermined or
     /// denied), which the page reads to turn notifications back on after a
     /// sign-in without ever prompting.
+    /// The registration belongs to this account generation and this instance.
+    /// Activity tokens use it only as relay authorization, never as their token.
+    func liveActivityRegistrationID(accountID: String, instanceOrigin: String) -> String? {
+        guard accountProvider()?.id == accountID,
+              let installation = try? keychain.loadInstallation(),
+              installation.accountID == accountID,
+              let records = try? keychain.listRecords() else { return nil }
+        return records.first {
+            $0.accountID == accountID && $0.instanceOrigin == instanceOrigin
+                && $0.bindGeneration == installation.bindGeneration
+                && $0.accountGeneration == generationStore.generation
+                && $0.state == .active && !$0.pendingRevoke
+        }?.kid
+    }
+
     func status(
         vapidPublicKey: String?,
         instanceOrigin: String

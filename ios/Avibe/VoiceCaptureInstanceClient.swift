@@ -386,7 +386,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         }
     }
 
-    private func request(
+    func request(
         _ method: String,
         _ path: String,
         json: [String: Any]? = nil,
