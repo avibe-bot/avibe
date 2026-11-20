@@ -793,3 +793,47 @@ async def test_wait_polls_job_files_and_processes_off_the_event_loop(tmp_path, m
     assert (await host.wait("job", deadline_s=5)).state == "exited"
     assert not await host.enforce_deadline("job")
     assert threads and loop_thread not in threads
+
+
+async def test_a_cancel_during_an_overdue_probe_still_kills_and_a_queued_poll_is_withdrawn(tmp_path, monkeypatch):
+    """The owed timeout kill is not lost to a cancel that lands while the probe
+    runs; and a poll still queued behind busy probes withdraws at once, so a
+    Stop never waits on unrelated polling backlog."""
+    import threading
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    entered, release = threading.Event(), threading.Event()
+    killed: list[str] = []
+
+    def overdue(_job_id):
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    async def kill(job_id, *, reason):
+        killed.append(reason)
+
+    monkeypatch.setattr(host, "_overdue", overdue)
+    monkeypatch.setattr(host, "kill", kill)
+    enforcing = asyncio.ensure_future(host.enforce_deadline("job"))
+    assert await asyncio.to_thread(entered.wait, 5)
+    enforcing.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await enforcing
+    assert killed == [jobs_module.STOP_TIMEOUT]
+
+    # Saturate the polling pool, then cancel a wait whose poll is still queued.
+    block = threading.Event()
+    busy = [jobs_module._PROBE_IO.submit(block.wait, 5) for _ in range(jobs_module._PROBE_IO._max_workers)]
+    try:
+        waiting = asyncio.ensure_future(host.wait("job", deadline_s=5))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(waiting), 1)
+    finally:
+        block.set()
+        for future in busy:
+            future.result(5)
