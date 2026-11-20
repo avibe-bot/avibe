@@ -270,6 +270,20 @@ for (const lang of ['en', 'zh'] as const) {
 // The exact question the shell asks on a user close and on a quit (app_windows.rs CLOSE_GUARD_QUERY).
 const SHELL_CLOSE_QUESTION = "(()=>{try{const g=window.__AVIBE_APP_WINDOW_CLOSE_GUARD__;const c=typeof g==='function'?g():null;return c?JSON.stringify({message:c.message,confirm:c.confirm,cancel:c.cancel}):''}catch(_){return ''}})()";
 
+test('W1 a native Editor window keeps its Search and New File shortcuts', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 640 });
+  await serveProduct(page);
+  await page.route('**/api/files/list?**', route => route.fulfill({ json: { ok: true, path: '/fixture', parent: '/', entries: [] } }));
+  await nativeSnapshot(page, { appId: 'editor', requestId: 'editor-keys', windowId: 'native-editor', source: 'file-browser', params: { rootDir: '/fixture' } });
+  await page.goto('/apps/editor?standalone=1');
+  await expect(page.getByRole('button', { name: 'Open Folder…', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Untitled/ })).toHaveCount(0);
+  await page.keyboard.press('ControlOrMeta+n');
+  await expect(page.getByRole('button', { name: /Untitled/ }).first()).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+Shift+f');
+  await expect(page.getByPlaceholder('Search', { exact: true })).toBeFocused();
+});
+
 // Every native App window type renders the same window manager, so these are the hosts
 // from which a user can open an in-page Editor fallback today.
 const EDITOR_HOSTS = [

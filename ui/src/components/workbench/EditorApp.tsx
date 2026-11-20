@@ -10,6 +10,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind }
 import { adjustEditorFontSize, resetEditorFontSize } from '../../lib/editorFontSize';
 import { IS_APPLE } from '../../lib/platform';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
+import { isNativeAppWindow } from '../../lib/desktopShell';
 import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
@@ -582,11 +583,14 @@ export const EditorApp: React.FC<{
 
   // ⌘O Open Folder · ⌘N New File — only while THIS editor window holds focus (several windows can
   // be open). Capture phase + preventDefault so ⌘O doesn't fall through to the browser's open dialog.
+  // A native App window's Editor is the route body, without a manager window id: the native window
+  // is its window, so it holds these keys while no in-page window is on top of it.
+  const nativeRoute = !windowId && isNativeAppWindow();
   useRouteSurfaceWindowEvent('keydown', (event) => {
     if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
     // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
     // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
-    if (picker || wm.focusedId !== windowId) return;
+    if (picker || wm.focusedId !== (nativeRoute ? null : windowId)) return;
     const k = event.key.toLowerCase();
     // ⇧⌘F opens the cross-file Search view and focuses its query input. (Plain ⌘F is left to
     // Monaco's built-in in-file find widget when the editor has focus.)
@@ -602,7 +606,7 @@ export const EditorApp: React.FC<{
     event.preventDefault();
     if (k === 'o') openFolder();
     else newFile();
-  }, Boolean(windowId), true);
+  }, Boolean(windowId) || nativeRoute, true);
 
   // Claim browser-style zoom only for the focused Editor surface. A window additionally checks real
   // DOM focus so an Editor left open while the user works in the sidebar doesn't steal browser zoom.
