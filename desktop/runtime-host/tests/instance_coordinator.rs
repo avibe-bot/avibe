@@ -1620,7 +1620,10 @@ async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
     for managed in [false, true] {
         let mut data = offer();
         if managed {
+            // The standalone install above has ended: the instance restarted
+            // on another version (now a desktop-managed host).
             data["managed_by"] = json!("desktop");
+            data["current"] = json!("3.2.7rc2");
         }
         update_reads(&f, true, data);
         let reply = refresh(&f).await;
@@ -1933,6 +1936,16 @@ async fn an_accepted_install_is_followed_past_the_pre_restart_read() {
     // Before the restart: same version, no install reported.
     update_reads(&f, true, offer());
     f.client.poll_instance_update(false).await;
+    // Nothing else may replace the receipt that follows the install.
+    let calls = f.http.calls.lock().unwrap().len();
+    for other in [
+        ClientAction::InstanceUpdateCheck {},
+        ClientAction::InstanceUpdateSetAutoUpdate { enabled: true },
+    ] {
+        assert_eq!(action(&f.client, other).await.error.unwrap().code, "update_in_progress");
+    }
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    assert_eq!(update(&f)["request"]["action"], "install");
     // Restarting: the instance does not answer.
     f.http
         .replies

@@ -363,19 +363,21 @@ impl Coordinator {
             if snapshot.get("host_actions").is_some() && !listed(name) {
                 return Err(ClientError::new("requires_host"));
             }
-            if let Some(target) = &target {
-                // The exact version on screen at the click, or nothing.
-                if snapshot["has_update"] != true || snapshot["latest"].as_str() != Some(target.as_str()) {
-                    return Err(ClientError::new("target_mismatch"));
-                }
-                if update.unsettled(now)
+            // Nothing else is sent while an install runs: the receipt that
+            // follows it to the restarted version must not be replaced.
+            if !snapshot["install"].is_null()
+                || update.unsettled(now)
                     && update
                         .request
                         .as_ref()
                         .is_some_and(|request| request.action == Action::Install)
-                    || !snapshot["install"].is_null()
-                {
-                    return Err(ClientError::new("update_in_progress"));
+            {
+                return Err(ClientError::new("update_in_progress"));
+            }
+            if let Some(target) = &target {
+                // The exact version on screen at the click, or nothing.
+                if snapshot["has_update"] != true || snapshot["latest"].as_str() != Some(target.as_str()) {
+                    return Err(ClientError::new("target_mismatch"));
                 }
                 if snapshot["managed_by"] == "desktop" {
                     path = "/api/desktop/update/request";
