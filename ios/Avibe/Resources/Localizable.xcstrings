@@ -1343,6 +1343,210 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Discard" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "放弃" } }
       }
+    },
+    "appLock.lock.lockedTitle" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe is locked"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe 已锁定"
+          }
+        }
+      }
+    },
+    "appLock.lock.unlockTouchID" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock with Touch ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用触控 ID 解锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.verifying" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verifying…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在验证…"
+          }
+        }
+      }
+    },
+    "appLock.lock.verificationFailed" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not verified. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有验证成功，再试一次。"
+          }
+        }
+      }
+    },
+    "appLock.lock.changeReason" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm the App Lock change"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确认更改 App 锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.unlockReason" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Avibe"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解锁 Avibe"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.unlockFaceID" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock with Face ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用面容 ID 解锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.unlockPasscode" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock with Passcode"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用设备密码解锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.faceIDNotEnrolled" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone has no Face ID set up."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPhone 没有录入面容 ID。"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.faceIDDenied" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe is not allowed to use Face ID. You can allow it in iOS Settings › Avibe."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe 没有使用面容 ID 的权限。可在 iOS 设置 › Avibe 中允许。"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.faceIDLockout" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Face ID did not recognize you several times. Use your passcode."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "面容 ID 多次未识别，请用设备密码解锁。"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.touchIDLockout" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Touch ID did not recognize you several times. Use your passcode."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "触控 ID 多次未识别，请用设备密码解锁。"
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

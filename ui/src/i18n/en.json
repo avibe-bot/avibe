@@ -1,4 +1,29 @@
 {
+  "appLock": {
+    "lock": {
+      "lockedTitle": "Avibe is locked",
+      "unlockTouchID": "Unlock with Touch ID",
+      "unlockPassword": "Unlock with Password",
+      "verifying": "Verifying…",
+      "verificationFailed": "Not verified. Try again.",
+      "macNotEnrolled": "No fingerprints are set up on this Mac.",
+      "macLockout": "Touch ID did not recognize you several times. Use your Mac password.",
+      "macUnavailable": "Touch ID is not available right now, for example with the lid closed.",
+      "restoreAllWindows": "Unlocking restores every Avibe window.",
+      "pendingContent": "Something you sent to Vibey is waiting. After you unlock, it goes into the message box for you to review and send.",
+      "pendingLink": "An Avibe link is waiting. It opens after you unlock.",
+      "changeReason": "Confirm the App Lock change",
+      "unlockReason": "Unlock Avibe",
+      "iphone": {
+        "unlockFaceID": "Unlock with Face ID",
+        "unlockPasscode": "Unlock with Passcode",
+        "faceIDNotEnrolled": "This iPhone has no Face ID set up.",
+        "faceIDDenied": "Avibe is not allowed to use Face ID. You can allow it in iOS Settings › Avibe.",
+        "faceIDLockout": "Face ID did not recognize you several times. Use your passcode.",
+        "touchIDLockout": "Touch ID did not recognize you several times. Use your passcode."
+      }
+    }
+  },
   "desktopBootstrap": {
     "retry": "Try again",
     "installationHelp": "Installation help",
@@ -704,6 +729,24 @@
       "remoteInstallWarning": "Remote installs can restart Avibe without someone at the host, interrupt running work, and leave a failed update for someone on the host to repair.",
       "autosaved": "Changes are saved automatically",
       "languageSaveFailed": "The language changed here, but could not be saved for this instance",
+      "appLock": {
+        "title": "App Lock",
+        "descriptionFaceId": "Unlock with Face ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
+        "descriptionTouchIdPhone": "Unlock with Touch ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
+        "descriptionMac": "Unlock with Touch ID or your Mac password when you open Avibe, or come back after the time you choose. Applies to this Mac only; changing it asks you to verify.",
+        "off": "Off",
+        "immediately": "Immediately",
+        "oneMinute": "After 1 minute",
+        "fiveMinutes": "After 5 minutes",
+        "verifying": "Verifying…",
+        "failed": "Not verified. The setting did not change.",
+        "noPasscodePhone": "This iPhone has no passcode, so App Lock cannot work. Set one in iOS Settings › Face ID & Passcode to turn it on.",
+        "noPasswordMac": "This Mac user has no password, so App Lock cannot work. Set one in System Settings › Users & Groups to turn it on.",
+        "faceIdDenied": "Avibe is not allowed to use Face ID, so your passcode unlocks it. You can allow Face ID in iOS Settings › Avibe.",
+        "passwordOnlyMac": "Touch ID is not available on this Mac right now, so your Mac password unlocks Avibe.",
+        "coversPhone": "App Lock covers what is inside the app. Notification previews follow iOS Settings › Notifications; background sync and reminders keep running.",
+        "coversMac": "App Lock covers every Avibe window. The Runtime and Agents on this Mac keep running; notification previews follow System Settings › Notifications."
+      },
       "desktopMini": {
         "title": "Desktop Mini",
         "description": "Show the Desktop Mini pet on your desktop.",

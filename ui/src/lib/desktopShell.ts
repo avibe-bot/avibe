@@ -21,6 +21,9 @@ declare global {
     readonly __AVIBE_DESKTOP_VAULT_PASSKEY__?: true;
     /** The shell brings its main window forward on the Workbench's request (`focus_main_window`). */
     readonly __AVIBE_DESKTOP_FOCUS__?: true;
+    /** The shell owns App Lock and answers `app_lock_status` / `app_lock_set_policy` on the
+     *  Workbench page (ui/src/lib/appLockContract.ts). */
+    readonly __AVIBE_DESKTOP_APP_LOCK__?: true;
     /** The main Workbench can ask the shell to open standalone native app windows. */
     readonly __AVIBE_DESKTOP_APP_WINDOWS__?: true;
     /** Identity of a native App child window; grants no IPC capabilities. */
@@ -313,6 +316,12 @@ const desktopUpdateInvoke = (): ShellInvoke | null => {
   const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
   return internals?.invoke ? internals.invoke.bind(internals) : null;
 };
+
+/** The App Lock commands, when this Workbench's shell offers them. */
+export function desktopAppLockInvoke(): ShellInvoke | null {
+  if (typeof window === 'undefined' || window.__AVIBE_DESKTOP_APP_LOCK__ !== true) return null;
+  return desktopUpdateInvoke();
+}
 
 export const DESKTOP_OPEN_UPDATES_EVENT = 'avibe:desktop-open-updates';
 export const DESKTOP_UPDATE_STATE_EVENT = 'avibe:desktop-update-state';
