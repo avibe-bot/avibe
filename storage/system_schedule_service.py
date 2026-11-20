@@ -701,6 +701,7 @@ def _pending_attempt(
     instance_id: str,
     device_id: str | None,
     kinds: tuple[str, ...] | None = None,
+    claimant=None,
 ) -> Mapping[str, Any] | None:
     query = (
         select(system_schedule_attempts)
@@ -726,12 +727,21 @@ def _pending_attempt(
         query = query.where(system_schedule_attempts.c.device_id.is_(None))
     else:
         query = query.where(system_schedule_attempts.c.device_id == device_id)
-    return conn.execute(
-        query.order_by(
-            system_schedule_attempts.c.created_at,
-            system_schedule_attempts.c.request_id,
-        ).limit(1)
-    ).mappings().one_or_none()
+    ordered = query.order_by(system_schedule_attempts.c.created_at, system_schedule_attempts.c.request_id)
+    if claimant is not None and action == "create" and device_id is None:
+        from storage.workbench_sessions_service import get_active_session
+
+        # Read authorization and first lease share this transaction. An invisible
+        # queue head must not block the phone's next eligible proposal.
+        for row in conn.execute(ordered).mappings():
+            operation = _load_operation(conn, row["operation_id"])
+            try:
+                get_active_session(conn, operation["session_id"], authorization_context=claimant)
+            except LookupError:
+                continue
+            return row
+        return None
+    return conn.execute(ordered.limit(1)).mappings().one_or_none()
 
 
 def claim_next(
@@ -741,6 +751,7 @@ def claim_next(
     exclude_lease_tokens: object = None,
     allow_create: bool = True,
     kinds: object = None,
+    claimant=None,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
     instance_id = _bounded_identifier(instance_id, field="instance_id")
@@ -794,6 +805,7 @@ def claim_next(
                     instance_id=instance_id,
                     device_id=None,
                     kinds=allowed_kinds,
+                    claimant=claimant,
                 )
             if attempt is None:
                 return None

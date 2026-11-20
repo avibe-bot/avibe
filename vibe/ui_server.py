@@ -7608,6 +7608,7 @@ def system_schedule_claim():
             device_id=payload.get("device_id"),
             exclude_lease_tokens=payload.get("exclude_lease_tokens"),
             allow_create=payload["allow_create"],
+            claimant=_request_authorization_context(),
             **({"kinds": payload["kinds"]} if "kinds" in payload else {}),
         )
     except system_schedule_service.SystemScheduleServiceError as exc:
