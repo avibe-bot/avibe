@@ -62,7 +62,14 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 - **start:** refuse with `disabled` when activities are off. Use this instance's active relay registration id from `NativePushCoordinator`; if there is none, refuse with `push_unavailable`. Then GET the turn (409 maps to `no_active_turn`), `Activity.request(attributes, content: (state from the turn, staleDate: confirmedAt + 2400), pushType: .token)`, wait for the first value of `pushTokenUpdates`, and PUT. Apply the PUT response with `activity.update` locally. A 409 `turn_not_active` ends the activity locally with the returned terminal state. Starting a new activity first ends any other `TurnActivityAttributes` activity (one at a time).
 - Every later value from `pushTokenUpdates` is PUT again with the same body and the new token.
-- **foreground:** for each local activity, GET it and apply the answer locally:
+- **Registration state:** the App records on the device, persisted across launches, which activities have had a PUT answered `200`. An activity without one is *unregistered*.
+- **foreground, unregistered activity:** PUT again with its current token. The answers:
+  - `200`: it is registered; apply the returned state.
+  - `409 turn_not_active`: end it with the returned terminal state.
+  - `404`, `403`, `409 activity_conflict`, or `400`: end it `.immediate`.
+  - `503` or no answer: keep it unregistered and try again on the next foreground or token update. Its local `staleDate` (`confirmedAt + 2400`) marks it out of date meanwhile, and it is ended `.immediate` once it has been unregistered for 28800 s.
+  Every token update PUTs whatever the activity's state, and the answers are handled the same way.
+- **foreground, registered activity:** GET it and apply the answer locally (a registered activity is never PUT from the foreground; only a token update PUTs it):
   - `status: tracking` with a live phase: update;
   - a terminal phase: end with that state;
   - `status: stopped` or a 404: end it `.immediate`.
