@@ -137,7 +137,10 @@ nothing by default.
     it begins no new connection, and an event whose hand-over begins after
     that moment is refused, so that Feishu sends it again;
   - a handshake that already had its endpoint may complete; the socket is
-    closed within moments. An event already handed over is handled.
+    closed within moments. An event already handed over is handled to its
+    end, but its answer may not reach Feishu, which then sends it again
+    (at least once, as Feishu's delivery is throughout);
+  - a peer that does not complete the close is cut off after 3 seconds;
   - `stop()` returns false while the thread is inside a blocking call of the
     SDK that cannot be interrupted: its endpoint request has no timeout, as
     before. The thread ends, under the rules above, when that call returns.

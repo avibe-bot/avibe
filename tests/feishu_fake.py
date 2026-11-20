@@ -76,6 +76,9 @@ class FakeFeishu:
         # Refusals for the next handshakes, before the normal upgrade: (HTTP status, headers).
         self.handshake_refusals: List[Any] = []
         self.handshakes_refused = 0
+        self.closes_withheld = 0
+        # A peer that never completes a close the client begins.
+        self.withhold_close_reply = False
         # Events sent down every socket the moment it opens.
         self.events_on_open: List[Dict[str, Any]] = []
         # Seconds to withhold the next endpoint replies, before answering as usual.
@@ -175,7 +178,7 @@ class FakeFeishu:
             status, headers = self.handshake_refusals.pop(0)
             self.handshakes_refused += 1
             return web.Response(status=status, headers=headers)
-        socket = web.WebSocketResponse()
+        socket = web.WebSocketResponse(autoclose=False)
         await socket.prepare(request)
         index = self.connections_opened
         self.connections_opened += 1
@@ -183,7 +186,16 @@ class FakeFeishu:
         for number, body in enumerate(self.events_on_open):
             for frame in self.event_frames(body, message_id=f"on-open-{index}-{number}"):
                 await socket.send_bytes(frame)
-        async for message in socket:
+        while True:
+            message = await socket.receive()
+            if message.type == WSMsgType.CLOSE:
+                if self.withhold_close_reply:
+                    self.closes_withheld += 1
+                    await asyncio.sleep(30)  # says nothing, keeps the TCP connection
+                await socket.close()
+                break
+            if message.type in (WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR):
+                break
             if message.type != WSMsgType.BINARY:
                 continue
             frame = _frame_class()()

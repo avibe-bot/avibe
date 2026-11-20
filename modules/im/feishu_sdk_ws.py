@@ -62,11 +62,31 @@ def _stoppable_client_class(sdk: Any, stop_requested: threading.Event) -> type:
     class StoppableClient(sdk.Client):
         def _get_conn_url(self) -> str:
             # Every connection, first or again, begins by asking for an endpoint.
+            # The request blocks; a stop may come before it or while it is out.
             if stop_requested.is_set():
                 raise asyncio.CancelledError()
-            return super()._get_conn_url()
+            url = super()._get_conn_url()
+            if stop_requested.is_set():
+                raise asyncio.CancelledError()
+            return url
 
     return StoppableClient
+
+
+async def _close_socket(connection: Any) -> None:
+    """Close a WebSocket politely, and in any case have its TCP connection gone on return."""
+    try:
+        await asyncio.wait_for(connection.close(), _CLOSE_SECONDS)
+    except (Exception, asyncio.CancelledError):
+        logger.debug("Feishu WS: the peer did not complete the close", exc_info=True)
+    transport = getattr(connection, "transport", None)
+    if transport is not None and not transport.is_closing():
+        transport.abort()
+    try:
+        # The loop has to run for the transport to be released.
+        await asyncio.wait_for(connection.wait_closed(), 1.0)
+    except (Exception, asyncio.CancelledError):
+        logger.debug("Feishu WS: the connection was not released in time", exc_info=True)
 
 
 class SdkLongConnection:
@@ -78,7 +98,9 @@ class SdkLongConnection:
     ``stop`` may be called at any time, from any thread, any number of times,
     before ``start`` included. It only asks. From that moment the client is
     given no endpoint, so it can begin no connection, and no event is taken
-    from it; the connection's own thread then ends what is left, once.
+    from it; the connection's own thread then ends what is left, once. An
+    event already being handled then is handled to its end, but its answer may
+    not reach Feishu, which sends it again.
 
     Not changed from the SDK: its endpoint request blocks the thread and has no
     timeout. While one is outstanding, the thread cannot end.
@@ -191,7 +213,7 @@ class SdkLongConnection:
                 client._auto_reconnect = False
                 connection = getattr(client, "_conn", None)
                 if connection is not None:
-                    loop.run_until_complete(asyncio.wait_for(connection.close(), _CLOSE_SECONDS))
+                    loop.run_until_complete(_close_socket(connection))
         except (Exception, asyncio.CancelledError):
             logger.debug("Feishu WS: closing the connection failed", exc_info=True)
         finally:

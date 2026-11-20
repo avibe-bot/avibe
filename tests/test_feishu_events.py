@@ -463,6 +463,37 @@ def test_a_stop_between_the_endpoint_and_the_handshake_leaves_a_socket_that_take
     assert connection._loop.is_closed()
 
 
+def test_a_stop_while_the_endpoint_request_is_out_opens_no_socket_when_the_reply_comes(fake: FakeFeishu):
+    """The request blocks the connection's thread; the stop cannot end it, but nothing may follow from its reply."""
+    fake.endpoint_delays = [1.0]
+    fake.events_on_open = [message_event()]
+    connection = _connection(fake)
+    connection.start()
+    fake.wait_until(lambda: fake.endpoint_requests, what="the endpoint request")
+
+    connection.stop(timeout=0)
+    fake.wait_until(lambda: not connection.is_alive(), timeout=5, what="the connection's thread to end")
+
+    assert len(fake.endpoint_requests) == 1
+    assert fake.connections_opened == 0
+    assert connection._loop.is_closed()
+
+
+def test_a_peer_that_does_not_complete_the_close_is_cut_off_before_stop_returns(fake: FakeFeishu):
+    fake.withhold_close_reply = True
+    connection = _connection(fake)
+    connection.start()
+    fake.wait_connected()
+    socket = fake.wait_until(lambda: connection._client and connection._client._conn, what="the client's socket")
+    transport = socket.transport
+
+    assert connection.stop(timeout=5) is True
+
+    assert fake.closes_withheld == 1  # the peer did get a close, and said nothing
+    assert transport.is_closing()
+    assert connection._loop.is_closed()
+
+
 def test_an_event_that_arrives_after_the_stop_is_refused_not_taken(fake: FakeFeishu):
     """Feishu sends a refused event again, and then the connection that replaced this one gets it."""
     handled: List[bytes] = []
