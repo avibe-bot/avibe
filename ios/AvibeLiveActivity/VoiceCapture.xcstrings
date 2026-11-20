@@ -65,6 +65,22 @@
         }
       }
     },
+    "voiceCapture.action.retryAll" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry all"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全部重试"
+          }
+        }
+      }
+    },
     "voiceCapture.action.send" : {
       "localizations" : {
         "en" : {
@@ -637,6 +653,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "准备录音文件"
+          }
+        }
+      }
+    },
+    "voiceCapture.unsent.many %lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld voice messages couldn't be sent."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有 %lld 条语音没能发出去。"
+          }
+        }
+      }
+    },
+    "voiceCapture.unsent.notice" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This voice message couldn't be sent. Open Avibe to retry."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这条语音没能发出去，打开 Avibe 可以重试。"
+          }
+        }
+      }
+    },
+    "voiceCapture.unsent.one" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "One voice message couldn't be sent."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有一条语音没能发出去。"
           }
         }
       }

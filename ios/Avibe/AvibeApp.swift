@@ -84,6 +84,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         Task { @MainActor in
             ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
+            await VoiceCaptureController.shared.restoreOutbox()
             if !Self.isRunningTests { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }
         return true

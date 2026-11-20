@@ -873,7 +873,6 @@ final class VoiceCaptureTests: XCTestCase {
         // Still unreachable at the first retry (2 s): kept again, the next in 5 s.
         var retry = controller.retryTask
         await world.wakeRetry()
-        XCTAssertEqual(world.slept.last, .seconds(2))
         await retry?.value
         XCTAssertEqual(controller.phase, .failed)
         XCTAssertTrue(world.instance.sent.isEmpty)
@@ -881,8 +880,8 @@ final class VoiceCaptureTests: XCTestCase {
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
         retry = controller.retryTask
         await world.wakeRetry()
-        XCTAssertEqual(world.slept.last, .seconds(5))
         await retry?.value
+        XCTAssertEqual(world.slept.filter { $0 <= .seconds(60) }, [.seconds(2), .seconds(5)])
         XCTAssertEqual(world.instance.sent, ["hello"])
         XCTAssertEqual(controller.phase, .idle)
         XCTAssertEqual(world.activities.first?.ended?.phase, .sent)
@@ -926,15 +925,18 @@ final class VoiceCaptureTests: XCTestCase {
             world.instance.release()
             await retry?.value
 
-            if action == "retry" {
-                XCTAssertEqual(world.instance.sent, ["hello"], "sent once, by the send already under way")
-                XCTAssertEqual(world.instance.posts, 1)
-            } else {
-                XCTAssertEqual(world.instance.transcribed, 0, "\(action): the take given up is not sent")
+            if action == "discard" {
+                XCTAssertEqual(world.instance.transcribed, 0, "the take given up is not sent")
                 XCTAssertTrue(world.instance.sent.isEmpty)
-                XCTAssertEqual(kept?.discarded, true)
+            } else {
+                // Retry: sent once, by the send already under way. A new
+                // press: the earlier take is not discarded, and goes on.
+                XCTAssertEqual(world.instance.sent, ["hello"], action)
+                XCTAssertEqual(world.instance.posts, 1, action)
             }
+            XCTAssertEqual(kept?.discarded, true, action)
             XCTAssertEqual(world.retryHolds, 0, action)
+            XCTAssertEqual(controller.unsentCount, 0, action)
         }
     }
 
@@ -949,12 +951,12 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
         world.instance.holdStatus = true
-        let first = Task { await controller.retryKeptNow() }
-        let second = Task { await controller.retryKeptNow() }
+        let first = Task { await controller.activated() }
+        let second = Task { await controller.activated() }
         await world.instance.untilHolding()
         world.instance.holdStatus = false
         await controller.retry()
-        await controller.retryKeptNow()
+        await controller.activated()
         await second.value
         XCTAssertEqual(world.instance.statusCalls, 3, "the start, the stop, and one send again")
         world.instance.release()
@@ -975,7 +977,7 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
         world.instance.holdPost = true
-        let send = Task { await controller.retryKeptNow() }
+        let send = Task { await controller.activated() }
         await world.instance.untilHolding()
         await controller.finish(send: false)
         XCTAssertEqual(controller.phase, .idle)
@@ -998,7 +1000,7 @@ final class VoiceCaptureTests: XCTestCase {
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
         world.instance.holdPost = true
         world.instance.postError = Failure.closed
-        let send = Task { await controller.retryKeptNow() }
+        let send = Task { await controller.activated() }
         await world.instance.untilHolding()
         await controller.finish(send: false)
         world.instance.release()
@@ -1081,11 +1083,12 @@ final class VoiceCaptureTests: XCTestCase {
         world.audio?.duration = 3
         _ = await controller.toggle()
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
-        await controller.retryKeptNow()
+        await controller.activated()
         XCTAssertEqual(world.instance.sent, ["hello"])
         XCTAssertEqual(world.retryHolds, 0)
 
-        // A take that waits for the user's Retry (not unreachable) does not.
+        // A take that waits for the user (not unreachable) is not sent by
+        // the schedule, but is sent once more, silently, on coming forward.
         let other = World()
         other.instance.transcribeResult = .failure(Failure.server(500, nil))
         let second = other.controller()
@@ -1093,17 +1096,21 @@ final class VoiceCaptureTests: XCTestCase {
         other.audio?.duration = 3
         _ = await second.toggle()
         XCTAssertEqual(other.activities.first?.states.last?.reason, .transcriptionFailed)
-        other.instance.transcribeResult = .success("hello")
-        await second.retryKeptNow()
-        XCTAssertTrue(other.instance.sent.isEmpty)
+        XCTAssertNil(second.retryTask)
         XCTAssertEqual(other.retryHolds, 0)
+        other.instance.transcribeResult = .success("hello")
+        await second.activated()
+        XCTAssertEqual(other.instance.sent, ["hello"])
+        XCTAssertTrue(other.unsentAlerts.isEmpty, "everything went: nothing is shown")
     }
 
-    /// Ten minutes unsent: one last send, then the take goes with its
-    /// island, and the next message says so.
-    func testAKeptTakeGetsOneLastSendWhenItsTimeIsUp() async {
+    /// Ten minutes unsent: the island goes, the take stays and is still
+    /// sent; the lasting notification was scheduled for that moment when
+    /// the take was kept, and is removed once nothing is unsent.
+    func testAfterTenMinutesTheIslandGoesAndTheTakeStays() async {
         let world = World()
-        var clock = Date()
+        let start = Date()
+        var clock = start
         world.now = { clock }
         world.instance.statusResult = .failure(Failure.offline)
         world.instance.failures = ["GET /api/asr/status loadp NSURLErrorDomain -1004 +12ms"]
@@ -1116,23 +1123,30 @@ final class VoiceCaptureTests: XCTestCase {
             world.earlier.last?.contains("kept:offline {GET /api/asr/status loadp NSURLErrorDomain -1004 +12ms} 0 [") == true,
             "\(world.earlier)"
         )
-        clock = clock.addingTimeInterval(11 * 60)
+        XCTAssertEqual(world.unsentNotices, [start.addingTimeInterval(600)])
+
+        clock = clock.addingTimeInterval(601)
+        let island = controller.islandTask
+        await world.wakeIsland()
+        await island?.value
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.activities.first?.endedImmediately, true)
+        XCTAssertEqual(controller.unsentCount, 1, "kept, without its island")
+        XCTAssertEqual(world.audio?.discarded, false)
+
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
         let retry = controller.retryTask
         await world.wakeRetry()
         await retry?.value
-        XCTAssertEqual(world.instance.statusCalls, 3, "the start, the stop, and the last send")
-        XCTAssertEqual(controller.phase, .idle)
-        XCTAssertEqual(world.audio?.discarded, true)
-        XCTAssertEqual(world.retryHolds, 0)
-        XCTAssertTrue(
-            world.earlier.last?.contains("expired {GET /api/asr/status loadp NSURLErrorDomain -1004 +12ms}") == true,
-            "\(world.earlier)"
-        )
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertEqual(controller.unsentCount, 0)
+        XCTAssertEqual(world.unsentNotices.count, 2)
+        XCTAssertNil(world.unsentNotices.last ?? Date(), "removed once nothing is unsent")
     }
 
-    /// Cancel, an account change, or a new press end the retrying.
+    /// Discard or an account change ends the retrying.
     func testGivingAKeptTakeUpEndsItsRetries() async {
-        for end in 0..<3 {
+        for end in 0..<2 {
             let world = World()
             world.instance.statusResult = .failure(Failure.offline)
             let controller = world.controller()
@@ -1142,12 +1156,306 @@ final class VoiceCaptureTests: XCTestCase {
             let retry = controller.retryTask
             switch end {
             case 0: await controller.finish(send: false)
-            case 1: _ = controller.cancelForAccountTransition()
-            default: _ = await controller.toggle()
+            default: _ = controller.cancelForAccountTransition()
             }
             XCTAssertEqual(retry?.isCancelled, true, "\(end)")
             XCTAssertEqual(world.retryHolds, 0, "\(end)")
+            XCTAssertEqual(controller.unsentCount, 0, "\(end)")
+            XCTAssertTrue(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().isEmpty, "\(end)")
         }
+    }
+
+    // MARK: Takes that are not sent yet are kept in order (the outbox)
+
+    /// Records a take and stops it while the instance is unreachable.
+    private func keepATake(_ world: World, _ controller: VoiceCaptureController) async {
+        world.instance.statusResult = .failure(Failure.offline)
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+    }
+
+    private func reachable(_ world: World) {
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+    }
+
+    /// A new press never discards a take that is not sent yet: both are
+    /// kept, and sent oldest first, each as its own message.
+    func testANewPressKeepsTheUnsentTakeAndBothAreSentInOrder() async {
+        let world = World()
+        world.pressContext = "first"
+        let controller = world.controller()
+        await keepATake(world, controller)
+        let first = world.audio
+        XCTAssertEqual(controller.unsentCount, 1)
+
+        world.pressContext = "second"
+        await keepATake(world, controller)
+        XCTAssertEqual(first?.discarded, false, "not discarded by the new press")
+        XCTAssertEqual(world.activities.first?.endedImmediately, true, "its island went to the new take")
+        XCTAssertEqual(controller.unsentCount, 2)
+        XCTAssertEqual(controller.phase, .failed, "the newest keeps its island")
+        XCTAssertEqual(world.activities.last?.states.last?.reason, .willSend)
+        XCTAssertEqual(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().map(\.sequence), [1, 2])
+        XCTAssertTrue(world.instance.sent.isEmpty)
+
+        reachable(world)
+        world.instance.transcripts = ["one", "two"]
+        let retry = controller.retryTask
+        await world.wakeRetry()
+        await retry?.value
+        XCTAssertEqual(world.instance.sent, ["one", "two"], "oldest first, never merged")
+        XCTAssertEqual(world.instance.captures.map { $0?.contains("[first") }, [true, false])
+        XCTAssertEqual(controller.unsentCount, 0)
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.activities.last?.ended?.phase, .sent)
+        XCTAssertTrue(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().isEmpty)
+        XCTAssertEqual(world.retryHolds, 0)
+    }
+
+    /// A take that stops while an earlier one is still on its way waits
+    /// behind it, even though the instance answers again.
+    func testATakeIsNeverSentBeforeAnEarlierOneThatIsOnItsWay() async {
+        let world = World()
+        let controller = world.controller()
+        await keepATake(world, controller)
+        // Reachable again, and the earlier take's send is under way (held).
+        reachable(world)
+        world.instance.holdTranscribe = true
+        world.instance.transcripts = ["one", "two"]
+        let retry = controller.retryTask
+        await world.wakeRetry()
+        await world.instance.untilHolding()
+        // A new take is recorded and stopped meanwhile.
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertTrue(world.instance.sent.isEmpty)
+        XCTAssertEqual(controller.unsentCount, 2)
+        world.instance.holdTranscribe = false
+        world.instance.release()
+        await retry?.value
+        XCTAssertEqual(world.instance.sent, ["one", "two"])
+        XCTAssertEqual(controller.unsentCount, 0)
+    }
+
+    /// The order survives the App being ended: a new run finds the takes,
+    /// with their transcription ids, and sends them oldest first.
+    func testUnsentTakesSurviveARelaunchInOrder() async {
+        let before = World()
+        before.instance.dictationID = "ios-action-kept"
+        before.pressContext = "first"
+        let ended = before.controller()
+        await keepATake(before, ended)
+        before.pressContext = "second"
+        await keepATake(before, ended)
+
+        let after = World()
+        after.outboxDirectory = before.outboxDirectory
+        after.instance.statusResult = .failure(Failure.offline)
+        let controller = after.controller()
+        await controller.restoreOutbox()
+        XCTAssertEqual(controller.unsentCount, 2)
+        XCTAssertEqual(controller.phase, .idle, "no island after a relaunch")
+        XCTAssertEqual(after.madeWith, ["ios-action-kept", "ios-action-kept"])
+        XCTAssertTrue(after.instance.sent.isEmpty, "still unreachable")
+
+        reachable(after)
+        after.instance.transcripts = ["one", "two"]
+        let retry = controller.retryTask
+        await after.wakeRetry()
+        await retry?.value
+        XCTAssertEqual(after.instance.sent, ["one", "two"])
+        XCTAssertEqual(after.instance.captures.map { $0?.contains("[first") }, [true, false])
+        XCTAssertTrue((after.instance.timings.first ?? nil)?.contains("stop=") == true, "its steps as they stood")
+        XCTAssertTrue(VoiceCaptureOutbox(directory: after.outboxDirectory).entries().isEmpty)
+        // Asked afresh about voice input before anything went.
+        XCTAssertGreaterThanOrEqual(after.instance.statusCalls, 2)
+    }
+
+    /// A message whose POST was begun when the App ended is never posted
+    /// again: it may have arrived. The next message says so.
+    func testATakeWhosePostWasBegunIsNotSentAgainAfterARelaunch() async {
+        let before = World()
+        let ended = before.controller()
+        await keepATake(before, ended)
+        reachable(before)
+        before.instance.holdPost = true
+        let send = Task { await ended.sendKept(all: false) }
+        await before.instance.untilHolding()
+        XCTAssertEqual(VoiceCaptureOutbox(directory: before.outboxDirectory).entries().first?.posted, true)
+
+        // The App ends here; a new run starts.
+        let after = World()
+        after.outboxDirectory = before.outboxDirectory
+        let controller = after.controller()
+        await controller.restoreOutbox()
+        XCTAssertEqual(controller.unsentCount, 0)
+        XCTAssertEqual(after.instance.posts, 0)
+        XCTAssertTrue(after.earlier.last?.contains("sendUnknown") == true, "\(after.earlier)")
+        XCTAssertTrue(VoiceCaptureOutbox(directory: after.outboxDirectory).entries().isEmpty)
+        before.instance.release()
+        await send.value
+    }
+
+    /// An account sign-out or change deletes every unsent take at once.
+    func testAnAccountChangeDeletesEveryUnsentTake() async {
+        let world = World()
+        let controller = world.controller()
+        await keepATake(world, controller)
+        await keepATake(world, controller)
+        XCTAssertEqual(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().count, 2)
+        _ = controller.cancelForAccountTransition()
+        XCTAssertEqual(controller.unsentCount, 0)
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertTrue(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().isEmpty)
+        XCTAssertNil(controller.retryTask)
+        XCTAssertNil(world.unsentNotices.last ?? Date())
+        reachable(world)
+        await controller.activated()
+        XCTAssertTrue(world.instance.sent.isEmpty)
+
+        // A take another account left on disk is not this account's.
+        let other = World()
+        other.outboxDirectory = world.outboxDirectory
+        let first = other.controller()
+        await keepATake(other, first)
+        let later = World()
+        later.outboxDirectory = world.outboxDirectory
+        later.target = VoiceCaptureTarget(
+            accountID: "account-2", instanceID: "instance-9",
+            origin: WebOrigin.parseConfigured("https://other.example.invalid")!, storeIdentifier: UUID()
+        )
+        let second = later.controller()
+        await second.restoreOutbox()
+        XCTAssertEqual(second.unsentCount, 0)
+        XCTAssertTrue(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().isEmpty)
+    }
+
+    /// Avibe coming to the front sends what is unsent once more, silently.
+    /// Everything sent: nothing is shown. Still unsent: one alert with the
+    /// count; Retry sends all, oldest first; Discard deletes all.
+    func testComingToTheFrontRetriesSilentlyThenAsksOnce() async {
+        let world = World()
+        world.inFront = true
+        let controller = world.controller()
+        await keepATake(world, controller)
+        await keepATake(world, controller)
+        XCTAssertEqual(world.said, [.willSend, .willSend], "said in front, where no island is drawn")
+
+        await controller.activated()
+        XCTAssertEqual(world.unsentAlerts.map(\.count), [2])
+        await controller.activated()
+        XCTAssertEqual(world.unsentAlerts.count, 1, "one alert, not one per take or per return")
+
+        // Retry: all of them, oldest first.
+        reachable(world)
+        world.instance.transcripts = ["one", "two"]
+        world.unsentAlerts[0].answer(true)
+        for _ in 0..<400 where world.instance.sent.count < 2 { try? await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(world.instance.sent, ["one", "two"])
+        XCTAssertEqual(controller.unsentCount, 0)
+        await controller.activated()
+        XCTAssertEqual(world.unsentAlerts.count, 1, "nothing unsent: nothing shown")
+
+        // Discard: all of them, with no second question.
+        await keepATake(world, controller)
+        await keepATake(world, controller)
+        await controller.activated()
+        XCTAssertEqual(world.unsentAlerts.map(\.count), [2, 2])
+        world.unsentAlerts[1].answer(false)
+        for _ in 0..<400 where controller.unsentCount > 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(controller.unsentCount, 0)
+        XCTAssertTrue(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().isEmpty)
+        XCTAssertTrue(world.earlier.contains { $0.contains("discardedAll 2") }, "\(world.earlier)")
+        XCTAssertEqual(world.instance.sent, ["one", "two"], "nothing more was sent")
+
+        // In the background nothing is asked.
+        let background = World()
+        let other = background.controller()
+        await keepATake(background, other)
+        await other.activated()
+        XCTAssertTrue(background.unsentAlerts.isEmpty)
+    }
+
+    /// A take that cannot be turned into text waits for the user without
+    /// holding up the ones after it.
+    func testATakeThatNeedsTheUserDoesNotHoldTheOthersUp() async {
+        let world = World()
+        let controller = world.controller()
+        // The first take: reachable, but its transcription fails.
+        world.instance.transcribeResult = .failure(Failure.server(500, nil))
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .transcriptionFailed)
+        // The second is recorded and sent while the first still waits.
+        world.instance.transcribeResult = .success("two")
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.sent, ["two"])
+        XCTAssertEqual(controller.unsentCount, 1)
+        // Retry (the alert's, or coming forward) sends the first too.
+        world.instance.transcribeResult = .success("one")
+        await controller.sendKept(all: true)
+        XCTAssertEqual(world.instance.sent, ["two", "one"])
+        XCTAssertEqual(controller.unsentCount, 0)
+    }
+
+    /// A day unsent: the take is deleted, and the next message says so.
+    func testAnUnsentTakeIsDeletedAfterADay() async {
+        let world = World()
+        var clock = Date()
+        world.now = { clock }
+        let controller = world.controller()
+        await keepATake(world, controller)
+        clock = clock.addingTimeInterval(VoiceCaptureOutbox.retention - 1)
+        await controller.activated()
+        XCTAssertEqual(controller.unsentCount, 1)
+        clock = clock.addingTimeInterval(2)
+        reachable(world)
+        await controller.activated()
+        XCTAssertEqual(controller.unsentCount, 0)
+        XCTAssertTrue(world.instance.sent.isEmpty, "deleted, not sent a day late")
+        XCTAssertTrue(world.earlier.contains { $0.contains("expired") }, "\(world.earlier)")
+        XCTAssertTrue(VoiceCaptureOutbox(directory: world.outboxDirectory).entries().isEmpty)
+
+        // And one a run that ended left behind, at the next launch.
+        let before = World()
+        let start = Date()
+        before.now = { start }
+        await keepATake(before, before.controller())
+        let after = World()
+        after.outboxDirectory = before.outboxDirectory
+        after.now = { start.addingTimeInterval(VoiceCaptureOutbox.retention + 1) }
+        let later = after.controller()
+        await later.restoreOutbox()
+        XCTAssertEqual(later.unsentCount, 0)
+        XCTAssertTrue(after.earlier.contains { $0.contains("expired") }, "\(after.earlier)")
+    }
+
+    func testTheUnsentAlertAndNoticeReadAsDecided() throws {
+        func format(_ language: String, _ key: String) throws -> String {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+            return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: "VoiceCapture")
+        }
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.unsent.one"), "有一条语音没能发出去。")
+        XCTAssertEqual(try format("en", "voiceCapture.unsent.one"), "One voice message couldn't be sent.")
+        XCTAssertEqual(
+            String(format: try format("zh-Hans", "voiceCapture.unsent.many %lld"), 3), "有 3 条语音没能发出去。"
+        )
+        XCTAssertEqual(
+            String(format: try format("en", "voiceCapture.unsent.many %lld"), 3), "3 voice messages couldn't be sent."
+        )
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.action.retryAll"), "全部重试")
+        XCTAssertEqual(try format("en", "voiceCapture.action.retryAll"), "Retry all")
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.unsent.notice"), "这条语音没能发出去，打开 Avibe 可以重试。")
+        XCTAssertEqual(
+            try format("en", "voiceCapture.unsent.notice"), "This voice message couldn't be sent. Open Avibe to retry."
+        )
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.phase.failed"), "没发出去")
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.action.discard"), "放弃")
     }
 
     // MARK: What happened to a press that left no message leaves the phone
@@ -1324,8 +1632,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
         XCTAssertEqual(world.retryHolds, 0)
         XCTAssertEqual(world.instance.transcribed, 1)
-        await controller.retryKeptNow()
-        XCTAssertEqual(world.instance.transcribed, 1, "not sent again by itself")
+        XCTAssertNil(controller.retryTask, "not sent again by itself")
 
         // The same when the consent ask meets the fault.
         let asked = World()
@@ -1949,27 +2256,59 @@ private final class World {
     var retryHolds = 0
     /// Presses that left no message (`capture_earlier`).
     var earlier: [String] = []
-    /// Waits asked for; a retry's wait is held until `wakeRetry()`.
+    /// Where takes that are not sent yet are kept; two Worlds on one
+    /// directory are two runs of the App.
+    var outboxDirectory = FileManager.default.temporaryDirectory.appending(path: "outbox-\(UUID().uuidString)")
+    /// The dictation id each client was made with (nil: a new take).
+    var madeWith: [String?] = []
+    /// The unsent notice as scheduled (nil: removed), the alerts shown in
+    /// front (how many takes, and the answer to give), and lines said.
+    var unsentNotices: [Date?] = []
+    var unsentAlerts: [(count: Int, answer: (Bool?) -> Void)] = []
+    var said: [VoiceCaptureAttributes.Reason] = []
+
+    /// Waits asked for; a retry's wait is held until `wakeRetry()`, and a
+    /// kept take's island wait until `wakeIsland()`.
     var slept: [Duration] = []
     private var wakes = 0
     private var retryWaits = 0
+    private var islandWakes = 0
+    private var islandWaits = 0
+
+    /// Ends the wait for a kept take's island to go, once one is under way.
+    func wakeIsland(file: StaticString = #filePath, line: UInt = #line) async {
+        let woken = islandWoken
+        for _ in 0..<400 {
+            if islandWaits > 0 { islandWakes += 1 }
+            try? await Task.sleep(for: .milliseconds(5))
+            if islandWoken > woken { return }
+        }
+        XCTFail("no island is waiting", file: file, line: line)
+    }
 
     /// Ends the retry wait under way, once one is (a retry that was never
-    /// scheduled fails the test instead of hanging it).
+    /// scheduled fails the test instead of hanging it). A wait that was
+    /// cancelled does not count: the one that replaced it is woken.
     func wakeRetry(file: StaticString = #filePath, line: UInt = #line) async {
-        for _ in 0..<400 where retryWaits == 0 { try? await Task.sleep(for: .milliseconds(5)) }
-        guard retryWaits > 0 else {
-            XCTFail("no retry is waiting", file: file, line: line)
-            return
+        let woken = retryWoken
+        for _ in 0..<400 {
+            if retryWaits > 0 { wakes += 1 }
+            try? await Task.sleep(for: .milliseconds(5))
+            if retryWoken > woken { return }
         }
-        wakes += 1
+        XCTFail("no retry is waiting", file: file, line: line)
     }
+    private var retryWoken = 0
+    private var islandWoken = 0
 
     func controller() -> VoiceCaptureController {
         instance.log = { self.events.append($0) }
         return VoiceCaptureController(environment: VoiceCaptureEnvironment(
             target: { self.target },
-            makeInstance: { _ in self.instance },
+            makeInstance: { _, dictationID in
+                self.madeWith.append(dictationID)
+                return self.instance
+            },
             makeAudio: { _ in
                 if self.takeFileFails { throw CocoaError(.fileWriteNoPermission) }
                 let audio = FakeAudio()
@@ -2022,10 +2361,26 @@ private final class World {
             noteEarlier: { self.earlier = VoiceCaptureEarlier.adding($0, to: self.earlier) },
             earlier: { self.earlier },
             dropEarlier: { self.earlier = VoiceCaptureEarlier.removing($0, from: self.earlier) },
+            outbox: VoiceCaptureOutbox(directory: self.outboxDirectory),
+            scheduleUnsentNotice: { self.unsentNotices.append($0) },
+            presentUnsent: { count, answer in self.unsentAlerts.append((count, answer)) },
+            sayInFront: { self.said.append($0) },
             now: { self.now() },
             sleep: { duration in
                 self.slept.append(duration)
                 await Task.yield()
+                if duration > .seconds(300) {
+                    // A kept take's island (ten minutes): until the test
+                    // ends it, or it is cancelled.
+                    let ticket = self.islandWakes
+                    self.islandWaits += 1
+                    while self.islandWakes == ticket, !Task.isCancelled {
+                        try? await Task.sleep(for: .milliseconds(5))
+                    }
+                    self.islandWaits -= 1
+                    if !Task.isCancelled { self.islandWoken += 1 }
+                    return
+                }
                 guard duration <= .seconds(60) else {
                     // Every other wait never ends in a test.
                     try? await Task.sleep(for: .seconds(3600))
@@ -2039,6 +2394,7 @@ private final class World {
                     try? await Task.sleep(for: .milliseconds(5))
                 }
                 self.retryWaits -= 1
+                if !Task.isCancelled { self.retryWoken += 1 }
             }
         ))
     }
@@ -2080,6 +2436,7 @@ private final class FakeInstance: VoiceCaptureInstance {
             await withCheckedContinuation { held = $0 }
         }
         transcribed += 1
+        if !transcripts.isEmpty { return transcripts.removeFirst() }
         return try transcribeResult.get()
     }
 
@@ -2131,6 +2488,9 @@ private final class FakeInstance: VoiceCaptureInstance {
     func close() { closed = true }
     var releaseBarrier: WebsiteDataStoreReleaseBarrier? { nil }
     var failures: [String] = []
+    var dictationID = "ios-action-fake"
+    /// What each transcription returns, in order (then `transcribeResult`).
+    var transcripts: [String] = []
 }
 
 private final class FakeAudio: VoiceCaptureAudio {
