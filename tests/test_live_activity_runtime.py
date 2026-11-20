@@ -544,6 +544,9 @@ async def test_a_terminal_outage_keeps_one_pending_end_until_a_later_heartbeat_a
     await service.tick()
     assert len(sent) == 5
     assert all(body["event"] == "end" for body in sent)
+    # Lost responses permit duplicate wire delivery, but never a second terminal state.
+    assert len({(body["phase"], body["started_at"], body["ended_at"]) for body in sent}) == 1
+    assert all(left["timestamp"] < right["timestamp"] for left, right in zip(sent, sent[1:]))
     assert sent[-1]["confirmed_at"] == now[0]
     with state.connect() as conn:
         row = tracking_store.get(conn, "activity-1")
@@ -554,7 +557,8 @@ async def test_a_terminal_outage_keeps_one_pending_end_until_a_later_heartbeat_a
 
 
 @pytest.mark.asyncio
-async def test_a_new_phase_replaces_pending_work_and_terminal_pending_survives_restart(state, monkeypatch):
+@pytest.mark.parametrize("source_gone", [True, False])
+async def test_a_new_phase_replaces_pending_work_and_terminal_pending_survives_restart(state, monkeypatch, source_gone):
     import httpx
     import json
     from storage import live_activity_service as tracking_store
@@ -587,11 +591,15 @@ async def test_a_new_phase_replaces_pending_work_and_terminal_pending_survives_r
     restarted.clock = service.clock
     restarted.sender = lambda **kwargs: sent.append(kwargs["body"])
     now[0] += 5
-    # The durable pending end remains authoritative even if the source Turn is gone.
-    monkeypatch.setattr(tracking_store, "snapshot", lambda *args: None)
+    # A missing or changed source cannot overwrite a terminal state already attempted.
+    next_state = None if source_gone else {
+        "phase": "failed", "started_at": saved_end["started_at"] + 1,
+        "ended_at": saved_end["ended_at"] + 1, "confirmed_at": now[0], "turn_id": TURN,
+    }
+    monkeypatch.setattr(tracking_store, "snapshot", lambda *args: next_state)
     await restarted.tick()
     assert sent[-1]["event"] == "end"
-    assert sent[-1]["ended_at"] == saved_end["ended_at"]
+    assert all(sent[-1][key] == saved_end[key] for key in ("phase", "started_at", "ended_at"))
     assert sent[-1]["timestamp"] > saved_end["timestamp"]
     assert (await restarted.handle("get", "local", "activity-1", {}))["body"]["activity"]["status"] == "ended"
 
