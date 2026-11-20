@@ -728,7 +728,7 @@ Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
-`auth.signInWithProvider`, `session.refresh`,
+`auth.signInWithProvider`, `auth.signInWithPasskey`, `session.refresh`,
 `session.selectInstance`, `session.logout`, `app.returnToInstance`,
 `app.openPage`, and the closed `app.openExternal` allowlist (the two install
 guides and avibe.bot's Account security page). Instance documents, child
@@ -1079,8 +1079,22 @@ below.
   2 s carries that last list instead, so Welcome after sign-out or on a cold
   start shows the row at once. Welcome also asks `auth.providers` (no
   arguments; refused in sheets) when it appears and when the App returns to
-  the foreground on it, and replaces the row in place with the answer. So the App can ship before the broker
-  serves a provider, and each mark appears when avibe.bot enables it.
+  the foreground on it, and replaces the row in place with the answer. The
+  same read carries passkey sign-in (`passkey_login_enabled` exactly `true`;
+  every iOS the App runs on has the passkey sheet): it is kept with the list
+  and answered beside it as `passkey`, in signed-out answers and in
+  `auth.providers`. So the App can ship before the broker serves a provider,
+  and each way in appears when avibe.bot enables it.
+- Passkey sign-in with no email first is the closed `auth.signInWithPasskey`
+  (no arguments; the sheet forbids it), apart from the second-factor
+  `auth.verifyPasskey`. The coordinator runs avibe.bot's primary passkey
+  options, the system sheet with no allow-list and verify in one fresh
+  store, then reads the session as a request of its own. A closed sheet
+  cancels the flow and any attempt that does not sign in retires the store,
+  but a store that holds an accepted verify is kept until its session is
+  read (a `401` there retires it), so trying again reads it without a
+  second sheet or verify. `503` is passkey sign-in switched off
+  (`provider_unavailable`); a `403` is avibe.bot's HTTP boundary (`network`).
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
   `provider` exactly `google`, `github` or `apple`; any other value or an extra key
   is `invalid_argument`, and the sheet forbids it like every auth method. It

@@ -929,6 +929,7 @@ const NON_KEY_LITERALS = [
   'appLock.setPolicy',
   'appLock.status',
   'auth.signInWithProvider',
+  'auth.signInWithPasskey',
   'auth.providers',
   'auth.requestOtp',
   'auth.signInWithPassword',

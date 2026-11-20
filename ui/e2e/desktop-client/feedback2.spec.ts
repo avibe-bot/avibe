@@ -89,11 +89,12 @@ for (const [lang, theme, width, height] of [['en', 'light', 1200, 800], ['zh', '
     await page.addInitScript((lng) => localStorage.setItem('i18nextLng', lng), lang);
     await installBridge(page, clientState());
     await page.goto(`${ACCOUNT}?theme=${theme}`);
-    const link = page.getByRole('button', { name: lang === 'en' ? 'Use password' : '使用密码登录' });
+    await page.getByRole('button', { name: lang === 'en' ? 'Continue with email' : '使用邮箱继续' }).click();
+    const link = page.getByRole('button', { name: lang === 'en' ? 'Sign in with password' : '使用密码登录' });
     await expect(link).toHaveCSS('text-decoration-line', 'underline');
     const style = await link.evaluate((node) => ({ gap: parseFloat(getComputedStyle(node).columnGap), color: getComputedStyle(node).color, foreground: getComputedStyle(document.querySelector('main')!).color }));
     expect(style.gap).toBeGreaterThanOrEqual(8); await expect(link).toHaveCSS('color', style.foreground);
-    await link.click(); await expect(page.locator('#desktop-password')).toBeVisible();
+    await link.click(); await expect(page.locator('#mobile-login-password')).toBeVisible();
     await page.screenshot({ animations: 'disabled', path: info.outputPath('password-link.png') });
   });
 }

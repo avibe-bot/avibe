@@ -2181,10 +2181,13 @@ async fn an_instance_dropped_from_recency_returns_to_server_order() {
     assert!(f.http.replies.lock().unwrap().is_empty());
 }
 
-// A rejected replacement first factor cannot leave an unusable old OTP or MFA
-// projection. The previous success/cancel cases did not switch first-factor modes.
+// A rejected replacement first factor changes nothing (#4034, main 2026-11-20: a first factor
+// commits only on success). The email code it would have replaced, or the second factor that
+// code owes, stays exactly as it was and still works; nothing of the rejection is kept. (Before,
+// the rejection reset to signed out, so that no unusable old projection was left; now the old
+// one is never made unusable.)
 #[tokio::test]
-async fn rejected_password_retires_previous_first_factor_state() {
+async fn rejected_password_keeps_the_previous_first_factor_usable() {
     for factor in [false, true] {
         let mut replies = first_factor();
         replies.truncate(2);
@@ -2198,6 +2201,25 @@ async fn rejected_password_retires_previous_first_factor_state() {
             ("/api/config/auth", ok(json!({"supabase_url":"https://provider.test","supabase_anon_key":"public"}))),
             ("/auth/v1/token", Reply::Ready(response(400,json!({"error":"invalid_grant","error_code":"invalid_credentials","error_description":"synthetic-private-detail"}),None))),
         ]);
+        // The previous attempt, used after the rejection.
+        if factor {
+            replies.extend([
+                ("/api/two-factor/verify", ok(json!({}))),
+                ("/api/mobile/session", ok(signed_in())),
+            ]);
+        } else {
+            replies.extend([
+                ("/auth/v1/verify", ok(json!({"access_token":"a","refresh_token":"r"}))),
+                (
+                    "/api/desktop/session",
+                    Reply::Ready(response(
+                        200,
+                        signed_in(),
+                        Some("avibe_session=private-account; Secure; HttpOnly; Path=/"),
+                    )),
+                ),
+            ]);
+        }
         let f = fixture(replies);
         assert!(
             action(
@@ -2216,6 +2238,8 @@ async fn rejected_password_retires_previous_first_factor_state() {
                     .ok
             );
         }
+        let before = f.client.state();
+        let stored = f.private.0.lock().unwrap().clone();
         let reply = action(
             &f.client,
             serde_json::from_value(
@@ -2225,14 +2249,151 @@ async fn rejected_password_retires_previous_first_factor_state() {
         )
         .await;
         assert_eq!(reply.error.unwrap().code, "invalid_credentials");
-        assert_eq!(reply.state.account.status, AccountStatus::SignedOut);
-        assert!(reply.state.account.email.is_none());
-        assert!(reply.state.account.gate.is_none());
-        assert!(reply.state.catalog.instances.is_empty());
-        assert!(f.private.0.lock().unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(&reply.state.account).unwrap(),
+            serde_json::to_value(&before.account).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&reply.state.catalog).unwrap(),
+            serde_json::to_value(&before.catalog).unwrap()
+        );
+        assert_eq!(*f.private.0.lock().unwrap(), stored);
         assert!(!serde_json::to_string(&f.client.state())
             .unwrap()
             .contains("synthetic-private"));
+        // Still usable: the same code, or the second factor it owes, signs in.
+        let next = if factor {
+            serde_json::from_value(json!({"type":"verify_second_factor","method":"totp","code":"123456"})).unwrap()
+        } else {
+            ClientAction::VerifyOtp { code: "123456".into() }
+        };
+        let done = action(&f.client, next).await;
+        assert!(done.ok, "{:?}", done.error);
+        assert_eq!(f.client.state().account.status, AccountStatus::SignedIn);
+    }
+}
+
+fn auth_config() -> Reply {
+    ok(json!({"supabase_url":"https://fixture.supabase.test","supabase_anon_key":"public-fixture"}))
+}
+fn account_session() -> Reply {
+    Reply::Ready(response(
+        200,
+        signed_in(),
+        Some("avibe_session=private-account; Secure; HttpOnly; Path=/"),
+    ))
+}
+fn email(address: &str) -> ClientAction {
+    ClientAction::RequestOtp { email: address.into() }
+}
+
+/// AUTH-SETUP-182: a resend avibe.bot refuses (rate limited, or no answer at all) leaves the code
+/// already sent, its attempt and the published state as they were; that code still signs in, and
+/// no broadcast ever shows signed out (#4034, main 2026-11-20: a first factor commits only on
+/// success).
+#[tokio::test]
+async fn a_refused_resend_keeps_the_code_already_sent() {
+    for answered in [true, false] {
+        let refusal = if answered {
+            Reply::Ready(response(429, json!({"error_code":"over_email_send_rate_limit"}), None))
+        } else {
+            Reply::Failure
+        };
+        let f = fixture(vec![
+            ("/api/config/auth", auth_config()),
+            ("/auth/v1/otp", ok(json!({}))),
+            ("/api/config/auth", auth_config()),
+            ("/auth/v1/otp", refusal),
+            ("/auth/v1/verify", ok(json!({"access_token":"a","refresh_token":"r"}))),
+            ("/api/desktop/session", account_session()),
+        ]);
+        assert!(action(&f.client, email("old@example.test")).await.ok);
+        let before = f.client.state();
+        let seen = f.view.states.lock().unwrap().len();
+        let resend = action(&f.client, email("old@example.test")).await;
+        assert!(!resend.ok);
+        assert_eq!(
+            serde_json::to_value(&resend.state.account).unwrap(),
+            serde_json::to_value(&before.account).unwrap()
+        );
+        assert!(f.view.states.lock().unwrap()[seen..]
+            .iter()
+            .all(|state| state.account.status == AccountStatus::Verifying));
+        let done = action(&f.client, ClientAction::VerifyOtp { code: "123456".into() }).await;
+        assert!(done.ok, "{:?}", done.error);
+        assert_eq!(f.client.state().account.status, AccountStatus::SignedIn);
+    }
+}
+
+/// A first factor publishes only after it commits. While a new email's request is still out, the
+/// state and every broadcast are the previous attempt's; then one commit moves straight from the
+/// old email to the new one, never through signed out.
+#[tokio::test]
+async fn a_first_factor_publishes_only_its_commit() {
+    let (release, waiting) = oneshot::channel();
+    let entered = Arc::new(Notify::new());
+    let f = fixture(vec![
+        ("/api/config/auth", auth_config()),
+        ("/auth/v1/otp", ok(json!({}))),
+        ("/api/config/auth", auth_config()),
+        ("/auth/v1/otp", Reply::Held(waiting, entered.clone())),
+    ]);
+    assert!(action(&f.client, email("old@example.test")).await.ok);
+    let seen = f.view.states.lock().unwrap().len();
+    let client = f.client.clone();
+    let pending = tokio::spawn(async move { action(&client, email("new@example.test")).await });
+    entered.notified().await;
+    assert_eq!(f.client.state().account.email.as_deref(), Some("old@example.test"));
+    assert!(f.view.states.lock().unwrap()[seen..]
+        .iter()
+        .all(|state| state.account.email.as_deref() == Some("old@example.test")));
+    assert!(release.send(response(200, json!({}), None)).is_ok());
+    let done = pending.await.unwrap();
+    assert!(done.ok, "{:?}", done.error);
+    let states = f.view.states.lock().unwrap()[seen..].to_vec();
+    assert!(states
+        .iter()
+        .all(|state| state.account.status == AccountStatus::Verifying));
+    assert_eq!(
+        states.last().unwrap().account.email.as_deref(),
+        Some("new@example.test")
+    );
+    assert_eq!(f.client.state().account.email.as_deref(), Some("new@example.test"));
+}
+
+/// An escape while a first factor is still out (cancel, back to this computer, sign out) wins:
+/// that attempt commits nothing even when avibe.bot then accepts it, and the escape's own state
+/// is what stays published.
+#[tokio::test]
+async fn an_escape_during_a_first_factor_commits_nothing_of_it() {
+    for escape in [
+        ClientAction::Cancel,
+        ClientAction::ReturnLocal,
+        ClientAction::SignOut { intent_id: None },
+    ] {
+        let (release, waiting) = oneshot::channel();
+        let entered = Arc::new(Notify::new());
+        let f = fixture(vec![
+            ("/api/config/auth", auth_config()),
+            ("/auth/v1/otp", Reply::Held(waiting, entered.clone())),
+        ]);
+        let client = f.client.clone();
+        let pending = tokio::spawn(async move { action(&client, email("new@example.test")).await });
+        entered.notified().await;
+        let escaped = action(&f.client, escape).await;
+        assert!(escaped.ok, "{:?}", escaped.error);
+        assert!(release.send(response(200, json!({}), None)).is_ok());
+        let late = pending.await.unwrap();
+        assert!(!late.ok);
+        assert_eq!(f.client.state().account.status, AccountStatus::SignedOut);
+        assert!(f.client.state().account.email.is_none());
+        assert!(f
+            .view
+            .states
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|state| state.account.status != AccountStatus::Verifying));
     }
 }
 

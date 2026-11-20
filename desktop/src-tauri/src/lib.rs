@@ -183,6 +183,8 @@ struct DesktopBootstrapCatalog {
     updater: updater::Catalog,
     notifications: notifications::NativeNotificationCatalog,
     pet: pet::NativePetCatalog,
+    #[serde(rename = "providerCallback")]
+    provider_callback: NativeProviderCallbackCatalog,
     #[cfg(feature = "bundled-runtime")]
     uninstall: NativeUninstallCatalog,
     #[cfg(target_os = "macos")]
@@ -214,6 +216,13 @@ pub(crate) fn ask_vibey_notice(notice: AskVibeyNotice) -> String {
         AskVibeyNotice::Kept => catalog.kept,
         AskVibeyNotice::Unavailable => catalog.unavailable,
     }
+}
+
+/// The browser's last page after a Google, GitHub or Apple sign-in.
+#[derive(Clone, Deserialize)]
+struct NativeProviderCallbackCatalog {
+    done: String,
+    failed: String,
 }
 
 #[derive(Clone, Deserialize)]
