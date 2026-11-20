@@ -214,10 +214,14 @@ export const WindowManagerProvider: React.FC<{
     };
   });
   useLayoutEffect(() => {
-    const controller = launchLifetime.begin();
+    let controller = launchLifetime.begin();
     const retire = () => controller.abort();
+    // A back-forward cache restore keeps React mounted, so the layout effect does not run again.
+    // Requests from the hidden lifetime stay aborted; the restored page gets a new one.
+    const renew = (event: PageTransitionEvent) => { if (event.persisted) controller = launchLifetime.begin(); };
     window.addEventListener('pagehide', retire);
-    return () => { window.removeEventListener('pagehide', retire); retire(); };
+    window.addEventListener('pageshow', renew);
+    return () => { window.removeEventListener('pagehide', retire); window.removeEventListener('pageshow', renew); retire(); };
   }, [launchLifetime]);
 
   const openApp = useCallback<WindowManagerValue['openApp']>((appId, opts) => {

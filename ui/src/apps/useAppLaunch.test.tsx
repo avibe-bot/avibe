@@ -149,3 +149,25 @@ it('serial fallback activation before React commit reuses one manager-owned App 
   await act(async () => { await Promise.all([result.current.launch({ appId: 'files' }), result.current.launch({ appId: 'files' })]); });
   expect(result.current.wm.windows).toHaveLength(1);
 });
+
+describe('launch lifetime and request identity', () => {
+  it('launches without crypto.randomUUID, as on a plain-HTTP LAN origin', async () => {
+    // An own property shadows the prototype's method only for this test; deleting it restores it.
+    Object.defineProperty(globalThis.crypto, 'randomUUID', { value: undefined, configurable: true });
+    try {
+      const { result } = renderHook(() => useAppLaunch('file-browser'), { wrapper: Wrapper });
+      await act(async () => expect(await result.current(targets[0], 'newWindow')).toBe('opened'));
+      expect(requests[0].requestId).toMatch(/^[0-9a-f]{32}$/);
+    } finally {
+      Reflect.deleteProperty(globalThis.crypto, 'randomUUID');
+    }
+    expect(typeof globalThis.crypto.randomUUID).toBe('function');
+  });
+  it('renews the owner lifetime after a back-forward cache restore', async () => {
+    const { result } = renderHook(() => useAppLaunch('file-browser'), { wrapper: Wrapper });
+    act(() => { window.dispatchEvent(new Event('pagehide')); });
+    await act(async () => expect(await result.current(targets[0], 'newWindow')).toBe('stale'));
+    act(() => { window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })); });
+    await act(async () => expect(await result.current(targets[0], 'newWindow')).toBe('opened'));
+  });
+});

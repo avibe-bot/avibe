@@ -10,6 +10,13 @@ import { appTabHref, type AppLaunchIntent } from './appLaunch';
 import { appBodyParams, requestNativeAppLaunch, validAppLaunchTarget, type AppLaunchSource, type AppLaunchTarget } from './appLaunchProtocol';
 import { showAppRoutePath } from '../components/apps/mobileDock';
 
+// Plain-HTTP LAN access has no `crypto.randomUUID`; `getRandomValues` exists in every context.
+function launchRequestId(): string {
+  const crypto = globalThis.crypto;
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 // All launch surfaces keep their animation geometry locally; only typed launch
 // state crosses the native boundary. The latest manager retains its foreground
 // gate when an async caller is now behind Settings.
@@ -36,7 +43,7 @@ export function useAppLaunch(source: AppLaunchSource) {
       }
       mode = 'activate';
     }
-    const request = { ...target, source, mode, newWindow: mode === 'newWindow', origin: window.location.origin, requestId: crypto.randomUUID() };
+    const request = { ...target, source, mode, newWindow: mode === 'newWindow', origin: window.location.origin, requestId: launchRequestId() };
     // Retired route command surfaces still settle locally behind Settings. They
     // cannot ask the OS to focus an App on behalf of an inactive surface.
     const outcome = active.current && window.__AVIBE_APP_LAUNCH_PROTOCOL__ === 1 ? await requestNativeAppLaunch(request, controller.signal) : 'fallback';
