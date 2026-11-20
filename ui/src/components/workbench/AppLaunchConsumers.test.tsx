@@ -8,7 +8,8 @@ import { TerminalTabs } from './TerminalTabs';
 const api = vi.hoisted(() => ({ getAuthSession: vi.fn(async () => ({ remote: false })) }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../../lib/apiFetch', () => ({ apiFetch: vi.fn(async () => ({ ok: true })) }));
-vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => ({ setTitle: vi.fn() }), useWindowCloseGuard: vi.fn(), useWindowState: vi.fn() }));
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()), useWindowManager: () => ({ setTitle: vi.fn() }), useWindowCloseGuard: vi.fn(), useWindowState: vi.fn() }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, opts?: { n?: number }) => opts?.n ? `${key} ${opts.n}` : key }) }));
 vi.mock('./FileTree', () => ({ FileTree: ({ rootPath }: { rootPath: string }) => <output data-testid="editor-root">{rootPath}</output> }));
 vi.mock('./FilePicker', () => ({ FilePicker: () => null }));

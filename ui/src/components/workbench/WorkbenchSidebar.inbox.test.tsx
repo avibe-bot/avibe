@@ -62,7 +62,8 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
   },
   useWorkbenchProjectsActions: () => ({}),
 }));
-vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => ({ open: vi.fn() }) }));
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()), useWindowManager: () => ({ open: vi.fn() }) }));
 vi.mock('../../context/useUnsavedChangesActionGuard', () => ({
   useUnsavedChangesActionGuard: () => (run: () => void) => run,
 }));
