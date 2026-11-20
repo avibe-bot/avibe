@@ -151,9 +151,13 @@ class _OwnedRendezvous:
             return
         self._owner._rendezvous.publish(endpoint, reason=reason)
 
-    def observe_path(self, peer: str, ordinal: int, phase: str, path: dict | None) -> None:
+    def clear_paths(self) -> None:
         if self._owner._can_commit(self._generation, self._ingress):
-            self._owner._rendezvous.observe_path(peer, ordinal, phase, path)
+            self._owner._rendezvous.clear_paths()
+
+    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> None:
+        if self._owner._can_commit(self._generation, self._ingress):
+            self._owner._rendezvous.observe_path(peer, epoch, ordinal, phase, path)
 
     def set_admission_listener(self, listener: Any) -> None:
         if listener is not None and not self._owner._can_commit(self._generation, self._ingress):

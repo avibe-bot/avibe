@@ -555,10 +555,11 @@ class DirectTransportSupervisor:
         generation = self._admission_listener_generation
         self._active_admission_generation = generation
         self._rendezvous.set_admission_listener(
-            lambda client_endpoint_id, ttl_seconds, generation=generation: self._admission_notice_from_thread(
+            lambda client_endpoint_id, ttl_seconds, epoch, generation=generation: self._admission_notice_from_thread(
                 generation,
                 client_endpoint_id,
                 ttl_seconds,
+                epoch,
             )
         )
         try:
@@ -600,7 +601,7 @@ class DirectTransportSupervisor:
         rows = msg.get("families")
         schema = {"type", "ordinal", "phase", "selected", "partial", "families"}
         if self._device_reports:
-            schema.update(("peer", "scope", "rtt_ms"))
+            schema.update(("peer", "epoch", "scope", "rtt_ms"))
         if (not self._path_reports or self._endpoint_id is None or set(msg) != schema or
                 msg["phase"] not in ("open", "change", "close") or
                 msg["selected"] not in ("relay", "ipv4", "ipv6", "unknown") or
@@ -612,14 +613,14 @@ class DirectTransportSupervisor:
         if self._device_reports:
             selected, scope, rtt = msg["selected"], msg["scope"], msg["rtt_ms"]
             ip = selected in ("ipv4", "ipv6")
-            if (not is_endpoint_id(msg["peer"]) or (rtt is not None and not uint(rtt))
+            if (not is_endpoint_id(msg["peer"]) or not uint(msg["epoch"]) or (rtt is not None and not uint(rtt))
                     or (scope not in ("local", "global") if ip else scope is not None)):
                 raise _ProtocolError("invalid_path_report")
             path = None if selected == "unknown" else {
                 "kind": ("lan" if scope == "local" else "punched") if ip else "relay",
                 "family": selected if ip else None, "rtt_ms": rtt,
             }
-            self._rendezvous.observe_path(msg["peer"], msg["ordinal"], msg["phase"], path)
+            self._rendezvous.observe_path(msg["peer"], msg["epoch"], msg["ordinal"], msg["phase"], path)
         now = asyncio.get_running_loop().time()
         if now >= self._report_window:
             self._report_window = now + 60
@@ -651,7 +652,7 @@ class DirectTransportSupervisor:
         if not is_endpoint_id(endpoint_id) or not isinstance(reason, str) or not reason:
             raise _ProtocolError("invalid_peer_closed")
 
-    def _admission_notice_from_thread(self, generation: int, endpoint_id: str, ttl_seconds: int) -> None:
+    def _admission_notice_from_thread(self, generation: int, endpoint_id: str, ttl_seconds: int, epoch: int) -> None:
         if self._loop is None or not is_endpoint_id(endpoint_id):
             return
         if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool):
@@ -662,11 +663,12 @@ class DirectTransportSupervisor:
                 generation,
                 endpoint_id,
                 max(0, min(RENDEZVOUS_TTL_SECONDS, ttl_seconds)),
+                epoch,
             )
         except RuntimeError:
             return
 
-    def _queue_admission_notice(self, generation: int, endpoint_id: str, ttl_seconds: int) -> None:
+    def _queue_admission_notice(self, generation: int, endpoint_id: str, ttl_seconds: int, epoch: int) -> None:
         if (
             generation != self._active_admission_generation
             or self._stop_event is None
@@ -676,7 +678,7 @@ class DirectTransportSupervisor:
         ):
             return
         task = asyncio.create_task(
-            self._send_admission_notice(self._process, generation, endpoint_id, ttl_seconds),
+            self._send_admission_notice(self._process, generation, endpoint_id, ttl_seconds, epoch),
             name="direct-transport-admission-notice",
         )
         self._admission_notice_tasks.add(task)
@@ -688,13 +690,15 @@ class DirectTransportSupervisor:
         generation: int,
         endpoint_id: str,
         ttl_seconds: int,
+        epoch: int,
     ) -> None:
         if generation != self._active_admission_generation or process is not self._process or process.stdin is None:
             return
         try:
             await self._write_control(
                 process.stdin,
-                {"type": "admission", "endpoint_id": endpoint_id, "ttl_seconds": ttl_seconds},
+                {"type": "admission", "endpoint_id": endpoint_id, "ttl_seconds": ttl_seconds,
+                 **({"epoch": epoch} if self._device_reports else {})},
             )
         except (_Stopping, BrokenPipeError, ConnectionError, OSError):
             return
@@ -784,6 +788,9 @@ class DirectTransportSupervisor:
                 dropping = False
         except (asyncio.CancelledError, ConnectionError, OSError):
             return
+        finally:
+            if self._device_reports:
+                self._rendezvous.clear_paths()
 
     async def _drain_stdout(self, reader: asyncio.StreamReader | None) -> None:
         if reader is None:

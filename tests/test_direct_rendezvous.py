@@ -201,7 +201,7 @@ def test_admission_listener_notifies_before_offer_return_and_on_extension():
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
     events: list[tuple[str, int]] = []
     order: list[str] = []
-    rendezvous.set_admission_listener(lambda endpoint_id, ttl: (events.append((endpoint_id, ttl)), order.append("notice")))
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl, _epoch: (events.append((endpoint_id, ttl)), order.append("notice")))
 
     _offer(rendezvous)
     order.append("answer")
@@ -217,7 +217,7 @@ def test_admission_listener_reports_early_drops_and_no_listener_is_optional():
     rendezvous = DirectRendezvous(_Clock())
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
     events: list[tuple[str, int]] = []
-    rendezvous.set_admission_listener(lambda endpoint_id, ttl: events.append((endpoint_id, ttl)))
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl, _epoch: events.append((endpoint_id, ttl)))
     clients = [f"{index:064x}" for index in range(9)]
     for client in clients:
         _offer(rendezvous, client=client, subject="same-subject")

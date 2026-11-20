@@ -102,7 +102,9 @@ class DirectEndpoint:
 PUBLIC_TRIAL = "public-trial-v1"
 PUBLIC_TRIAL_RELAYS = frozenset(f"https://{region}-1.relay.n0.iroh.link./" for region in ("use1", "usw1", "euc1", "aps1"))
 
-AdmissionListener = Callable[[str, int], None]
+AdmissionListener = Callable[[str, int, int], None]
+# V2 observers refresh unchanged paths at least every five seconds.
+_PATH_MAX_AGE = 10.0
 
 
 @dataclass
@@ -110,6 +112,8 @@ class _Admission:
     subject: str
     until: int
     session: tuple[str, str] | None  # (pairing binding, authenticated browser session)
+    epoch: int  # zero disables attribution, not transport admission
+    ambiguous_until: int = 0
     connections: dict[int, tuple[float, dict | None]] = field(default_factory=dict)
 
 
@@ -129,6 +133,7 @@ class DirectRendezvous:
         # Distinguishes this process's generations from any earlier process's.
         self._boot = secrets.token_hex(8)
         self._revision = 0
+        self._next_epoch = 1
         self._endpoint: DirectEndpoint | None = None
         self._candidates: tuple[dict[str, str], ...] = ()
         self._unavailable_reason = "not_running"
@@ -180,7 +185,7 @@ class DirectRendezvous:
             if previous_id != current_id or previous_policy != current_policy:
                 if self._admission_listener:
                     for key in self._admissions:
-                        self._admission_listener(key, 0)
+                        self._admission_listener(key, 0, 0)
                 self._admissions.clear()
             previous_origin = self._endpoint.relay_origin if self._endpoint else None
             current_origin = endpoint.relay_origin if endpoint else None
@@ -250,7 +255,8 @@ class DirectRendezvous:
         if self._admission_listener is not None:
             # Schedule on the loop in mutation order while holding the lock.
             for endpoint_id, ttl_seconds in notifications:
-                self._admission_listener(endpoint_id, ttl_seconds)
+                grant = self._admissions.get(endpoint_id)
+                self._admission_listener(endpoint_id, ttl_seconds, grant.epoch if ttl_seconds and grant else 0)
         return {
             **base, "status": "ready", "generation": generation, "issued_at": now, "expires_at": expires_at,
             "alpn": DIRECT_ALPN,
@@ -266,10 +272,15 @@ class DirectRendezvous:
             admission = self._admissions.get(client_endpoint_id)
             return admission is not None and admission.until > now
 
-    def observe_path(self, peer: str, ordinal: int, phase: str, path: dict | None) -> None:
+    def clear_paths(self) -> None:
+        with self._lock:
+            for admission in self._admissions.values():
+                admission.connections.clear()
+
+    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> None:
         with self._lock:
             admission = self._admissions.get(peer)
-            if not admission or not admission.session or admission.until <= self._clock():
+            if not admission or not admission.session or not epoch or admission.epoch != epoch or admission.until <= self._clock():
                 return
             connections = admission.connections
             if phase == "close":
@@ -282,13 +293,14 @@ class DirectRendezvous:
         latest = {}
         with self._lock:
             now = self._clock()
+            cutoff = time.monotonic() - _PATH_MAX_AGE
             for admission in self._admissions.values():
                 session = admission.session
                 if not session or session[0] != binding or admission.until <= now:
                     continue
                 key = (admission.subject, session[1])
                 for stamp, path in admission.connections.values():
-                    if path and (key not in latest or stamp > latest[key][0]):
+                    if path and stamp > cutoff and (key not in latest or stamp > latest[key][0]):
                         latest[key] = (stamp, path)
         return {key: dict(value[1]) for key, value in latest.items()}
 
@@ -315,11 +327,19 @@ class DirectRendezvous:
             endpoint_id = next(iter(admissions))
             del admissions[endpoint_id]
             notifications.append((endpoint_id, 0))
-        if previous and previous.subject == subject and previous.session == session:
+        same = previous and previous.subject == subject and previous.session == session
+        if same and (previous.epoch or now < previous.ambiguous_until):
             previous.until = admitted_until
             admissions[client_endpoint_id] = previous
         else:
-            admissions[client_endpoint_id] = _Admission(subject, admitted_until, session)
+            # A nomination is not key ownership. Preserve admission policy but
+            # suppress attribution across overlapping, conflicting nominations.
+            ambiguous_until = previous.until if previous and not same else 0
+            epoch = 0
+            if session and now >= ambiguous_until:
+                epoch = self._next_epoch
+                self._next_epoch += 1
+            admissions[client_endpoint_id] = _Admission(subject, admitted_until, session, epoch, ambiguous_until)
         notifications.append((client_endpoint_id, max(0, min(RENDEZVOUS_TTL_SECONDS, admitted_until - now))))
         return notifications
 

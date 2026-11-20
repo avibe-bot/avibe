@@ -23,6 +23,12 @@ One visible device can represent several signed sessions. A session belongs to o
 
 The authenticated rendezvous session associates a peer with an admission in memory. The registry joins observations only to visible, unrevoked sessions in the same pairing; no session key, peer ID or address is added to the device response. No database migration or disk write is required. Older sidecars keep their existing diagnostics and cannot populate a direct path.
 
+## Observation protocol (instance and sidecar)
+
+Only a negotiated v2 sidecar receives an `epoch` on its private admission notices. A positive epoch labels an unambiguous session association; zero means do not attribute. It is not an admission credential. Capture the epoch **once at connection admission** and echo that value on every observation for the connection, never the latest value for its peer. An overlapping nomination from a different session drops both sessions’ attribution. A subsequent unambiguous grant gets a new epoch; delayed reports from an older grant, including opens and closes, cannot affect it.
+
+A v2 observer must refresh even an unchanged selection at least every five seconds. A measurement expires ten seconds after receipt; renewing an admission does not refresh it. Loss of the diagnostic channel clears its observations without shutting down transport. The API can then show an independently observed tunnel, or null.
+
 ## Upgrade and rollback
 
 The schema change is revision `20261120_0094`, following Live Activities (`20261120_0093`). It adds registry tables and indexes without changing existing Live Activity or Push subscription rows. The schema is additive and migration signs nobody out. A pre-upgrade cookie can be enrolled only after successful verification. On this version and successors the cutoff rejects old cookies even if unregistered at sign-out. On rollback to a predecessor that does not recognize the cutoff, enrolled SIDs remain tombstoned. Only pre-upgrade cookies **not successfully verified and enrolled at sign-out** can be accepted again, including cookies first presented after the cutoff and rejected. The first acceptance window is their original idle lifetime (Personal: 30 days; Organization: 7 days since last renewal). After one uninterrupted idle lifetime on the upgraded binary, no such usable cookie remains. After an earlier rollback, an admitted predecessor session may slide to its original absolute cap. This is not unconditional rollback enforcement.
