@@ -102,6 +102,7 @@ def answer_route(isolated_state, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("second", ["choice", "text", "legacy", "replay"])
 def test_concurrent_answers_reserve_before_dispatch(answer_route, second):
+    """MESSAGE-DELIVERY-340: concurrent surfaces reserve one answer before dispatch."""
     r = answer_route
     r["release"].clear()
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -131,6 +132,7 @@ def test_concurrent_answers_reserve_before_dispatch(answer_route, second):
 
 
 def test_operation_replay_is_durable_and_bound_to_input(answer_route):
+    """MESSAGE-DELIVERY-340: restart-safe replay keeps the original input and receipt."""
     r = answer_route
     first = r["post"]()
     assert first.get_json()["answer"]["outcome"] == "accepted"
@@ -146,6 +148,7 @@ def test_operation_replay_is_durable_and_bound_to_input(answer_route):
 
 @pytest.mark.parametrize("cause", ["revision", "user", "agent", "pending", "missing", "archived"])
 def test_stale_and_missing_answers_do_not_dispatch(answer_route, cause):
+    """MESSAGE-DELIVERY-340: stale or missing native answer targets never dispatch."""
     from sqlalchemy import update
     from storage.models import agent_sessions
     from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
@@ -424,6 +427,7 @@ def test_winner_lookup_excludes_refusal_history_and_legacy_refusals_are_not_save
 
 @pytest.mark.parametrize("failure", ["unavailable", "timeout", "lost_ack"])
 def test_dispatch_failure_releases_only_proven_unaccepted_answers(answer_route, monkeypatch, failure):
+    """MESSAGE-DELIVERY-340: uncertain acceptance retains exclusive answer ownership."""
     from vibe import internal_client
 
     r = answer_route
@@ -462,6 +466,7 @@ def test_question_revision_shared_vectors(answer_route):
 
 @pytest.mark.parametrize("legacy", [False, True])
 def test_revoked_chat_permission_precedes_operation_replay(answer_route, tmp_path, legacy):
+    """MESSAGE-DELIVERY-340: revoked access prevents dispatch and receipt disclosure."""
     import traceback
     from sqlalchemy import event
     from sqlalchemy.engine import Engine
