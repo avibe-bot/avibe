@@ -234,13 +234,13 @@ final class DirectPathControllerTests: XCTestCase {
 
     // MARK: The path's kind, stickiness, and the race record
 
-    @MainActor
     /// `direct.status()` says whether the selected path's far end is on a
     /// local network, and its round-trip time, only when they belong to the
     /// path it names and only while the path is preferred. The event never
     /// carries them, and a change of them is not a change of the status.
+    @MainActor
     func testTheStatusCarriesThePathsClassAndRoundTripOnlyForThePathItNames() async throws {
-        let harness = try Harness()
+        let harness = try Harness(test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let target = try XCTUnwrap(harness.transport.selections.last)
@@ -285,6 +285,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(harness.status("instance-1").jsonObject["rtt_ms"])
     }
 
+    @MainActor
     func testThePathKindIsPublishedAndADirectAddressMakesPlansStickyUntilAMiss() async throws {
         let harness = try Harness(test: self)
         try await harness.signIn()
