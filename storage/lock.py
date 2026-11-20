@@ -276,7 +276,8 @@ def _recorded_holder(handle) -> str:
 
     try:
         handle.seek(0)
-        return handle.read().strip() or "unknown"
+        # Some lock users append per-acquisition metadata after the PID.
+        return handle.readline().strip() or "unknown"
     except OSError:
         return "unknown"
 

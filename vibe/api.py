@@ -93,6 +93,8 @@ from vibe.upgrade import (
     activation_block_reason,
     activate_upgrade_candidate,
     atomic_upgrade_lock,
+    get_install_status,
+    record_install_locked,
     build_upgrade_plan,
     defer_upgrade_activation,
     discard_atomic_uv_install_generation,
@@ -7822,6 +7824,8 @@ def get_version_info() -> dict:
             "managed_by": "desktop" | None
         }
 
+    A standalone Runtime also reports ``install``: null when idle, otherwise
+    the phase, target version (if known), and UTC start of the install.
     A desktop-managed Runtime reports the desktop app's last completed check
     (``vibe/desktop_update_status.py``), with its phase, version, channel and
     time, and never queries PyPI.
@@ -7842,6 +7846,7 @@ def get_version_info() -> dict:
     if managed_by:
         result["managed_by"] = managed_by
     else:
+        result["install"] = get_install_status()
         result["prereleases"] = prerelease_updates_enabled()
         try:
             auto_update = bool(V2Config.load().update.auto_update)
@@ -7941,6 +7946,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     "activation_notice": None,
                     "restarting": False,
                 }
+            record_install_locked(version_info.get("latest"))
             result = execute_upgrade_plan(
                 plan,
                 run=subprocess.run,
