@@ -598,6 +598,16 @@ final class AppModel: ObservableObject {
                   let origin = WebOrigin(url: instance.url) else { return nil }
             return HealthConnectionTarget(accountID: accountID, instanceID: instance.id, name: instance.name, origin: origin.serialized)
         }
+        // The list avibe.bot answered for the account (`healthAccountID` is
+        // set only by its answer in this process); unknown otherwise.
+        healthSync?.instancesProvider = { [weak self] in
+            guard let self, self.sessionCoordinator.healthAccountID != nil else { return nil }
+            var listed: [String: String] = [:]
+            for instance in self.sessionCoordinator.currentInstances {
+                if let origin = WebOrigin(url: instance.url) { listed[instance.id] = origin.serialized }
+            }
+            return listed
+        }
         _ = nativePushCoordinator
         _ = directPathController
         // The Action Button's hidden WebView loads through the same local

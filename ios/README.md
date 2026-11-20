@@ -1540,6 +1540,12 @@ an interrupted query without a durable payload is resumed. Redirects and cookies
 are disabled for device requests. Revocation or loss of instance eligibility
 clears the connection; invalid payloads and unsupported contracts suspend sync
 until a new explicit connection. Retry-After applies to device requests.
+Before each device request, restoration and HealthKit delivery included, the
+instance list avibe.bot last confirmed in this process must still list the
+paired instance at its origin. If it does not (the instance was removed or
+renamed), the connection ends locally and nothing more is sent to that origin,
+not even a revoke; a later connect starts over. An unknown or empty list
+changes nothing.
 
 Both HealthKit entitlements and the localized read-purpose description belong
 only to the main app. The archive checker requires boolean grants and rejects

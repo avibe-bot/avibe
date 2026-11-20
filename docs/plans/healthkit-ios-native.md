@@ -93,6 +93,10 @@ Health account events are separate from push cleanup. Logout and account changes
 freeze authority synchronously; same-account two-factor checks pause work while
 retaining the committed binding. Fresh nonempty authoritative catalogs can revoke
 a removed paired instance without treating another instance's removal as logout.
+Before each device request, the list avibe.bot last confirmed in this process must
+still list the paired instance at its origin; otherwise (removed or renamed) the
+connection ends locally with no further request to that origin. An unknown or
+empty list decides nothing.
 The existing named WebKit store UUID is captured in the private Health Keychain
 identity; missing or mismatching bindings fail closed after account/protected-start
 validation. Account UUID generation, rotation timing and transactions are unchanged.
