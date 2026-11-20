@@ -63,7 +63,8 @@ def _accept(h, *requests, finish=True, provenance=None, suffix=""):
             snapshot = deliveries.message_snapshot(
                 scope_id=None, session_id=request.session_id, platform="avibe", author="harness", source="harness",
                 message_type="harness", text=request.prompt,
-                metadata={"scheduled_provenance": (provenance or {}).get(request.id) or {"platform_specific": {
+                metadata={**({"turn_carry": "failed"} if suffix else {}),
+                          "scheduled_provenance": (provenance or {}).get(request.id) or {"platform_specific": {
                     "task_trigger_kind": "agent_run", "task_execution_id": request.id,
                     "source_kind": request.source_kind, "source_actor": request.source_actor,
                 }}},
@@ -1019,3 +1020,22 @@ def test_a_recipient_that_wrote_back_already_answered_the_pair(harness):
     _accept(h, _send(h, sender="sesB", recipient="sesA"))
     assert _pair(h)["state"] == "answered"
     assert not h.lane._notify(_pair(h)) and _notices(h) == []
+
+
+
+def test_a_carried_copy_of_an_old_report_does_not_answer_a_newer_dispatch(harness):
+    """A accepted B's report for dispatch 1, sent dispatch 2, and B finished it silently;
+    A's Turn failed and its successor took the carried copy of the OLD report (#4010).
+    The replay must not close dispatch 2."""
+    h = harness
+    _accept(h, _send(h))
+    report = _send(h, sender="sesB", recipient="sesA")
+    _accept(h, report)
+    second = _send(h)
+    _accept(h, second)
+    assert _pair(h)["state"] == "open" and _pair(h)["run_id"] == second.id
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == report.id).values(status="queued"))
+    _accept(h, report, suffix="~carry")
+    assert _pair(h)["state"] == "open"
+    assert h.lane._notify(_pair(h))

@@ -50,6 +50,11 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
     if snapshot.get("source") != "harness":
         return
     metadata = _object(snapshot.get("metadata_json"))
+    if metadata.get("turn_carry"):
+        # A failed or stopped Turn carried this input on (#4010): continued processing
+        # of an input already accepted once, neither a new send nor a return. The pair
+        # projection already counted it; leave both directions as they stand.
+        return
     sources = metadata.get("merged_harness_sources")
     if not isinstance(sources, list):
         sources = [_object(metadata.get("scheduled_provenance")).get("platform_specific")]
@@ -91,14 +96,7 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
         # answers. Only A sending again rearms A→B; wording/turns are not judged.
         if run["source_kind"] != "agent" or answered:
             continue
-        # The same dispatch accepted again (a failed Turn carried it on, #4010) is not
-        # a new request: it keeps the pair as it stands, answered included.
-        if conn.execute(select(session_delegations.c.run_id).where(
-            session_delegations.c.sender_session_id == sender,
-            session_delegations.c.recipient_session_id == recipient,
-            session_delegations.c.run_id == run["id"],
-        )).first() is not None:
-            continue
+
         values = dict(
             sender_session_id=sender, recipient_session_id=recipient,
             message_id=message_id, run_id=run["id"], state="open", notice_run_id=None, updated_at=at,
