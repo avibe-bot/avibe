@@ -2,6 +2,28 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- The bundle's localizations: English stays the system UI language for
+	     English users; zh-Hans carries the Services menu title 「问 Vibey」. -->
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+	</array>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict><key>default</key><string>Ask Vibey</string></dict>
+			<key>NSMessage</key><string>askVibey</string>
+			<key>NSPortName</key><string>Avibe</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>public.utf8-plain-text</string>
+				<string>public.url</string>
+				<string>public.file-url</string>
+			</array>
+		</dict>
+	</array>
 	<!-- Merged by the Tauri bundler into the generated Info.plist. The
 	     Workbench's voice input calls getUserMedia inside WKWebView; wry
 	     grants the WebKit-level media request, but macOS TCC denies
