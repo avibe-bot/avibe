@@ -113,7 +113,6 @@ class _Admission:
     until: int
     session: tuple[str, str] | None  # (pairing binding, authenticated browser session)
     epoch: int  # zero disables attribution, not transport admission
-    ambiguous_until: int = 0
     connections: dict[int, tuple[float, dict | None]] = field(default_factory=dict)
 
 
@@ -327,19 +326,18 @@ class DirectRendezvous:
             endpoint_id = next(iter(admissions))
             del admissions[endpoint_id]
             notifications.append((endpoint_id, 0))
-        same = previous and previous.subject == subject and previous.session == session
-        if same and (previous.epoch or now < previous.ambiguous_until):
+        if previous and previous.subject == subject and previous.session == session:
+            # A renewal preserves the epoch, including zero for a conflict.
             previous.until = admitted_until
             admissions[client_endpoint_id] = previous
         else:
-            # A nomination is not key ownership. Preserve admission policy but
-            # suppress attribution across overlapping, conflicting nominations.
-            ambiguous_until = previous.until if previous and not same else 0
+            # Only a fresh admission can start attribution. Replacing a live
+            # session is ambiguous for the rest of this continuous admission.
             epoch = 0
-            if session and now >= ambiguous_until:
+            if previous is None and session:
                 epoch = self._next_epoch
                 self._next_epoch += 1
-            admissions[client_endpoint_id] = _Admission(subject, admitted_until, session, epoch, ambiguous_until)
+            admissions[client_endpoint_id] = _Admission(subject, admitted_until, session, epoch)
         notifications.append((client_endpoint_id, max(0, min(RENDEZVOUS_TTL_SECONDS, admitted_until - now))))
         return notifications
 

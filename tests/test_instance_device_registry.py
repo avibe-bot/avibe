@@ -140,7 +140,16 @@ def test_conflicting_sessions_are_unattributed_and_old_epochs_cannot_rebind(inst
     rv.observe_path(peer, old, 2, 'open', path)
     rv.observe_path(peer, 0, 3, 'open', path)
     assert path_for(first) is None and path_for(second) is None
-    now[0] = 1000 + direct.RENDEZVOUS_TTL_SECONDS
+    # The second session renews while the key is still admitted, after the
+    # first session's original deadline. A fresh connection gets that renewal's
+    # epoch, not proof of which session holds the key.
+    now[0] = 1001 + direct.RENDEZVOUS_TTL_SECONDS
+    reconnect_epoch = nominate(second)
+    rv.observe_path(peer, reconnect_epoch, 4, 'open', path)
+    assert path_for(first) is None and path_for(second) is None
+    assert reconnect_epoch == 0 and rv.is_admitted(peer)
+    now[0] += direct.RENDEZVOUS_TTL_SECONDS + 1
+    assert not rv.is_admitted(peer)
     new = nominate(second)
     assert new and new != old
     rv.observe_path(peer, old, 4, 'open', path)
