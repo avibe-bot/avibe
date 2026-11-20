@@ -249,9 +249,10 @@ A row is `tracking`, `ended`, or `stopped`. This table is the whole row lifecycl
 | a new `activity_id` PUT on the same `push_registration_id` | — | becomes `stopped` (`replaced`) | — | — |
 | the publisher's send | — | §4.3 | — | — |
 | `now ≥ expires_at` | — | becomes `stopped` (`expired`), no push | — | — |
+| the row's source goes away: its push registration is no longer an enabled subscription of the owner, the owner can no longer read the session, or the Turn row is gone | — | becomes `stopped` (`registration_unavailable`, `session_unavailable`, or `turn_unavailable`), no push | — | — |
 | DELETE | `200 {stopped: false}` | becomes `stopped` (the DELETE reason); `200 {stopped: true}` | `200 {stopped: false}` | same |
 
-`stop_reason` is one of the DELETE reasons, `replaced`, `expired`, `token_gone`, `registration_gone`, or `relay_rejected`. Only `token_gone` can be revived, and only by a new token: an ActivityKit token rotation can race a send to the old token, and the App's PUT of the new token must not lose a live activity. The App sends that PUT on every rotation (§2.3).
+`stop_reason` is one of the DELETE reasons, `replaced`, `expired`, `token_gone`, `registration_gone`, `relay_rejected`, `registration_unavailable`, `session_unavailable`, or `turn_unavailable`. Only `token_gone` can be revived, and only by a new token: an ActivityKit token rotation can race a send to the old token, and the App's PUT of the new token must not lose a live activity. The App sends that PUT on every rotation (§2.3).
 
 ## 5. Invariants every lane tests
 
