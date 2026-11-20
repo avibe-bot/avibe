@@ -1733,7 +1733,7 @@ mod tests {
                 "{case}"
             );
             assert!((DRAG_HEIGHT..=WINDOW_HEIGHT).contains(&frame.height), "{case}");
-            assert_eq!(frame.size().0, 460.0);
+            assert_eq!(frame.size().0, 500.0);
         }
         assert_eq!(
             initial_anchor(None, &[]),

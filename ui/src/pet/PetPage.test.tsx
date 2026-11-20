@@ -3544,6 +3544,26 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true });
   });
 
+  it('moves the column by the snapshot\'s column_offset, and keeps it centred for an older shell', async () => {
+    const offset = () => (document.querySelector('.pet-mini-stage') as HTMLElement | null)?.style.getPropertyValue('--pet-column-offset');
+    const invoke = recording((command, args) => command === 'pet_ready' ? ready(bottom, 1) : { revision: args?.revision ?? 1, layout: bottom });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    // An older shell's layout has no column_offset: centred on Vibey.
+    await waitFor(() => expect(offset()).toBe('0px'));
+    // Near the left side the shell moves the column right; the page draws it,
+    // then acknowledges that revision.
+    await publish(2, { ...bottom, column_offset: 89 } as typeof top);
+    await waitFor(() => expect(offset()).toBe('89px'));
+    await waitFor(() => expect(settles(invoke).map(([revision]) => revision)).toContain(2));
+    await publish(3, { ...bottom, column_offset: -89 } as typeof top);
+    await waitFor(() => expect(offset()).toBe('-89px'));
+    // Anything but a finite number is no move at all.
+    await publish(4, { ...bottom, column_offset: 'far' } as unknown as typeof top);
+    await waitFor(() => expect(offset()).toBe('0px'));
+  });
+
   it('draws nothing until the shell\'s first snapshot, whichever layout it is', async () => {
     const readyAnswer = deferred<unknown>();
     shell(vi.fn((command: string) => command === 'pet_ready' ? readyAnswer.promise : Promise.resolve({ revision: 2, layout: top })));

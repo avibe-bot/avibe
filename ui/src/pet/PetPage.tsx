@@ -162,6 +162,10 @@ export const PetPage: React.FC = () => {
   return <PetSurface />;
 };
 
+/** The shell's sideways move of the column (and the setup card) off Vibey's
+ * centre, for a pet near a display's side; pet-mini.css reads it. */
+const columnOffsetStyle = (layout: PetLayout) => ({ '--pet-column-offset': `${layout.column_offset}px` }) as CSSProperties;
+
 const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const { t } = useTranslation();
   useOnSummon(recheck);
@@ -169,7 +173,7 @@ const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const rootRef = useRef<HTMLDivElement>(null);
   useHitRegions(rootRef);
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-edge={layout.panel_edge} data-layout-pending={awaiting || undefined}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-edge={layout.panel_edge} data-layout-pending={awaiting || undefined} style={columnOffsetStyle(layout)}>
       <div className="pet-mini-setup" data-pet-hit>
         <p>{t('pet.setupPending')}</p>
         <Button size="sm" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openAvibe')}</Button>
@@ -1136,7 +1140,7 @@ const PetSurface: React.FC = () => {
   );
 
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-layout-pending={awaitingLayout || undefined}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-layout-pending={awaitingLayout || undefined} style={columnOffsetStyle(layout)}>
       {composing && canChat && !uncertain && !voice.busy && (
         // Capture blank-space clicks only while typing. Keep this outside the
         // avatar's hover zone and below every control; the existing document

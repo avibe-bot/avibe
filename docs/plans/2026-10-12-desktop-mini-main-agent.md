@@ -96,7 +96,7 @@ the main agent; there is no Follow up on cards.
   recent-turn history share the expanded space; they never expand together.
   History retains the collapsed stack above it and uses up to the list's 292px
   height, bounded by the measured stack, bubble header and fixed window. On the
-  460×600 frame this leaves about 240px with four cards. Only overflowing history
+  500×600 frame this leaves about 240px with four cards. Only overflowing history
   scrolls; ordinary replies and their Open in Avibe/approval/quick-reply actions
   fit without scrolling. Vibey and the dock keep their fixed anchors.
 
@@ -776,7 +776,8 @@ already communicate activity. Keep the upper-right red unread badge.
 ### 9.1 Window
 
 - **One width, and no resize for any interaction state.** The window is
-  460 logical px wide. Collapsing, expanding, the speech slot and the cards
+  500 logical px wide (460 until 2026-11-20: it now also holds the column
+  moved ±89px against a display's side, below). Collapsing, expanding, the speech slot and the cards
   never resize it; click-through (§9.2) makes the empty area harmless. Its
   height is decided only where the pet is placed (below), at most **600**.
   - This replaces the collapsed 88 × 88 / expanded side-panel geometry.
@@ -789,7 +790,8 @@ already communicate activity. Keep the upper-right red unread badge.
   is more room below than above (Vibey and the dock at the top of the window,
   the image 12px from its top), else upward. Ties stay upward.
   - The window reaches from Vibey toward the column only as far as the work
-    area goes, up to 600px, so no part of it is ever off the display. macOS
+    area goes, up to 600px, so no part of it is ever above or below the
+    display. macOS
     never lets this window's top rise above the menu bar (verified: even a
     programmatic frame is pushed back down at its floating level), so a frame
     that did would move Vibey instead.
@@ -871,9 +873,22 @@ already communicate activity. Keep the upper-right red unread badge.
   same state machine. An older page still cannot drag Vibey above the 600px
   window's reach: only the shell's drag shrinks the window.
 - **What must stay on a display.** Restore on launch, a dropped pet and a
-  display or scale change keep the drag strip inside a connected work area:
-  at the window's width on a display that fits the full 460 × 600 window,
-  else at Vibey's width. The window for that spot then follows the rule above.
+  display or scale change keep the drag strip's height and Vibey, with 12pt
+  on each side of the image, inside a connected work area. The window for
+  that spot then follows the rule above.
+- **Vibey reaches the display's sides (owner decision, 2026-11-20 13:21).**
+  Sideways the window stays centred on Vibey, so near a side its transparent
+  part passes the display's edge (or reaches onto the next display). The
+  column (316pt: the 280pt cards, reply and composer plus their 18pt gutter)
+  opens centred on Vibey when it fits on the display; otherwise the shell
+  moves it inward just far enough (`column_offset` in the layout, window
+  points, rounded inward), so its cards sit 18pt from the edge. Against a side
+  that is ±89pt. The compact status bubble moves back toward Vibey as far as
+  the column allows, and every bubble's tail stays on Vibey. The setup card
+  moves with the column. Collapsing leaves Vibey where it is. Vertical
+  placement is unchanged. A page that predates `column_offset` keeps its
+  column centred, so near a side it is cut at the display's edge until the
+  Runtime is updated; an older page (no `layouts`) always gets offset 0.
   - **Which display (decision 2026-10-12, from the #2508 breaker):** the one
     Vibey overlaps most, else its saved display if it is connected, else the
     primary. A pet the user parked on a small laptop screen stays there, even
@@ -1061,7 +1076,11 @@ GET /api/sessions/main
 - [ ] Busy rule follows §8.
 - [ ] Window: fixed width, never resized by an interaction; Vibey anchored at
       the bottom, or at the top with the column mirrored below when it has
-      been dragged there (§9.1), the window never past the work area.
+      been dragged there (§9.1), the window never above or below the work
+      area.
+- [ ] Vibey drags to 12pt from each side of each display (Dock on a side,
+      next to another display); the column opens whole on that display, its
+      cards 18pt from the edge, with the tail on Vibey (§9.1).
 - [ ] Vibey drags all the way to the top of the work area and back; the
       column flips on drop without showing the other layout at full size.
 - [ ] Clicks pass through

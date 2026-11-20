@@ -8,6 +8,9 @@
   --settle:cubic-bezier(.32,.72,0,1);
   /* Content rises toward Vibey as it enters; the top layout flips both. */
   --pet-rise:8px;
+  /* The shell's sideways move of the column off Vibey's centre (PetLayout
+     column_offset), set on the stage. */
+  --pet-column-offset:0px;
   /* The history's height bound reserves Vibey and the dock (147px), the bubble
      header (62px) and the far inset (16px). */
   --pet-history-reserve:225px;
@@ -31,13 +34,16 @@
      and the speech slot as padding, the expanded panel as 6px padding plus
      12px scroll padding. Activity cards, Vibey's reply bubble and the composer
      (or the voice marquee in its place) therefore share one width: 280 CSS px,
-     or less in a narrow window. */
+     or less in a narrow window. The column's full width (316px) is
+     COLUMN_WIDTH in desktop/runtime-host/src/pet.rs. */
   --pet-mini-gutter:18px;
+  --pet-mini-content:min(280px,calc(94vw - 2 * var(--pet-mini-gutter)));
   position:absolute;
   left:50%;
   bottom:147px;
-  width:min(calc(280px + 2 * var(--pet-mini-gutter)),94vw);
-  transform:translateX(-50%);
+  width:calc(var(--pet-mini-content) + 2 * var(--pet-mini-gutter));
+  /* Centred on Vibey, or moved inward when Vibey is near a display's side. */
+  transform:translateX(calc(-50% + var(--pet-column-offset)));
   display:flex;
   flex-direction:column;
   align-items:center;
@@ -587,7 +593,7 @@ to {
   left:50%;
   z-index:2;
   width:min(260px,90vw);
-  transform:translateX(-50%);
+  transform:translateX(calc(-50% + var(--pet-column-offset)));
   pointer-events:auto;
   border:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);
   border-radius:24px;
@@ -815,7 +821,8 @@ to {
 .pet-mini-reply-bubble:after {
   position:absolute;
   bottom:-7px;
-  left:calc(50% - 7px);
+  /* Always under Vibey: back by the column's move and the bubble's own. */
+  left:calc(50% - 7px - var(--pet-column-offset) - var(--pet-bubble-shift,0px));
   width:14px;
   height:14px;
   border-right:1px solid color-mix(in srgb,var(--pet-ink) 10%,transparent);
@@ -835,15 +842,20 @@ to {
   flex-direction:column-reverse;
   /* Centred on Vibey at every width; at full width the margins are zero. */
   margin-inline:auto;
-  /* Runs only while useWidthMorph sets an inline width (§4.2). */
-  transition:width 300ms var(--settle)}
+  /* Width runs only while useWidthMorph sets an inline width (§4.2). */
+  transition:width 300ms var(--settle),translate 300ms var(--settle)}
 /* A status word alone (thinking, waiting) sizes the bubble to its content,
    centred on Vibey like the column, so it grows from the centre and its tail
    never moves. The closed history must not lend it its own text's width. */
 .pet-mini-reply-bubble.is-main.is-compact {
+  /* When the column has moved inward, the compact bubble moves back toward
+     Vibey as far as the column allows. A percentage here is the bubble's own
+     width (in translate, and in the tail's left, which uses it too). */
+  --pet-bubble-shift:clamp(calc((100% - var(--pet-mini-content)) / 2),calc(-1 * var(--pet-column-offset)),calc((var(--pet-mini-content) - 100%) / 2));
   width:fit-content;
   min-width:min(160px,100%);
-  max-width:100%}
+  max-width:100%;
+  translate:var(--pet-bubble-shift) 0}
 .pet-mini-reply-bubble.is-main.is-compact > .pet-mini-detail {
   contain:inline-size}
 /* With the input or the marquee below it, the open history leaves room for

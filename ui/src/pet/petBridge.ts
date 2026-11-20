@@ -10,6 +10,9 @@ export type PetIntent = 'listen' | 'show' | 'release';
 export type PetLayout = {
   panel_side: 'left' | 'right';
   panel_edge: 'top' | 'bottom';
+  /** How far (CSS px) the column moves right (negative: left) of its place
+   * centred on Vibey, so a pet near a display's side opens it whole there. */
+  column_offset: number;
 };
 
 /** The shell's binding, and the revision it was at. */
@@ -42,7 +45,7 @@ export type PetHitRect = { x: number; y: number; width: number; height: number; 
 // Outside the shell, `{ binding, revision }` as JSON: the dev stand-in for
 // `pet.json` and the shell's revision counter.
 const DEV_BINDING_KEY = 'avibe.pet.devBinding';
-const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom' };
+const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom', column_offset: 0 };
 
 type TauriInternals = { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
 
@@ -59,6 +62,8 @@ const parseLayout = (value: unknown): PetLayout => {
   return {
     panel_side: layout?.panel_side === 'right' ? 'right' : 'left',
     panel_edge: layout?.panel_edge === 'top' ? 'top' : 'bottom',
+    // Older shells send none: the column stays centred on Vibey.
+    column_offset: typeof layout?.column_offset === 'number' && Number.isFinite(layout.column_offset) ? Math.round(layout.column_offset) : 0,
   };
 };
 
