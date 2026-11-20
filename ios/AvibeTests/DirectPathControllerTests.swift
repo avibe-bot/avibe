@@ -280,32 +280,46 @@ final class DirectPathControllerTests: XCTestCase {
         }
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(harness.transport.failedTags.count, 0)
+        // A CONNECT planned after the miss wins a hedged race on the direct
+        // path: sticky again.
+        let second = try XCTUnwrap(harness.controller.plan(for: authority))
+        second.recordRace?(DirectRaceRecord(
+            direct: .ready(40), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: false
+        ))
+        try await eventually { harness.status("instance-1").races.count == 1 }
+        XCTAssertTrue(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
+        // Only now does the first CONNECT's race end (its public candidate
+        // was slow). Its record is kept, and its old miss undoes nothing.
         plan.recordRace?(DirectRaceRecord(
             direct: .timedOut, publicOrigin: .ready(1_520), winner: .publicOrigin, path: .ipv4, sticky: true
         ))
-        try await eventually { harness.status("instance-1").races.count == 1 }
-        XCTAssertFalse(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
-        // A direct candidate won a hedged race: sticky again.
-        plan.recordRace?(DirectRaceRecord(
-            direct: .ready(40), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: false
-        ))
         try await eventually { harness.status("instance-1").races.count == 2 }
         XCTAssertTrue(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
+
         // A real failure of a direct candidate (refused, stream or open
         // error): dropped at once too, and this one tells the transport.
-        plan.directFailed()
+        let third = try XCTUnwrap(harness.controller.plan(for: authority))
+        third.directFailed()
         try await eventually { harness.transport.failedTags.count == 1 }
         XCTAssertFalse(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
-        plan.recordRace?(DirectRaceRecord(
-            direct: .ready(38), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: false
+        // A win of a plan made before that failure restores nothing; one
+        // made after it does.
+        third.recordRace?(DirectRaceRecord(
+            direct: .ready(45), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: true
         ))
         try await eventually { harness.status("instance-1").races.count == 3 }
+        XCTAssertFalse(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
+        let fourth = try XCTUnwrap(harness.controller.plan(for: authority))
+        fourth.recordRace?(DirectRaceRecord(
+            direct: .ready(38), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: false
+        ))
+        try await eventually { harness.status("instance-1").races.count == 4 }
         XCTAssertTrue(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
         let connections = harness.status("instance-1").jsonObject["connections"] as? [[String: Any]]
         XCTAssertEqual(connections?.last?["direct"] as? Int, 38)
-        XCTAssertEqual(connections?.first?["direct"] as? String, "timeout")
         XCTAssertEqual(connections?.last?["public"] as? String, "none")
-        XCTAssertEqual(connections?.first?["winner"] as? String, "public")
+        XCTAssertEqual(connections?[1]["direct"] as? String, "timeout")
+        XCTAssertEqual(connections?[1]["winner"] as? String, "public")
         // Another host's page learns nothing of it.
         XCTAssertNil(harness.status("instance-2").path)
         XCTAssertEqual(harness.status("instance-2").races, [])

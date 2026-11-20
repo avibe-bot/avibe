@@ -410,6 +410,10 @@ final class DirectPathController {
     /// A sticky plan's direct candidate missed its bound: plans hedge again
     /// until a direct candidate wins, or the path changes.
     private var stickyDropped = false
+    /// Counts the drops of stickiness. A direct win restores stickiness only
+    /// if its plan was made after the last drop, so a result that arrives
+    /// late cannot undo a newer one.
+    private var stickyDropSerial = 0
     /// The last few CONNECTs' races, oldest first; for diagnosis.
     private var races: [DirectRaceRecord] = []
     static let raceLimit = 5
@@ -933,7 +937,7 @@ final class DirectPathController {
         }
         // At once, not when the race it lost has finished: the next plans
         // hedge again while the transport probes the path.
-        stickyDropped = true
+        dropStickiness()
         transport.pathDidFail(for: tag)
     }
 
@@ -970,6 +974,7 @@ final class DirectPathController {
             && (currentPath == .ipv4 || currentPath == .ipv6)
             && !stickyDropped
         let generation = pathGeneration
+        let dropSerial = stickyDropSerial
         var plan = DirectConnectPlan(
             scope: scope,
             generation: pathGeneration,
@@ -998,7 +1003,12 @@ final class DirectPathController {
         }
         plan.recordRace = { [weak self] record in
             Task { @MainActor in
-                self?.raceDidFinish(record, generation: generation, selection: fence.selection)
+                self?.raceDidFinish(
+                    record,
+                    generation: generation,
+                    selection: fence.selection,
+                    dropSerial: dropSerial
+                )
             }
         }
         return plan
@@ -1013,13 +1023,26 @@ final class DirectPathController {
         guard raced == selection, generation == pathGeneration else {
             return
         }
-        stickyDropped = true
+        dropStickiness()
     }
 
-    /// One CONNECT's race ended. Kept for diagnosis; and it decides
-    /// stickiness: a direct candidate that failed drops it (the next plans
-    /// hedge again), and one that won restores it.
-    private func raceDidFinish(_ record: DirectRaceRecord, generation: Int, selection raced: Int) {
+    private func dropStickiness() {
+        stickyDropped = true
+        stickyDropSerial += 1
+    }
+
+    /// One CONNECT's race ended. Kept for diagnosis; and a direct candidate
+    /// that won restores stickiness, if its plan was made after the last
+    /// drop. A race ends only when both candidates have settled, so its
+    /// record can arrive long after a miss or a failure was acted on
+    /// (`stickyAttemptMissed`, `directCandidateFailed`): the record itself
+    /// never drops stickiness.
+    private func raceDidFinish(
+        _ record: DirectRaceRecord,
+        generation: Int,
+        selection raced: Int,
+        dropSerial: Int
+    ) {
         guard raced == selection else {
             return
         }
@@ -1041,9 +1064,7 @@ final class DirectPathController {
         guard generation == pathGeneration else {
             return
         }
-        if record.direct == .failed || record.direct == .timedOut {
-            stickyDropped = true
-        } else if record.winner == .direct {
+        if record.winner == .direct, dropSerial == stickyDropSerial {
             stickyDropped = false
         }
     }
