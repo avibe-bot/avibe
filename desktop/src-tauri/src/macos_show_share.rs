@@ -99,13 +99,8 @@ pub fn call_script(
     }
 }
 
-/// Captures `rect` of the web view, or all of it, after its next screen update.
-pub fn snapshot(
-    webview: &WKWebView,
-    mtm: MainThreadMarker,
-    rect: Option<NSRect>,
-    done: impl FnOnce(Option<Retained<NSImage>>) + 'static,
-) {
+/// Captures the whole web view, after its next screen update.
+pub fn snapshot(webview: &WKWebView, mtm: MainThreadMarker, done: impl FnOnce(Option<Retained<NSImage>>) + 'static) {
     let done = RefCell::new(Some(done));
     let block = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
         let Some(done) = done.borrow_mut().take() else { return };
@@ -119,9 +114,6 @@ pub fn snapshot(
     // SAFETY: Main thread; the configuration is fully initialised here.
     unsafe {
         let configuration = WKSnapshotConfiguration::new(mtm);
-        if let Some(rect) = rect {
-            configuration.setRect(rect);
-        }
         configuration.setAfterScreenUpdates(true);
         webview.takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &block);
     }

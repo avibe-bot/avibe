@@ -223,7 +223,7 @@ document.getElementById('show').addEventListener('load', () => {
         let (png, pdf, size, view) = on_main(window, move |webview, mtm, tx| {
             let (bounds, _, _) = native::geometry(webview);
             assert!(native::within_pixel_cap(webview));
-            native::snapshot(webview, mtm, None, move |image| {
+            native::snapshot(webview, mtm, move |image| {
                 let image = image.expect("snapshot");
                 let size = image.size();
                 let _ = tx.send((
@@ -327,7 +327,7 @@ document.getElementById('show').addEventListener('load', () => {
         let press = || {
             on_main(window, |webview, _, tx| {
                 let window = webview.window().expect("window");
-                let _ = tx.send(crate::macos_show_titlebar::press(&window));
+                let _ = tx.send(title_bar::press(&window));
             })
         };
         let heard = |wait: u64| reports.recv_timeout(Duration::from_millis(wait)).ok();
@@ -390,10 +390,7 @@ document.getElementById('show').addEventListener('load', () => {
             std::thread::sleep(Duration::from_millis(300));
             on_main(window, |webview, _, tx| {
                 let window = webview.window().expect("window");
-                let _ = tx.send((
-                    window.title().to_string(),
-                    crate::macos_show_titlebar::title_state(&window),
-                ));
+                let _ = tx.send((window.title().to_string(), title_bar::state(&window)));
             })
         };
         let gap = |end: f64, start: f64| start - end;
@@ -455,7 +452,7 @@ document.getElementById('show').addEventListener('load', () => {
         let views = on_main(&window, |webview, _, tx| {
             objc2::rc::autoreleasepool(|_| {
                 let window = webview.window().expect("window");
-                let views: Vec<_> = crate::macos_show_titlebar::installed(&window)
+                let views: Vec<_> = title_bar::installed(&window)
                     .iter()
                     .map(objc2::rc::Weak::from_retained)
                     .collect();
@@ -530,10 +527,7 @@ document.getElementById('show').addEventListener('load', () => {
             std::thread::sleep(Duration::from_millis(500));
             on_main(&window, |webview, _, tx| {
                 let window = webview.window().expect("window");
-                let _ = tx.send((
-                    window.title().to_string(),
-                    crate::macos_show_titlebar::title_state(&window),
-                ));
+                let _ = tx.send((window.title().to_string(), title_bar::state(&window)));
             })
         };
         std::thread::sleep(Duration::from_millis(1000));
@@ -569,6 +563,93 @@ document.getElementById('show').addEventListener('load', () => {
         let (title, _) = titled("document.title = ''; return true;");
         check("a-blank-document-title-changes-nothing", title == RENAMED, json!(title));
         window.destroy().unwrap();
+    }
+
+    /// Reads and drives what `macos_show_titlebar` put in a window, as AppKit
+    /// shows it: by public AppKit calls and the classes it registers, so the
+    /// shipping module carries nothing for the probe.
+    mod title_bar {
+        use objc2::{rc::Retained, runtime::AnyObject};
+        use objc2_app_kit::{NSButton, NSTextField, NSView, NSWindow, NSWindowButton};
+
+        const HOST: &str = "AvibeShowShareTitleBarHost";
+        const TITLE: &str = "AvibeShowShareTitle";
+
+        fn is(view: &NSView, class: &str) -> bool {
+            let object: &AnyObject = view;
+            object.class().name().to_str() == Ok(class)
+        }
+
+        fn bar(window: &NSWindow) -> Option<Retained<NSView>> {
+            let zoom = window.standardWindowButton(NSWindowButton::ZoomButton)?;
+            // SAFETY: Reading the button's own superview.
+            unsafe { zoom.superview() }
+        }
+
+        fn host(window: &NSWindow) -> Option<Retained<NSView>> {
+            window
+                .titlebarAccessoryViewControllers()
+                .iter()
+                .map(|controller| controller.view())
+                .find(|view| is(view, HOST))
+        }
+
+        fn button(host: &NSView) -> Option<Retained<NSButton>> {
+            host.subviews().iter().find_map(|view| view.downcast::<NSButton>().ok())
+        }
+
+        fn title(bar: &NSView) -> Option<Retained<NSView>> {
+            bar.subviews().into_iter().find(|view| is(view, TITLE))
+        }
+
+        /// Presses the share button, as a click would.
+        pub fn press(window: &NSWindow) -> bool {
+            let Some(button) = host(window).and_then(|host| button(&host)) else {
+                return false;
+            };
+            // SAFETY: A plain button click, on the main thread.
+            unsafe { button.performClick(None) };
+            true
+        }
+
+        /// The drawn title's text, whether it shows, how far it reaches, where the
+        /// button starts, its natural width (title-bar points), and whether a click
+        /// on it reaches the title bar.
+        pub fn state(window: &NSWindow) -> Option<(String, bool, f64, f64, f64, bool)> {
+            let bar = bar(window)?;
+            let title = title(&bar)?;
+            let label = title
+                .subviews()
+                .iter()
+                .find_map(|view| view.downcast::<NSTextField>().ok())?;
+            let end = title.frame().origin.x + label.frame().size.width;
+            let host = host(window)?;
+            let button = button(&host)?;
+            let start = bar.convertPoint_fromView(button.frame().origin, Some(&host)).x;
+            let middle = objc2_foundation::NSPoint::new(
+                title.frame().origin.x + 10.0,
+                bar.frame().origin.y + bar.frame().size.height / 2.0,
+            );
+            let passes = bar
+                .hitTest(middle)
+                .is_some_and(|view| !is(&view, TITLE) && view.downcast_ref::<NSTextField>().is_none());
+            Some((
+                label.stringValue().to_string(),
+                !label.isHidden(),
+                end,
+                start,
+                label.intrinsicContentSize().width,
+                passes,
+            ))
+        }
+
+        /// The views it added and that are still in the window.
+        pub fn installed(window: &NSWindow) -> Vec<Retained<NSView>> {
+            host(window)
+                .into_iter()
+                .chain(bar(window).and_then(|bar| title(&bar)))
+                .collect()
+        }
     }
 
     fn serve(listener: TcpListener, ready: mpsc::Sender<String>) {

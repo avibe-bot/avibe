@@ -1226,7 +1226,7 @@ mod macos {
                     let _ = sender.send(None);
                     return;
                 }
-                native::snapshot(webview, mtm, None, move |image| {
+                native::snapshot(webview, mtm, move |image| {
                     let bytes = image.and_then(|image| match kind {
                         Kind::Image => native::png(&image),
                         Kind::Pdf => native::pdf(&image, mtm),
