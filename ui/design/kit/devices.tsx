@@ -463,7 +463,7 @@ export function DevicesPage({ reach, devices, activity = [], viewer = 'owner', o
 
       <SettingsPanel title={d('我的设备', 'My devices')}>
         {mine.map((each) => <DeviceRow key={each.id} device={each} />)}
-        {viewer === 'owner' && !on && reach.state !== 'starting' && (
+        {viewer === 'owner' && !on && reach.state !== 'starting' && mine.length === 1 && (
           <p className="px-5 py-3 text-[12px] text-muted">
             {d('开启远程访问后，登录的手机和电脑会出现在这里。', 'Once remote access is on, the phones and computers you sign in on appear here.')}
           </p>

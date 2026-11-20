@@ -80,8 +80,8 @@ const fullActivity: Activity[] = [
 const on: Reach = { state: 'on', host, account, tunnel: 'good', ms: 120, direct: true };
 const all = (self: string): Device[] => [macbook(), iphone(), macMini, safari, chrome].map((each) => (each.id === self ? { ...each, self: true } : each));
 
-const DESKTOP = { width: 1440, height: 900 };
-const TALL = { width: 1440, height: 1000 };
+const at = (height: number) => ({ width: 1440, height });
+const TALL = at(1000);
 
 function frame(
   name: string,
@@ -106,15 +106,15 @@ function frame(
 
 const designFrames = frames([
   // 1. Remote access off: one action, no key.
-  frame('off-browser', '未开启 · 浏览器打开的独立 Runtime：一个动作，去 avibe.bot 起名后自动回来', DESKTOP,
+  frame('off-browser', '未开启 · 浏览器打开的独立 Runtime：一个动作，去 avibe.bot 起名后自动回来', at(640),
     { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ self: true })] }),
-  frame('off-desktop-signed-in', '未开启 · Desktop App 已登录：就在这里起名，一个动作', DESKTOP,
+  frame('off-desktop-signed-in', '未开启 · Desktop App 已登录：就在这里起名，一个动作', at(760),
     { reach: { state: 'off', surface: 'desktop', account, name: 'max', nameState: 'free' }, devices: [macbook({ self: true })] }),
-  frame('off-desktop-signed-out', '未开启 · Desktop App 未登录：走 App 自己的登录，回到这里', DESKTOP,
+  frame('off-desktop-signed-out', '未开启 · Desktop App 未登录：走 App 自己的登录，回到这里', at(640),
     { reach: { state: 'off', surface: 'desktop', account: null, name: '' }, devices: [macbook({ self: true })] }),
-  frame('off-desktop-name-taken', '未开启 · Desktop App：名称已被使用', DESKTOP,
+  frame('off-desktop-name-taken', '未开启 · Desktop App：名称已被使用', at(760),
     { reach: { state: 'off', surface: 'desktop', account, name: 'max', nameState: 'taken' }, devices: [macbook({ self: true })] }),
-  frame('starting', '从 avibe.bot 自动回来：正在开启', DESKTOP,
+  frame('starting', '从 avibe.bot 自动回来：正在开启', at(600),
     { reach: { state: 'starting', host, account }, devices: [macbook({ self: true })] }),
 
   // 3. On, with devices.
@@ -122,9 +122,9 @@ const designFrames = frames([
     { reach: on, devices: all('host'), activity }, { themes: ['light', 'dark'] }),
   frame('on-phone', '已开启 · 在 iPhone App 里看', { ...IPHONE_17_PRO, height: 1240 },
     { reach: on, devices: all('iphone'), activity }, { app: true }),
-  frame('on-shared', '已开启 · 共享实例的所有者：别人的设备单独一组', TALL,
+  frame('on-shared', '已开启 · 共享实例的所有者：别人的设备单独一组', at(1180),
     { reach: on, devices: [...all('host'), sara], activity }),
-  frame('member', '共享实例的成员：只看到自己的设备', DESKTOP,
+  frame('member', '共享实例的成员：只看到自己的设备', at(600),
     { reach: on, viewer: 'member', devices: [{ ...sara, person: undefined, self: true }, { ...iphone({ id: 'sara-phone', name: 'Sara 的 iPhone', online: undefined, lastActive: t('昨天 18:20', 'Yesterday 18:20'), capabilities: [iphone().capabilities[0]] }) }] }),
 
   // 4. A device's detail.
@@ -134,38 +134,38 @@ const designFrames = frames([
     { reach: on, devices: all('safari'), activity, detail: 'iphone' }),
   frame('detail-self-app', '设备详情 · 在 iPhone App 里看自己：多一行「这台设备走 自动 | 仅 Cloudflare」（11-19 连接路径卡的本设备选择）', { ...IPHONE_17_PRO, height: 960 },
     { reach: on, activity, detail: 'iphone', devices: all('iphone').map((each) => (each.id === 'iphone' ? { ...each, pathChoice: 'auto' as const } : each)) }, { app: true }),
-  frame('detail-confirm', '退出 iPhone：会删除健康数据，所以先确认', TALL,
+  frame('detail-confirm', '退出 iPhone：会删除健康数据，所以先确认', at(860),
     { reach: on, devices: all('host'), activity, detail: 'iphone', confirm: 'remove' }),
-  frame('detail-browser', '设备详情 · 浏览器：没有会丢的东西，退出不需要确认', TALL,
+  frame('detail-browser', '设备详情 · 浏览器：没有会丢的东西，退出不需要确认', at(860),
     { reach: on, devices: all('host'), activity, detail: 'chrome' }),
-  frame('detail-host', '设备详情 · 运行 Avibe 的电脑：没有「退出」', TALL,
+  frame('detail-host', '设备详情 · 运行 Avibe 的电脑：没有「退出」', at(860),
     { reach: on, devices: all('host'), activity, detail: 'host' }),
-  frame('detail-host-remote', '设备详情 · 从别的设备看主机：电脑操作只能在那台电脑上改', TALL,
+  frame('detail-host-remote', '设备详情 · 从别的设备看主机：电脑操作只能在那台电脑上改', at(860),
     { reach: on, activity, detail: 'host', devices: all('mini').map((each) => (each.id === 'host' ? macbook({ capabilities: [
       { kind: 'computerUse', on: true, detail: t('', ''), fixed: t('已就绪。在那台 Mac 的 Avibe 里开关。', 'Ready. Turn it on or off in Avibe on that Mac.') },
       macbook().capabilities[1],
     ] }) : each)) }),
-  frame('detail-other-person', '设备详情 · 别人的设备：只结束这次访问', TALL,
+  frame('detail-other-person', '设备详情 · 别人的设备：只结束这次访问', at(1080),
     { reach: on, devices: [...all('host'), sara], activity, detail: 'sara' }),
 
   // 5. Activity.
-  frame('activity', '活动：登录、退出和功能使用，按时间', TALL,
+  frame('activity', '活动：登录、退出和功能使用，按时间', at(860),
     { reach: on, devices: all('host'), activity: fullActivity, view: 'activity' }),
 
   // 6. Empty and error states that really occur.
-  frame('empty', '刚开启，还没有别的设备', DESKTOP,
+  frame('empty', '刚开启，还没有别的设备', at(680),
     { reach: on, devices: [macbook({ self: true })] }),
-  frame('tunnel-down', '已开启，但连不上 Cloudflare', TALL,
+  frame('tunnel-down', '已开启，但连不上 Cloudflare', at(760),
     { reach: { ...on, tunnel: 'down' } as Reach, devices: [macbook({ self: true }), iphone({ online: undefined, lastActive: t('12 分钟前', '12 min ago') }), { ...macMini, online: undefined, lastActive: t('12 分钟前', '12 min ago') }] }),
-  frame('paused', '关闭后：域名保留，一个开关就能再开', DESKTOP,
+  frame('paused', '关闭后：域名保留，一个开关就能再开', at(700),
     { reach: { state: 'paused', host, account }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActive: t('2 小时前', '2 h ago') })] }),
-  frame('turn-off-remote', '远程关闭远程访问：会把自己关在外面，所以先确认', TALL,
+  frame('turn-off-remote', '远程关闭远程访问：会把自己关在外面，所以先确认', at(860),
     { reach: on, devices: all('mini'), activity, confirm: 'turn-off' }),
-  frame('remove-others', '退出其他所有设备：确认', TALL,
+  frame('remove-others', '退出其他所有设备：确认', at(860),
     { reach: on, devices: all('host'), activity, confirm: 'remove-others' }),
-  frame('conflict', '从 avibe.bot 回来：这台电脑已属于另一个账号', DESKTOP,
+  frame('conflict', '从 avibe.bot 回来：这台电脑已属于另一个账号', at(660),
     { reach: { state: 'conflict', host: 'studio-app.avibe.bot', owner: 'm***@gmail.com', account }, devices: [macbook({ self: true })] }),
-  frame('unreachable', '点了开启，但连不上 avibe.bot', DESKTOP,
+  frame('unreachable', '点了开启，但连不上 avibe.bot', at(700),
     { reach: { state: 'off', surface: 'browser', error: 'unreachable' }, devices: [macbook({ self: true })] }),
 ]);
 
