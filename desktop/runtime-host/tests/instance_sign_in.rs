@@ -293,9 +293,10 @@ fn browsers(browsing: Vec<Browsing>) -> Arc<Browser> {
     })
 }
 /// Tests that check that a port was released run one at a time, so no other
-/// test's listener is on the port they check. Why one such check once failed
-/// in a parallel run is not known; that run's log was not kept, and later
-/// passes under this lock are an observation, not a fix.
+/// test's listener is on the port they check. A refused connection proves the
+/// release here because no test in this binary spawns a process: in the
+/// library's tests, where some do, a child can inherit a listener on macOS and
+/// keep its port open (see `unanswered` in loopback.rs).
 static PORTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn act(client: &Coordinator, action: ClientAction) -> ClientReply {

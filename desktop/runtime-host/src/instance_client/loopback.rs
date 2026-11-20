@@ -278,10 +278,8 @@ mod tests {
             failed: "没有完成".into(),
         }
     }
-    /// Tests that check that a port was released run one at a time, so no
-    /// other test's listener is on the port they check. Why one such check
-    /// once failed in a parallel run is not known; that run's log was not
-    /// kept, and later passes under this lock are an observation, not a fix.
+    /// The listener tests run one at a time, so no other one's socket is on
+    /// the port a test probes.
     static PORTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
@@ -390,6 +388,31 @@ mod tests {
         );
     }
 
+    /// A late callback to a finished transaction gets no Avibe page: nothing
+    /// in this process serves its port any more. Whether the port refuses the
+    /// connection cannot be the check here: on macOS a socket becomes
+    /// close-on-exec only after it exists, so a child that another test in
+    /// this binary spawns at that moment (the launcher and receipt tests run
+    /// Python) inherits the listener and keeps the port open after this
+    /// process closes its own (reproduced: 3 of 20 runs beside those tests,
+    /// 0 of 200 alone).
+    async fn unanswered(port: u16) -> bool {
+        let late = async {
+            let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)).await else {
+                return String::new();
+            };
+            let request = format!("GET /callback?state={STATE}&code=late HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+            let _ = stream.write_all(request.as_bytes()).await;
+            let mut reply = String::new();
+            let _ = stream.read_to_string(&mut reply).await;
+            reply
+        };
+        let reply = tokio::time::timeout(Duration::from_millis(500), late)
+            .await
+            .unwrap_or_default();
+        !reply.contains("<title>Avibe</title>")
+    }
+
     async fn get(port: u16, target: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         stream
@@ -420,7 +443,7 @@ mod tests {
         assert!(done.ends_with("<p>Done &lt;here&gt; &amp; now</p>"), "{done}");
         assert!(matches!(waiting.await.unwrap(), Ok(Callback::Code(code)) if code == "secret-code"));
         // The listener is gone with the transaction: a late callback cannot land.
-        assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        assert!(unanswered(port).await);
     }
 
     /// A provider's bare refusal ends the wait at once with the failure page.
@@ -439,7 +462,7 @@ mod tests {
         assert!(reply.ends_with("<title>Avibe</title><p>没有完成</p>"), "{reply}");
         assert!(matches!(waiting.await.unwrap(), Ok(Callback::Failed)));
         assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
-        assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        assert!(unanswered(port).await);
     }
 
     #[tokio::test]
@@ -452,7 +475,7 @@ mod tests {
         let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(5)).await });
         generation.store(4, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(waiting.await.unwrap().unwrap_err().code, "stale_generation");
-        assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        assert!(unanswered(port).await);
     }
 
     #[tokio::test]
