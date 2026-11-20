@@ -79,6 +79,38 @@ describe('App Lock setting', () => {
     expect(invoke).toHaveBeenCalledWith('app_lock_set_policy', { policy: 'immediately' });
   });
 
+  it('reads the shell again when the page comes back from system settings', async () => {
+    let answer: unknown = APP_LOCK_FIXTURES.iphoneNoPasscode;
+    const call = vi.fn(async () => answer);
+    iphone(call);
+    show();
+    const control = await select();
+    expect(control.disabled).toBe(true);
+    answer = APP_LOCK_FIXTURES.iphoneFiveMinutes;
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await vi.waitFor(() => expect(control.disabled).toBe(false));
+    expect(control.value).toBe('fiveMinutes');
+    expect(screen.queryByText(i18n.t('settings.general.appLock.noPasscodePhone'))).toBeNull();
+  });
+
+  it('keeps a verified change when an older read answers after it', async () => {
+    let releaseRead: (value: unknown) => void = () => {};
+    const call = vi.fn(async (method: string) => {
+      if (method === 'appLock.setPolicy') return APP_LOCK_FIXTURES.setChanged;
+      if (call.mock.calls.length === 1) return APP_LOCK_FIXTURES.iphoneOff;
+      return new Promise((resolve) => { releaseRead = resolve; });
+    });
+    iphone(call);
+    show();
+    const control = await select();
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    fireEvent.change(control, { target: { value: 'fiveMinutes' } });
+    await vi.waitFor(() => expect(control.value).toBe('fiveMinutes'));
+    await act(async () => { releaseRead(APP_LOCK_FIXTURES.iphoneOff); });
+    expect(control.value).toBe('fiveMinutes');
+  });
+
   it('reads as Off and explains when the device has no passcode', async () => {
     iphone(vi.fn(async () => APP_LOCK_FIXTURES.iphoneNoPasscode));
     show();

@@ -137,6 +137,32 @@ final class AppLockMachineTests: XCTestCase {
         XCTAssertTrue(machine.locked)
     }
 
+    /// Whatever turns the lock on, other than a verified settings change, shows nothing first.
+    func testTheLockNeverEngagesUnlocked() {
+        // A passcode appears while a policy is chosen (set in iOS Settings, then back).
+        for policy in AppLockPolicy.allCases where policy != .off {
+            var machine = AppLockMachine(policy: policy, available: false)
+            machine.resignActive()
+            machine.enterBackground(now: 0)
+            machine.update(available: true)
+            XCTAssertTrue(machine.locked, "\(policy)")
+            machine.enterForeground(now: 1)
+            XCTAssertTrue(machine.becomeActive(promptAllowed: true), "\(policy)")
+            XCTAssertTrue(machine.covered)
+        }
+        // A launch with a policy and a passcode.
+        XCTAssertTrue(AppLockMachine(policy: .fiveMinutes, available: true).locked)
+        // A verified change is the one way on without locking: the user just proved who they are.
+        var machine = AppLockMachine(policy: .off, available: true)
+        XCTAssertTrue(machine.beginVerification())
+        machine.finishChange(saving: .immediately)
+        XCTAssertTrue(machine.engaged)
+        XCTAssertFalse(machine.locked)
+        // A fresh reading that is unchanged never relocks the App in hand.
+        machine.update(available: true)
+        XCTAssertFalse(machine.locked)
+    }
+
     func testAVoiceTakeDefersTheAutomaticPromptWithoutSpendingIt() {
         var machine = AppLockMachine(policy: .immediately, available: true)
         XCTAssertFalse(machine.becomeActive(promptAllowed: false))

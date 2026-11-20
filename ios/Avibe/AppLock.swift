@@ -207,9 +207,20 @@ struct AppLockMachine: Equatable {
     }
 
     /// A fresh reading of whether the device has a passcode.
+    ///
+    /// The lock engages only two ways: a launch, or a passcode appearing under a chosen policy.
+    /// A passcode is set outside the App, so the first return after it is locked like a launch;
+    /// only a verified settings change (`finishChange`) turns the lock on without locking.
     mutating func update(available: Bool) {
+        let wasEngaged = engaged
         self.available = available
-        if !engaged { release() }
+        if !engaged {
+            release()
+        } else if !wasEngaged {
+            locked = true
+            covered = true
+            autoPromptSpent = false
+        }
     }
 
     private mutating func release() {

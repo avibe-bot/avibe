@@ -21,17 +21,33 @@ export const AppLockSetting: React.FC = () => {
   const [status, setStatus] = React.useState<AppLockStatus | null>(null);
   const [activity, setActivity] = React.useState<AppLockSettingActivity>('idle');
 
+  // Bumped by every change: a read that started before it must not undo its answer.
+  const changes = React.useRef(0);
+
   React.useEffect(() => {
     if (!actions) return;
     let active = true;
-    void actions.status().then((value) => {
-      if (active) setStatus(value);
-    }).catch(() => {
-      // A shell that cannot answer keeps the panel hidden, as a browser does.
-      if (active) setStatus(null);
-    });
+    const read = () => {
+      const generation = changes.current;
+      void actions.status().then((value) => {
+        if (active && generation === changes.current) setStatus(value);
+      }).catch(() => {
+        // A shell that cannot answer keeps the panel hidden, as a browser does.
+        if (active && generation === changes.current) setStatus(null);
+      });
+    };
+    // A passcode or Face ID permission changes in system settings, outside the page:
+    // read again whenever the page comes back.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') read();
+    };
+    read();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', read);
     return () => {
       active = false;
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', read);
     };
   }, [actions]);
 
@@ -39,6 +55,7 @@ export const AppLockSetting: React.FC = () => {
 
   const change = async (policy: AppLockPolicy) => {
     if (activity === 'verifying' || policy === status.policy) return;
+    changes.current += 1;
     setActivity('verifying');
     try {
       const result = await actions.setPolicy(policy);
