@@ -272,6 +272,106 @@ final class TurnActivityTests: XCTestCase {
         await relaunched.endAll(reason: "logout")
     }
 
+    func testForegroundRegistersTokenRotatedWhileTerminatedBeforeGettingStoppedRow() async throws {
+        let owner = coordinator()
+        _ = await start(owner)
+        _ = owner.invalidateRequests()
+        let card = try XCTUnwrap(cards.first)
+        card.token = Data([0xaa, 0xbb]) // No stream event while the process was absent.
+        calls.removeAll()
+        let relaunched = coordinator(response: { _, method, _, _ in
+            let status = method == "GET" ? "stopped" : "tracking"
+            return .init(status: 200, json: ["activity": self.initial.merging(["status": status]) { _, new in new }], redirected: false)
+        })
+        await relaunched.reconcile(target: target)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(calls.map { $0.0 }, ["PUT"])
+        XCTAssertEqual(calls.first?.2?["activity_token"] as? String, "aabb")
+        XCTAssertEqual(card.state, .active)
+        await relaunched.endAll(reason: "logout")
+    }
+
+    func testForegroundRotation503PersistsUnregisteredTokenForNextLaunch() async throws {
+        let owner = coordinator()
+        _ = await start(owner)
+        _ = owner.invalidateRequests()
+        let card = try XCTUnwrap(cards.first)
+        card.token = Data([0xaa, 0xbb])
+        calls.removeAll()
+        let offline = coordinator(response: { _, _, _, _ in
+            .init(status: 503, json: ["error": "service_unavailable"], redirected: false)
+        })
+        await offline.reconcile(target: target)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(calls.map { $0.0 }, ["PUT"])
+        XCTAssertEqual(card.state, .active)
+        _ = offline.invalidateRequests()
+        calls.removeAll()
+        let recovered = coordinator()
+        await recovered.reconcile(target: target)
+        XCTAssertEqual(calls.map { $0.0 }, ["PUT"])
+        XCTAssertEqual(calls.first?.2?["activity_token"] as? String, "aabb")
+        XCTAssertEqual(card.state, .active)
+        calls.removeAll()
+        await recovered.reconcile(target: target)
+        XCTAssertEqual(calls.map { $0.0 }, ["GET"])
+        await recovered.endAll(reason: "logout")
+    }
+
+    func testStoppedGetForOldTokenCannotRetireNewRegistration() async throws {
+        let fetching = expectation(description: "registered GET suspended")
+        let rotated = expectation(description: "replacement token registered")
+        var resumeGet: CheckedContinuation<Void, Never>?
+        let owner = coordinator(response: { _, method, path, body in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            if method == "GET" {
+                await withCheckedContinuation { resumeGet = $0; fetching.fulfill() }
+                return .init(status: 200, json: ["activity": self.initial.merging(["status": "stopped"]) { _, new in new }], redirected: false)
+            }
+            if method == "PUT", body?["activity_token"] as? String == "aabb" { rotated.fulfill() }
+            return .init(status: 200, json: ["activity": self.initial], redirected: false)
+        })
+        _ = await start(owner)
+        let card = try XCTUnwrap(cards.first)
+        let reconciliation = Task { await owner.reconcile(target: target) }
+        await fulfillment(of: [fetching], timeout: 2)
+        card.token = Data([0xaa, 0xbb])
+        card.tokenContinuation?.yield(card.token!)
+        await fulfillment(of: [rotated], timeout: 2)
+        resumeGet?.resume()
+        await reconciliation.value
+        XCTAssertEqual(card.state, .active)
+        XCTAssertFalse(calls.contains { $0.0 == "DELETE" })
+        await owner.endAll(reason: "logout")
+    }
+
+    func testStoppedPutForOldTokenCannotRetireQueuedReplacement() async throws {
+        let registering = expectation(description: "old token PUT suspended")
+        let rotated = expectation(description: "latest token registered")
+        var resumePut: CheckedContinuation<Void, Never>?
+        let owner = coordinator(response: { _, method, path, body in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            if method == "PUT", body?["activity_token"] as? String == "aabb" {
+                await withCheckedContinuation { resumePut = $0; registering.fulfill() }
+                return .init(status: 200, json: ["activity": self.initial.merging(["status": "stopped"]) { _, new in new }], redirected: false)
+            }
+            if method == "PUT", body?["activity_token"] as? String == "ccdd" { rotated.fulfill() }
+            return .init(status: 200, json: ["activity": self.initial], redirected: false)
+        })
+        _ = await start(owner)
+        let card = try XCTUnwrap(cards.first)
+        card.token = Data([0xaa, 0xbb])
+        card.tokenContinuation?.yield(card.token!)
+        await fulfillment(of: [registering], timeout: 2)
+        card.token = Data([0xcc, 0xdd])
+        card.tokenContinuation?.yield(card.token!)
+        resumePut?.resume()
+        await fulfillment(of: [rotated], timeout: 2)
+        XCTAssertEqual(card.state, .active)
+        XCTAssertFalse(calls.contains { $0.0 == "DELETE" })
+        await owner.endAll(reason: "logout")
+    }
+
     func testUnregisteredNetworkFailurePersistsAndRetriesPutAcrossRelaunch() async throws {
         let owner = coordinator(response: { _, _, path, _ in
             if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }

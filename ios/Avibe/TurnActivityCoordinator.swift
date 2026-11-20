@@ -285,7 +285,7 @@ final class TurnActivityCoordinator {
                 observeTokens(activity, record: record)
             }
             do {
-                if record.registeredAt == nil {
+                if record.registeredAt == nil || activity.token.map({ $0 != record.observedToken }) == true {
                     // A terminal PUT response already supplied the final one-hour card.
                     if activity.state == .ended { continue }
                     if now().timeIntervalSince1970 >= Double(record.requestedAt + 28800) {
@@ -296,7 +296,11 @@ final class TurnActivityCoordinator {
                     continue
                 }
                 let response = try await request(record.target, "GET", Self.base + "/" + record.id, nil)
-                guard generation == epoch, ledger.records[record.id] != nil else { continue }
+                // A GET describes the token registered when it began. Rotation may
+                // have started a PUT while this request was suspended.
+                guard generation == epoch, let current = ledger.records[record.id],
+                      current.registeredAt != nil, current.observedToken == record.observedToken,
+                      activity.token == nil || activity.token == record.observedToken else { continue }
                 if response.status == 404 {
                     await finish(activity, record: record, reason: "system_ended")
                 } else if response.status == 200, let body = response.json?["activity"] as? [String: Any] {
@@ -395,6 +399,13 @@ final class TurnActivityCoordinator {
         }
     }
     private func register(_ token: Data, activity: any TurnActivityHandle, record: Record, generation: Int) async throws -> Bool {
+        guard generation == epoch, ledger.records[record.id] != nil, !locallyEnding.contains(record.id) else { return false }
+        // Invalidate registration before yielding to queued work or a GET response.
+        if ledger.records[record.id]?.observedToken != token {
+            ledger.records[record.id]?.registeredAt = nil
+            ledger.records[record.id]?.observedToken = token
+            save()
+        }
         let previous = mutations[record.id]
         let operation = Task { @MainActor in
             _ = try? await previous?.value
@@ -407,11 +418,11 @@ final class TurnActivityCoordinator {
     private func registerNow(_ token: Data, activity: any TurnActivityHandle, record: Record, generation: Int) async throws -> Bool {
         guard generation == epoch, ledger.records[record.id] != nil, !locallyEnding.contains(record.id),
               activity.state == .active || activity.state == .stale else { return false }
-        if ledger.records[record.id]?.observedToken != token {
-            ledger.records[record.id]?.registeredAt = nil
-            ledger.records[record.id]?.observedToken = token
-            save()
-        }
+        // Foreground reconciliation and the token stream can observe the same
+        // rotation. A newer token supersedes queued work; a successful PUT needs
+        // no duplicate registration for the same token.
+        guard ledger.records[record.id]?.observedToken == token else { return true }
+        if ledger.records[record.id]?.registeredAt != nil { return true }
         let response: VoiceCaptureInstanceClient.Response
         do {
             response = try await request(record.target, "PUT", Self.base + "/" + record.id, [
@@ -427,6 +438,10 @@ final class TurnActivityCoordinator {
             }
             return false
         }
+        // A response for an obsolete token cannot retire or register the current
+        // token. Its observer will submit the replacement through this same queue.
+        guard ledger.records[record.id]?.observedToken == token,
+              activity.token == nil || activity.token == token else { return true }
         if response.status == 503 || response.status == 0 && !response.redirected { throw Failure.unavailable }
         if [400, 403, 404].contains(response.status) || response.status == 409 && ["activity_conflict", "activity_expired"].contains(response.errorCode ?? "") {
             // Retire locally here; remove() awaits this mutation and would deadlock.
