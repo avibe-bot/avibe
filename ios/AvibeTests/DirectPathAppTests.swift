@@ -5318,7 +5318,8 @@ final class DirectPathAppTests: XCTestCase {
         // Answered before anything was reopened.
         XCTAssertEqual(app.runtimeOpenAttempt?.id, identity)
         try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > identity }
-        XCTAssertEqual(try await waitForBrowser("instance-1", in: app), runtime)
+        let reopened = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(reopened, runtime)
         XCTAssertEqual(transport.deselectCount, 1)
         XCTAssertEqual(app.takeRuntimeStartURL(for: runtime), page)
         XCTAssertNil(app.takeRuntimeStartURL(for: runtime))
