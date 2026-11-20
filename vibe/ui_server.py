@@ -7754,7 +7754,7 @@ def web_push_subscribe():
                     device_id=device_id,
                     previous_endpoints=previous_endpoints,
                 )
-                device_registry.attach_push(conn, identity, row)
+            device_registry.attach_push(conn, identity, row)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True, "accepted": row is not None, "subscription": row})
@@ -8872,7 +8872,7 @@ def device_list():
     viewer = _device_viewer()
     host = {'id': 'host', 'kind': 'host', 'display_name': socket.gethostname(), 'app_version': __version__,
             'account': None, 'system_version': None, 'signed_in_at': None, 'last_active_at': None,
-            'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
+            'push_only': False, 'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
     if viewer is None:
         config = _load_remote_access_config()
         if config and not config.remote_access.vibe_cloud.is_runtime_paired() and _is_setup_host_request(config):
@@ -8880,13 +8880,12 @@ def device_list():
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
     mine, others = ([host] if owner else []), []
-    if binding:
-        from storage.importer import ensure_sqlite_state
-        ensure_sqlite_state()
-        for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time())):
-            account = row['account']
-            is_mine = account['subject'] == subject if subject else account['login_role'] == 'owner'
-            (mine if is_mine else others).append(row)
+    from storage.importer import ensure_sqlite_state
+    ensure_sqlite_state()
+    for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time())):
+        account = row['account']
+        is_mine = account is None or (account['subject'] == subject if subject else account['login_role'] == 'owner')
+        (mine if is_mine else others).append(row)
     return jsonify({'mine': mine, 'others': others, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
 
 
@@ -8920,17 +8919,17 @@ def device_sign_out(device_id=None):
     if viewer is None:
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
-    if not binding:
+    if not binding and not (owner and device_id and device_id.startswith('p.')):
         return jsonify({'error': 'device_access_forbidden'}), 403
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
     try:
-        ids, count = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+        ids, count, stopped = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
-    if device_id is not None and not ids:
+    if device_id is not None and not (ids or stopped):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)

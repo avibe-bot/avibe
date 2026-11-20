@@ -166,6 +166,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "system_schedule_attempts",
     "message_answer_operations",
     "remote_device_sessions",
+    "remote_device_push_links",
     "remote_device_deadlines",
     "show_session_events",
     "media_objects",

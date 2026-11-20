@@ -171,6 +171,47 @@ def test_push_identity_survives_login_and_capability_follows_subscription(instal
         assert count_enabled(conn, user_key="remote:member") == 0
 
 
+@pytest.mark.parametrize("path", ["/api/web-push/status", "/api/web-push/subscriptions"])
+def test_inflight_push_registration_cannot_restore_signed_out_delivery(install, monkeypatch, path):
+    from storage import device_registry, web_push_service
+
+    c = client(login(install, "subject", "member"))
+    data = {
+        "device_id": "installation-push",
+        "subscription": {
+            "endpoint": "https://example.invalid/registered",
+            "keys": {"auth": "test-auth", "p256dh": "test-public"},
+        },
+    }
+
+    def post(route):
+        return c.post(route, base_url=ORIGIN, headers=csrf_headers(c, ORIGIN), json=data)
+
+    assert post("/api/web-push/subscriptions").status_code == 200
+    target = listing(c)["mine"][0]["id"]
+    original = device_registry.begin_push_change
+
+    def revoke_before_transaction(conn, identity, *, now):
+        # Force the ordering: HTTP authorization succeeded, then sign-out committed,
+        # then the registration handler tries to mutate the subscription.
+        _, count, _ = device_registry.sign_out(
+            identity["_device_binding"],
+            "subject",
+            owner=False,
+            caller=identity["browser_session_id"],
+            device_id=target,
+            now=now,
+            lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
+        )
+        assert count == 1
+        return original(conn, identity, now=now)
+
+    monkeypatch.setattr(device_registry, "begin_push_change", revoke_before_transaction)
+    assert post(path).status_code == 401
+    with get_cached_sqlite_engine().connect() as conn:
+        assert web_push_service.count_enabled(conn, user_key="remote:subject") == 0
+
+
 def test_self_describe_changes_only_own_session_and_checks_reports(install):
     import hashlib
 
@@ -250,6 +291,50 @@ def test_idle_expiry_hides_device_but_bulk_still_writes_its_absolute_tombstone(i
             )
             == start + remote_access.SESSION_ABSOLUTE_TTL_SECONDS
         )
+
+
+def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(install, monkeypatch):
+    from storage.web_push_service import upsert_subscription, count_enabled
+    from tests.test_remote_access_vibe_cloud import _pin_clock
+
+    start = int(time.time())
+    clock = _pin_clock(monkeypatch, start)
+    c = client(login(install, "member", "member"))
+    payload = {"endpoint": "https://example.invalid/proven", "keys": {"auth": "fixture", "p256dh": "fixture"}}
+    assert (
+        c.post(
+            "/api/web-push/subscriptions",
+            base_url=ORIGIN,
+            headers=csrf_headers(c, ORIGIN),
+            json={"subscription": payload, "device_id": "same-id"},
+        ).status_code
+        == 200
+    )
+    clock["now"] += remote_access.SESSION_ABSOLUTE_TTL_SECONDS + 1
+    current = client(login(install, "member", "member"))
+    owner = client(login(install, "owner", "owner"))
+    with get_cached_sqlite_engine().begin() as conn:
+        for tag, user_key, device_id in [("legacy", "remote:member", "other-id"), ("local", "local", None)]:
+            upsert_subscription(
+                conn,
+                user_key=user_key,
+                device_id=device_id,
+                payload={**payload, "endpoint": "https://example.invalid/" + tag},
+            )
+    (proven,) = [r for r in listing(current)["mine"] if r["push_only"]]
+    assert proven["account"]["subject"] == "member" and proven["capabilities"]["push_enabled"]
+    (legacy, local) = [r for r in listing(owner)["mine"] if r["push_only"]]
+    for row in [legacy, local]:
+        assert row["account"] is None and row["display_name"] is None
+        assert sign_out(current, row["id"] + "/sign-out").status_code == 404
+    assert sign_out(current, proven["id"] + "/sign-out").get_json() == {"ok": True, "revoked_sessions": 0}
+    assert sign_out(owner, legacy["id"] + "/sign-out").get_json() == {"ok": True, "revoked_sessions": 0}
+    loop = "http://127.0.0.1:5123"
+    unpaired = ui_server.app.test_client()
+    (unproven,) = [r for r in listing(unpaired, loop)["mine"] if r["push_only"]]
+    assert sign_out(unpaired, unproven["id"] + "/sign-out", loop).get_json() == {"ok": True, "revoked_sessions": 0}
+    with get_cached_sqlite_engine().connect() as conn:
+        assert count_enabled(conn) == 0
 
 
 def test_legacy_adoption_and_ordinary_requests_are_read_only_after_first_visit(install):

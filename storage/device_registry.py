@@ -11,7 +11,8 @@ from sqlalchemy.dialects.sqlite import insert
 from storage.db import get_cached_sqlite_engine
 from storage.models import remote_device_deadlines as deadlines
 from storage.models import remote_device_sessions as sessions
-from storage.models import state_meta, web_push_subscriptions as push
+from storage import device_push_registry as device_push
+from storage.models import remote_device_push_links as links, state_meta
 from vibe.device_metadata import device_key
 
 
@@ -175,6 +176,11 @@ def describe_self(binding, subject, sid, report, now):
             .values(**values, described_at=now)
         )
         if conn.execute(stmt).rowcount:
+            conn.execute(
+                links.update()
+                .where(links.c.session_id == sid, links.c.binding == binding, links.c.subject == subject)
+                .values(device_id=key)
+            )
             return 200
         row = conn.execute(select(sessions).where(*target)).mappings().first()
         if not row:
@@ -218,38 +224,33 @@ def begin_push_change(conn, identity, *, now):
 
 
 def attach_push(conn, identity, subscription):
-    if not identity or not subscription or not subscription.get("device_id"):
+    if not identity or not subscription:
         return
     sid, subject = identity["browser_session_id"], identity["sub"]
     if subscription["user_key"] != "remote:" + subject:
         return
     push_id = subscription["device_id"]
     row = conn.execute(
-        select(sessions.c.binding, sessions.c.identity_source, sessions.c.push_id).where(
+        select(sessions.c.binding, sessions.c.identity_source, sessions.c.push_id, sessions.c.device_id).where(
             sessions.c.session_id == sid, sessions.c.subject == subject
         )
     ).first()
-    if not row or row.push_id == push_id:
+    if not row:
         return
-    values = {"push_id": push_id}
-    if row.identity_source != "installation":
-        values.update(identity_source="push", device_id=device_key(row.binding, subject, "push", push_id))
-    conn.execute(sessions.update().where(sessions.c.session_id == sid).values(**values))
+    key = row.device_id
+    if push_id and row.push_id != push_id:
+        values = {"push_id": push_id}
+        if row.identity_source != "installation":
+            key = device_key(row.binding, subject, "push", push_id)
+            values.update(identity_source="push", device_id=key)
+        conn.execute(sessions.update().where(sessions.c.session_id == sid).values(**values))
+    device_push.attest(conn, subscription, sid, row.binding, subject, key)
 
 
 def list_devices(binding, subject, *, owner, caller, now):
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
-    notifications = (
-        select(push.c.id)
-        .where(
-            push.c.user_key == literal("remote:") + sessions.c.subject,
-            push.c.device_id == sessions.c.push_id,
-            push.c.enabled == 1,
-        )
-        .exists()
-    )
-    stmt = select(sessions, notifications.label("notifications")).where(
+    stmt = select(sessions).where(
         sessions.c.binding == binding,
         sessions.c.cookie_exp > now,
         sessions.c.expires_at > now,
@@ -277,12 +278,14 @@ def list_devices(binding, subject, *, owner, caller, now):
                 "current_path": {"kind": row["path_kind"], "family": row["path_family"], "rtt_ms": row["path_rtt_ms"]}
                 if row["path_kind"]
                 else None,
+                "push_only": False,
                 "current": False,
                 "capabilities": {"push_enabled": False},
             },
         )
         item["current"] |= row["session_id"] == caller
-        item["capabilities"]["push_enabled"] |= row["notifications"]
+    with get_cached_sqlite_engine().connect() as conn:
+        device_push.join_devices(conn, grouped, binding, subject, owner)
     return list(grouped.values())
 
 
@@ -312,18 +315,18 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
     )
     with get_cached_sqlite_engine().begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
-        if (
-            caller
-            and not conn.execute(
-                select(sessions.c.session_id).where(
+        keeper = None
+        if caller:
+            keeper = conn.execute(
+                select(sessions.c.device_id, sessions.c.push_id).where(
                     sessions.c.session_id == caller,
                     sessions.c.binding == binding,
                     sessions.c.subject == subject,
                     sessions.c.expires_at > now,
                 )
             ).first()
-        ):
-            raise PermissionError("session_revoked")
+            if not keeper:
+                raise PermissionError("session_revoked")
         if device_id is None:
             _deadline(conn, _cutoff_key(binding, subject), now, now + lifetime)
             if caller:
@@ -335,32 +338,19 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
         rows = conn.execute(stmt.with_only_columns(sessions.c.session_id, sessions.c.cookie_exp)).all()
         ids = [r.session_id for r in rows]
         visible_count = sum(r.cookie_exp > now for r in rows)
+        stopped = device_push.stop_targets(
+            conn,
+            binding,
+            subject,
+            owner,
+            caller,
+            device_id,
+            keeper.device_id if keeper else None,
+            keeper.push_id if keeper else None,
+            now,
+        )
         if ids:
-            from storage import web_push_service
             from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
-
-            # Push has its own delivery authority. Disable the targets' known
-            # subscriptions in this transaction, unless a surviving session of
-            # the same subject still uses that exact registration (e.g. caller).
-            remaining = sessions.alias("remaining")
-            survivor = select(remaining.c.session_id).where(
-                remaining.c.binding == binding,
-                remaining.c.subject == sessions.c.subject,
-                remaining.c.push_id == sessions.c.push_id,
-                remaining.c.cookie_exp > now,
-                remaining.c.expires_at > now,
-            )
-            if device_id is not None:
-                survivor = survivor.where(remaining.c.device_id != device_id)
-            elif caller:
-                survivor = survivor.where(remaining.c.session_id == caller)
-            targets = stmt.with_only_columns(sessions.c.subject, sessions.c.push_id).where(
-                sessions.c.push_id.is_not(None)
-            )
-            if device_id is not None or caller:
-                targets = targets.where(~survivor.exists())
-            for push_subject, push_id in set(conn.execute(targets)):
-                web_push_service.disable_device_subscription(conn, user_key="remote:" + push_subject, device_id=push_id)
 
             key = literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id
             # One indexed pass per ledger, not three DB round-trips per device.
@@ -381,4 +371,4 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
             )
             conn.execute(sessions.delete().where(stmt.whereclause))
         prune(conn, now)
-    return ids, visible_count
+    return ids, visible_count, stopped

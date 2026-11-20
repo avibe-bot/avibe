@@ -36,7 +36,7 @@ def describe(headers: Mapping[str, str]) -> dict:
             )
             if marker in ua
         ),
-        "Browser",
+        None,
     )
     system = next(
         (
@@ -56,7 +56,7 @@ def describe(headers: Mapping[str, str]) -> dict:
     native = re.search(r"\bAvibe(iOS|Desktop)/([0-9.]+)", ua)
     kind = ("iphone_app" if native[1] == "iOS" else "desktop_app") if native else "browser"
     label = {"iphone_app": "Avibe · iPhone", "desktop_app": "Avibe Desktop"}.get(kind) or (
-        f"{browser} · {system}" if system else browser
+        f"{browser} · {system}" if browser and system else browser or system
     )
     return dict(kind=kind, display_name=label, app_version=native[2] if native else None, system_version=None)
 
