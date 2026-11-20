@@ -1733,6 +1733,7 @@
         "autoRefresh": "Refreshes every 5 minutes",
         "refresh": "Refresh now",
         "refreshing": "Refreshing…",
+        "refreshAccount": "Refresh quota",
         "empty": "No signed-in subscription accounts yet. Add a Claude or ChatGPT subscription under Providers & routing to see its quota here.",
         "left": "left",
         "window": {

@@ -1,8 +1,10 @@
 // 订阅额度 — each logged-in subscription's own rate-limit windows
 // (`quota-summary.schema.json`).
 //
-// Like 用量 it is a report and only a report: nothing here feeds resolution,
-// admission, or cooldown. Beside the quota it states what the same use would
+// Like 用量 it is a report: nothing here feeds resolution or admission. The
+// refresh the user presses is the one exception, on the server: it resumes an
+// account paused for quota once the vendor reports quota again, so the page
+// reads its providers behind that refresh. Beside the quota it states what the same use would
 // cost at list API prices (the optional `value` block), against the plan's
 // monthly fee — a valuation to judge whether the plan pays for itself, never a
 // charge. A server that predates the block draws the quota alone.

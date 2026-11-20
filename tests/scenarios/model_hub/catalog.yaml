@@ -59,6 +59,7 @@ capability:
     - tests/test_model_hub_usage.py
     - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
+    - tests/test_model_hub_account_refresh.py
     - tests/test_model_hub_pricing.py
     - tests/test_models_dev_catalog.py
     - ui/src/components/settings/models/QuotaTab.test.tsx
@@ -1888,6 +1889,45 @@ scenarios:
       - tests/test_model_hub_quota.py::test_claude_plan_is_read_from_the_oauth_profile_organization
       - tests/test_model_hub_pricing.py::test_reported_plans_resolve_to_fee_table_keys
       - ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-027
+  - id: MH-QUOTA-031
+    name: A refresh the user presses resumes an account paused for quota once the vendor reports quota, with no restart
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_account_refresh.py::test_refresh_resumes_a_paused_account_once_the_vendor_reports_quota
+    related_tests:
+      - tests/test_model_hub_account_refresh.py::test_refresh_resumes_every_shape_of_a_quota_pause
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-016
+  - id: MH-QUOTA-032
+    name: A refresh keeps the pause only while the vendor still reports an account-wide limit used up or the sign-in has expired; an unreadable reading lets the next request ask the vendor
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_account_refresh.py::test_refresh_keeps_the_pause_only_while_the_vendor_reports_it
+  - id: MH-QUOTA-033
+    name: Listing an account's models leaves its quota pause in force both where the page reads it and where requests do
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_account_refresh.py::test_listing_models_leaves_a_paused_account_paused_where_requests_look
+  - id: MH-QUOTA-034
+    name: An account paused for quota or rate offers the quota refresh in its detail; an API-key provider and other pauses do not
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-QUOTA-034
+  - id: MH-QUOTA-035
+    name: A paused account's refresh in its detail forces the quota read, reads providers again, and says when the read failed
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-035
+  - id: MH-QUOTA-036
+    name: A refusal admitted before the refresh cannot pause the account again when it settles afterwards
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_account_refresh.py::test_a_refusal_from_before_the_refresh_cannot_pause_the_account_again
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

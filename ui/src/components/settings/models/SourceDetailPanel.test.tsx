@@ -1105,6 +1105,41 @@ describe('SourceDetailPanel', () => {
     expect(dialog.textContent).toContain(locale.t('settings.models.sourceTest.cooldownHint'));
   });
 
+  // An account has no test request: what lifts its quota pause is the vendor's own
+  // reading, so the pause offers that read and nothing else does.
+  it('MH-QUOTA-034: offers the quota refresh beside an account paused for quota or rate, and nowhere else', async () => {
+    const locale = i18n.cloneInstance({ lng: 'zh' });
+    for (const { kind, detail, offered } of [
+      { kind: 'subscription', detail: 'models.source.cooldown.quota_exhausted', offered: true },
+      { kind: 'subscription', detail: 'models.source.cooldown.rate_limited', offered: true },
+      { kind: 'subscription', detail: 'models.source.cooldown.server_error', offered: false },
+      { kind: 'api_key', detail: 'models.source.cooldown.quota_exhausted', offered: false },
+    ] as const) {
+      let landed!: () => void;
+      const refreshQuota = vi.fn(() => new Promise<void>((resolve) => { landed = resolve; }));
+      render(<ToastProvider><I18nextProvider i18n={locale}>
+        <CommittedPanel
+          source={{ ...source, kind, state: { status: 'cooldown', retry_at: null, detail_key: detail } }}
+          trackMutation={immediateTrack}
+          onReauth={noReauth}
+          onRefreshQuota={refreshQuota}
+        />
+      </I18nextProvider></ToastProvider>);
+      const refresh = screen.queryByRole('button', { name: locale.t('settings.models.quota.refreshAccount') });
+      expect(Boolean(refresh), `${kind} ${detail}`).toBe(offered);
+      if (refresh) {
+        await userEvent.click(refresh);
+        expect(refreshQuota).toHaveBeenCalledTimes(1);
+        // One read at a time: the button says it is reading and takes no second press.
+        const reading = screen.getByRole('button', { name: locale.t('settings.models.quota.refreshing') }) as HTMLButtonElement;
+        expect(reading.disabled).toBe(true);
+        await act(async () => { landed(); });
+        expect(screen.getByRole('button', { name: locale.t('settings.models.quota.refreshAccount') })).toBeTruthy();
+      }
+      cleanup();
+    }
+  });
+
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockResolvedValueOnce(source);
     renderPanel();

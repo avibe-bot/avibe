@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/quota-summary.schema.json",
   "title": "Model Hub subscription quota",
-  "description": "Rate-limit windows of every hub-held subscription Source, parsed from the vendor's own model-free usage report that the engine reads with the bound grant. A report only: no consumer may feed it back into resolution, admission, or cooldown. It carries parsed fields only, never a grant, token, or raw upstream body. The optional `value` blocks price the Source's own metered usage at list API prices for comparison with the subscription fee; they are a valuation, never an amount charged, and their absence means not reported, never zero.",
+  "description": "Rate-limit windows of every hub-held subscription Source, parsed from the vendor's own model-free usage report that the engine reads with the bound grant. A report: resolution and admission never read it. Its one consumer is the forced read the user asks for, which resumes a Source paused for quota or rate unless the fresh report still shows an account-wide window used up. It carries parsed fields only, never a grant, token, or raw upstream body. The optional `value` blocks price the Source's own metered usage at list API prices for comparison with the subscription fee; they are a valuation, never an amount charged, and their absence means not reported, never zero.",
   "type": "object",
   "required": [
     "refresh_interval_seconds",

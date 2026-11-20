@@ -4,7 +4,9 @@ A logged-in subscription (Claude, ChatGPT/Codex) exposes how much of each of its
 rate-limit windows is used through a model-free account endpoint. The engine that
 holds the grant makes the call; this module only turns the returned body into the
 `quota-summary.schema.json` window shape. It is a report, like usage metering:
-nothing in resolution, admission, or cooldown reads it.
+resolution and admission never read it. The one reader is the refresh the user
+presses, which resumes an account paused for quota unless this report still shows
+the limit used up (`ModelHubService.quota_summary`).
 
 Parsing is defensive by construction. A vendor may add, rename, or null a window
 at any time, so a window we cannot read is skipped, a window we do not recognise
