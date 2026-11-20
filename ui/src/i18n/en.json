@@ -7644,6 +7644,7 @@
     "loginTitle": "Start with an email.",
     "welcomeLine1": "Computer Use, files and apps:",
     "welcomeLine2": "let Vibey take over your computer.",
+    "previousStep": "Previous step",
     "codeSent": "A code was sent to {{email}}",
     "emailCode": "6-digit code",
     "email": "Email",

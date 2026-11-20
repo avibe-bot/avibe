@@ -31,7 +31,8 @@ function DesktopSignInFrame({ children, back }: SignInFrameProps) {
           onClick={back.onBack}
         >
           <ArrowLeft className="size-4" />
-          {t('common.back')}
+          {/* Back one step within sign-in (Max, 2026-11-20); the header's "Back to Workbench" leaves it. */}
+          {t('desktopClient.previousStep')}
         </Button>
       ) : null}
       {children}

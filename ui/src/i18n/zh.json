@@ -7644,6 +7644,7 @@
     "loginTitle": "从一封邮件开始。",
     "welcomeLine1": "电脑操作、读写文件、操作应用，",
     "welcomeLine2": "让 Vibey 接管你的电脑。",
+    "previousStep": "上一步",
     "codeSent": "验证码已发送至 {{email}}",
     "emailCode": "6 位验证码",
     "email": "邮箱",

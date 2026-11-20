@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -60,3 +60,27 @@ it.each([['en', en], ['zh', zh]] as const)(
     expect(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail })).toBeTruthy();
   },
 );
+
+// Max, 2026-11-20 10:53: a later step's own way back reads "Previous step", apart from the header's
+// "Back to Workbench"; the iPhone keeps its "Back".
+it.each([['en', en], ['zh', zh]] as const)('AUTH-SETUP-182 a later step goes back with "Previous step" (%s)', async (lng, copy) => {
+  const i18n = createInstance();
+  await i18n.init({ lng, resources: { [lng]: { translation: copy } } });
+  render(
+    <I18nextProvider i18n={i18n}>
+      <DesktopSignIn
+        state={signedOut}
+        send={vi.fn(async () => null)}
+        onLocal={() => undefined}
+        onDifferentAccount={() => undefined}
+        onOpenSecurity={() => undefined}
+        renderEnroll={() => null}
+      />
+    </I18nextProvider>,
+  );
+  fireEvent.click(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail }));
+  expect(screen.getByLabelText(copy.mobileApp.email.label)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: copy.desktopClient.previousStep }));
+  expect(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: copy.common.back })).toBeNull();
+});

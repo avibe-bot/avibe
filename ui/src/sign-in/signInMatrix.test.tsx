@@ -343,12 +343,15 @@ afterEach(() => {
 
 type Harness = {
   name: 'iPhone' | 'Desktop';
+  /** The step's own way back: the iPhone's "Back", the Desktop's "Previous step". */
+  back: string;
   mount: (account: Service, options?: { holdVerify?: boolean; signIn?: NativeSignIn | null }) => { accountChange: () => void };
 };
 
 const HARNESSES: Harness[] = [
   {
     name: 'iPhone',
+    back: en.common.back,
     mount: (account, options) => {
       const native = installIosNative(account, options);
       let signal = 0;
@@ -364,6 +367,7 @@ const HARNESSES: Harness[] = [
   },
   {
     name: 'Desktop',
+    back: en.desktopClient.previousStep,
     mount: (account, options) => {
       const native = createDesktopNative(account, options);
       render(<I18nextProvider i18n={i18n}><DesktopHost native={native} /></I18nextProvider>);
@@ -383,7 +387,7 @@ const typeCode = async (value: string) => {
   });
 };
 
-describe.each(HARNESSES)('shared sign-in on $name', ({ name, mount }) => {
+describe.each(HARNESSES)('shared sign-in on $name', ({ name, back, mount }) => {
   const title = (behavior: string) => `AUTH-SETUP-182 ${name}: ${behavior}`;
   it(title('signs in with an email code on the same steps'), async () => {
     mount(service());
@@ -446,7 +450,7 @@ describe.each(HARNESSES)('shared sign-in on $name', ({ name, mount }) => {
     click(en.mobileApp.email.send);
     await screen.findByText(en.mobileApp.code.title);
     // Back to the email step: native still holds the code attempt until a new first factor starts.
-    click(en.common.back);
+    click(back);
     click(en.mobileApp.password.entry);
     fireEvent.change(screen.getByLabelText(en.mobileApp.password.label), { target: { value: 'nope' } });
     click(en.mobileApp.password.signIn);
@@ -460,7 +464,7 @@ describe.each(HARNESSES)('shared sign-in on $name', ({ name, mount }) => {
     startEmail();
     click(en.mobileApp.email.send);
     await screen.findByText(en.mobileApp.code.title);
-    click(en.common.back);
+    click(back);
     account.sendRetryAfter = 30;
     click(en.mobileApp.email.send);
     expect(await screen.findByText(en.mobileApp.code.rateLimited)).toBeTruthy();
