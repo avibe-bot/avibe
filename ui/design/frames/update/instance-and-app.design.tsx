@@ -93,6 +93,10 @@ const states: PanelState[] = [
   { name: 'details', zh: '点名字展开：这一项的上次检查和开关', en: 'A name opens its own last check and switches', subjects: pair(instance(), appCurrent(), 'instance') },
   { name: 'offline', zh: 'alex 连接断开', en: 'alex cannot be reached', subjects: pair(null, appCurrent()) },
   {
+    name: 'unauthorized', zh: 'alex 不再接受这台电脑上的应用的登录', en: "alex no longer accepts this app's sign-in",
+    subjects: { instance: { name: INSTANCE, model: null, unavailable: 'unauthorized' }, app: { model: appCurrent() } },
+  },
+  {
     name: 'member', zh: '不能管理 alex 的成员：看得到，没有按钮和开关', en: 'A member who cannot manage alex: the state, no button or switches',
     subjects: {
       instance: { name: INSTANCE, model: instance({}, { prereleases: null, autoUpdate: null }), canUpdate: false },

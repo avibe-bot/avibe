@@ -71,8 +71,10 @@ Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
    (Vibey continues its own Turn after the restart; a Claude Code or Codex Turn
    ends with a Retry notice); this computer's Avibe restarts and the instance
    is not affected. An account that cannot manage the instance sees its
-   section without a button or switches; an instance that cannot be reached,
-   or whose sign-in ended, shows the bottom row's words for a lost connection.
+   section without a button or switches; an instance that cannot be reached
+   shows the bottom row's words for a lost connection, and one that no longer
+   accepts the app's sign-in says that its update state cannot be read here
+   and to reconnect to it.
    The last check
    and the two switches are behind the subject's name, closed by default.
    The header's check asks both updaters.
@@ -196,7 +198,8 @@ timestamps, and bounded `host_actions`. The free-text `error` becomes the fixed
 string `"error"` when set and `null` otherwise; `build` keeps only `kind`.
 Anything else is dropped; an answer that fails validation is `unreachable`.
 `unauthorized` is an instance that answers but no longer accepts the app's
-sign-in; the panel draws it like `unreachable`.
+sign-in; the panel says so in its own line, and no update action starts a
+sign-in.
 
 Actions, in the account bridge's v1 envelope, beside the four `update_*` ones:
 
@@ -238,12 +241,16 @@ Actions, in the account bridge's v1 envelope, beside the four `update_*` ones:
 - The bottom row and the narrow-window badge are the instance's page: they
   read the page's own `/api/version`, and still only ask the shell to present
   the panel. The page reads it when it loads, when its window comes back to
-  the front or becomes visible (the shell's panel is another window), and every
-  two seconds while an install or its restart is reported, until it ends; it
-  then loads itself again, since its interface changed with the version.
-- In a section the header's check stands in for the single panel's "Check for
-  updates" and retry-a-check buttons, and a failed check keeps its retry
-  button. A source build keeps its package version beside its name.
+  the front or becomes visible, every two seconds from the moment it asks the
+  shell for the panel until its window is in front again (the panel is another
+  window, and takes the focus), and every two seconds while an install or its
+  restart is reported. When the Runtime then answers with a version other than
+  the one the install started from, the page loads itself again, since its
+  interface changed with the version; an install that ends on the same version
+  changes nothing on the page.
+- A subject whose check failed or never ran keeps the single panel's button
+  for it (retry, or "Check for updates"), in its own section; it runs the
+  panel's one check. A source build keeps its package version beside its name.
 - A standalone Runtime's page reads `install` from `/api/version` at the same
   moments, and when its own panel opens: an install started elsewhere shows as
   running, and Update is disabled until it ends.

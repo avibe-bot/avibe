@@ -32,8 +32,10 @@ const draft = (lang: SubjectLang): Draft => (zh, en) => (lang === 'en' ? en : zh
 export type UpdateSubjectSection = {
   /** The instance's own name. */
   name: string;
-  /** What the shipped mapping makes of this subject's updater; none while the instance cannot be reached. */
+  /** What the shipped mapping makes of this subject's updater; none while the instance cannot be read. */
   model: UpdatePanelModel | null;
+  /** Why there is none: the instance does not answer (the default), or it no longer accepts the app's sign-in. */
+  unavailable?: 'unreachable' | 'unauthorized';
   /** Its last check and its switches are shown (its name opens and closes them). */
   open?: boolean;
   /** Whether the signed-in account may install here (an instance member without that right gets no button). */
@@ -173,8 +175,12 @@ function Section({ section, lang, first }: { section: Subject; lang: SubjectLang
       {/* An instance that cannot be reached shows the footer's own words for it, and nothing it cannot know. */}
       {!model && (
         <div role="status" className={cn('flex items-start gap-2 rounded-md border px-3 py-2 text-sm', TONE_CLASS.neutral)}>
-          <WifiOff size={16} className="mt-0.5 shrink-0" />
-          <p className="min-w-0 font-medium">{t('desktopClient.disconnected')}</p>
+          {section.unavailable === 'unauthorized' ? <Info size={16} className="mt-0.5 shrink-0" /> : <WifiOff size={16} className="mt-0.5 shrink-0" />}
+          <p className="min-w-0 font-medium">
+            {section.unavailable === 'unauthorized'
+              ? d(`这里读不到 ${section.name} 的更新状态，请重新连接 ${section.name}。`, `Can't read ${section.name}'s update status here. Reconnect to ${section.name}.`)
+              : t('desktopClient.disconnected')}
+          </p>
         </div>
       )}
       {copy && (
