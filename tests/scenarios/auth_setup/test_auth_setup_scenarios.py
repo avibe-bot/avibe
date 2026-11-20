@@ -57,6 +57,7 @@ from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, CliComma
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from tests.test_desktop_local_instance import desktop_host as desktop_host
+from tests.test_personal_claims import claim_peer as claim_peer
 from tests.test_pairing_recovery import pairing_host as pairing_host
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
@@ -108,6 +109,49 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     # Keep the existing no-process guard. Supply command evidence only at the
     # shared probe transport seam; production parsing/readiness remain real.
     CliCommandObservations().bind(monkeypatch)
+
+
+def test_personal_claim_redirect_through_pairing_journal(claim_peer):
+    """AUTH-SETUP-914: browser return, subject acceptance, key redemption and local publication."""
+    import hashlib
+    import base64
+    import time
+    from tests.test_personal_claims import _start, callback_proof
+    from vibe import remote_access
+    from config.v2_config import V2Config
+
+    client = app.test_client()
+    start = _start(client)
+    assert start.status_code == 201 and start.headers["Cache-Control"] == "no-store"
+    response = start.get_json()
+    ident = response["claim_id"]
+    peer_start = claim_peer.calls[0][1]
+    form = response["form"]
+    assert form["action"] == "https://avibe.bot/api/v1/claims/redirect-entry"
+    assert form["method"] == "POST" and form["referrer_policy"] == "strict-origin"
+    state = form["fields"]["redirect_state"]
+    assert base64.urlsafe_b64encode(hashlib.sha256(state.encode()).digest()).decode().rstrip("=") == peer_start["redirect_state_challenge"]
+    assert peer_start["return_origin"] == "http://localhost" and peer_start["code_challenge"] != peer_start["redirect_state_challenge"]
+    assert not claim_peer.decisions
+    url = f"/remote/claim/callback?claim_id={ident}&state={callback_proof(response)}"
+    callback = client.get(url, base_url="http://localhost")
+    assert callback.status_code == 303 and callback.headers["Location"] == "/settings/remote-access"
+    assert callback.headers["Referrer-Policy"] == "no-referrer"
+    assert client.get(url, base_url="http://localhost").status_code == 403
+    end = time.monotonic() + 8
+    while time.monotonic() < end:
+        outcome = client.get("/api/remote-access/claims/" + ident).get_json()
+        if outcome["state"] in ("error", "bound"):
+            break
+        time.sleep(.02)
+    assert outcome["state"] == "bound", outcome
+    assert outcome["account"] == {"email": "actual@fixture.test"} and outcome["hostname"] == "fixture.avibe.bot"
+    assert claim_peer.decisions == ["owner-id"]
+    cloud = V2Config.load().remote_access.vibe_cloud
+    assert cloud.instance_id == "inst_A" and cloud.enabled and cloud.is_runtime_paired()
+    assert cloud.session_secret and cloud.tunnel_token and cloud.instance_secret
+    assert remote_access._read_pending_pairing_record() == (None, None)
+    assert all(s not in str(outcome) for s in (state, claim_peer.key, claim_peer.calls[-1][1]["code_verifier"], cloud.session_secret))
 
 
 @pytest.mark.parametrize("instance_kind", ["personal", "organization"])
