@@ -60,7 +60,7 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 ### 2.3 Lifecycle owned by the App
 
-- **start:** one activity at a time, so starting first ends any other `TurnActivityAttributes` activity `.immediate` and DELETEs it best-effort with reason `replaced`, whatever the new start then answers. Every step has a defined outcome, and `start` answers with the first refusal it meets:
+- **start:** one activity at a time, so starting first ends any other `TurnActivityAttributes` activity (the "displaces" row below), whatever the new start then answers. Every step has a defined outcome, and `start` answers with the first refusal it meets:
 
 | Step | Outcome | `start` answers |
 | --- | --- | --- |
@@ -73,24 +73,37 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 | | `409 turn_not_active`: end with the returned terminal state | `no_active_turn` |
 | | `403 registration_not_owned`: end `.immediate` | `push_unavailable` |
 | | `404`, `400`, `409 activity_conflict`: end `.immediate` | `failed` |
-| | `503` or no answer: keep it, unregistered (below) | `{ok: true}` |
+| | `503` or no answer: keep it, unregistered | `{ok: true}` |
 
-- Every later value from `pushTokenUpdates` is PUT again with the same body and the new token.
-- **Registration state:** the App records on the device, persisted across launches, which activities have had a PUT answered `200`. An activity without one is *unregistered*.
-- **foreground, unregistered activity:** PUT again with its current token. The answers:
-  - `200`: it is registered; apply the returned state.
-  - `409 turn_not_active`: end it with the returned terminal state.
-  - `404`, `403`, `409 activity_conflict`, or `400`: end it `.immediate`.
-  - `503` or no answer: keep it unregistered and try again on the next foreground or token update. Its local `staleDate` (`confirmedAt + 2400`) marks it out of date meanwhile, and it is ended `.immediate` once it has been unregistered for 28800 s.
-  Every token update PUTs whatever the activity's state, and the answers are handled the same way.
-- **foreground, registered activity:** GET it and apply the answer locally (a registered activity is never PUT from the foreground; only a token update PUTs it):
-  - `status: tracking` with a live phase: update;
-  - a terminal phase: end with that state;
-  - `status: stopped` or a 404: end it `.immediate`.
-- `activityStateUpdates` reporting `.dismissed` or `.ended` that the App did not cause: DELETE with `dismissed`, or `system_ended`. Never re-create an activity for that Turn.
-- **GET for a registered activity answers `503` or nothing:** change nothing; the next foreground asks again.
-- **A DELETE (any reason) that fails:** it is not retried. The row stops by itself, either on the relay's `410` once the token is dead or at `expires_at`. Until then, pushes reach an activity that no longer exists, and the system ignores them.
-- **logout, account switch, instance switch, instance removed:** end every `TurnActivityAttributes` activity `.immediate`, then make a best-effort DELETE with `logout`, `account_switch`, or `instance_switch`. Logout also revokes the relay registration, so the instance stops on the relay's 410 even when the DELETE is lost.
+After `start`, each local activity is in exactly one state, persisted on the device across launches:
+- **registered:** the instance holds its current token, because the last PUT was answered `200`;
+- **unregistered:** it has no PUT answered `200` since its last token.
+
+This table is the whole lifecycle. Every event has one row; "end" removes the activity from the device, and the App never re-creates an activity for a Turn it ended.
+
+| Event | Unregistered | Registered |
+| --- | --- | --- |
+| a new token from `pushTokenUpdates` | PUT → R(PUT) | becomes unregistered, then PUT → R(PUT) |
+| the App comes to the foreground | PUT → R(PUT) | GET → R(GET) |
+| unregistered for 28800 s since `Activity.request` | end `.immediate`, then DELETE `system_ended` | — |
+| `liveActivity.stop` | end `.immediate`, then DELETE `user_stopped` | same |
+| a new `start` displaces it | end `.immediate`, then DELETE `replaced` | same |
+| the person dismisses it, or the system ends it, with no App action behind it (`activityStateUpdates`) | DELETE `dismissed` or `system_ended` | same |
+| Live Activities are turned off (`activityEnablementUpdates` is false) | end `.immediate`, then DELETE `disabled` | same |
+| logout, account switch, instance switch, or instance removed | end `.immediate`, then DELETE `logout`, `account_switch`, or `instance_switch` | same |
+
+- **R(PUT):**
+  - `200`: registered; apply the returned state.
+  - `409 turn_not_active`: end with the returned terminal state.
+  - `403`, `404`, `400`, `409 activity_conflict`: end `.immediate`.
+  - `503` or no answer: stay unregistered. The local `staleDate` marks the card out of date until a later row registers it.
+- **R(GET):**
+  - `status: tracking` with a live phase: update.
+  - A terminal phase: end with that state.
+  - `status: stopped` or `404`: end `.immediate`.
+  - `503` or no answer: change nothing.
+- **DELETE** is best-effort and never retried; its answer changes nothing on the device. A row whose DELETE was lost stops by itself, either on the relay's `410` once the token is dead or at `expires_at`. Pushes to an activity that is gone are ignored by the system.
+- Logout also revokes the relay registration, so the instance stops on the relay's `410` even when the DELETE is lost.
 - **tap:** `widgetURL(avibe-app://live-activity/<activityID>)`. The App registers the `avibe-app` scheme in `CFBundleURLTypes` (no entitlement). It resolves the id only against its own `Activity<TurnActivityAttributes>.activities` and opens that account, instance, and `/chat/<sessionID>` through the existing instance-path route. An unknown id opens the App without navigating.
 - The voice capture cleanup stays scoped to `Activity<VoiceCaptureAttributes>`.
 
