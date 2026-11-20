@@ -66,7 +66,7 @@ export function AccountRefresh({ refreshing = false }: { refreshing?: boolean })
   const d = useDraft();
   return (
     <Button variant="ghost" size="icon" className="size-7 shrink-0 text-muted" disabled={refreshing} aria-label={d('刷新这个账号', 'Refresh this account')}>
-      <RefreshCw className={cn('size-[13px]', refreshing && 'animate-spin')} aria-hidden />
+      <RefreshCw className={cn('size-3.5', refreshing && 'animate-spin')} aria-hidden />
     </Button>
   );
 }
@@ -79,7 +79,7 @@ export function ResetCards({ cards, state = { phase: 'idle' } }: { cards: ResetC
   return (
     <section className="mt-3.5 rounded-lg border border-border bg-surface" aria-label={d('重置卡', 'Limit resets')}>
       <h3 className="flex items-center gap-1.5 border-b border-border px-3 py-2 text-[length:var(--model-hub-usage-label-size)] font-medium text-muted">
-        <Ticket className="size-[13px]" aria-hidden />
+        <Ticket className="size-3.5" aria-hidden />
         {d('重置卡', 'Limit resets')}
       </h3>
       <ul className="divide-y divide-border">
@@ -110,7 +110,7 @@ export function ResetCards({ cards, state = { phase: 'idle' } }: { cards: ResetC
                   </div>
                 ) : mine && state.phase === 'using' ? (
                   <Button size="compact" variant="outline" className="shrink-0" disabled>
-                    <LoaderCircle className="size-[13px] animate-spin" aria-hidden />
+                    <LoaderCircle className="size-3.5 animate-spin" aria-hidden />
                     {d('使用中…', 'Using…')}
                   </Button>
                 ) : blocked ? (
@@ -128,13 +128,13 @@ export function ResetCards({ cards, state = { phase: 'idle' } }: { cards: ResetC
               )}
               {mine && state.phase === 'used' && (
                 <p className="mt-2 flex items-center gap-1.5 text-[length:var(--model-hub-usage-label-size)] text-mint-ink" role="status">
-                  <Check className="size-[13px] shrink-0" aria-hidden />
+                  <Check className="size-3.5 shrink-0" aria-hidden />
                   {d(`用了 1 张。${done(card.kind)}。`, `1 used. ${done(card.kind)}.`)}
                 </p>
               )}
               {mine && state.phase === 'failed' && (
                 <p className="mt-2 flex items-start gap-1.5 text-[length:var(--model-hub-usage-label-size)] text-destructive-ink" role="alert">
-                  <AlertTriangle className="mt-px size-[13px] shrink-0" aria-hidden />
+                  <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
                   {state.reason === 'not_limited'
                     ? d('没有用掉：这个账号现在没到限额。卡还在。', 'Not used: this account isn’t at a limit now. You still hold the card.')
                     : state.reason === 'cooldown'
@@ -144,7 +144,7 @@ export function ResetCards({ cards, state = { phase: 'idle' } }: { cards: ResetC
               )}
               {mine && state.phase === 'unconfirmed' && (
                 <p className="mt-2 flex items-start gap-1.5 text-[length:var(--model-hub-usage-label-size)] text-destructive-ink" role="alert">
-                  <AlertTriangle className="mt-px size-[13px] shrink-0" aria-hidden />
+                  <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
                   {d('没收到厂商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。', 'The vendor’s answer didn’t arrive, so this card may be spent. Don’t use another yet; refresh this account in a moment and check the count.')}
                 </p>
               )}
