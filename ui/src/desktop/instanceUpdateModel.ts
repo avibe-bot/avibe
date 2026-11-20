@@ -60,13 +60,7 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
   // a desktop-managed host its receipt of the request (`remote_request`). While it does not answer, that last
   // report stands for an install this shell follows, or for the Runtime's own for a bounded time.
   const ownInstall = snapshot.install ? now - Date.parse(snapshot.install.started_at) < OWN_INSTALL_MS : false;
-  // A desktop-managed host whose receipt of this shell's install is still unsettled after the shell has stopped
-  // following it: whether it finished cannot be confirmed from here, as the single panel says after its wait.
-  // The shell keeps its own receipt until its next action, so the host's is taken for this install's only
-  // when it is for the same version; a later install from another surface is relayed as what it is.
-  const timedOut = managed && accepted && !followed && installRunning(snapshot)
-    && normalizeVersion(snapshot.remote_request?.target ?? '') === normalizeVersion(install.target ?? '');
-  const reported = installRunning(snapshot) && !timedOut && (reachable || followed || ownInstall);
+  const reported = installRunning(snapshot) && (reachable || followed || ownInstall);
   // An instance that does not answer, with nothing of ours under way, is a lost connection.
   if (!reachable && !followed && !reported && sending !== 'install') return { ...none, model: null };
 
@@ -78,7 +72,9 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
       // On its way until the host's own receipt of it shows in an answer.
       requesting: sending === 'install' || (followed && !installRunning(snapshot)),
       error: install?.phase === 'failed' ? install.error_code ?? 'request_failed' : null,
-      timedOut,
+      // Whether a receipt the host still shows as unsettled is this shell's install, the page cannot tell: it is
+      // relayed as the host reports it.
+      timedOut: false,
       disconnected: !reachable,
     })
     : modelFromRuntime(snapshot, {

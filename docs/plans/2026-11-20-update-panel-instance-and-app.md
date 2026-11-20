@@ -141,6 +141,14 @@ its own, five minutes after acceptance. The section then says the update did
 not finish, and its retry is one the shell takes. A test walks every
 combination of what the shell can report and holds the section to those rules.
 
+One thing the page still cannot tell: whether a receipt a desktop-managed host
+relays (`remote_request`) is the receipt of this shell's install or of a later
+one from another surface; the shell can, by request id. So the section relays
+an unsettled receipt as the host reports it, and waits with it. A host whose
+receipt stays `completed` without ever reaching its target therefore reads
+"confirming" until the host's own request expires. If that shows up in
+practice, the shell should say which receipt is its own.
+
 ## Also needed
 
 - A standalone Runtime reports an install or restart in progress in
