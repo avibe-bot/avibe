@@ -32,8 +32,6 @@ struct VoiceOutboxEntry: Codable, Equatable {
     var posted = false
     /// Sends tried after the first.
     var retries = 0
-    /// Times it could not be turned into text.
-    var transcriptionFailures = 0
     /// Why it is kept (`offline`, `transcriptionFailed`, `signIn`).
     var reason: String?
 

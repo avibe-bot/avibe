@@ -694,14 +694,15 @@ final class VoiceCaptureController {
         }
     }
 
-    /// Retry on the island of a take that is not sent yet: every such take
-    /// is sent again, oldest first.
+    /// Retry on the island of a take that is not sent yet: it is sent
+    /// again now, after any earlier one that is still within its window
+    /// (an older one waits for the alert's Retry).
     func retry() async {
         guard case .failed = state else {
             if case .idle = state, keptTakes.isEmpty { _ = await endLeftovers(reason: .interrupted) }
             return
         }
-        await sendKept(.retry, showSending: true)
+        await sendKept(.comingForward, showSending: true)
     }
 
     /// At launch: whatever this process does not hold is a leftover.
@@ -1353,9 +1354,31 @@ final class VoiceCaptureController {
                       final: content(for: take, phase: .failed, reason: .nothingHeard))
         case .needsApp(let reason):
             note("needsApp:\(reason.rawValue)", for: take)
+            let notice = content(for: take, phase: .needsApp, reason: reason)
+            let dismissal = ActivityUIDismissalPolicy.after(
+                environment.now().addingTimeInterval(Self.noticeDismissal)
+            )
+            guard reason == .signIn else {
+                // A "no" given since: stop, send nothing, keep nothing.
+                state = .idle
+                await end(take, dismissal: dismissal, final: notice)
+                return
+            }
+            // Signed out of the instance: the take is not lost. It waits,
+            // without its island, for Retry once the App is signed in.
+            var kept = take
+            kept.keptAt = kept.keptAt ?? environment.now()
+            kept.keptReason = .signIn
+            kept.keptAutomatic = false
+            persist(&kept)
+            let island = kept.activity
+            kept.activity = nil
+            islandTask?.cancel()
+            islandTask = nil
+            parked.append(kept)
             state = .idle
-            await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
-                      final: content(for: take, phase: .needsApp, reason: reason))
+            updateUnsentNotice()
+            await island?.end(notice, dismissal: dismissal)
         case .unknown:
             // It may have arrived; the chat shows whether it did.
             note("sendUnknown", for: take)
@@ -1553,9 +1576,10 @@ final class VoiceCaptureController {
         /// The schedule: those an unreachable instance kept, still within
         /// `automaticWindow`.
         case byItself
-        /// Avibe coming to the front: every take still within the window.
+        /// Avibe coming to the front, or Retry on the island: every take
+        /// still within the window.
         case comingForward
-        /// Retry (the alert's, the island's): every take.
+        /// Retry in the alert: every take.
         case retry
     }
 
@@ -1735,6 +1759,10 @@ final class VoiceCaptureController {
                 continue
             }
             let unreachable = Refusal(reason: .offline, needsApp: false, transient: true)
+            // Why it was kept: only one an unreachable instance kept is
+            // sent again by itself (a listener that had failed belongs to
+            // the run that ended).
+            let reason = entry.reason.flatMap(VoiceCaptureAttributes.Reason.init(rawValue:)) ?? .offline
             parked.append(Take(
                 id: entry.id, target: target,
                 instance: environment.makeInstance(target, entry.dictationID),
@@ -1743,7 +1771,7 @@ final class VoiceCaptureController {
                 // Asked afresh before anything is sent.
                 consent: Task { unreachable }, inBackground: entry.inBackground,
                 marks: [], pressAt: entry.createdAt, endedAt: entry.spokenAt, text: entry.text,
-                keptAt: entry.createdAt, keptReason: .offline, keptAutomatic: true,
+                keptAt: entry.createdAt, keptReason: reason, keptAutomatic: reason == .offline,
                 entry: entry, retries: entry.retries
             ))
         }
