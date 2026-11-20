@@ -39,38 +39,43 @@ const RESTART_GRACE_MS = 5 * 60_000;
 
 export function instanceSection(update: InstanceUpdateState, now: number): InstanceSection {
   const { snapshot, request } = update;
-  const none = { target: null, canUpdate: false, canSet: { prereleases: false, autoUpdate: false }, canCheck: false, busy: false };
+  const sending = request?.phase === 'sending' ? request.action : null;
+  // Nothing to offer; still waiting only for something of ours that is on its way.
+  const none = { target: null, canUpdate: false, canSet: { prereleases: false, autoUpdate: false }, canCheck: false, busy: sending !== null };
   if (update.status === 'unauthorized') return { ...none, model: null, unavailable: 'unauthorized' };
   if (!snapshot) return { ...none, model: update.status === 'loading' ? WAITING : null };
 
-  const sending = request?.phase === 'sending' ? request.action : null;
   const install = request?.action === 'install' ? request : null;
   const managed = snapshot.managed_by === 'desktop';
   const offered = snapshot.has_update && snapshot.latest ? snapshot.latest : null;
   const reachable = update.status !== 'unreachable';
+  // The instance's last answer still offers exactly what the install was sent for: nothing has changed yet.
+  const sameOffer = Boolean(install?.target && offered && normalizeVersion(offered) === normalizeVersion(install.target));
   // The shell's own accepted install, and how long ago it was accepted.
   const accepted = install?.phase === 'accepted';
   const age = install ? now - Date.parse(install.updated_at) : 0;
   const followed = accepted && age < FOLLOW_INSTALL_MS;
-  // A desktop-managed host relays its own receipt of the install (`remote_request`): that receipt, not the
-  // shell's, says whether it still runs, and when it failed, was declined or expired. While the host does
-  // not answer, its last receipt stands only for an install this shell is following.
-  const relayed = managed && installRunning(snapshot) && (reachable || followed);
+  // What the instance itself reports is running: a standalone Runtime its own install and restart (`install`),
+  // a desktop-managed host its receipt of the request (`remote_request`), which also says when that failed,
+  // was declined or expired. While the instance does not answer (it is restarting), that last report stands
+  // for as long as an install is followed: this shell's, or the Runtime's own by the time it started.
+  const ownInstall = snapshot.install ? now - Date.parse(snapshot.install.started_at) < FOLLOW_INSTALL_MS : false;
+  const reported = installRunning(snapshot) && (reachable || followed || ownInstall);
   // The host's receipt appears in the first read made after the shell's own was accepted; until that read
-  // the last answer on screen predates the request, and the request is still on its way.
-  const unread = managed && followed
-    && (!update.fetched_at || Date.parse(update.fetched_at) <= Date.parse(install!.updated_at));
+  // the last answer on screen predates the request, and the request is still on its way. The same holds
+  // while the host has shown no receipt at all and still offers what was asked for.
+  const unread = managed && followed && sameOffer
+    && (!update.fetched_at || Date.parse(update.fetched_at) <= Date.parse(install!.updated_at) || !snapshot.remote_request);
   // A standalone Runtime restarts after an accepted install, and reports that itself when it can (`install`).
   // Without that report, its last answer still offering what was installed is that restart: for as long as
   // the shell follows it while it does not answer, and for a few minutes while it does. Once it has answered
   // with anything else the install has settled, and a later outage is a lost connection like any other.
-  const sameOffer = Boolean(install?.target && offered && normalizeVersion(offered) === normalizeVersion(install.target));
   const pending = !managed && accepted && sameOffer && !snapshot.install;
   const restarting = pending && (reachable ? age < RESTART_GRACE_MS : followed);
   // Accepted, and nothing changed in that time: it did not finish.
   const lapsed = pending && !restarting;
   // An instance that does not answer, with nothing of ours under way, is a lost connection.
-  if (!reachable && !restarting && !relayed && sending !== 'install') return { ...none, model: null };
+  if (!reachable && !restarting && !reported && sending !== 'install') return { ...none, model: null };
 
   const can = update.can_manage;
   const takes = (action: 'prereleases' | 'auto_update' | 'install') => !managed || (snapshot.host_actions?.includes(action) ?? false);
@@ -94,11 +99,11 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
       autoUpdate: can && typeof snapshot.auto_update === 'boolean' ? snapshot.auto_update : null,
       checkedAt: update.fetched_at,
     });
-  const busy = sending !== null || restarting || unread || (managed ? relayed : installRunning(snapshot));
+  const busy = sending !== null || restarting || unread || reported;
   return {
     model,
     target: offered,
-    canUpdate: can && takes('install') && !busy,
+    canUpdate: can && takes('install') && !busy && offered !== null,
     canSet: { prereleases: can && takes('prereleases'), autoUpdate: can && takes('auto_update') },
     canCheck: reachable && update.status === 'ready' && can && (!managed || (snapshot.host_actions?.includes('check') ?? false)),
     busy,

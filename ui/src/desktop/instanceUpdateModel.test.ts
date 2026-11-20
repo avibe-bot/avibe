@@ -84,6 +84,19 @@ describe('a standalone instance', () => {
     expect(reported.busy).toBe(true);
   });
 
+  it('keeps showing the restart the Runtime reported while it does not answer, whoever started the install', () => {
+    const restartingNow = { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, install: { phase: 'restarting' as const, target: '3.2.8rc4', started_at: AT } };
+    // The main flow: Update was clicked here, the Runtime answered, reported its restart, and went quiet.
+    const ours = instanceSection(state({ status: 'unreachable', request: install('accepted'), snapshot: restartingNow }), NOW);
+    expect(ours.model?.status).toEqual({ kind: 'updated', version: '3.2.8rc4', restarting: true });
+    expect(ours).toMatchObject({ canUpdate: false, busy: true });
+    // Started from another surface: the same restart, from the Runtime's own report.
+    const theirs = instanceSection(state({ status: 'unreachable', snapshot: restartingNow }), NOW);
+    expect(theirs.model?.status).toMatchObject({ kind: 'updated', restarting: true });
+    // It never came back: a lost connection once the install is no longer followed.
+    expect(instanceSection(state({ status: 'unreachable', snapshot: restartingNow }), Date.parse(AT) + 31 * 60_000)).toMatchObject({ model: null, busy: false });
+  });
+
   it('offers a release that appeared after the install it sent, instead of repeating that result', () => {
     const later = instanceSection(state({
       request: install('accepted'),
@@ -175,3 +188,65 @@ describe('a desktop-managed instance', () => {
     expect(ended).toMatchObject({ target: '3.2.7', canUpdate: true, busy: false });
   });
 });
+
+// The section mirrors the shell's own rule for when an install is still under way (instance_update.rs,
+// `unsettled`), from less than the shell knows. Three reviewed heads each missed a combination, so the
+// combinations are walked here and held to what must be true of every one of them.
+describe('every combination of what the shell can report', () => {
+  const MINUTES = [0, 1, 4, 6, 29, 31];
+  const requests: InstanceUpdateState['request'][] = [
+    null, install('sending'), install('accepted'), install('failed', 'install_failed'),
+    { action: 'check', phase: 'sending', target: null, error_code: null, updated_at: AT },
+    { action: 'prereleases', phase: 'failed', target: null, error_code: 'request_failed', updated_at: AT },
+  ];
+  const standalone: NonNullable<InstanceUpdateState['snapshot']>[] = [
+    { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null },
+    { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, install: { phase: 'installing', target: '3.2.8rc4', started_at: AT } },
+    { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, install: { phase: 'restarting', target: '3.2.8rc4', started_at: AT } },
+    { current: '3.2.8rc4', latest: '3.2.8rc4', has_update: false, error: null },
+    { current: '3.2.8rc4', latest: '3.2.8rc5', has_update: true, error: null },
+  ];
+  const host = { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, managed_by: 'desktop' as const, phase: 'available' as const, desktop_version: '3.2.8rc2', host_actions: ['check' as const, 'prereleases' as const, 'auto_update' as const, 'install' as const] };
+  const receipt = (phase: 'checking' | 'awaiting_host' | 'downloading' | 'restarting' | 'completed' | 'failed' | 'declined' | 'expired') =>
+    ({ request_id: 'r1', target: '3.2.8rc4', phase, progress: null, error_code: null, updated_at: AT });
+  const managedHosts: NonNullable<InstanceUpdateState['snapshot']>[] = [
+    host,
+    ...(['checking', 'awaiting_host', 'downloading', 'restarting', 'completed', 'failed', 'declined', 'expired'] as const)
+      .map((phase) => ({ ...host, remote_request: receipt(phase) })),
+    { ...host, current: '3.2.8rc4', desktop_version: '3.2.8rc4', has_update: false, phase: 'current' as const, remote_request: receipt('completed') },
+  ];
+  const cases = [...standalone, ...managedHosts].flatMap((snapshot) => requests.flatMap((request) =>
+    (['ready', 'unreachable'] as const).flatMap((status) => [AT, READ].flatMap((fetched_at) => [true, false].flatMap((can_manage) =>
+      MINUTES.map((minutes) => ({ snapshot, request, status, fetched_at, can_manage, minutes })))))));
+  const running = (snapshot: NonNullable<InstanceUpdateState['snapshot']>) => Boolean(snapshot.install)
+    || Boolean(snapshot.remote_request && !['completed', 'failed', 'declined', 'expired'].includes(snapshot.remote_request.phase))
+    || (snapshot.remote_request?.phase === 'completed' && snapshot.current !== snapshot.remote_request.target);
+
+  it(`holds for all ${cases.length}`, () => {
+    for (const c of cases) {
+      const shown = instanceSection(state({ ...c }), Date.parse(AT) + c.minutes * 60_000);
+      const where = JSON.stringify({ ...c, snapshot: { ...c.snapshot, host_actions: undefined } });
+      // A button is offered only where the shell would take the click, and never beside a running install.
+      if (shown.canUpdate) {
+        expect(shown.busy, where).toBe(false);
+        expect(c.can_manage, where).toBe(true);
+        expect(['available', 'update-failed'], where).toContain(shown.model?.status?.kind);
+      }
+      if (shown.canCheck) expect(c.status === 'ready' && c.can_manage, where).toBe(true);
+      // An instance that cannot be read offers nothing, and waits only for what is on its way to it.
+      if (!shown.model) expect(shown, where).toMatchObject({ canUpdate: false, canCheck: false, busy: c.request?.phase === 'sending' });
+      // Something on its way, or reported as running by an instance that answers, is never offered again.
+      if (c.request?.phase === 'sending') expect(shown.busy, where).toBe(true);
+      if (c.status === 'ready' && running(c.snapshot)) expect(shown.busy, where).toBe(true);
+      // Nothing waits for ever: past the shell's own limit, with nothing reported as running, the section is
+      // free again when the instance answers, and a lost connection when it does not.
+      if (c.minutes > 30 && c.request?.phase !== 'sending' && !running(c.snapshot)) {
+        expect(shown.busy, where).toBe(false);
+        if (c.status === 'unreachable') expect(shown.model, where).toBeNull();
+      }
+      // A member never gets a switch.
+      if (!c.can_manage && shown.model) expect(shown.model, where).toMatchObject({ prereleases: null });
+    }
+  });
+});
+

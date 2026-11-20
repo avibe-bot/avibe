@@ -395,7 +395,10 @@ function SubjectSection({ named, section, first, check }: {
     ? { label: updateLabel, run: actions.update.run, disabled: actions.update.disabled, icon: <Download /> }
     : status?.kind === 'update-failed' && status.retry && actions.update
       ? { label: t('update.action.retry'), run: actions.update.run, disabled: actions.update.disabled, icon: <RefreshCw /> }
-      : (status?.kind === 'check-failed' || status?.kind === 'not-checked') && check
+      // Without an install action (the desktop app dropped the failed offer), trying again starts with a check,
+      // as in the single panel.
+      : (status?.kind === 'check-failed' || status?.kind === 'not-checked'
+        || (status?.kind === 'update-failed' && !actions.update)) && check
         ? {
           label: t(status.kind === 'not-checked' ? 'update.action.check' : 'update.action.retry'),
           run: check.run,

@@ -159,16 +159,35 @@ it("a member's check reads the instance again instead of asking for a check the 
   await waitFor(() => expect(send.mock.calls.map(([action]) => (action as { type: string }).type)).toEqual(['update_check', 'instance_update_refresh']));
 });
 
-it("a failed action on the instance is told by its section, not by this page's connection notice", async () => {
-  shown.instance = instanceReady();
-  // The client reports the last action's refusal as an error code.
+it("a failed install of the instance is told by its section, not also by this page's connection notice", async () => {
+  // The shell's receipt says the install failed; the client reports the same refusal as an error code.
+  shown.instance = instanceReady({ request: { action: 'install', phase: 'failed', target: '3.2.7', error_code: 'install_failed', updated_at: new Date(Date.now() + 60_000).toISOString() } });
   bridge.error = 'install_failed';
-  await openPopup();
-  // For this computer's own actions the page says so itself.
-  expect(screen.getByText(en.desktopClient.errors.request)).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Update Studio' }));
+  const { instance } = await openPopup();
+  expect(instance!.textContent).toContain(en.update.failure.install.title);
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.retry }));
   await waitFor(() => expect(send).toHaveBeenCalledWith({ type: 'instance_update_install', target_version: '3.2.7' }));
   expect(screen.queryByText(en.desktopClient.errors.request)).toBeNull();
+});
+
+it("a refusal that leaves no receipt keeps this page's notice: the section has nothing to tell", async () => {
+  // An older failed install is still the shell's last receipt; this click is refused before any new one.
+  shown.instance = instanceReady({ request: { action: 'install', phase: 'failed', target: '3.2.7', error_code: 'install_failed', updated_at: '2026-11-20T07:03:17Z' } });
+  bridge.error = 'busy';
+  await openPopup();
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.retry }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: 'instance_update_install', target_version: '3.2.7' }));
+  expect(screen.getByText(en.desktopClient.errors.request)).toBeTruthy();
+});
+
+it("a failed check or switch on the instance, which no section tells, keeps this page's notice", async () => {
+  shown.instance = instanceReady({ request: { action: 'prereleases', phase: 'failed', target: null, error_code: 'request_failed', updated_at: '2026-11-20T07:03:17Z' } });
+  bridge.error = 'request_failed';
+  await openPopup();
+  fireEvent.click(screen.getByRole('button', { name: 'Studio' }));
+  fireEvent.click(screen.getByRole('switch', { name: en.update.setting.prereleases }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: 'instance_update_set_prereleases', enabled: true }));
+  expect(screen.getByText(en.desktopClient.errors.request)).toBeTruthy();
 });
 
 it('the update popup does not tell an enrollment failure', async () => {

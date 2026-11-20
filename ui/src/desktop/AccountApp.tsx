@@ -179,9 +179,8 @@ export function AccountApp() {
   const [editEmail, setEditEmail] = useState(false);
   const [method, setMethod] = useState<'totp' | 'recovery'>('totp');
   const [busy, setBusy] = useState(false);
-  // Whether the last action was sent to the selected instance's updater: its section says how that went, so a
-  // refusal or a failure there is not repeated as this page's own "could not be completed" notice.
-  const [instanceAction, setInstanceAction] = useState(false);
+  // When the last action was one sent to the selected instance's updater: the time of that click.
+  const [instanceAction, setInstanceAction] = useState<number | null>(null);
   const [reviewChange, setReviewChange] = useState(false);
   const [selection, setSelection] = useState<{ id: string; generation: number; error: string | null } | null>(null);
   const [material, setMaterial] = useState<{ generation: number; result: DesktopClientDirectResult } | null>(null);
@@ -221,7 +220,7 @@ export function AccountApp() {
   }, [i18n, popover]);
   const act = useCallback(async (action: DesktopClientAction): Promise<boolean> => {
     if (requestBusy.current) return false;
-    setInstanceAction(action.type.startsWith('instance_update_'));
+    setInstanceAction(action.type.startsWith('instance_update_') ? Date.now() : null);
     requestBusy.current = true;
     setBusy(true);
     const ticket = epoch.current;
@@ -304,8 +303,14 @@ export function AccountApp() {
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
   };
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
+  // An install the instance refused or failed is told by its section (the shell's receipt says `failed`). Any
+  // other failed action there, a check or a switch, has no such place, and keeps this page's notice.
+  // A refusal that leaves no receipt (the shell busy, a selection under way, the offer changed) keeps it too.
+  const instanceRequest = state?.instance_update?.request;
+  const toldBySection = instanceAction !== null && instanceRequest?.action === 'install' && instanceRequest.phase === 'failed'
+    && Date.parse(instanceRequest.updated_at) >= instanceAction - 1000;
   // The update views, the popup included, are not where an enrollment failure is told.
-  const displayedError = (instanceAction ? null : error) ?? (popover || view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
+  const displayedError = (toldBySection ? null : error) ?? (popover || view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
   const errorMessage = displayedError ? explainError(displayedError) : null;
   const activeSelection = selection?.generation === state?.generation ? selection : null;
   const failedPending = activeSelection?.error && activeSelection.id === state?.connection.pending?.instance_id;

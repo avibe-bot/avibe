@@ -102,6 +102,22 @@ it('shows an instance it cannot reach, or one the account cannot update, without
   expect(member.alex.queryByRole('button', { name: /Update/ })).toBeNull();
 });
 
+it("lets a subject whose install failed with no offer left try again through the panel's check", () => {
+  // The desktop app's updater ends a failed install in `error` and drops the offer: its container has no install action.
+  const failed = modelFromDesktopState({
+    phase: 'error', latest: null, channel: 'test', prereleases: true, skippedVersion: null, interactive: true,
+    autoUpdate: false, checkedAt: CHECKED, hostActions: ['check', 'prereleases', 'auto_update', 'install'],
+  }, { current: '3.2.8-rc.2', installFailed: true });
+  const check = vi.fn();
+  render(<I18nextProvider i18n={i18n}>
+    <UpdateSubjectsPanel instanceName="alex" instance={{ model: instance(), actions: {} }} app={{ model: failed, actions: {} }} check={{ run: check }} />
+  </I18nextProvider>);
+  const thisApp = within(document.querySelector<HTMLElement>('[data-update-subject="app"]')!);
+  expect(thisApp.getByText(en.update.failure.install.title)).toBeTruthy();
+  fireEvent.click(thisApp.getByRole('button', { name: en.update.action.retry }));
+  expect(check).toHaveBeenCalledOnce();
+});
+
 it('keeps the single panel as it ships: "Current version", one "Update", the offer without a name', () => {
   render(<I18nextProvider i18n={i18n}><UpdatePanel model={app('available')} actions={{ update: { run: () => {} } }} /></I18nextProvider>);
   expect(screen.getByText(en.update.row.current)).toBeTruthy();
