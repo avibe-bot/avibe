@@ -74,7 +74,7 @@ Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
    section without a button or switches; an instance that cannot be reached
    shows the bottom row's words for a lost connection, and one that no longer
    accepts the app's sign-in says that its update state cannot be read here
-   and to reconnect to it.
+   (the app has no reconnect action to point to, so the line names none).
    The last check
    and the two switches are behind the subject's name, closed by default.
    The header's check asks both updaters.

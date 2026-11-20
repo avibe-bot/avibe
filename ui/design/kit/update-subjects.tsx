@@ -178,7 +178,7 @@ function Section({ section, lang, first }: { section: Subject; lang: SubjectLang
           {section.unavailable === 'unauthorized' ? <Info size={16} className="mt-0.5 shrink-0" /> : <WifiOff size={16} className="mt-0.5 shrink-0" />}
           <p className="min-w-0 font-medium">
             {section.unavailable === 'unauthorized'
-              ? d(`这里读不到 ${section.name} 的更新状态，请重新连接 ${section.name}。`, `Can't read ${section.name}'s update status here. Reconnect to ${section.name}.`)
+              ? d(`这里读不到 ${section.name} 的更新状态。`, `Can't read ${section.name}'s update status here.`)
               : t('desktopClient.disconnected')}
           </p>
         </div>
