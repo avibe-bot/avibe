@@ -898,6 +898,81 @@ async def test_an_acknowledgement_about_another_credit_or_an_unfinished_one_is_u
     assert len(_vendor_writes(engine)) == 1 and "private-" not in json.dumps(answer)
 
 
+_ORGANIZATION = "00000000-0000-4000-8000-000000000000"
+
+
+@pytest.mark.parametrize(
+    ("carried", "statement"),
+    [
+        # It says whose it is and what it was about as the request did, or does not say.
+        ({"account_id": "acct_123", "redeem_request_id": "synthetic-request", "credit_id": "private-credit"}, "ack"),
+        ({"credit": {"account_id": "acct_123", "redeem_request_id": "synthetic-request", "credit_id": "private-credit"}}, "ack"),
+        ({"account_id": None, "redeem_request_id": None, "credit_id": None}, "ack"),
+        ({"credit": {"account_id": None}}, "ack"),
+        # It is about another account than the grant's, or does not say readably whose.
+        ({"account_id": "private-other-account"}, "unknown"),
+        ({"credit": {"account_id": "private-other-account"}}, "unknown"),
+        ({"account_id": "acct_123", "credit": {"account_id": "private-other-account"}}, "unknown"),
+        ({"account_id": ""}, "unknown"),
+        ({"account_id": "ACCT_123"}, "unknown"),
+        ({"account_id": 7}, "unknown"),
+        ({"account_id": ["acct_123"]}, "unknown"),
+        # It answers another request, or names another credit under the name it was sent by.
+        ({"redeem_request_id": "private-other-request"}, "unknown"),
+        ({"credit": {"redeem_request_id": "private-other-request"}}, "unknown"),
+        ({"credit_id": "private-another"}, "unknown"),
+        ({"credit": {"id": "private-credit", "credit_id": "private-another"}}, "unknown"),
+    ],
+)
+async def test_a_chatgpt_acknowledgement_about_another_account_or_request_is_unknown(carried, statement):
+    """MH-QUOTA-076: Where ChatGPT's acknowledgement of a use names an account, a request or a credit, at the top or in its credit, each is the one that was sent; otherwise the outcome is unknown, so a lower count read afterwards cannot make it "used"."""
+
+    adapter, engine, source, kind = _use_engine("openai", _body({"code": "reset", "windows_reset": 1, **carried}))
+    key = await adapter.reset_card_account_key(*source)
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key, 1)
+    assert answer == ({"statement": "unknown"} if statement == "unknown" else {"statement": "ack", "before": 1, "cleared": []})
+    assert len(_vendor_writes(engine)) == 1 and "private-" not in json.dumps(answer) and "acct_" not in json.dumps(answer)
+
+
+@pytest.mark.parametrize(
+    ("carried", "statement"),
+    [
+        # It names the grant, the program and the organization as the request did, or names none.
+        ({"grant_id": "private-grant", "program": "cedar_ember", "organization_uuid": _ORGANIZATION}, "ack"),
+        # The same organization written another way is the same organization.
+        ({"grant": {"id": "private-grant"}, "organization": {"uuid": _ORGANIZATION.replace("-", "")}}, "ack"),
+        ({"grant": "private-grant", "organization": _ORGANIZATION}, "ack"),
+        ({"grant_id": None, "grant": None, "program": None, "organization": None, "organization_uuid": None}, "ack"),
+        ({"grant": {}, "organization": {}}, "ack"),
+        # It names another grant than the one sent, or not readably which.
+        ({"grant_id": "private-another"}, "unknown"),
+        ({"grant": {"id": "private-another"}}, "unknown"),
+        ({"grant": "private-another"}, "unknown"),
+        ({"grant_id": "private-grant", "grant": {"id": "private-another"}}, "unknown"),
+        ({"grant_id": ""}, "unknown"),
+        ({"grant_id": 7}, "unknown"),
+        ({"grant": ["private-grant"]}, "unknown"),
+        # It is about another program or another organization than the request.
+        ({"program": "private-other-program"}, "unknown"),
+        ({"organization_uuid": "11111111-1111-4111-8111-111111111111"}, "unknown"),
+        ({"organization": {"uuid": "11111111-1111-4111-8111-111111111111"}}, "unknown"),
+        ({"organization": "private-not-a-uuid"}, "unknown"),
+        ({"organization_uuid": 7}, "unknown"),
+    ],
+)
+async def test_a_claude_acknowledgement_about_another_grant_or_organization_is_unknown(carried, statement):
+    """MH-QUOTA-076: Where Claude's acknowledgement of a use names a grant, a program or an organization, each is the one the request was made with; otherwise the outcome is unknown, so a lower count read afterwards cannot make it "used"."""
+
+    adapter, engine, source, kind = _use_engine("anthropic", _body({"result": "reset", "cleared": ["five_hour"], **carried}))
+    key = await adapter.reset_card_account_key(*source)
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key, 1)
+    assert answer == (
+        {"statement": "unknown"} if statement == "unknown" else {"statement": "ack", "before": 1, "cleared": ["five_hour"]}
+    )
+    assert json.loads(_vendor_writes(engine)[0]["data"])["grant_id"] == "private-grant"
+    assert len(_vendor_writes(engine)) == 1 and "private-" not in json.dumps(answer) and _ORGANIZATION not in json.dumps(answer)
+
+
 def _use_engine(vendor, answer, *, cards=None):
     """A fake engine holding usable cards of the vendor's kind, as (handle, expiry); ``answer`` is its reply to the use request."""
 
@@ -909,7 +984,7 @@ def _use_engine(vendor, answer, *, cards=None):
         return {"status_code": 200, "body": json.dumps(body)}
 
     if vendor == "anthropic":
-        organization = "00000000-0000-4000-8000-000000000000"
+        organization = _ORGANIZATION
         grants = [
             {"id": handle, "type": "session", "resets_left": 1, "usable_now": True, "clears": ["five_hour"], "ends_at": ends}
             for handle, ends in cards or [("private-grant", None)]

@@ -816,7 +816,7 @@ def create_app(
         watchdog = getattr(controller, "_loop_watchdog", None)
         if watchdog is None:
             raise HTTPException(status_code=503, detail="watchdog_unavailable")
-        return {"state": watchdog.arm_warm_freeze(manager), "controller_pid": os.getpid()}
+        return {"state": watchdog.arm_warm_freeze(), "controller_pid": os.getpid()}
 
     @app.post("/internal/diagnostics/warm-gc-unfreeze")
     async def _rollback_warm_gc_freeze():

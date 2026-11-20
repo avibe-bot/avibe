@@ -8617,7 +8617,12 @@ def direct_rendezvous():
         )
     else:
         auth = getattr(g, "authorization_context", None)
+        identity = getattr(g, "remote_session_identity", None)
+        registered_session = None
+        if identity and identity.get("sub") == subject and identity.get("browser_session_id") and identity.get("_device_binding"):
+            registered_session = (identity["_device_binding"], identity["browser_session_id"])
         result = rendezvous_state.rendezvous.offer(
+            session=registered_session,
             is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
@@ -8956,7 +8961,12 @@ def device_list():
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
     from storage.importer import ensure_sqlite_state
     ensure_sqlite_state()
-    for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time())):
+    from vibe.direct_rendezvous import rendezvous
+    from vibe.sse_broker import broker
+    paths = rendezvous.session_paths(binding)
+    for key in broker.tunnel_sessions(binding):
+        paths.setdefault(key, {"kind": "tunnel", "family": None, "rtt_ms": None})
+    for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time()), paths=paths):
         account = row['account']
         if account is None:
             group = 'unattributed'
@@ -15299,6 +15309,11 @@ async def workbench_events():
             if state != "current":
                 yield _remote_authorization_sse_frame(state)
                 return
+            if (stream_via == "other" and remote_session_payload and remote_session_identity
+                    and remote_session_identity.get("sub") == remote_session_payload.get("sub")
+                    and remote_session_identity.get("_device_binding") and remote_session_identity.get("browser_session_id")):
+                broker.mark_remote_tunnel(sub_id, remote_session_identity["_device_binding"],
+                                         remote_session_identity["sub"], remote_session_identity["browser_session_id"])
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"

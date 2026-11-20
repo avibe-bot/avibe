@@ -54,6 +54,8 @@ class SSEBroker:
     def __init__(self) -> None:
         self._subscribers: dict[int, _Subscription] = {}
         self._next_id = 0
+        # Best-effort device telemetry; never limit actual subscriptions.
+        self._tunnels: dict[int, tuple[str, str, str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
         # ``subscribe`` / ``unsubscribe`` run on the event loop thread while
@@ -82,8 +84,20 @@ class SSEBroker:
         logger.debug("SSE subscriber %s connected (total=%s)", sub_id, total)
         return sub_id, queue
 
+    def mark_remote_tunnel(self, sub_id: int, binding: str, subject: str, sid: str) -> None:
+        with self._lock:
+            if not self._closed and sub_id in self._subscribers and len(self._tunnels) < 256:
+                self._tunnels[sub_id] = (binding, subject, sid)
+
+    def tunnel_sessions(self, binding: str) -> set[tuple[str, str]]:
+        with self._lock:
+            if self._closed:
+                return set()
+            return {(sub, sid) for paired, sub, sid in self._tunnels.values() if paired == binding}
+
     def unsubscribe(self, sub_id: int) -> None:
         with self._lock:
+            self._tunnels.pop(sub_id, None)
             removed = self._subscribers.pop(sub_id, None) is not None
             total = len(self._subscribers)
         if removed:

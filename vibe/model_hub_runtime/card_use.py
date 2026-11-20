@@ -19,8 +19,9 @@ Two rules shape everything below.
   names a member twice, when a field has the wrong type, when its result and
   reason are not a known pair, when a refusal carries anything that could be
   evidence of a redemption, including a member this client does not know, and
-  when an acknowledgement names another credit than the one sent or a status
-  that is not known to mean completed.
+  when an acknowledgement names another account, organization, grant, credit or
+  request than the one it answers, or a status that is not known to mean
+  completed.
 
 What is taken as true is an answer that is well formed, of the expected shape,
 and does not contradict what was sent or itself in a field it carries. A field
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import operator
 import re
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
@@ -160,7 +162,35 @@ def _optional(value: object, kind: type) -> bool:
     return value is None or type(value) is kind
 
 
-def _claude_statement(result: Mapping[str, Any]) -> tuple[str, list[str]]:
+def _same_uuid(carried: str, sent: str) -> bool:
+    try:
+        return UUID(carried) == UUID(sent)
+    except ValueError:
+        return False
+
+
+def _names_another(
+    result: Mapping[str, Any],
+    sent: str,
+    *names: str,
+    member: Optional[str] = None,
+    inside: tuple[str, ...] = (),
+    same=operator.eq,
+) -> bool:
+    """Whether an answer names, for one thing the request named, anything but ``sent``.
+
+    The thing may be carried under ``names``, and as ``member`` itself or under
+    ``inside`` it. Left out or null, it is not named, which contradicts nothing.
+    Named unreadably (empty, not a string) it is not known to be ``sent``.
+    """
+
+    nested = result.get(member) if member else None
+    carried = [result.get(name) for name in names]
+    carried += [nested.get(name) for name in inside] if isinstance(nested, dict) else [nested]
+    return any(value is not None and not (type(value) is str and same(value, sent)) for value in carried)
+
+
+def _claude_statement(result: Mapping[str, Any], sent: Mapping[str, Any], organization: str) -> tuple[str, list[str]]:
     status, reason = result.get("result"), result.get("reason")
     cleared, cooldown = result.get("cleared"), result.get("cooldown_until")
     if (
@@ -175,25 +205,39 @@ def _claude_statement(result: Mapping[str, Any]) -> tuple[str, list[str]]:
     if statement != ACK and (cleared or not _CLAUDE_REFUSAL_MEMBERS.issuperset(result)):
         # A refusal that also cleared a limit, or says more than a refusal says.
         return UNKNOWN, []
+    if statement == ACK and (
+        _names_another(result, sent["grant_id"], "grant_id", member="grant", inside=("id",))
+        or _names_another(result, sent["program"], "program")
+        or _names_another(
+            result, organization, "organization_uuid", member="organization", inside=("uuid",), same=_same_uuid
+        )
+    ):
+        # A reset of another grant, program or organization than the request's. Its own
+        # `request_id` is not compared: a vendor's answer may carry its own under that name.
+        return UNKNOWN, []
     return statement, [limit for limit in LIMITS if limit in (cleared or ())]
 
 
-def _chatgpt_statement(result: Mapping[str, Any], sent: object) -> tuple[str, list[str]]:
+def _chatgpt_statement(result: Mapping[str, Any], sent: Mapping[str, Any], account: str) -> tuple[str, list[str]]:
     code, windows, credit = result.get("code"), result.get("windows_reset"), result.get("credit")
     if type(code) is not str or not _optional(windows, int) or (windows or 0) < 0 or not _optional(credit, dict):
         return UNKNOWN, []
     statement = _CHATGPT_STATEMENTS.get(code, UNKNOWN)
     if statement == ACK:
-        credit = credit or {}
-        named, status, redeemed = credit.get("id"), credit.get("status"), credit.get("redeemed_at")
+        status, redeemed = (credit or {}).get("status"), (credit or {}).get("redeemed_at")
         if (
             windows == 0
-            or (named is not None and named != sent)
+            or _names_another(result, sent["credit_id"], "credit_id", member="credit", inside=("id", "credit_id"))
+            or _names_another(
+                result, sent["redeem_request_id"], "redeem_request_id", member="credit", inside=("redeem_request_id",)
+            )
+            or _names_another(result, account, "account_id", member="credit", inside=("account_id",))
             or not (status is None or (type(status) is str and status in _CHATGPT_COMPLETED))
             or (redeemed is not None and _moment(redeemed) is None)
         ):
-            # A reset that reset nothing, that is about another credit than the one
-            # sent, or whose credit is unreadable or not known to be completed.
+            # A reset that reset nothing, that is about another credit, request or
+            # account than the one sent, or whose credit is unreadable or not known
+            # to be completed.
             return UNKNOWN, []
     elif windows or credit is not None or not _CHATGPT_REFUSAL_MEMBERS.issuperset(result):
         # "Nothing was redeemed" beside a credit, a window that was reset, or more
@@ -202,19 +246,23 @@ def _chatgpt_statement(result: Mapping[str, Any], sent: object) -> tuple[str, li
     return statement, []
 
 
-def statement_from_reply(vendor: str, result: object, before: int, sent: Mapping[str, Any]) -> dict[str, Any]:
+def statement_from_reply(
+    vendor: str, result: object, before: int, sent: Mapping[str, Any], identity: str
+) -> dict[str, Any]:
     """Reduce a vendor's answer to the use request ``sent`` to a closed statement.
 
-    Types are checked, only recognised combinations are statements, and an
-    answer whose parts disagree with each other or with the request is ``unknown``.
+    ``identity`` is whose request it was: Claude's organization, ChatGPT's account.
+    It is compared here and goes nowhere else. Types are checked, only recognised
+    combinations are statements, and an answer whose parts disagree with each
+    other or with the request is ``unknown``.
     """
 
     if not isinstance(result, dict):
         return {"statement": UNKNOWN}
     if vendor == "anthropic":
-        statement, cleared = _claude_statement(result)
+        statement, cleared = _claude_statement(result, sent, identity)
     else:
-        statement, cleared = _chatgpt_statement(result, sent["credit_id"])
+        statement, cleared = _chatgpt_statement(result, sent, identity)
     if statement == UNKNOWN:
         return {"statement": UNKNOWN}
     return {"statement": statement, "before": before, "cleared": cleared}
@@ -269,7 +317,8 @@ def _prepare(
     if expires <= _utcnow():
         # It ran out during the reads above: not sent, rather than sent to be refused.
         raise ValueError("expired")
-    return url, data, before
+    # Whose request this is, for reading its answer: checked against the claim above.
+    return url, data, before, organization if vendor == "anthropic" else auth.account_id
 
 
 def use_once(
@@ -278,7 +327,7 @@ def use_once(
     """Use one card of ``kind``. Returns a closed statement; never raises, retries or echoes the vendor."""
 
     try:
-        url, data, before = _prepare(
+        url, data, before, identity = _prepare(
             client=client,
             auth=auth,
             vendor=vendor,
@@ -301,6 +350,6 @@ def use_once(
     except Exception:
         return {"statement": UNKNOWN}
     try:
-        return statement_from_reply(vendor, result, before, data)
+        return statement_from_reply(vendor, result, before, data, identity)
     except Exception:
         return {"statement": UNKNOWN}
