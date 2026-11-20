@@ -66,10 +66,14 @@ enum Command {
     },
     #[serde(rename = "observe_paths_v1")]
     ObservePaths,
+    #[serde(rename = "observe_paths_v2")]
+    ObserveDevicePaths,
     #[serde(rename = "admission")]
     Admission {
         endpoint_id: String,
         ttl_seconds: u64,
+        #[serde(default)]
+        epoch: u64,
     },
     #[serde(rename = "stop")]
     Stop,
@@ -114,6 +118,7 @@ enum Message<'a> {
     #[serde(rename = "ready")]
     Ready {
         path_reports_v1: bool,
+        path_reports_v2: bool,
         protocol: u32,
         endpoint_id: String,
         addresses: Vec<String>,
@@ -133,7 +138,7 @@ enum Message<'a> {
 
 #[derive(Clone)]
 struct Control {
-    observe: Arc<std::sync::atomic::AtomicBool>,
+    observe: Arc<std::sync::atomic::AtomicU8>,
     stdout: Arc<Mutex<tokio::io::Stdout>>,
     admissions: Admissions,
     stop: StopSignal,
@@ -272,16 +277,20 @@ async fn run_control_reader<R: AsyncRead + Unpin>(mut reader: R, control: Contro
             Ok(Some(Command::Admission {
                 endpoint_id,
                 ttl_seconds,
+                epoch,
             })) => {
                 if !valid_endpoint_id(&endpoint_id) {
                     control.fail(SidecarError("invalid_endpoint_id")).await;
                     return;
                 }
-                control.admissions.update(endpoint_id, ttl_seconds);
+                control.admissions.update(endpoint_id, ttl_seconds, epoch);
             }
             Ok(Some(Command::ObservePaths)) => control
                 .observe
-                .store(true, std::sync::atomic::Ordering::Relaxed),
+                .store(1, std::sync::atomic::Ordering::Relaxed),
+            Ok(Some(Command::ObserveDevicePaths)) => control
+                .observe
+                .store(2, std::sync::atomic::Ordering::Relaxed),
             Ok(None) | Ok(Some(Command::Stop)) => {
                 control.stop.stop();
                 return;
@@ -398,26 +407,25 @@ async fn handle_connection(
     };
     drop(handshake_permit);
     let endpoint_id = connection.remote_id().to_string();
-    if !control.admissions.allows_connection(&connection) {
+    let Some(epoch) = control.admissions.connection_epoch(&connection) else {
         connection.close(close_code(), b"admission ended");
         control.peer_closed(&endpoint_id, "admission_ended").await;
         return;
-    }
+    };
     connection.set_max_concurrent_bi_streams(VarInt::from_u32(config.max_streams_per_connection));
     let stream_permits = Arc::new(Semaphore::new(config.max_streams_per_connection as usize));
     let mut stream_tasks = JoinSet::new();
     let no_stream = time::sleep(NO_STREAM_TIMEOUT);
     tokio::pin!(no_stream);
-    let terminal = control
-        .observe
-        .load(std::sync::atomic::Ordering::Relaxed)
+    let mode = control.observe.load(std::sync::atomic::Ordering::Relaxed);
+    let terminal = (mode != 0)
         .then(|| reports.clone().try_reserve_owned().ok())
         .flatten();
     let mut observer = terminal
         .as_ref()
-        .map(|_| path_report::Observer::new(&connection));
+        .map(|_| path_report::Observer::new(&connection, (mode == 2).then_some(epoch)));
     let mut changed = false;
-    let mut next_change = Instant::now() + Duration::from_secs(1);
+    let mut last_report = Instant::now();
     if let Some(obs) = &mut observer {
         obs.report(&connection, "open", &reports);
     }
@@ -433,14 +441,15 @@ async fn handle_connection(
                     changed = true;
                 } else { break; }
             }
-            _ = time::sleep_until(next_change), if changed => {
+            _ = time::sleep_until(last_report + Duration::from_secs(if changed { 1 } else { 5 })),
+                if observer.is_some() && (changed || mode == 2) => {
                 if let Some(obs) = &mut observer { obs.report(&connection, "change", &reports); }
                 changed = false;
-                next_change = Instant::now() + Duration::from_secs(1);
+                last_report = Instant::now();
             }
             incoming_stream = connection.accept_bi() => {
                 let Ok((mut send, mut recv)) = incoming_stream else { break; };
-                if !control.admissions.allows_connection(&connection) {
+                if control.admissions.connection_epoch(&connection).is_none() {
                     reset_stream(&mut send, &mut recv);
                     reason = "admission_ended";
                     break;
@@ -458,7 +467,7 @@ async fn handle_connection(
             }
         }
     }
-    if reason == "connection_closed" && !control.admissions.allows_connection(&connection) {
+    if reason == "connection_closed" && control.admissions.connection_epoch(&connection).is_none() {
         reason = "admission_ended";
     }
     connection.close(close_code(), reason.as_bytes());
@@ -556,6 +565,7 @@ async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Resu
     if let Err(error) = control
         .emit(&Message::Ready {
             path_reports_v1: true,
+            path_reports_v2: true,
             protocol: 1,
             endpoint_id: endpoint.id().to_string(),
             addresses: endpoint_addresses(&ready_address),

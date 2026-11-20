@@ -20,12 +20,13 @@ const MAX_TTL: u64 = 300;
 struct Entry {
     deadline: Instant,
     order: u64,
-    live: HashMap<usize, WeakConnectionHandle>,
+    epoch: u64,
+    live: HashMap<usize, (WeakConnectionHandle, u64)>,
 }
 
 impl Entry {
     fn close(self) {
-        for weak in self.live.into_values() {
+        for (weak, _) in self.live.into_values() {
             if let Some(connection) = weak.upgrade() {
                 connection.close(close_code(), b"admission ended");
             }
@@ -52,7 +53,7 @@ impl State {
         }
     }
 
-    fn update(&mut self, id: String, ttl: u64, now: Instant) {
+    fn update(&mut self, id: String, ttl: u64, now: Instant, epoch: u64) {
         self.expire(now);
         if ttl == 0 {
             if let Some(entry) = self.entries.remove(&id) {
@@ -65,6 +66,7 @@ impl State {
             // A refresh extends this admission, without reopening revoked or
             // expired connections and without changing insertion order.
             entry.deadline = deadline;
+            entry.epoch = epoch; // Future handshakes only.
             return;
         }
         if self.entries.len() == CAPACITY {
@@ -86,6 +88,7 @@ impl State {
             Entry {
                 deadline,
                 order,
+                epoch,
                 live: HashMap::new(),
             },
         );
@@ -107,11 +110,11 @@ impl Admissions {
         }
     }
 
-    pub fn update(&self, id: String, ttl: u64) {
+    pub fn update(&self, id: String, ttl: u64, epoch: u64) {
         self.state
             .lock()
             .expect("admissions poisoned")
-            .update(id, ttl, Instant::now());
+            .update(id, ttl, Instant::now(), epoch);
         self.changed.send_replace(());
     }
 
@@ -125,13 +128,14 @@ impl Admissions {
             .is_some_and(|entry| entry.deadline > Instant::now())
     }
 
-    pub fn allows_connection(&self, connection: &Connection) -> bool {
+    pub fn connection_epoch(&self, connection: &Connection) -> Option<u64> {
         let mut state = self.state.lock().expect("admissions poisoned");
         state.expire(Instant::now());
         state
             .entries
             .get(&connection.remote_id().to_string())
-            .is_some_and(|entry| entry.live.contains_key(&connection.stable_id()))
+            .and_then(|entry| entry.live.get(&connection.stable_id()))
+            .map(|(_, epoch)| *epoch)
     }
 
     pub async fn run_expiration(&self, stop: StopSignal) {
@@ -169,10 +173,11 @@ impl EndpointHooks for Admissions {
             };
         };
         // Weak handles cannot keep a transport alive; prune completed ones.
-        entry.live.retain(|_, weak| weak.upgrade().is_some());
-        entry
-            .live
-            .insert(connection.stable_id(), connection.weak_handle());
+        entry.live.retain(|_, (weak, _)| weak.upgrade().is_some());
+        entry.live.insert(
+            connection.stable_id(),
+            (connection.weak_handle(), entry.epoch),
+        );
         AfterHandshakeOutcome::Accept
     }
 }
@@ -186,18 +191,18 @@ mod tests {
         let mut state = State::default();
         let now = Instant::now();
         assert!(state.entries.is_empty());
-        state.update("peer".into(), u64::MAX, now);
+        state.update("peer".into(), u64::MAX, now, 0);
         assert_eq!(
             state.entries["peer"].deadline,
             now + Duration::from_secs(300)
         );
-        state.update("peer".into(), 2, now + Duration::from_secs(1));
+        state.update("peer".into(), 2, now + Duration::from_secs(1), 0);
         state.expire(now + Duration::from_secs(2));
         assert!(state.entries.contains_key("peer"));
         state.expire(now + Duration::from_secs(3));
         assert!(state.entries.is_empty());
-        state.update("peer".into(), 5, now);
-        state.update("peer".into(), 0, now);
+        state.update("peer".into(), 5, now, 0);
+        state.update("peer".into(), 0, now, 0);
         assert!(state.entries.is_empty());
     }
 
@@ -206,13 +211,13 @@ mod tests {
         let mut state = State::default();
         let now = Instant::now();
         for index in 0..CAPACITY {
-            state.update(index.to_string(), if index == 1 { 1 } else { 300 }, now);
+            state.update(index.to_string(), if index == 1 { 1 } else { 300 }, now, 0);
         }
-        state.update("new".into(), 300, now + Duration::from_secs(2));
+        state.update("new".into(), 300, now + Duration::from_secs(2), 0);
         assert!(state.entries.contains_key("0"));
         assert!(!state.entries.contains_key("1"));
-        state.update("0".into(), 300, now + Duration::from_secs(3));
-        state.update("newer".into(), 300, now + Duration::from_secs(3));
+        state.update("0".into(), 300, now + Duration::from_secs(3), 0);
+        state.update("newer".into(), 300, now + Duration::from_secs(3), 0);
         assert!(!state.entries.contains_key("0"));
         assert_eq!(state.entries.len(), CAPACITY);
     }

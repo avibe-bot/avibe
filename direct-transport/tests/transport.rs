@@ -55,7 +55,16 @@ impl Sidecar {
     }
 
     async fn start_limits(stream_addr: SocketAddr, connections: u32, streams: u32) -> Self {
-        let mut child = child_command().spawn().expect("spawn sidecar");
+        Self::spawn(child_command(), stream_addr, connections, streams).await
+    }
+
+    async fn spawn(
+        mut command: Command,
+        stream_addr: SocketAddr,
+        connections: u32,
+        streams: u32,
+    ) -> Self {
+        let mut child = command.spawn().expect("spawn sidecar");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let mut this = Self {
@@ -209,6 +218,76 @@ async fn accept_header(listener: &TcpListener, endpoint: &Endpoint) -> TcpStream
 
 async fn open(connection: &Connection) -> (iroh::endpoint::SendStream, iroh::endpoint::RecvStream) {
     timeout(WAIT, connection.open_bi()).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn stable_connection_refreshes_device_sample_with_handshake_epoch() {
+    let listener = listener().await;
+    let mut command = child_command();
+    command.stderr(Stdio::piped());
+    let mut sidecar = Sidecar::spawn(command, listener.local_addr().unwrap(), 4, 4).await;
+    let mut reports = BufReader::new(sidecar.child.stderr.take().unwrap()).lines();
+    assert_eq!(sidecar.ready["path_reports_v2"], true);
+    let client = client().await;
+    let peer = client.id().to_string();
+    sidecar.send(json!({"type":"observe_paths_v2"})).await;
+    sidecar
+        .send(json!({"type":"admission", "endpoint_id":peer, "ttl_seconds":60, "epoch":31}))
+        .await;
+    // Control is asynchronous: retry a dial that raced the admission notice.
+    let connection = timeout(WAIT, async {
+        loop {
+            if let Ok(conn) = client.connect(dial_address(&sidecar.ready), ALPN).await {
+                if timeout(Duration::from_millis(50), conn.closed())
+                    .await
+                    .is_err()
+                {
+                    break conn;
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let started = tokio::time::Instant::now();
+    let mut previous = started;
+    let mut five_second_gap = false;
+    let mut closing = false;
+    loop {
+        let line = timeout(Duration::from_secs(7), reports.next_line())
+            .await
+            .expect("missing periodic report")
+            .unwrap()
+            .unwrap();
+        let report: Value = serde_json::from_str(&line).unwrap();
+        assert!(
+            report["peer"] == peer && report["epoch"] == 31,
+            "connection attribution changed"
+        );
+        let now = tokio::time::Instant::now();
+        if report["phase"] == "open" {
+            sidecar
+                .send(json!({"type":"admission", "endpoint_id":peer, "ttl_seconds":60, "epoch":0}))
+                .await;
+        } else if report["phase"] == "close" {
+            assert!(closing);
+            break;
+        } else {
+            assert_eq!(report["phase"], "change");
+            five_second_gap |= now - previous >= Duration::from_secs(4);
+            if now - started >= Duration::from_secs(10) && !closing {
+                assert!(five_second_gap, "expected stable-path refresh cadence");
+                assert!(report["selected"] == "ipv4" || report["selected"] == "ipv6");
+                assert!(report["scope"] == "global" || report["scope"] == "local");
+                assert!(report["rtt_ms"].as_u64().is_some());
+                connection.close(0u8.into(), b"done");
+                closing = true;
+            }
+        }
+        previous = now;
+    }
+    sidecar.stop().await;
 }
 
 #[tokio::test]

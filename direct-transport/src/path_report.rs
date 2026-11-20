@@ -1,5 +1,5 @@
-//! Aggregate only on the sidecar side of the control boundary. Never serialize
-//! a Path, address, endpoint ID, or a dependency Debug representation.
+//! V2 includes the authenticated peer key only on the negotiated private pipe.
+//! Never serialize a Path, socket address or dependency Debug representation.
 use futures_core::Stream;
 use iroh::{
     TransportAddr,
@@ -37,8 +37,34 @@ fn family(addr: &TransportAddr) -> (usize, &'static str) {
         _ => (3, "unknown"),
     }
 }
+fn scope(addr: &TransportAddr) -> Option<&'static str> {
+    use std::net::IpAddr;
+    let TransportAddr::Ip(sock) = addr else {
+        return None;
+    };
+    let local = match sock.ip().to_canonical() {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_link_local()
+                || (ip.octets()[0] == 100 && ip.octets()[1] >> 6 == 1)
+        }
+        IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+    };
+    Some(if local { "local" } else { "global" })
+}
+
+#[derive(Clone, Serialize)]
+struct DeviceSample {
+    peer: String,
+    epoch: u64,
+    scope: Option<&'static str>,
+    rtt_ms: Option<u64>,
+}
+
 #[derive(Serialize)]
 pub(super) struct Report {
+    #[serde(flatten)]
+    device: Option<DeviceSample>,
     ordinal: u64,
     phase: &'static str,
     selected: &'static str,
@@ -47,6 +73,7 @@ pub(super) struct Report {
     families: [Counts; 4],
 }
 pub(super) struct Observer {
+    device: Option<DeviceSample>,
     ordinal: u64,
     events: PathEventStream,
     closed: [Counts; 4],
@@ -67,6 +94,37 @@ fn selection(
 
 #[cfg(test)]
 #[test]
+fn scope_matches_device_address_classes() {
+    for (host, expected) in [
+        ("10.1.2.3:9", "local"),
+        ("172.16.0.1:9", "local"),
+        ("192.168.1.1:9", "local"),
+        ("169.254.2.1:9", "local"),
+        ("100.64.0.1:9", "local"),
+        ("100.127.255.255:9", "local"),
+        ("100.128.0.1:9", "global"),
+        ("172.32.0.1:9", "global"),
+        ("127.0.0.1:9", "global"),
+        ("[fd00::1]:9", "local"),
+        ("[fe80::1]:9", "local"),
+        ("[::ffff:192.168.1.2]:9", "local"),
+        ("[2001:db8::1]:9", "global"),
+    ] {
+        assert_eq!(
+            scope(&TransportAddr::Ip(host.parse().unwrap())),
+            Some(expected)
+        );
+    }
+    assert_eq!(
+        scope(&TransportAddr::Relay(
+            "https://relay.invalid/".parse().unwrap()
+        )),
+        None
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn empty_change_does_not_erase_close_fallback() {
     let mut last = "unknown";
     assert_eq!(selection(&mut last, None, true), "unknown");
@@ -77,9 +135,15 @@ fn empty_change_does_not_erase_close_fallback() {
 }
 
 impl Observer {
-    pub(super) fn new(conn: &Connection) -> Self {
+    pub(super) fn new(conn: &Connection, epoch: Option<u64>) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            device: epoch.map(|epoch| DeviceSample {
+                peer: conn.remote_id().to_string(),
+                epoch,
+                scope: None,
+                rtt_ms: None,
+            }),
             ordinal: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             events: conn.path_events(),
             closed: Default::default(),
@@ -105,6 +169,7 @@ impl Observer {
             self.partial = true;
         }
         Report {
+            device: self.device,
             ordinal: self.ordinal,
             phase: "close",
             selected: self.selected,
@@ -119,7 +184,13 @@ impl Observer {
                 last_stats,
                 ..
             } => self.closed[family(&remote_addr).0].add(&last_stats),
-            PathEvent::Selected { remote_addr, .. } => self.selected = family(&remote_addr).1,
+            PathEvent::Selected { remote_addr, .. } => {
+                self.selected = family(&remote_addr).1;
+                if let Some(d) = &mut self.device {
+                    d.scope = scope(&remote_addr);
+                    d.rtt_ms = None; // A selection event alone has no RTT sample.
+                }
+            }
             PathEvent::Lagged { .. } => self.partial = true,
             _ => (),
         }
@@ -135,14 +206,26 @@ impl Observer {
         for p in conn.paths().iter() {
             let (i, name) = family(p.remote_addr());
             families[i].open += 1;
-            families[i].add(&p.stats());
+            let stats = p.stats();
+            families[i].add(&stats);
             if p.is_selected() {
                 selected = Some(name);
+                if let Some(d) = &mut self.device {
+                    d.scope = scope(p.remote_addr());
+                    d.rtt_ms = u64::try_from(stats.rtt.as_millis()).ok();
+                }
             }
         }
         let selected = selection(&mut self.selected, selected, phase == "close");
         if tx
             .try_send(Report {
+                device: self.device.clone().map(|mut d| {
+                    if selected == "unknown" {
+                        d.scope = None;
+                        d.rtt_ms = None;
+                    }
+                    d
+                }),
                 ordinal: self.ordinal,
                 phase,
                 selected,
