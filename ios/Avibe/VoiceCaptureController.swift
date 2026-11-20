@@ -203,6 +203,8 @@ struct VoiceCaptureEnvironment {
     /// spoken at `oldest`, with Retry (`true`) and Discard (`false`); nil
     /// when it could not be shown.
     var presentUnsent: (_ count: Int, _ oldest: Date, _ answer: @escaping (Bool?) -> Void) -> Void
+    /// Whether that alert is on screen now.
+    var unsentAlertIsShown: () -> Bool
     /// Says a line in front, where the island is not drawn.
     var sayInFront: (VoiceCaptureAttributes.Reason) -> Void
     var now: () -> Date
@@ -273,6 +275,7 @@ struct VoiceCaptureEnvironment {
         outbox: (try? VoiceCaptureOutbox.standardDirectory()).map(VoiceCaptureOutbox.init(directory:)),
         scheduleUnsentNotice: { VoiceCaptureFailureNotification.scheduleUnsent(at: $0) },
         presentUnsent: { VoiceCaptureAlert.presentUnsent(count: $0, oldest: $1, answer: $2) },
+        unsentAlertIsShown: { VoiceCaptureAlert.unsentIsShown },
         sayInFront: { VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.reason($0))) },
         now: Date.init,
         sleep: { try? await Task.sleep(for: $0) }
@@ -588,6 +591,11 @@ final class VoiceCaptureController {
     /// (`.preparing`) for `startTake(inFront:)`, which the intent calls once
     /// it has brought Avibe forward.
     func beginPress() async -> Outcome? {
+        // What an earlier run left is known before this press's take can be
+        // sent: it goes in its turn, not ahead of them.
+        if loadOutbox() {
+            Task { await self.sendKept(.byItself) }
+        }
         // A reservation whose intent ended without coming forward (or
         // saying so) is abandoned once the wait is over.
         if case .preparing = state, let reservedAt,
@@ -687,8 +695,10 @@ final class VoiceCaptureController {
         if nextAutomatic != nil || draining {
             // Earlier takes are still on their way: this one waits its
             // turn behind them, and is never sent before them.
-            await keep(take, reason: .offline, automatic: true)
-            await sendKept(.byItself)
+            await keep(take, reason: .offline, automatic: true, queued: true)
+            // A pass that is running sends it in its turn; the stop does
+            // not wait for that.
+            if !askRunningPass(.byItself) { await sendKept(.byItself) }
         } else {
             await deliver(take)
         }
@@ -792,7 +802,9 @@ final class VoiceCaptureController {
         }
         state = .idle
         environment.outbox?.removeAll()
-        updateUnsentNotice()
+        // Also one an earlier run scheduled, which this run never read.
+        unsentNoticeFor = nil
+        environment.scheduleUnsentNotice(nil)
         guard !takes.isEmpty else { return [] }
         record("account transition: \(takes.count) take(s) given up")
         var barriers: [WebsiteDataStoreReleaseBarrier] = []
@@ -1275,6 +1287,13 @@ final class VoiceCaptureController {
             if failure == .closed { return .superseded }
             guard posted ? generation == sendGeneration : current else { return .superseded }
             if posted, failure != .consentRequired, failure != .signIn { return .unknown }
+            if posted, var entry = take.entry {
+                // The instance said no to the POST (sign in, or consent):
+                // it provably did not arrive, so it may be made again.
+                entry.posted = false
+                try? environment.outbox?.update(entry)
+                take.entry = entry
+            }
             switch failure {
             case .nothingHeard: return .nothingHeard
             // A "no" given since: stop, send nothing, keep nothing.
@@ -1470,9 +1489,11 @@ final class VoiceCaptureController {
             let dropped = try outbox.add(entry, movingAudioFrom: take.audio.url)
             take.entry = entry
             for old in dropped {
-                // Too many unsent takes: the oldest went.
-                if let gone = kept(old.id) { note("overflow", for: gone) }
-                parked.removeAll { $0.id == old.id }
+                // Too many unsent takes: the oldest went. It is over, a
+                // send under way for it included.
+                guard let gone = parked.first(where: { $0.id == old.id }) else { continue }
+                note("overflow", for: gone)
+                forget(gone)
             }
         } catch {
             record("outbox: could not keep the take on disk \(error)")
@@ -1484,12 +1505,15 @@ final class VoiceCaptureController {
     /// (还没发出去，连上你的 Avibe 后会自动发送。 when it is sent again by itself)
     /// with Retry and Discard, until `automaticWindow` after it was spoken;
     /// then the island goes and the take waits in the outbox for Retry.
-    private func keep(_ kept: Take, reason: VoiceCaptureAttributes.Reason, automatic: Bool) async {
+    private func keep(
+        _ kept: Take, reason: VoiceCaptureAttributes.Reason, automatic: Bool, queued: Bool = false
+    ) async {
         var take = kept
         let first = take.keptAt == nil
         if first {
             take.keptAt = environment.now()
-            note("kept:\(reason.rawValue)\(unreached(take))", for: take)
+            // `queued`: nothing failed for it; it waits behind an earlier take.
+            note(queued ? "queued" : "kept:\(reason.rawValue)\(unreached(take))", for: take)
         }
         take.keptReason = reason
         take.keptAutomatic = automatic
@@ -1571,8 +1595,10 @@ final class VoiceCaptureController {
         environment.now().timeIntervalSince(spokenAt(take)) < Self.automaticWindow
     }
 
-    /// Which kept takes a pass sends.
-    enum KeptScope {
+    /// Which kept takes a pass sends, from the narrowest to the widest.
+    enum KeptScope: Int, Comparable {
+        static func < (lhs: KeptScope, rhs: KeptScope) -> Bool { lhs.rawValue < rhs.rawValue }
+
         /// The schedule: those an unreachable instance kept, still within
         /// `automaticWindow`.
         case byItself
@@ -1622,26 +1648,55 @@ final class VoiceCaptureController {
     }
 
     private var draining = false
+    /// What was asked for while a pass was running: the running pass does
+    /// it before it ends, so a Retry is never dropped.
+    private var askedMeanwhile: (scope: KeptScope, showSending: Bool)?
+    private var passWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Asks for a pass without waiting for it: a pass that is running does
+    /// it too before it ends. False when none is running.
+    private func askRunningPass(_ scope: KeptScope, showSending: Bool = false) -> Bool {
+        guard draining else { return false }
+        askedMeanwhile = (
+            max(askedMeanwhile?.scope ?? scope, scope),
+            (askedMeanwhile?.showSending ?? false) || showSending
+        )
+        return true
+    }
 
     /// Sends the takes that are not sent yet and belong to `scope`, oldest
     /// first, one at a time, stopping at the first that still cannot reach
     /// the instance, so a later take never arrives before an earlier one
     /// that is on its way. A take that needs the user (it could not be
     /// turned into text, or it was spoken more than `automaticWindow` ago)
-    /// does not hold the others up.
+    /// does not hold the others up. One pass runs at a time; asked for
+    /// during one, this is done by that pass before it ends, and returns
+    /// when it has.
     func sendKept(_ scope: KeptScope, showSending: Bool = false) async {
-        guard !draining else { return }
+        if askRunningPass(scope, showSending: showSending) {
+            await withCheckedContinuation { passWaiters.append($0) }
+            return
+        }
         draining = true
-        var tried: Set<UUID> = []
-        while let next = keptTakes.first(where: {
-            !tried.contains($0.id) && sending != $0.id && belongs($0, to: scope)
-        }) {
-            tried.insert(next.id)
-            guard await sendOneKept(next.id, showSending: showSending) else { break }
+        var pass = (scope: scope, showSending: showSending)
+        while true {
+            var tried: Set<UUID> = []
+            while let next = keptTakes.first(where: {
+                !tried.contains($0.id) && sending != $0.id && belongs($0, to: pass.scope)
+            }) {
+                tried.insert(next.id)
+                guard await sendOneKept(next.id, showSending: pass.showSending) else { break }
+            }
+            guard let asked = askedMeanwhile else { break }
+            askedMeanwhile = nil
+            pass = asked
         }
         draining = false
         scheduleRetry()
         updateUnsentNotice()
+        let waiters = passWaiters
+        passWaiters = []
+        waiters.forEach { $0.resume() }
     }
 
     /// Sends one kept take. It stays kept while this runs, so a new press
@@ -1740,14 +1795,25 @@ final class VoiceCaptureController {
     /// The takes an earlier run of the App left in the outbox come back,
     /// oldest first, without islands; those older than a day, of another
     /// account, or whose POST was begun (it may have arrived, so it is
-    /// never made again) are removed. Then they are sent.
+    /// never made again) are removed. Then those still within their window
+    /// are sent.
     func restoreOutbox() async {
-        guard let outbox = environment.outbox, !restored else { return }
+        guard loadOutbox() else { return }
+        await sendKept(.byItself)
+    }
+
+    /// Reads the outbox once per run, sending nothing. True when it found
+    /// takes. A press does this before it records, so its take is never
+    /// sent ahead of an earlier one.
+    @discardableResult
+    private func loadOutbox() -> Bool {
+        guard let outbox = environment.outbox, !restored else { return false }
         restored = true
         for old in outbox.removeExpired(now: environment.now()) {
             noteRestored("expired", old)
         }
         let account = environment.target()?.accountID
+        var found = false
         for entry in outbox.entries() where kept(entry.id) == nil && !ended.contains(entry.id) {
             guard let target = entry.target, account == nil || target.accountID == account else {
                 outbox.remove(entry)
@@ -1774,12 +1840,14 @@ final class VoiceCaptureController {
                 keptAt: entry.createdAt, keptReason: reason, keptAutomatic: reason == .offline,
                 entry: entry, retries: entry.retries
             ))
+            found = true
         }
         parked.sort { ($0.entry?.sequence ?? .max) < ($1.entry?.sequence ?? .max) }
-        guard !parked.isEmpty else { return }
-        record("outbox: \(parked.count) kept from an earlier run")
-        await sendKept(.byItself)
-        scheduleRetry()
+        if found {
+            record("outbox: \(parked.count) kept from an earlier run")
+            updateUnsentNotice()
+        }
+        return found
     }
 
     private var restored = false
@@ -1811,36 +1879,44 @@ final class VoiceCaptureController {
         }
     }
 
-    private var unsentAlertShown = false
-
     /// Avibe came to the front. Takes spoken within `automaticWindow` are
     /// sent once more, silently; if any take is still unsent, one alert
     /// says how many and how long ago the oldest was spoken, with Retry
-    /// (all, oldest first) and Discard (all).
+    /// (all, oldest first) and Discard (the ones it spoke of). Not while a
+    /// take is being recorded or sent, and not over an alert already up:
+    /// the next time Avibe comes to the front asks then.
     func activated() async {
         await restoreOutbox()
         await removeExpired()
         guard !keptTakes.isEmpty else { return }
         await sendKept(.comingForward)
         let unsent = keptTakes
-        guard let oldest = unsent.map(spokenAt).min(), !unsentAlertShown, environment.isInFront() else { return }
-        unsentAlertShown = true
+        guard let oldest = unsent.map(spokenAt).min(), environment.isInFront(),
+              !environment.unsentAlertIsShown()
+        else {
+            return
+        }
+        switch state {
+        case .idle, .failed: break
+        case .preparing, .listening, .sending: return
+        }
+        let ids = Set(unsent.map(\.id))
         environment.presentUnsent(unsent.count, oldest) { [weak self] retry in
             Task { @MainActor in
                 guard let self else { return }
-                self.unsentAlertShown = false
                 switch retry {
                 case true?: await self.sendKept(.retry, showSending: true)
-                case false?: await self.discardAllKept()
+                case false?: await self.discardKept(ids)
                 case nil: break
                 }
             }
         }
     }
 
-    /// Discard in the alert: every take that is not sent yet is deleted.
-    func discardAllKept() async {
-        let takes = keptTakes
+    /// Discard in the alert: the takes it spoke of that are still unsent
+    /// are deleted (one kept since is not).
+    func discardKept(_ ids: Set<UUID>) async {
+        let takes = keptTakes.filter { ids.contains($0.id) }
         guard !takes.isEmpty else { return }
         note("discardedAll \(takes.count)")
         for take in takes { await discardKept(take) }

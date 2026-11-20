@@ -123,7 +123,8 @@ struct VoiceCaptureOutbox {
         do {
             try write(entry)
         } catch {
-            try? files.removeItem(at: destination)
+            // The audio goes back where it was: it is the take's only copy.
+            try? files.moveItem(at: destination, to: audio)
             throw error
         }
         let kept = entries()

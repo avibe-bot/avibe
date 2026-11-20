@@ -117,6 +117,23 @@ final class VoiceCaptureOutboxTests: XCTestCase {
         XCTAssertEqual(outbox.entries(), [transcribed])
     }
 
+    /// A record that cannot be written leaves the take's audio where it
+    /// was: it is the only copy.
+    func testAFailedWriteLeavesTheAudioWhereItWas() throws {
+        let audio = try take([7, 8, 9])
+        let entry = entry()
+        try FileManager.default.createDirectory(at: outbox.directory, withIntermediateDirectories: true)
+        // Something sits where the record would go.
+        let record = outbox.directory.appending(
+            path: "\(String(format: "%010d", entry.sequence))-\(entry.id.uuidString.lowercased()).json"
+        )
+        try FileManager.default.createDirectory(at: record, withIntermediateDirectories: true)
+        try Data().write(to: record.appending(path: "x"))
+        XCTAssertThrowsError(try outbox.add(entry, movingAudioFrom: audio))
+        XCTAssertEqual(try Data(contentsOf: audio), Data([7, 8, 9]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outbox.audioURL(for: entry.id).path))
+    }
+
     func testTheOldestGoesWhenTooManyAreKept() throws {
         var kept: [VoiceOutboxEntry] = []
         var dropped: [VoiceOutboxEntry] = []

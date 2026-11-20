@@ -121,7 +121,17 @@ enum VoiceCaptureAlert {
         let retry = UIAlertAction(title: unsentRetryTitle(count: count), style: .default) { _ in answer(true) }
         alert.addAction(retry)
         alert.preferredAction = retry
+        unsentAlert = alert
         presenter.present(alert, animated: true)
+    }
+
+    /// The unsent alert, while it is on screen. UIKit may drop an alert
+    /// without running an action (its presenter went away), so what is
+    /// asked is whether it is still presented, not whether it was answered.
+    private static weak var unsentAlert: UIAlertController?
+
+    static var unsentIsShown: Bool {
+        unsentAlert?.presentingViewController != nil
     }
 
     private static func topViewController() -> UIViewController? {
