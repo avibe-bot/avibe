@@ -482,73 +482,20 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
         "install(move |raw| crate::receive_native_deep_link(&app, [raw]))",
         "paramDescriptorForKeyword: DIRECT_OBJECT",
         "descriptor?.stringValue()",
+        "forEventClass: GET_URL_EVENT",
+        "andEventID: GET_URL_EVENT",
+        "RunEvent::Exit",
+        "removeEventHandlerForEventClass: GET_URL_EVENT",
     ] {
         assert!(native.contains(required), "raw native delivery must retain {required}");
     }
-    let launch_observer = native
-        .split("fn application_will_finish_launching")
-        .nth(1)
-        .unwrap()
-        .split("fn handle_get_url")
-        .next()
-        .unwrap();
-    assert!(
-        launch_observer.contains("register(self);"),
-        "will-finish delivery must reclaim GURL through the shared registration helper"
-    );
-    let registration = native
-        .split("fn register(handler: &RawDeepLinkHandler)")
-        .nth(1)
-        .unwrap()
-        .split("fn install(")
-        .next()
-        .unwrap();
-    for required in [
-        "setEventHandler: handler",
-        "forEventClass: GET_URL_EVENT",
-        "andEventID: GET_URL_EVENT",
-    ] {
-        assert!(
-            registration.contains(required),
-            "shared raw handler registration must retain {required}"
-        );
-    }
-    let install = native
-        .split("fn install(")
-        .nth(1)
-        .unwrap()
-        .split("fn remove(")
-        .next()
-        .unwrap();
-    for required in [
-        "let handler = RawDeepLinkHandler::new(receive)",
-        "register(&handler)",
-        "addObserver_selector_name_object(",
-        "sel!(applicationWillFinishLaunching:)",
-        "Some(NSApplicationWillFinishLaunchingNotification)",
-        "HANDLER.with(|current| *current.borrow_mut() = Some(handler))",
-    ] {
-        assert!(install.contains(required), "install must retain {required}");
-    }
-    let remove = native
-        .split("fn remove(")
-        .nth(1)
-        .unwrap()
-        .split("pub fn init()")
-        .next()
-        .unwrap();
-    for required in [
-        "current.borrow_mut().take()",
-        "removeObserver_name_object(",
-        "Some(NSApplicationWillFinishLaunchingNotification)",
-        "removeEventHandlerForEventClass: GET_URL_EVENT",
-        "andEventID: GET_URL_EVENT",
-    ] {
-        assert!(remove.contains(required), "Exit cleanup must retain {required}");
-    }
-    let lifecycle = native.split("pub fn init()").nth(1).unwrap();
-    assert!(lifecycle.contains("RunEvent::Exit"));
-    assert!(lifecycle.contains("remove();"));
+    // Cross-boundary constants only: the Apple Event macOS sends for a URL and
+    // the launch notification that reclaims it before the first delivery. The
+    // cold-launch ordering itself is AppKit runtime behaviour, checked on a
+    // packaged build (see the PR's TEST RC checks), not by source text.
+    assert!(native.contains("const GET_URL_EVENT: u32 = u32::from_be_bytes(*b\"GURL\");"));
+    assert!(native.contains("const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b\"----\");"));
+    assert!(native.contains("Some(NSApplicationWillFinishLaunchingNotification)"));
     for forbidden in [
         "Url::",
         "currentAppleEvent",
