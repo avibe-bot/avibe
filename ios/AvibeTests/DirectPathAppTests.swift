@@ -5253,6 +5253,307 @@ final class DirectPathAppTests: XCTestCase {
         )
     }
 
+    // MARK: This device's path choice
+
+    /// "Cloudflare tunnel only" for an instance: its open prepares no route,
+    /// binds no listener and selects nothing, so the transport never dials
+    /// and nothing can hand over; its pages are told the tunnel. Another
+    /// instance, automatic, still dials.
+    @MainActor
+    func testTunnelOnlyOpensWithoutARouteASelectionOrAHandover() async throws {
+        let routeWrites = try ProxyConfigurationWrites.count()
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let defaults = try XCTUnwrap(appDefaults)
+        DirectPathPreferenceStore(defaults: defaults).set(
+            DirectPathPreference(mode: .tunnel),
+            accountID: "account-1",
+            origin: instance.serialized
+        )
+
+        let runtime = try await select("instance-1", in: app)
+        XCTAssertEqual(app.directPathPreference(for: runtime).mode, .tunnel)
+        // The route would have been prepared, and the selection made, in
+        // the turns after the open.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(transport.selections.count, 0)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
+        XCTAssertTrue(app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty)
+        let status = await withCheckedContinuation { continuation in
+            app.directStatusProvider?(instance) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(status?.preferred, .tunnel)
+        let handover = await withCheckedContinuation { continuation in
+            app.directHandoverProvider?(instance, true) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(handover, .skipped(.notUsable))
+
+        _ = try await select("instance-2", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+        }
+    }
+
+    /// The page sets the choice for its own instance: the answer comes
+    /// first, then the instance opens again at the page's URL, once, on the
+    /// new path; setting the same mode again reopens nothing. Unknown modes
+    /// are refused by the bridge (`testTheDirectPreferenceSurface...`).
+    @MainActor
+    func testSettingTheChoiceReopensTheInstanceWhereThePageWas() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.count == 1
+        }
+        let provider = try XCTUnwrap(app.directPreferenceProvider)
+        XCTAssertEqual(provider.read(instance), .automatic)
+        // Another origin's page is not the open instance's.
+        let other = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
+        XCTAssertNil(provider.read(other))
+
+        let page = try XCTUnwrap(URL(string: "https://instance-one.example/settings/devices/connection"))
+        let identity = try XCTUnwrap(app.runtimeOpenAttempt).id
+        let answer = provider.write(instance, .tunnel, page)
+        XCTAssertEqual(answer, DirectPathPreference(mode: .tunnel))
+        // Answered before anything was reopened.
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, identity)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > identity }
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(transport.deselectCount, 1)
+        XCTAssertEqual(app.takeRuntimeStartURL(for: runtime), page)
+        XCTAssertNil(app.takeRuntimeStartURL(for: runtime))
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(transport.selections.count, 1)
+
+        let reopened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        XCTAssertEqual(provider.write(instance, .tunnel, page), DirectPathPreference(mode: .tunnel))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, reopened)
+
+        // Back to automatic: it dials again.
+        XCTAssertEqual(provider.write(instance, .automatic, page), .automatic)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.count == 2
+        }
+    }
+
+    /// "Cloudflare tunnel only" and the instance cannot be reached on it (its
+    /// open runs out of time, or its document fails to load) while the
+    /// device has a network and avibe.bot lists it online: the choice goes
+    /// back to automatic, says so, and the instance opens again, automatic.
+    /// Once: an automatic open that then fails ends as any open. Without a
+    /// network nothing is changed.
+    @MainActor
+    func testTunnelOnlyGoesBackToAutomaticWhenTheInstanceCannotBeReached() async throws {
+        let network = StandInNetworkPath()
+        let timing = RuntimeOpenManualTiming()
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(
+            directTransport: transport,
+            runtimeOpenTiming: timing,
+            networkPath: network
+        )
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        let tunnelOnly = {
+            store.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: self.instance.serialized)
+        }
+
+        // Out of time, without a network: unchanged, and to the list.
+        tunnelOnly()
+        network.isSatisfied = false
+        _ = try await select("instance-1", in: app)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .tunnel)
+
+        // Out of time, with a network: automatic, reverted, opened again.
+        network.isSatisfied = true
+        _ = try await select("instance-1", in: app)
+        let timedOut = try XCTUnwrap(app.runtimeOpenAttempt).id
+        timing.advance(by: .seconds(60))
+        let reverted = store.preference(accountID: "account-1", origin: instance.serialized)
+        XCTAssertEqual(reverted.mode, .automatic)
+        XCTAssertEqual(reverted.reverted?.reason, .unreachable)
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .replaced)
+        XCTAssertGreaterThan(try XCTUnwrap(app.runtimeOpenAttempt).id, timedOut)
+        _ = try await waitForBrowser("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.map(\.runtime.instance.id) == ["instance-1"]
+        }
+        XCTAssertEqual(try XCTUnwrap(app.directPreferenceProvider).read(instance), reverted)
+
+        // Once: the automatic open running out of time ends as any open.
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized), reverted)
+
+        // The document failing to load counts the same.
+        tunnelOnly()
+        let again = try await select("instance-1", in: app)
+        let failed = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: failed.id,
+            runtime: again
+        )
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .automatic)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > failed.id }
+        _ = try await waitForBrowser("instance-1", in: app)
+    }
+
+    /// The bridge surface: `directPreference` 1 only with a provider; the
+    /// reading takes no parameters; the setting takes exactly a known mode
+    /// (a later mode is refused, not guessed); both answer the agreed shape;
+    /// the event reaches only a document on the instance's origin.
+    @MainActor
+    func testTheDirectPreferenceSurfaceTakesOnlyKnownModes() async throws {
+        var written: [(WebOrigin, DirectPathPreference.Mode, URL)] = []
+        let reverted = DirectPathPreference(
+            mode: .automatic,
+            reverted: .init(at: Date(timeIntervalSince1970: 1_700_000_000), reason: .unreachable)
+        )
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in
+                    reply(DirectPathStatus(preferred: .tunnel, sequence: 1, closure: 0))
+                },
+                directHandover: { _, _, reply in reply(.skipped(.notUsable)) },
+                directPreference: DirectPreferenceProvider(
+                    read: { _ in reverted },
+                    write: { origin, mode, url in
+                        written.append((origin, mode, url))
+                        return DirectPathPreference(mode: mode)
+                    }
+                )
+            )
+        )
+        let loader = PageLoader()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML(
+            "<!doctype html><title>instance</title>",
+            baseURL: instance.url,
+            in: webView
+        )
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const canon = (value) => JSON.stringify(value, (key, item) =>
+              item && typeof item === "object" && !Array.isArray(item)
+                ? Object.fromEntries(Object.entries(item).sort()) : item);
+            const refusals = [];
+            for (const params of [{mode: "relayOff"}, {}, {mode: "tunnel", extra: 1}, {mode: 1}]) {
+              try {
+                await window.avibeNative.call("direct.setPreference", params);
+                refusals.push("accepted");
+              } catch (error) {
+                refusals.push(error.code);
+              }
+            }
+            try {
+              await window.avibeNative.call("direct.preference", {mode: "tunnel"});
+              refusals.push("accepted");
+            } catch (error) {
+              refusals.push(error.code);
+            }
+            const read = await window.avibeNative.call("direct.preference");
+            const set = await window.avibeNative.call("direct.setPreference", {mode: "tunnel"});
+            return canon({
+              capability: window.avibeNative.capabilities.directPreference,
+              read, set, refusals
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(
+            result as? String,
+            #"{"capability":1,"read":{"mode":"automatic","reverted":{"at":1700000000000,"reason":"unreachable"}},"refusals":["invalid_argument","invalid_argument","invalid_argument","invalid_argument","invalid_argument"],"set":{"mode":"tunnel","reverted":null}}"#
+        )
+        XCTAssertEqual(written.count, 1)
+        XCTAssertEqual(written.first?.0, instance)
+        XCTAssertEqual(written.first?.1, .tunnel)
+        XCTAssertEqual(written.first?.2, webView.url)
+
+        // The event, on this origin only.
+        let script = try XCTUnwrap(reverted.eventScript(for: instance))
+        let heard = try await webView.callAsyncJavaScript(
+            """
+            const heard = new Promise((resolve) => {
+              window.addEventListener("avibe:native:direct.preferenceChanged",
+                (event) => resolve(JSON.stringify(event.detail, (key, item) =>
+                  item && typeof item === "object" && !Array.isArray(item)
+                    ? Object.fromEntries(Object.entries(item).sort()) : item)), {once: true});
+            });
+            eval(script);
+            return await heard;
+            """,
+            arguments: ["script": script],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(
+            heard as? String,
+            #"{"mode":"automatic","reverted":{"at":1700000000000,"reason":"unreachable"}}"#
+        )
+        let elsewhere = try XCTUnwrap(
+            reverted.eventScript(for: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example")))
+        )
+        XCTAssertTrue(elsewhere.contains("window.location.origin !== event.origin"))
+
+        // Without a provider there is no capability and no answer.
+        let bare = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in reply(nil) }
+            )
+        )
+        let bareLoader = PageLoader()
+        bare.navigationDelegate = bareLoader
+        try await bareLoader.loadHTML("<!doctype html>", baseURL: instance.url, in: bare)
+        let bareResult = try await bare.callAsyncJavaScript(
+            """
+            let code = "answered";
+            try { await window.avibeNative.call("direct.preference"); } catch (error) { code = error.code; }
+            return JSON.stringify({capability: window.avibeNative.capabilities.directPreference ?? null, code});
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(bareResult as? String, #"{"capability":null,"code":"unsupported"}"#)
+    }
+
+    /// The stored choices: per account and instance; a mode this build
+    /// does not know reads as automatic; automatic with nothing to say is
+    /// not kept.
+    @MainActor
+    func testTheStoredChoiceIsPerAccountAndInstanceAndAnUnknownModeReadsAutomatic() throws {
+        let suite = "DirectPathPreference.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = DirectPathPreferenceStore(defaults: defaults)
+        store.set(DirectPathPreference(mode: .tunnel), accountID: "a", origin: "https://one.example")
+        XCTAssertEqual(store.preference(accountID: "a", origin: "https://one.example").mode, .tunnel)
+        XCTAssertEqual(store.preference(accountID: "a", origin: "https://two.example"), .automatic)
+        XCTAssertEqual(store.preference(accountID: "b", origin: "https://one.example"), .automatic)
+        store.set(.automatic, accountID: "a", origin: "https://one.example")
+        XCTAssertNil(defaults.dictionary(forKey: DirectPathPreferenceStore.key)?["a https://one.example"])
+        defaults.set(
+            ["a https://one.example": Data(#"{"mode":"lanOnly"}"#.utf8)],
+            forKey: DirectPathPreferenceStore.key
+        )
+        XCTAssertEqual(store.preference(accountID: "a", origin: "https://one.example"), .automatic)
+        XCTAssertNil(DirectPathPreference.Mode(name: "lanOnly"))
+    }
+
     // MARK: Account over the runtime while a push request runs
 
     /// The avatar while a push request the App made on its own is running:
@@ -6015,7 +6316,7 @@ final class DirectPathAppTests: XCTestCase {
             NativeBridgeMethod.allCases
                 .map(\.rawValue)
                 .filter { $0.hasPrefix("direct.") },
-            ["direct.status", "direct.handover"]
+            ["direct.status", "direct.handover", "direct.preference", "direct.setPreference"]
         )
     }
 
@@ -6628,6 +6929,7 @@ final class DirectPathAppTests: XCTestCase {
         pushNotificationCenter: PushNotificationCentering? = nil,
         runtimeOpenTiming: RuntimeOpenTiming? = nil,
         runtimeOpenNotificationCenter: NotificationCenter = .default,
+        networkPath: NetworkPathReading? = nil,
         systemSchedulePlatform: SystemSchedulePlatforming? = nil,
         systemScheduleNow: @escaping @MainActor () -> Date = Date.init,
         systemScheduleCheckpoint: ((FaultingSystemScheduleFileIO.Checkpoint) throws -> Void)? = nil,
@@ -6763,7 +7065,8 @@ final class DirectPathAppTests: XCTestCase {
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter()
+                badgeCenter: SilentBadgeCenter(),
+                networkPath: networkPath
             )
         } else if let directTransport {
             app = AppModel(
@@ -6782,7 +7085,8 @@ final class DirectPathAppTests: XCTestCase {
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter()
+                badgeCenter: SilentBadgeCenter(),
+                networkPath: networkPath
             )
         } else {
             app = AppModel(
@@ -6800,7 +7104,8 @@ final class DirectPathAppTests: XCTestCase {
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter()
+                badgeCenter: SilentBadgeCenter(),
+                networkPath: networkPath
             )
         }
         notifications?.app = app
@@ -8285,4 +8590,9 @@ private final class RootViewStandIn {
             Made(runtime: runtime, controller: controller, providerUpdateInFlight: inFlight)
         )
     }
+}
+
+@MainActor
+private final class StandInNetworkPath: NetworkPathReading {
+    var isSatisfied = true
 }

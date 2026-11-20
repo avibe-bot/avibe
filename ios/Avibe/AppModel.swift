@@ -319,6 +319,14 @@ final class AppModel: ObservableObject {
     /// The next open of this runtime loads live, skipping the cache once
     /// (Retry over a cached page that could not connect).
     private var runtimeLoadsLiveOnce: MobileRuntimeContext?
+    /// This device's path choice per account and instance.
+    private let directPathPreferences: DirectPathPreferenceStore
+    /// Whether the device has a network: without one, an instance that
+    /// cannot be reached says nothing about its path.
+    private let networkPath: NetworkPathReading
+    /// Where the next open of this runtime starts: a reopen after this
+    /// device's path choice changed, at the page that changed it.
+    private var runtimeStartURL: (runtime: MobileRuntimeContext, url: URL)?
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -516,6 +524,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Answers `direct.preference` and `direct.setPreference` for the
+    /// runtime's pages; `nil` without a direct transport, when there is
+    /// nothing to choose between.
+    var directPreferenceProvider: DirectPreferenceProvider? {
+        guard directPathController != nil else {
+            return nil
+        }
+        return DirectPreferenceProvider(
+            read: { [weak self] origin in
+                guard let self, let runtime = self.runtimeShowing(origin) else { return nil }
+                return self.directPathPreference(for: runtime)
+            },
+            write: { [weak self] origin, mode, url in
+                self?.setDirectPathPreference(mode, at: origin, reopeningAt: url)
+            }
+        )
+    }
+
     var pushCoordinator: NativePushCoordinator {
         nativePushCoordinator
     }
@@ -546,9 +572,12 @@ final class AppModel: ObservableObject {
         runtimeOpenLongWait: Duration = .seconds(8),
         runtimeOpenNotificationCenter: NotificationCenter = .default,
         badgeCenter: AppBadgeCentering? = nil,
-        healthSync: HealthSyncCoordinator? = nil
+        healthSync: HealthSyncCoordinator? = nil,
+        networkPath: NetworkPathReading? = nil
     ) {
         self.defaults = defaults
+        self.directPathPreferences = DirectPathPreferenceStore(defaults: defaults)
+        self.networkPath = networkPath ?? SystemNetworkPath()
         self.healthSync = healthSync
         self.controlPlane = controlPlane
         let directFaultMarker = directFaultMarker
@@ -1603,6 +1632,11 @@ final class AppModel: ObservableObject {
         guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
             return false
         }
+        if revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
+            // Opened again, automatic: this attempt is replaced.
+            openRuntime(attempt.runtime)
+            return true
+        }
         if attempt.phase == .showingCachedLive {
             // The page stays; a banner says the instance is not reachable,
             // with Retry. A later live navigation is covered as any open.
@@ -2110,8 +2144,130 @@ final class AppModel: ObservableObject {
                     phase: .failed,
                     attemptID: attemptID
                 )
+                if revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
+                    // Opened again, automatic, once this callback has
+                    // returned; the failed attempt waits for nothing else.
+                    let runtime = attempt.runtime
+                    Task { @MainActor [weak self] in
+                        guard
+                            let self,
+                            self.runtimeIdentity == attemptID,
+                            self.runtimeOpenAttempt?.id == attemptID,
+                            self.runtimeOpenAttempt?.phase == .failed
+                        else {
+                            return
+                        }
+                        self.openRuntime(runtime)
+                    }
+                }
             }
         }
+    }
+
+    // MARK: This device's path choice
+
+    private func preferenceOrigin(_ runtime: MobileRuntimeContext) -> String? {
+        WebOrigin(url: runtime.instance.url)?.serialized
+    }
+
+    func directPathPreference(for runtime: MobileRuntimeContext) -> DirectPathPreference {
+        guard let origin = preferenceOrigin(runtime) else {
+            return .automatic
+        }
+        return directPathPreferences.preference(accountID: runtime.account.id, origin: origin)
+    }
+
+    /// Whether opens of `runtime` may use the direct path.
+    private func allowsDirect(_ runtime: MobileRuntimeContext) -> Bool {
+        directPathPreference(for: runtime).mode == .automatic
+    }
+
+    /// The runtime on screen, if it is `origin`'s and still selected.
+    private func runtimeShowing(_ origin: WebOrigin) -> MobileRuntimeContext? {
+        guard
+            let runtime = route.runtime,
+            WebOrigin(url: runtime.instance.url) == origin,
+            sessionCoordinator.isSelectedRuntime(runtime)
+        else {
+            return nil
+        }
+        return runtime
+    }
+
+    /// The page chose a path for its instance. Kept, any earlier automatic
+    /// reversion cleared; a change of mode reopens the instance at `url`
+    /// after this answer, so every connection starts again on the new path.
+    private func setDirectPathPreference(
+        _ mode: DirectPathPreference.Mode,
+        at origin: WebOrigin,
+        reopeningAt url: URL
+    ) -> DirectPathPreference? {
+        guard
+            let runtime = runtimeShowing(origin),
+            let key = preferenceOrigin(runtime)
+        else {
+            return nil
+        }
+        let previous = directPathPreference(for: runtime)
+        let next = DirectPathPreference(mode: mode, reverted: nil)
+        directPathPreferences.set(next, accountID: runtime.account.id, origin: key)
+        guard previous.mode != mode else {
+            return next
+        }
+        let identity = runtimeIdentity
+        Task { @MainActor [weak self] in
+            guard
+                let self,
+                self.runtimeIdentity == identity,
+                self.route.runtime == runtime,
+                self.sessionCoordinator.isSelectedRuntime(runtime)
+            else {
+                return
+            }
+            self.runtimeStartURL = (runtime, url)
+            self.openRuntime(runtime)
+        }
+        return next
+    }
+
+    /// The URL the new controller of `runtime` starts at, once.
+    func takeRuntimeStartURL(for runtime: MobileRuntimeContext) -> URL? {
+        guard let start = runtimeStartURL, start.runtime == runtime else {
+            return nil
+        }
+        runtimeStartURL = nil
+        return start.url
+    }
+
+    /// "Cloudflare tunnel only", and this open of the instance ran out of
+    /// time or failed to load, while the device has a network and avibe.bot
+    /// lists the instance online: the path is what fails, so the choice
+    /// goes back to automatic (once; it stays automatic until chosen
+    /// again), and the page is told. The caller opens it again.
+    private func revertTunnelOnlyIfUnreachable(attemptID: Int) -> Bool {
+        guard
+            directPathController != nil,
+            !directListenerFault,
+            runtimeIdentity == attemptID,
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            route.runtime == attempt.runtime,
+            sessionCoordinator.isSelectedRuntime(attempt.runtime),
+            networkPath.isSatisfied,
+            sessionCoordinator.currentInstances
+                .first(where: { $0.id == attempt.runtime.instance.id })?.available == true,
+            directPathPreference(for: attempt.runtime).mode == .tunnel,
+            let origin = preferenceOrigin(attempt.runtime)
+        else {
+            return false
+        }
+        let reverted = DirectPathPreference(
+            mode: .automatic,
+            reverted: .init(at: Date(), reason: .unreachable)
+        )
+        directPathPreferences.set(reverted, accountID: attempt.runtime.account.id, origin: origin)
+        runtimeController?.deliverDirectPreferenceChanged(reverted)
+        return true
     }
 
     private func isAuthenticationDestination(
@@ -2183,12 +2339,23 @@ final class AppModel: ObservableObject {
         runtimeOpenAttempt = nil
         cancelRuntimeOpenTimers()
         stopRuntime()
+        let directAllowed = allowsDirect(runtime)
         let identity = beginRuntimeOpenAttempt(
             for: runtime,
-            phase: directPathController == nil ? .connecting : .preparingRoute
+            phase: directPathController == nil || !directAllowed ? .connecting : .preparingRoute
         )
         guard let directPathController else {
             route = .browser(runtime)
+            return true
+        }
+        guard directAllowed else {
+            // Cloudflare tunnel only: no route is prepared and nothing is
+            // selected, so the transport never dials and no plan has a
+            // direct candidate. A host routed earlier in this process still
+            // loads through the listener (public candidates only), so its
+            // load gate still decides, as for any open.
+            route = .loading
+            settleOpen(of: runtime, identity: identity)
             return true
         }
         // The route for the instance's host must be in place before the
@@ -2248,7 +2415,9 @@ final class AppModel: ObservableObject {
             deferredOpen = nil
             setRuntimeOpenPhase(.connecting, attemptID: identity)
             route = .browser(runtime)
-            directPathController.runtimeDidOpen(runtime)
+            if allowsDirect(runtime) {
+                directPathController.runtimeDidOpen(runtime)
+            }
         case .held:
             deferredOpen = (runtime, identity)
         case .fault:
@@ -2689,6 +2858,7 @@ final class AppModel: ObservableObject {
         // separately and removed when it signs out or changes).
         runtimePageCache.removeAll()
         runtimeLoadsLiveOnce = nil
+        runtimeStartURL = nil
         // Any account invalidation ends a route-prepare or held open; neither
         // may leave the Native loading surface behind without an attempt.
         retireRuntimeOpenForAccountTransition()
