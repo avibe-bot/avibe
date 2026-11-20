@@ -1294,10 +1294,10 @@ async def test_an_interval_begun_again_gives_each_verdict_once(fake: FakeFeishu,
 class _History:
     """A page of a chat's history, or a refusal, as the adapter's API client gives it."""
 
-    def __init__(self, people: Tuple[str, ...] = (), more: str = "", code: int = 0) -> None:
+    def __init__(self, people: Tuple[str, ...] = (), more: str = "", code: int = 0, data: Any = None) -> None:
         self.code, self.msg = code, "ok" if code == 0 else "system busy"
         items = [{"message_id": message_id, "sender": {"sender_type": "user"}} for message_id in people]
-        self.data = {"items": items, "has_more": bool(more), "page_token": more}
+        self.data = data if data is not None else {"items": items, "has_more": bool(more), "page_token": more}
 
     def success(self) -> bool:
         return self.code == 0
@@ -1373,7 +1373,53 @@ async def test_the_end_of_the_check_is_one_moment(clock: _Clock, caplog: pytest.
     assert pages["oc_a"] and pages["oc_b"]  # nothing was asked for after the end
 
 
-@pytest.mark.parametrize("comes_back", ["a page with more to come", "a page of nothing", "a failure"])
+_NOT_PAGES = {
+    "more promised, no token": {"items": [{"message_id": "om_new", "sender": {"sender_type": "user"}}], "has_more": True},
+    "an entry that is nothing": {"items": [None]},
+    "items that are no list": {"items": {"message_id": "om_new"}},
+    "a sender that is no object": {"items": [{"message_id": "om_new", "sender": "user"}]},
+    "a person's message without an id": {"items": [{"sender": {"sender_type": "user"}}]},
+    "no object at all": ["om_new"],
+}
+
+
+@pytest.mark.parametrize("not_a_page", sorted(_NOT_PAGES))
+async def test_a_reply_that_is_not_a_page_is_a_reading_that_failed(
+    clock: _Clock, caplog: pytest.LogCaptureFixture, not_a_page: str
+):
+    """Nothing is taken from half a page: the interval is read again, and the other chats are read meanwhile."""
+    from modules.im.feishu_history_check import FeishuHistoryCheck
+
+    whole = _History(people=("om_old", "om_new"))
+    pages = {"oc_a": [_History(data=_NOT_PAGES[not_a_page]), _History(data=_NOT_PAGES[not_a_page]), whole]}
+    asked: List[Tuple[str, int]] = []
+
+    async def list_messages(chat_id: str, start: int, _end: int, _page: Optional[str]) -> _History:
+        asked.append((chat_id, start))
+        return pages[chat_id].pop(0) if pages.get(chat_id) else _History(people=(f"om_in_{chat_id}",))
+
+    check = FeishuHistoryCheck(list_messages)
+    for _ in range(3):
+        clock.now += 600
+        await check.run_once(["oc_a", "oc_b"])
+
+    assert [chat_id for chat_id, _ in asked] == ["oc_a", "oc_b"] * 3
+    assert len({start for chat_id, start in asked if chat_id == "oc_a"}) == 1  # from the same start each time
+    assert check.snapshot() == {
+        "people_messages": 3,  # the two of the chat that was read at last, and the other chat's one
+        "matched": 0,
+        "missing": 3,
+        "arrived_late": 0,
+        "readings_failed": 2,
+        "ended": False,
+    }
+    assert caplog.text.count("chat oc_a could not be read") == 1  # said once
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "comes_back", ["a page with more to come", "a page of nothing", "a failure", "a reply that is not a page"]
+)
 async def test_a_reading_under_way_when_the_check_ends_asks_for_nothing_more(
     clock: _Clock, caplog: pytest.LogCaptureFixture, comes_back: str
 ):
@@ -1388,6 +1434,8 @@ async def test_a_reading_under_way_when_the_check_ends_asks_for_nothing_more(
         await release.wait()
         if comes_back == "a failure":
             return _History(code=1)
+        if comes_back == "a reply that is not a page":
+            return _History(data={"items": [None]})
         return _History(people=("om_lost",), more="2") if comes_back == "a page with more to come" else _History()
 
     with patch("modules.im.feishu_history_check._LIMIT", 2):

@@ -167,8 +167,9 @@ class FeishuHistoryCheck:
 
         Returns them with the token to go on from, when the page limit stopped
         the reading before the interval's end. Raises ``_NotRead`` when Feishu
-        does not give the history, for whatever reason, and ``_Over`` instead
-        of asking for a page once the check is over.
+        does not give the history, for whatever reason (a reply that is not a
+        page included), and ``_Over`` instead of asking for a page, or looking
+        at one, once the check is over.
         """
         found: List[str] = []
         for _ in range(_PAGE_LIMIT):
@@ -178,17 +179,49 @@ class FeishuHistoryCheck:
                 reply = await self._list_messages(chat_id, start, end, page_token)
             except Exception as exc:
                 raise _NotRead(type(exc).__name__) from None
+            if self.counts.ended:
+                raise _Over()  # what comes back after the end is not looked at
             if not reply.success():
                 raise _NotRead(f"code={reply.code} msg={reply.msg}")
-            data = reply.data or {}
-            for item in data.get("items") or []:
-                sender = item.get("sender") or {}
-                if sender.get("sender_type") == "user" and item.get("message_id"):
-                    found.append(item["message_id"])
-            page_token = data.get("page_token") or None
-            if not data.get("has_more") or not page_token:
+            people, page_token = _page(reply.data)
+            found.extend(people)
+            if page_token is None:
                 return found, None
         return found, page_token
+
+
+def _page(data: Any) -> Tuple[List[str], Optional[str]]:
+    """The ids of the people's messages on one page, and the token of the next page if there is one.
+
+    Anything that is not such a page is a reading that failed: to take half of
+    it would be to pass over messages without saying so.
+    """
+    if data is None:
+        data = {}
+    items = data.get("items") if isinstance(data, dict) else 0
+    if items is None:
+        items = []
+    if not isinstance(items, list):
+        raise _NotRead("a reply that is not a page")
+    people: List[str] = []
+    for item in items:
+        sender = item.get("sender") if isinstance(item, dict) else 0
+        if sender is None:
+            sender = {}
+        if not isinstance(sender, dict):
+            raise _NotRead("a page with an entry that is not a message")
+        if sender.get("sender_type") != "user":
+            continue
+        message_id = item.get("message_id")
+        if not isinstance(message_id, str) or not message_id:
+            raise _NotRead("a page with a message that has no id")
+        people.append(message_id)
+    if not data.get("has_more"):
+        return people, None
+    page_token = data.get("page_token")
+    if not isinstance(page_token, str) or not page_token:
+        raise _NotRead("a page that promises more and does not say where")
+    return people, page_token
 
 
 class _Over(Exception):
