@@ -26,8 +26,11 @@ logger = logging.getLogger(__name__)
 
 # A message is looked for once it is this old: time for the event to arrive.
 _SETTLE_SECONDS = 120
-# Events are remembered as long as Feishu may still send one again.
+# An event is remembered until every chat's history has been read past the time it arrived
+# (and for as long as Feishu may still send it again), but not for ever: a chat that cannot
+# be read for longer than this is, for that stretch, not checkable.
 _REMEMBER_SECONDS = 8 * 3600
+_EVIDENCE_SECONDS = 7 * 24 * 3600
 # Pages (of 50) read of one chat in one go; a longer history is gone on with next time.
 _PAGE_LIMIT = 40
 
@@ -39,6 +42,7 @@ class HistoryCounts:
     missing: int = 0
     arrived_late: int = 0
     readings_failed: int = 0
+    not_checkable: int = 0
 
 
 class FeishuHistoryCheck:
@@ -75,7 +79,8 @@ class FeishuHistoryCheck:
 
     async def run_once(self, direct_chats: Iterable[str]) -> None:
         end = int(time.time()) - _SETTLE_SECONDS
-        for chat_id in sorted(set(direct_chats)):
+        direct_chats = sorted(set(direct_chats))
+        for chat_id in direct_chats:
             unfinished = self._unfinished.get(chat_id)
             if unfinished is not None:
                 start, until, page_token = unfinished  # the same interval, from where the reading stopped
@@ -106,10 +111,17 @@ class FeishuHistoryCheck:
                 self.counts.people_messages += 1
                 with self._lock:
                     arrived = message_id in self._event_at
-                    if not arrived:
+                    checkable = arrived or start >= time.time() - _EVIDENCE_SECONDS
+                    if checkable and not arrived:
                         self._missing[message_id] = chat_id
                 if arrived:
                     self.counts.matched += 1
+                elif not checkable:
+                    # The interval reaches back past what is remembered of the events: no verdict.
+                    self.counts.not_checkable += 1
+                    logger.warning(
+                        "Feishu history check: message %s in chat %s is too old to be checked", message_id, chat_id
+                    )
                 else:
                     self.counts.missing += 1
                     logger.error(
@@ -117,7 +129,12 @@ class FeishuHistoryCheck:
                         message_id,
                         chat_id,
                     )
-        forget_before = time.time() - _REMEMBER_SECONDS
+        now = time.time()
+        # Nothing is forgotten that a history not yet read may still be held against.
+        read_up_to = min(
+            (self._checked_until.get(chat_id, self._started_at) for chat_id in set(direct_chats)), default=now
+        )
+        forget_before = max(min(now - _REMEMBER_SECONDS, read_up_to - _REMEMBER_SECONDS), now - _EVIDENCE_SECONDS)
         with self._lock:
             for message_id in [key for key, at in self._event_at.items() if at < forget_before]:
                 del self._event_at[message_id]

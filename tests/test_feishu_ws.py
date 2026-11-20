@@ -1132,6 +1132,36 @@ async def test_history_longer_than_one_reading_is_continued_not_skipped(
         assert [request.get("page_token", "") for request in fake.history_requests][:3] == ["", "2", "4"]
 
 
+async def test_a_history_that_could_not_be_read_for_hours_is_still_judged_fairly(fake: FakeFeishu, clock: _Clock):
+    """What arrived is remembered until the history has been read past it; beyond a week there is no verdict."""
+    with running_adapter(fake, long_connection="own") as adapter:
+        bot = adapter.bot
+        bot._dm_chat_ids.add("oc_dm")
+        base = int(clock.now) + 60
+        fake.history = {"oc_dm": [("om_early", "user", base + 10)]}
+        fake.wait_acknowledged(fake.push_event(message_event(event_id="e_early", message_id="om_early")))
+
+        # Nine hours in which the history cannot be read.
+        for _ in range(54):
+            clock.now += 600
+            fake.history_replies = [(200, {"code": 1, "msg": "system busy"})]
+            await bot._report_connections()
+        clock.now += 600
+        await bot._report_connections()
+
+        counts = bot._history_check.counts
+        assert (counts.people_messages, counts.matched, counts.missing) == (1, 1, 0)
+
+        # A second chat whose history opens up only after eight days: its old messages get no verdict.
+        bot._dm_chat_ids.add("oc_late")
+        bot._history_check._checked_until["oc_late"] = base
+        fake.history["oc_late"] = [("om_ancient", "user", base + 20)]
+        clock.now += 8 * 24 * 3600
+        await bot._report_connections()
+
+        assert (counts.missing, counts.not_checkable) == (0, 1)
+
+
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):
     fake.history_delay = 20.0
     with patch("modules.im.feishu._CONNECTION_REPORT_SECONDS", 0.2):
