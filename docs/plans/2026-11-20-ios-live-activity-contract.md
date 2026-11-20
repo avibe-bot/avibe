@@ -237,7 +237,8 @@ Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`,
 
 - Through the relay and APNs, only the phase enum and Unix seconds travel in the clear; names and titles stay on the phone.
 - An activity token's death never affects the device's ordinary notifications.
-- A tracked Turn produces at most one `end`, and nothing after it. An activity the person dismissed is never re-created.
+- A tracked Turn has exactly one terminal state. Once its end has been attempted, the publisher sends nothing but that same end again; on the wire it can arrive more than once, because a send whose answer is lost is resent (§4.3) and the relay keeps no idempotency state. Every copy carries the same `phase`, `started_at`, and `ended_at`. ActivityKit ignores a push to an activity that has already ended, so a duplicate changes nothing on the phone.
+- Without the person's explicit `start`, an ended activity is never re-created.
 - Logout, account switch, and instance switch leave no `TurnActivityAttributes` activity on the phone.
 - Required end-to-end check: a real instance sends through the deployed relay to a TestFlight build with non-ASCII names (the vectors use `首席安全官` and `依赖审计 · avault 🔒`).
 
