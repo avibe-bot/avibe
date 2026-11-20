@@ -48,7 +48,8 @@ export function UpdatePopoverView({ label, onClose, panelRef, children }: {
 }) {
   return <div data-update-popover className="fixed inset-0" onClick={onClose}>
     {children && <div ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} onClick={(event) => event.stopPropagation()}
-      className="absolute bottom-2 left-2 w-80 overflow-hidden rounded-xl border border-edge bg-popover text-popover-foreground shadow-elevation-2 outline-none">
+      // Both subjects' details open can be taller than a small window: the panel then scrolls inside it.
+      className="absolute bottom-2 left-2 max-h-[calc(100%-1rem)] w-80 overflow-x-hidden overflow-y-auto rounded-xl border border-edge bg-popover text-popover-foreground shadow-elevation-2 outline-none">
       {children}
     </div>}
   </div>;

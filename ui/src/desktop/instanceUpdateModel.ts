@@ -35,12 +35,15 @@ export function instanceSection(update: InstanceUpdateState): InstanceSection {
   const install = request?.action === 'install' ? request : null;
   const managed = snapshot.managed_by === 'desktop';
   const offered = snapshot.has_update && snapshot.latest ? snapshot.latest : null;
-  // After an accepted install the instance restarts. Until it answers with something other than the offer
-  // that was installed (or does not answer at all), the old version on screen is that restart, not a refusal.
+  // A desktop-managed host relays its own receipt of the install (`remote_request`): that receipt, not the
+  // shell's, says whether it still runs, and when it failed, was declined or expired.
+  const relayed = managed && installRunning(snapshot);
+  // A standalone Runtime restarts after an accepted install. Until it answers with something other than the
+  // offer that was installed (or does not answer at all), the old version on screen is that restart.
   const sameOffer = Boolean(install?.target && offered && normalizeVersion(offered) === normalizeVersion(install.target));
-  const restarting = install?.phase === 'accepted' && (update.status === 'unreachable' || sameOffer);
+  const restarting = !managed && install?.phase === 'accepted' && (update.status === 'unreachable' || sameOffer);
   // An instance that does not answer, with nothing of ours under way, is a lost connection.
-  if (update.status === 'unreachable' && !restarting && sending !== 'install') return { ...none, model: null };
+  if (update.status === 'unreachable' && !restarting && !relayed && sending !== 'install') return { ...none, model: null };
 
   const can = update.can_manage;
   const takes = (action: 'prereleases' | 'auto_update' | 'install') => !managed || (snapshot.host_actions?.includes(action) ?? false);
@@ -55,9 +58,10 @@ export function instanceSection(update: InstanceUpdateState): InstanceSection {
       checking: sending === 'check',
       installing: sending === 'install',
       restarting,
-      // A standalone install is not pinned to the version clicked: the result names the one now running.
+      // A standalone install is not pinned to the version clicked: the result names the one now running. The
+      // shell keeps its receipt until the next action, so a release offered since then speaks instead of it.
       result: install?.phase === 'failed' ? { ok: false, target: install.target }
-        : install?.phase === 'accepted' && !restarting ? { ok: true, target: snapshot.current } : null,
+        : install?.phase === 'accepted' && !restarting && !offered ? { ok: true, target: snapshot.current } : null,
       prereleases: can && typeof snapshot.prereleases === 'boolean' ? snapshot.prereleases : null,
       autoUpdate: can && typeof snapshot.auto_update === 'boolean' ? snapshot.auto_update : null,
       checkedAt: update.fetched_at,

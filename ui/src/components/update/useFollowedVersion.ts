@@ -13,27 +13,41 @@ const WATCH_POLL_MS = 5000;
 const REFRESH_MIN_INTERVAL_MS = 5000;
 
 /** Follows an install on this Avibe from `info` to its end: rereads the version until nothing is running, and
- *  loads the page again once the Runtime answers with another version, since its interface changed with it. */
-export function useFollowInstall(info: VersionInfo | null, onRead: (info: VersionInfo) => void, enabled = true): boolean {
+ *  loads the page again once the Runtime answers with another version, since its interface changed with it.
+ *  Every read of the version while an install is followed goes through `receive`, whichever path made it, so
+ *  none can show the new version on the old page. */
+export function useFollowInstall(info: VersionInfo | null, onRead: (info: VersionInfo) => void, enabled = true): {
+  running: boolean;
+  receive: (fresh: VersionInfo) => void;
+} {
   const api = useApi();
   const running = enabled && installRunning(info);
-  // What the effect below reads when it starts and each time it answers, without restarting on every read.
+  // What the callbacks below read, without being rebuilt on every read.
   const latest = useRef({ info, onRead });
   useEffect(() => { latest.current = { info, onRead }; });
+  // The version the followed install started from, kept until a read shows it ended.
+  const started = useRef<string | null>(null);
+  useEffect(() => {
+    if (running && started.current === null) started.current = latest.current.info?.current ?? null;
+  }, [running]);
+  const receive = useCallback((fresh: VersionInfo) => {
+    if (started.current && normalizeVersion(fresh.current) !== normalizeVersion(started.current)) {
+      window.location.reload();
+      return;
+    }
+    // Ended on the version it started from: nothing changed on this page.
+    if (!installRunning(fresh)) started.current = null;
+    latest.current.onRead(fresh);
+  }, []);
   useEffect(() => {
     if (!running) return;
-    const started = latest.current.info?.current ?? null;
     let stopped = false;
     let timer: number | undefined;
     const poll = async () => {
       try {
         const fresh = await api.getVersion({ cache: false, background: true });
         if (stopped) return;
-        if (started && normalizeVersion(fresh.current) !== normalizeVersion(started)) {
-          window.location.reload();
-          return;
-        }
-        latest.current.onRead(fresh);
+        receive(fresh);
       } catch {
         // The Runtime does not answer while it restarts; the next read finds it.
       }
@@ -44,8 +58,8 @@ export function useFollowInstall(info: VersionInfo | null, onRead: (info: Versio
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [api, running]);
-  return running;
+  }, [api, running, receive]);
+  return { running, receive };
 }
 
 /** Calls `read` when this page's window comes back to the front or becomes visible again, at most once every
@@ -71,19 +85,19 @@ export function useReadOnReturn(enabled: boolean, read: () => void): void {
 export function useFollowedVersion(): { info: VersionInfo | null; updating: boolean; watch: () => void } {
   const api = useApi();
   const [info, setInfo] = useState<VersionInfo | null>(null);
+  const { running: updating, receive } = useFollowInstall(info, setInfo);
   // The shell's panel is another window and takes the focus: from the moment this page asks for it until this
   // window is in front again, the page keeps reading, so an install started in the panel shows here at once.
   const [watching, setWatching] = useState(false);
   const reread = useCallback(() => {
-    void api.getVersion({ cache: false, background: true }).then(setInfo).catch(() => undefined);
-  }, [api]);
+    void api.getVersion({ cache: false, background: true }).then(receive).catch(() => undefined);
+  }, [api, receive]);
   useEffect(() => {
     let active = true;
     void api.getVersion().then((next) => { if (active) setInfo(next); }).catch(() => undefined);
     return () => { active = false; };
   }, [api]);
   useReadOnReturn(true, reread);
-  const updating = useFollowInstall(info, setInfo);
   useEffect(() => {
     if (!watching || updating) return;
     const timer = window.setInterval(reread, WATCH_POLL_MS);

@@ -79,6 +79,19 @@ it('keeps reading while the panel it asked for is open, so an install started th
   expect(chip().querySelector('.animate-spin')).toBeTruthy();
 });
 
+it('loads the page again when a read on return finds the new version before the next poll does', async () => {
+  api.getVersion.mockResolvedValueOnce(installing);
+  mount();
+  await tick();
+  // The instance restarted between two polls, and the window comes back to the front first.
+  api.getVersion.mockResolvedValue({ current: '3.2.8rc4', latest: '3.2.8rc4', has_update: false });
+  vi.setSystemTime(Date.now() + 10_000);
+  await act(async () => { window.dispatchEvent(new Event('focus')); });
+  await tick();
+  expect(reload).toHaveBeenCalledOnce();
+  expect(screen.queryByRole('button', { name: 'alex is on v3.2.8rc4' })).toBeNull();
+});
+
 it('goes back to offering the update when the install ends without a new version', async () => {
   api.getVersion.mockResolvedValueOnce(installing);
   mount();

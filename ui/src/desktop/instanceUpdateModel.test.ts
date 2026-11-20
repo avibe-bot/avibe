@@ -47,6 +47,15 @@ describe('a standalone instance', () => {
     expect(done.busy).toBe(false);
   });
 
+  it('offers a release that appeared after the install it sent, instead of repeating that result', () => {
+    const later = instanceSection(state({
+      request: install('accepted'),
+      snapshot: { current: '3.2.8rc4', latest: '3.2.8rc5', has_update: true, error: null },
+    }));
+    expect(later.model?.status).toEqual({ kind: 'available', version: '3.2.8rc5' });
+    expect(later).toMatchObject({ target: '3.2.8rc5', canUpdate: true, busy: false });
+  });
+
   it('keeps an install the instance reports itself, started from anywhere', () => {
     const shown = instanceSection(state({
       snapshot: { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, install: { phase: 'installing', target: '3.2.8rc4', started_at: AT } },
@@ -93,5 +102,16 @@ describe('a desktop-managed instance', () => {
     expect(instanceSection(state({ snapshot, request: { ...install('sending'), target: '3.2.7' } })).model?.status).toEqual({ kind: 'requesting' });
     const relayed = instanceSection(state({ snapshot: { ...snapshot, remote_request: { request_id: 'r1', target: '3.2.7', phase: 'downloading', progress: 42, error_code: null, updated_at: AT } }, request: { ...install('accepted'), target: '3.2.7' } }));
     expect(relayed.model?.status).toEqual({ kind: 'downloading', progress: 42 });
+    expect(relayed).toMatchObject({ canUpdate: false, busy: true });
+  });
+
+  it.each(['failed', 'declined', 'expired'] as const)("is free to retry once the host's own receipt ends %s, though the shell's stays accepted", (phase) => {
+    const snapshot = {
+      ...managed, host_actions: ['check' as const, 'prereleases' as const, 'auto_update' as const, 'install' as const],
+      remote_request: { request_id: 'r1', target: '3.2.7', phase, progress: null, error_code: null, updated_at: AT },
+    };
+    const ended = instanceSection(state({ snapshot, request: { ...install('accepted'), target: '3.2.7' } }));
+    expect(ended.model?.status).toMatchObject({ kind: 'update-failed', retry: true });
+    expect(ended).toMatchObject({ target: '3.2.7', canUpdate: true, busy: false });
   });
 });

@@ -625,13 +625,13 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   // A standalone Runtime's install this page did not start (another page, the CLI, the automatic update):
   // shown as running, and followed to its end.
-  const followingInstall = useFollowInstall(versionInfo, setVersionInfo, !isDesktopManaged && !upgrading && !restarting);
+  const { running: followingInstall, receive: receiveVersion } = useFollowInstall(versionInfo, setVersionInfo, !isDesktopManaged && !upgrading && !restarting);
   // An install may have started since this page last read the version: it reads again, quietly, when its
   // window comes back to the front.
   const standalone = Boolean(versionInfo) && !isDesktopManaged;
   useReadOnReturn(standalone && !upgrading && !restarting, React.useCallback(() => {
-    void api.getVersion({ cache: false, background: true }).then(setVersionInfo).catch(() => undefined);
-  }, [api]));
+    void api.getVersion({ cache: false, background: true }).then(receiveVersion).catch(() => undefined);
+  }, [api, receiveVersion]));
 
   const requestSettled = remoteRequestSettled(remoteRequest, versionInfo?.current ?? '');
   const remoteRequestId = remoteDesktopWeb && !requestSettled ? remoteRequest?.request_id : undefined;
