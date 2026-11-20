@@ -9,8 +9,9 @@ import { copyFor } from './instances-fixtures';
 // Desktop sign-in on the shared flow (#3946), shipped (Max, 2026-11-18: as on the iPhone). Compare each with the shipped card it
 // replaces: start/email ← desktop/instances/email, password ← password, code ← code,
 // two-factor ← two-factor. The steps, order and words are the iPhone App's; the Desktop keeps its
-// window column, its registration line and "continue on this computer", and its in-app
-// authenticator setup. Frames show every way in, as both apps offer them once native supports
+// window column, "continue on this computer", and its in-app authenticator setup. Its first page is
+// the iPhone's Welcome, smaller, without the brand row or the registration line, with the Desktop's
+// own subtitle (Max, 2026-11-20). Frames show every way in, as both apps offer them once native supports
 // each; the fixture runs no native call.
 
 const EMAIL = 'max@example.test';
@@ -40,7 +41,7 @@ const send = async () => null;
 type Variant = { name: string; title: string; native: DesktopClientState; click?: FrameSpec['click'] };
 const continueWithEmail = 'role=button[name="{t:mobileApp.welcome.continueWithEmail}"]';
 const variants: Variant[] = [
-  { name: 'start', title: '登录 · 邮箱为主，Google / GitHub / Apple 一行，通行密钥链接', native: signedOut },
+  { name: 'start', title: '登录第一页 · iPhone 的 Welcome，Desktop 自己的副标题，无品牌行与登记说明', native: signedOut },
   { name: 'email', title: '邮箱 · 发送验证码', native: signedOut, click: [continueWithEmail] },
   {
     name: 'password',

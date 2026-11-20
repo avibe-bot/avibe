@@ -2,12 +2,12 @@ import { ArrowLeft } from 'lucide-react';
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import mailMascot from '@/assets/pet/vibey-message.png';
 import { Button } from '@/components/ui/button';
 import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/sign-in/chromeContext';
 import { useOperationOwner } from '@/sign-in/operationOwner';
 import { SIGN_IN_PROVIDERS, type SignInMethods, type SignInStep } from '@/sign-in/types';
 import { type SignInBusyAction, useSignInFlow } from '@/sign-in/useSignInFlow';
+import { SignInWelcome } from '@/sign-in/welcome';
 
 import type { DesktopClientState } from './bridge';
 import { createDesktopSignInAdapter, desktopSignInMethods, desktopSignInStep, type DesktopSend } from './signInAdapter';
@@ -69,7 +69,7 @@ export type DesktopSignInProps = {
  * The Desktop window's sign-in: the shared flow (#3946) in the account window's column. Native
  * state stays the authority: a step it reports without this page asking (a cancel, another
  * window, a relaunch mid-attempt) retires the running call and moves the flow there.
- * ui/design: desktop/sign-in (proposed).
+ * ui/design: desktop/sign-in.
  */
 export function DesktopSignIn({
   state,
@@ -137,16 +137,16 @@ export function DesktopSignIn({
     <LocalExit.Provider value={onLocal}>
     <SignInChrome value={DESKTOP_SIGN_IN_CHROME}>
       {flow.render((actions) => (
-        <div data-account-login className="mx-auto my-auto flex w-full max-w-md shrink-0 flex-col py-4">
-          <div className="mb-8 text-center">
-            <img src={mailMascot} className="mx-auto mb-4 size-20 object-contain" alt="" />
-            <h1 className="text-3xl font-semibold tracking-tight">{t('desktopClient.signInTitle')}</h1>
-            <p className="mt-3 text-sm leading-6 text-muted">{t('desktopClient.loginBody')}</p>
-          </div>
-          <div className="flex flex-col gap-4">{actions}</div>
-          <p className="mt-6 text-center text-xs leading-5 text-muted">{t('desktopClient.registrationDisclosure')}</p>
-          <div className="mt-4 text-center">
-            <Button variant="ghost" onClick={onLocal}>{t('desktopClient.continueLocal')}</Button>
+        // The iPhone's first page, smaller and without its brand row, with the Desktop's own
+        // subtitle (Max, 2026-11-20); "continue on this computer" stays, quieter, below it.
+        <div data-account-login className="mx-auto my-auto flex w-full max-w-sm shrink-0 flex-col py-4">
+          <SignInWelcome compact subtitle={[t('desktopClient.welcomeLine1'), t('desktopClient.welcomeLine2')]}>
+            {actions}
+          </SignInWelcome>
+          <div className="mt-2 text-center">
+            <Button variant="ghost" size="sm" className="text-muted" onClick={onLocal}>
+              {t('desktopClient.continueLocal')}
+            </Button>
           </div>
         </div>
       ))}

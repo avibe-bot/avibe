@@ -962,6 +962,17 @@ describe('mobile onboarding', () => {
     expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
   });
 
+  // ui/design: mobile-app/passkey/passkey-link; the body is shared with the Desktop's first page.
+  it('keeps the App\'s brand row and its own subtitle on Welcome', async () => {
+    mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut' });
+    render(<MobileOnboarding />);
+    await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+    expect(screen.getByText('mobileApp.brand.agentOs')).toBeTruthy();
+    expect(screen.getByRole('heading').textContent).toBe('mobileApp.welcome.titleLine1mobileApp.welcome.titleLine2');
+    expect(document.body.textContent).toContain('mobileApp.welcome.bodyLine1mobileApp.welcome.bodyLine2');
+    expect(document.body.textContent).not.toContain('desktopClient.welcomeLine1');
+  });
+
   describe('AUTH-SETUP-185 the ways in on Welcome follow the signed-out answer', () => {
     const marks = {
       google: 'mobileApp.welcome.continueWithGoogle',

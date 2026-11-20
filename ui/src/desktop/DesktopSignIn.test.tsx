@@ -1,0 +1,62 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen } from '@testing-library/react';
+import { createInstance } from 'i18next';
+import { I18nextProvider } from 'react-i18next';
+import { afterEach, expect, it, vi } from 'vitest';
+
+import en from '../i18n/en.json';
+import zh from '../i18n/zh.json';
+import type { DesktopClientState } from './bridge';
+import { DesktopSignIn } from './DesktopSignIn';
+
+const signedOut: DesktopClientState = {
+  version: 1,
+  revision: 1,
+  generation: 1,
+  account: { status: 'signed_out', identity: null, email: null, gate: null, methods: [] },
+  connection: { status: 'local', committed: { kind: 'local', name: 'Studio', instance_id: null }, pending: null },
+  enrollment: { status: 'unpaired', instance_id: null, error_code: null },
+  catalog: { status: 'idle', instances: [] },
+  local: { name: 'Studio', remote_access: 'off' },
+  desktop: { version: '3.2.7', update: { phase: 'idle', latest: null, channel: 'stable', skippedVersion: null, interactive: false } },
+  consent: null,
+  remote_auxiliary: 'local',
+};
+
+afterEach(() => cleanup());
+
+// ui/design: desktop/sign-in/start. Max, 2026-11-20 10:13/10:14.
+it.each([['en', en], ['zh', zh]] as const)(
+  'AUTH-SETUP-182 the first page is the iPhone Welcome with the Desktop subtitle and no registration note (%s)',
+  async (lng, copy) => {
+    const i18n = createInstance();
+    await i18n.init({ lng, resources: { [lng]: { translation: copy } } });
+    const view = render(
+      <I18nextProvider i18n={i18n}>
+        <DesktopSignIn
+          state={signedOut}
+          send={vi.fn(async () => null)}
+          onLocal={() => undefined}
+          onDifferentAccount={() => undefined}
+          onOpenSecurity={() => undefined}
+          renderEnroll={() => null}
+        />
+      </I18nextProvider>,
+    );
+    const page = view.container.querySelector('[data-account-login]')!;
+    const welcome = copy.mobileApp.welcome;
+    // The App's hero, title and footer, word for word.
+    expect(screen.getByAltText(welcome.mascotAlt)).toBeTruthy();
+    expect(screen.getByText(welcome.greeting)).toBeTruthy();
+    expect(screen.getByRole('heading').textContent).toBe(`${welcome.titleLine1}${welcome.titleLine2}`);
+    expect(page.textContent).toContain(`${welcome.footerLine1}${welcome.footerLine2}`);
+    // The Desktop's own subtitle, not the App's.
+    expect(page.textContent).toContain(`${copy.desktopClient.welcomeLine1}${copy.desktopClient.welcomeLine2}`);
+    expect(page.textContent).not.toContain(welcome.bodyLine1);
+    // No brand row and no registration note; "continue on this computer" stays.
+    expect(page.textContent).not.toContain(copy.mobileApp.brand.agentOs);
+    expect(page.textContent).not.toContain(copy.desktopClient.registrationDisclosure);
+    expect(screen.getByRole('button', { name: copy.desktopClient.continueLocal })).toBeTruthy();
+    expect(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail })).toBeTruthy();
+  },
+);

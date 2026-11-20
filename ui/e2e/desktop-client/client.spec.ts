@@ -432,9 +432,10 @@ for (const locale of ['en', 'zh'] as const) test(`rc19 admitted locale controls 
     }).observe(document, { childList: true, subtree: true });
   });
   await page.goto(`${ACCOUNT}?view=account&locale=${locale}`);
-  const title = locale === 'en' ? 'Sign in to Avibe' : '登录 Avibe';
-  await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
-  expect(await page.evaluate(() => (window as unknown as { __headings: string[] }).__headings)).toEqual([title]);
+  // The first sign-in page's title, two lines (`mobileApp.welcome.titleLine1/2`).
+  const [line1, line2] = locale === 'en' ? ['Your AI partner,', 'by your side.'] : ['你的 AI 伙伴，', '随身同行。'];
+  await expect(page.getByRole('heading', { name: new RegExp(`^${line1}\\s*${line2.replace('.', '\\.')}$`) })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __headings: string[] }).__headings)).toEqual([`${line1}${line2}`]);
 });
 
 test('rc19 stale receipt cannot auto-logout and a failed current intent needs explicit retry', async ({ page }) => {

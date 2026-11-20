@@ -8,7 +8,6 @@ import {
   Laptop,
   MonitorDown,
   RotateCw,
-  Sparkles,
   UserRound,
   Loader2,
   Database,
@@ -26,7 +25,6 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import heroMascot from '../../../assets/mascot/cloud-tuanzi-v2.png';
 import logo from '@/assets/logo.png';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -70,6 +68,7 @@ import { PULL_THRESHOLD_PX, usePullToRefresh } from './usePullToRefresh';
 import { raised } from '@/sign-in/chrome';
 import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/sign-in/chromeContext';
 import { pageErrorKey, type SignInErrorKey } from '@/sign-in/errors';
+import { SignInWelcome } from '@/sign-in/welcome';
 import { useOperationOwner, type OperationToken } from '@/sign-in/operationOwner';
 import { PasskeySignIn, SignInStart, WeakPasswordNotice } from '@/sign-in/screens';
 import type { SignInMethods, SignInProvider, WeakPasswordReason } from '@/sign-in/types';
@@ -286,41 +285,9 @@ function WelcomeHero({ children }: { children: ReactNode }) {
   return (
     <CloudScreen>
       <Brand />
-      <div className="relative flex flex-1 flex-col items-center justify-center py-8">
-        <div className="relative mb-8 grid size-64 place-items-center">
-          <div className="absolute inset-0 rounded-full border border-edge bg-surface/30 shadow-elevation-0" />
-          <div className="absolute inset-6 rounded-full border border-surface/70 bg-surface/30" />
-          <img
-            src={heroMascot}
-            alt={t('mobileApp.welcome.mascotAlt')}
-            className="relative size-52 object-contain motion-safe:animate-[mobile-mascot-arrive_var(--motion-spring-smooth-duration)_var(--motion-spring-smooth)_both]"
-          />
-          <span className="absolute -right-1 top-9 grid size-12 rotate-12 place-items-center rounded-2xl border border-edge bg-surface shadow-elevation-0">
-            <Sparkles className="size-5 text-mint-ink" />
-          </span>
-          <span className="absolute -left-1 bottom-5 rounded-full border border-edge bg-surface px-4 py-2 text-sm shadow-elevation-0">
-            {t('mobileApp.welcome.greeting')}
-          </span>
-        </div>
-        <h1 className="text-center text-4xl font-semibold leading-tight">
-          {t('mobileApp.welcome.titleLine1')}
-          <br />
-          {t('mobileApp.welcome.titleLine2')}
-        </h1>
-        <p className="mt-5 max-w-xs text-center text-sm leading-7 text-muted">
-          {t('mobileApp.welcome.bodyLine1')}
-          <br />
-          {t('mobileApp.welcome.bodyLine2')}
-        </p>
-      </div>
-      <div className="flex flex-col gap-4 pb-3">
+      <SignInWelcome subtitle={[t('mobileApp.welcome.bodyLine1'), t('mobileApp.welcome.bodyLine2')]}>
         {children}
-        <p className="text-center text-xs leading-relaxed text-muted">
-          {t('mobileApp.welcome.footerLine1')}
-          <br />
-          {t('mobileApp.welcome.footerLine2')}
-        </p>
-      </div>
+      </SignInWelcome>
     </CloudScreen>
   );
 }
