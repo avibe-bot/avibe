@@ -630,18 +630,16 @@ def test_answer_migration_preserves_existing_rows_and_epoch(answer_route):
     config = alembic_config(Path(path))
     command.downgrade(config, "20261118_0091")
 
-    def snapshot():
+    def snapshot(names=None):
         with sqlite3.connect(path) as conn:
-            names = [
-                row[0]
-                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                if row[0] not in {"alembic_version", "message_answer_operations"}
-            ]
+            if names is None:
+                names = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                         if row[0] != 'alembic_version']
             return {name: conn.execute('SELECT * FROM "' + name.replace('"', '""') + '"').fetchall() for name in names}
 
     before = snapshot()
     command.upgrade(config, "head")
-    assert snapshot() == before
+    assert snapshot(before) == before
     command.downgrade(config, "20261118_0091")
-    assert snapshot() == before
+    assert snapshot(before) == before
     command.upgrade(config, "head")

@@ -2623,6 +2623,8 @@ def enforce_remote_access_cookie():
         context = context_from_session_payload(payload)
         g.authorization_context = context
         g.remote_session_identity = identity
+        if not identity.get('device_registered'):
+            remote_access.register_device_session(config, identity, payload, request.headers)
         g.remote_session_payload = payload
         g.remote_authorization_resolution = resolution
         if remote_access.session_needs_renewal(
@@ -7668,6 +7670,8 @@ def web_push_status():
                 )
                 if synced is not None:
                     endpoint = synced["endpoint"]
+                    from storage.device_registry import attach_push
+                    attach_push(conn, getattr(g, 'remote_session_identity', None), synced)
             except ValueError:
                 logger.debug("web push: ignoring invalid status subscription payload", exc_info=True)
         subscription_count = web_push_service.count_enabled(conn, user_key=user_key)
@@ -7739,6 +7743,8 @@ def web_push_subscribe():
                     device_id=device_id,
                     previous_endpoints=previous_endpoints,
                 )
+                from storage.device_registry import attach_push
+                attach_push(conn, getattr(g, 'remote_session_identity', None), row)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True, "accepted": row is not None, "subscription": row})
@@ -8805,6 +8811,7 @@ def remote_access_auth_callback():
             str(claims.get("email", "")),
             str(claims.get("sub", "")),
             session_claims=session_claims,
+            device_headers=request.headers,
         )
     except Exception as exc:
         _log_oauth_callback_failure("session_cookie", exc)
@@ -8830,6 +8837,72 @@ def _remote_author_id(subject: Any) -> str | None:
 
     subject = str(subject or "").strip()
     return f"remote:{subject}" if subject else None
+
+
+def _device_viewer():
+    """Only authenticated remote subjects and direct loopback may administer devices."""
+    from vibe import remote_access
+
+    context = _request_authorization_context()
+    identity = getattr(g, 'remote_session_identity', None)
+    if context and context.is_remote and identity and context.subject == identity['sub']:
+        return (identity['_device_binding'], context.subject, context.is_instance_owner, identity['browser_session_id'])
+    if context and context.is_instance_owner and _is_direct_loopback_connection():
+        config = _load_remote_access_config()
+        return (remote_access.device_binding(config) if config else '', None, True, None)
+    return None
+
+
+@app.route('/api/devices', methods=['GET'])
+def device_list():
+    from storage import device_registry
+    from vibe import __version__
+
+    viewer = _device_viewer()
+    host = {'id': 'host', 'kind': 'host', 'display_name': socket.gethostname(), 'app_version': __version__,
+            'account': None, 'system_version': None, 'signed_in_at': None, 'last_active_at': None,
+            'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
+    if viewer is None:
+        config = _load_remote_access_config()
+        if config and not config.remote_access.vibe_cloud.instance_id and _is_setup_host_request(config):
+            return jsonify({'mine': [host], 'others': [], 'bulk_action': None})
+        return jsonify({'error': 'device_access_forbidden'}), 403
+    binding, subject, owner, caller = viewer
+    mine, others = ([host] if owner else []), []
+    if binding:
+        from storage.importer import ensure_sqlite_state
+        ensure_sqlite_state()
+        for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time())):
+            account = row['account']
+            is_mine = account['subject'] == subject if subject else account['login_role'] == 'owner'
+            (mine if is_mine else others).append(row)
+    return jsonify({'mine': mine, 'others': others, 'bulk_action': 'other_sessions' if caller else 'all_remote'})
+
+
+@app.route('/api/devices/<device_id>/sign-out', methods=['POST'])
+@app.route('/api/devices/sign-out-others', methods=['POST'])
+def device_sign_out(device_id=None):
+    from storage import device_registry
+    from storage.importer import ensure_sqlite_state
+    from vibe import remote_access
+
+    viewer = _device_viewer()
+    if viewer is None:
+        return jsonify({'error': 'device_access_forbidden'}), 403
+    binding, subject, owner, caller = viewer
+    if device_id == 'host':
+        return jsonify({'error': 'host_has_no_session'}), 400
+    ensure_sqlite_state()
+    try:
+        ids = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+                                      now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
+    except PermissionError:
+        return jsonify({'error': 'session_revoked'}), 403
+    if device_id is not None and not ids:
+        return jsonify({'error': 'device_not_found'}), 404
+    for sid in ids:
+        remote_access.publish_browser_session_revoked(sid)
+    return jsonify({'ok': True, 'revoked_sessions': len(ids)})
 
 
 @app.route("/api/session", methods=["GET"])
@@ -8897,6 +8970,8 @@ def api_session():
                 response = jsonify({"remote": True, "authenticated": False})
             else:
                 payload = resolution.payload
+                if not identity.get('device_registered'):
+                    remote_access.register_device_session(config, identity, payload, request.headers)
                 context = context_from_session_payload(payload)
                 response = jsonify(
                     {

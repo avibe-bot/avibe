@@ -1407,6 +1407,40 @@ media_object_references = Table(
     Index("ix_media_object_references_session", "session_id"),
 )
 
+remote_device_deadlines = Table(
+    "remote_device_deadlines", metadata,
+    Column("key", String, primary_key=True),
+    Column("issued_at", Integer, nullable=False),
+    Column("expires_at", Integer, nullable=False),
+    Index("ix_rdd_expiry", "expires_at"),
+)
+
+remote_device_sessions = Table(
+    "remote_device_sessions", metadata,
+    Column("session_id", String, primary_key=True),
+    Column("binding", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("email", String, nullable=False),
+    Column("login_role", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Column("identity_source", String, nullable=False),
+    Column("push_id", String),
+    Column("kind", String, nullable=False),
+    Column("display_name", String, nullable=False),
+    Column("app_version", String),
+    Column("system_version", String),
+    Column("signed_in_at", Integer, nullable=False),
+    Column("last_active_at", Integer, nullable=False),
+    Column("expires_at", Integer, nullable=False),
+    Column("path_kind", String),
+    Column("path_family", String),
+    Column("path_rtt_ms", Integer),
+    Index("ix_rds_binding_expiry", "binding", "expires_at"),
+    Index("ix_rds_subject_expiry", "binding", "subject", "expires_at"),
+    Index("ix_rds_device_expiry", "binding", "device_id", "expires_at"),
+    Index("ix_rds_expiry", "expires_at"),
+)
+
 # Per-install browser Push API subscriptions for PWA Web Push. These are
 # runtime/device endpoints, not user-authored config: one user may install the
 # app on multiple devices, and endpoints can rotate or expire independently.
@@ -1431,6 +1465,7 @@ web_push_subscriptions = Table(
     UniqueConstraint("endpoint", name="uq_web_push_subscriptions_endpoint"),
     Index("ix_web_push_subscriptions_user_enabled", "user_key", "enabled"),
     Index("ix_web_push_subscriptions_user_device", "user_key", "device_id"),
+    Index("ix_web_push_subscriptions_device_enabled", "user_key", "device_id", "enabled"),
 )
 
 # Resource ACLs are local enforcement state. The hosted control plane receives

@@ -6608,6 +6608,7 @@ def make_session_cookie(
     subject: str,
     *,
     session_claims: Mapping[str, Any],
+    device_headers: Mapping[str, str] | None = None,
 ) -> str:
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
@@ -6650,10 +6651,30 @@ def make_session_cookie(
         ),
         "auth_time": issued_at,
         "claims_issued_at": issued_at,
+        "device_registered": True,
         _SESSION_BROWSER_ID_KEY: secrets.token_urlsafe(24),
         _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
     }
-    return _encode_session_cookie(cloud.session_secret, payload)
+    cookie = _encode_session_cookie(cloud.session_secret, payload)
+    register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True)
+    return cookie
+
+
+def device_binding(config: V2Config) -> str:
+    from vibe.device_metadata import binding_key
+
+    cloud = config.remote_access.vibe_cloud
+    return binding_key(cloud.instance_id, cloud.session_secret)
+
+
+def register_device_session(config, identity, claims, headers, *, fresh=False):
+    from storage import device_registry
+    from vibe.device_metadata import describe
+
+    device_registry.record_session(
+        device_binding(config), identity, claims['vibe_instance_role'], describe(headers),
+        expires_at=identity['auth_time'] + SESSION_ABSOLUTE_TTL_SECONDS, now=int(time.time()), fresh=fresh,
+    )
 
 
 def _session_idle_ttl_seconds(instance_kind: object) -> int:
@@ -6738,6 +6759,11 @@ def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
     except Exception:
         logger.warning("browser session revocation persistence failed", exc_info=True)
         return False
+    publish_browser_session_revoked(session_id)
+    return True
+
+
+def publish_browser_session_revoked(session_id: str) -> None:
     try:
         from vibe.sse_broker import broker
 
@@ -6747,7 +6773,6 @@ def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
         )
     except Exception:
         logger.debug("failed to publish browser session revocation", exc_info=True)
-    return True
 
 
 def _browser_session_is_revoked(payload: Mapping[str, Any], *, now: int) -> bool:
@@ -6760,8 +6785,8 @@ def _browser_session_is_revoked(payload: Mapping[str, Any], *, now: int) -> bool
 
     try:
         return remote_access_authorization_service.browser_session_is_revoked(
-            session_id,
-            now=now,
+            session_id, now=now, binding=payload.get('_device_binding', ''),
+            subject=payload.get('sub', ''), auth_time=_session_auth_time(payload) or 0,
         )
     except Exception:
         # A sign-out that cannot be read is treated as present.
@@ -6845,6 +6870,7 @@ def parse_session_identity(
             cloud.session_secret,
             cookie_value,
         )
+    payload['_device_binding'] = device_binding(config)
     if not allow_revoked and _browser_session_is_revoked(payload, now=current):
         return None
     return payload
@@ -7611,9 +7637,13 @@ def renew_session_cookie(
         "exp": expires_at,
         "auth_time": auth_time,
         "claims_issued_at": int(payload.get("claims_issued_at", payload.get("iat", current))),
+        **({'device_registered': True} if payload.get('device_registered') else {}),
         _SESSION_BROWSER_ID_KEY: browser_session_id,
         _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
     }
+    from storage.device_registry import touch
+
+    touch(browser_session_id, current)
     return _encode_session_cookie(cloud.session_secret, identity)
 
 
