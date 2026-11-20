@@ -20,7 +20,9 @@ starts Locked. Authentication focus changes follow the approved event table.
 The owner covers content before presentation, hides Mini and update popovers,
 and restores their prior state only after authentication. New windows inherit
 the same protection through AppKit observation. Entry points defer their effect
-until unlock; a newer pending entry replaces the older one. Quit remains usable.
+until unlock. Content and Navigation use latest-wins; a foreground-only Action
+fills an empty slot and never displaces pending work. Explicit menu/shortcut
+commands retain their existing latest-wins behavior. Quit remains usable.
 Only the main local Workbench can call the two settings commands. There is no
 Web unlock API. Background Runtime and Agent operations continue.
 
@@ -89,13 +91,14 @@ regular-application classification and process identity getter.
 Restoring protected windows records a fresh Vault arrival so its existing
 input guard applies even when LA did not change focus.
 
-Pending entries distinguish navigation, content for Vibey, and other actions;
-only the first two show the corresponding generic shared copy. Copy changes
+Pending entries distinguish navigation, content for Vibey, explicit commands,
+and foreground-only actions; only the first two show the corresponding generic shared copy. Copy changes
 relayout the native controls immediately, including at unchanged window size.
 The owner never puts the content itself on a lock screen. Pending publication is serialized with
 completion; older Workbench navigation is replayed after unlock unless a newer
-locked intent superseded it. Deadline changes found by another entry are marked
-for the timer to synchronize, and Off does not dispatch a periodic UI tick.
+Content, Navigation or explicit command superseded it. Dock/tray Open preserves
+both the owner slot and older Workbench navigation/update queues. Deadline
+changes found by another entry are marked for the timer to synchronize, and Off does not dispatch a periodic UI tick.
 
 The first independent review examined `e899f374d2` and found the status/menu
 coverage and activation-return ordering defects, plus pending copy, repeated
@@ -112,7 +115,9 @@ The native implementation at `dfde9a5ce5` passed independent review (CLEAN,
 receipt `5b87cb526e7c`). Rebasing onto the merged shared/Ask changes produces
 `2aa4475691`; the Machine remains unchanged. The only rebase conflict retained
 Ask Vibey's crate-visible main-focus entry together with the existing lock gate.
-The Ask integration requires a new exact-head review before freezing.
+The integrated Ask head `123caf2c53` passed independent review (CLEAN, receipt
+`25721b1b9508`). Main then approved preserving pending work against pure Action
+requests; the revised candidate requires another exact-head review.
 
 Shared updates are copied without independent edits from `50c57df6` (availability
 contract docs/type comment) and `3431474f` (theme-token lock-frame sizes). The
@@ -120,15 +125,18 @@ AppKit sizes follow that kit; shared copy remains the embedded en/zh catalogs.
 
 ## Current local evidence
 
-The integrated implementation passes 237 Desktop library tests (14 App Lock
+The integrated implementation passes 238 Desktop library tests (15 App Lock
 scenario groups, including the core event matrix across all three policies),
-252 runtime-host tests (three pre-existing ignored), 26 desktop-client e2e cases,
+252 runtime-host tests (three pre-existing ignored), 27 desktop-client e2e cases,
 and 41 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
 warnings denied. Rust formatting, desktop-client TypeScript, and UI build pass.
 Design typecheck passed for the native baseline; the integration does not change
 design files. The release guard compiles the normal release and proves that a
 release containing authentication substitutes is rejected. Updated native
-light/dark captures were inspected.
+light/dark captures were inspected. The Action-priority revision reruns Desktop
+tests, native e2e, clippy, formatting, desktop-client typecheck and the release
+guard; runtime-host, Vitest and UI build evidence is retained from the previous
+CLEAN integration because their implementation and dependencies did not change.
 
 The native peer installs the production observer map on test-owned notification
 centers, so it exercises the actual event routing without broadcasting system
@@ -165,7 +173,8 @@ a signed TEST RC:
   sharing show the cover. New windows inherit protection. Vault's return guard
   applies after unlock. Mini/update popovers hide and restore correctly.
 - Deep links (startup, second launch, Apple event), Dock, tray, menus, and global
-  shortcuts wait for unlock; a newer pending intent replaces the previous one.
+  shortcuts wait for unlock; newer Content/Navigation replaces earlier work,
+  while foreground-only Dock/tray Open preserves it.
   Cancellation retains it, process exit discards it. Quit, including the Runtime
   choice and busy response, works without authentication.
 - Mac without usable Touch ID, including a closed lid with external keyboard:
@@ -177,7 +186,8 @@ a signed TEST RC:
 Ask Vibey #4035 is integrated at the start of `compose::enqueue`, before file
 validation or share allocation. Its consumer test E30 uses the production queue,
 WKWebView transport, and shipped composer receiver. It proves latest-intent
-replacement, cancellation retention, deferred file opening (a selected file is
+replacement, cancellation followed by Dock/tray Open without losing content,
+retained navigation, deferred file opening (a selected file is
 created only after the request), Off behavior, and a previously admitted share
 waiting through a lock. Only the final composer target records input instead of
 sending a message. The peer uses a nonpersistent WKWebView store, test-owned file
@@ -189,3 +199,18 @@ while locked: no selected content appears on the lock screen; cancel retains it;
 success places the newest selection in the input without sending. Also verify
 an already queued selection waits through a subsequent lock. W1 #4036 needs the
 corresponding window/menu acceptance checks after integration.
+
+## Revised freeze and package schedule
+
+On 2026-11-20 main approved Action-only-if-empty semantics before packaging.
+The pure pending-entry queue tests every kind pairing by consuming the surviving
+payload; native e2e covers Dock/tray preserving Navigation and the real Ask
+composer flow after cancelled authentication. Specific menu/shortcut commands
+remain distinct from foreground-only Action, with no change to their behavior.
+No timing/authentication Machine rules changed.
+
+Packaging is on hold until #4034/#4036/#4037 merge. Main will then request one
+package from master + App Lock + `fix/mini-input-card-width`, preserving the
+features in the installed w1.x line. The [smoke checklist](app-lock-desktop-smoke.md)
+separates Agent-runnable evidence from Max's real authentication and hardware
+checks. Do not build or install the standalone App Lock branch meanwhile.

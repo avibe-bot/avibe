@@ -11,8 +11,35 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
     defer, defer_kind, init, is_locked, protects_view, queue_if_locked, ready, show_lifecycle_busy, show_quit_question,
-    sync_windows, EntryKind,
+    sync_windows,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    Navigation,
+    Content,
+    Command,
+    Action,
+}
+
+#[cfg(any(target_os = "macos", test))]
+struct PendingEntry<T> {
+    kind: EntryKind,
+    action: T,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl<T> PendingEntry<T> {
+    /// Foreground-only requests add no work to an occupied slot. Content,
+    /// navigation and explicit commands retain latest-wins semantics.
+    fn offer(slot: &mut Option<Self>, kind: EntryKind, action: T) -> bool {
+        if kind == EntryKind::Action && slot.is_some() {
+            return false;
+        }
+        *slot = Some(Self { kind, action });
+        true
+    }
+}
 
 pub const MARKER: &str = if cfg!(target_os = "macos") {
     "if (window.self === window.top && location.protocol === 'http:' && ['127.0.0.1','[::1]'].includes(location.hostname) && !location.pathname.startsWith('/show/')) Object.defineProperty(window, '__AVIBE_DESKTOP_APP_LOCK__', {value:true});"
@@ -367,6 +394,29 @@ mod event_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn e28_e30_pending_actions_only_fill_empty_slots() {
+        use EntryKind::{Action, Command, Content, Navigation};
+        // Consume the surviving payload for every previous/incoming pairing,
+        // including Action -> Action, not just the kind used for lock copy.
+        for (previous, expected) in [
+            (None, ["new", "new", "new", "new"]),
+            (Some(Action), ["old", "new", "new", "new"]),
+            (Some(Content), ["old", "new", "new", "new"]),
+            (Some(Navigation), ["old", "new", "new", "new"]),
+            (Some(Command), ["old", "new", "new", "new"]),
+        ] {
+            for (incoming, expected_payload) in [Action, Content, Navigation, Command].into_iter().zip(expected) {
+                let mut slot = previous.map(|kind| PendingEntry { kind, action: "old" });
+                let accepted = PendingEntry::offer(&mut slot, incoming, "new");
+                assert_eq!(accepted, expected_payload == "new", "{previous:?} -> {incoming:?}");
+                let delivered = slot.take().unwrap();
+                assert_eq!(delivered.kind, if accepted { incoming } else { previous.unwrap() });
+                assert_eq!(delivered.action, expected_payload);
+                assert!(slot.is_none());
+            }
+        }
+    }
     fn available() -> Availability {
         Availability {
             available: true,
@@ -539,12 +589,6 @@ pub(crate) fn show_lifecycle_busy(_app: &tauri::AppHandle, _catalog: &crate::Nat
     false
 }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) enum EntryKind {
-    Navigation,
-    Content,
-    Action,
-}
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn defer_kind(
     _app: &tauri::AppHandle,

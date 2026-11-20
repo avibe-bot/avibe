@@ -17,16 +17,7 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntryKind {
-    Navigation,
-    Content,
-    Action,
-}
-struct Entry {
-    kind: EntryKind,
-    action: Box<dyn FnOnce(&AppHandle) + Send>,
-}
+type Entry = PendingEntry<Box<dyn FnOnce(&AppHandle) + Send>>;
 type Observer = (
     Retained<NSNotificationCenter>,
     Retained<objc2::runtime::ProtocolObject<dyn NSObjectProtocol>>,
@@ -226,10 +217,18 @@ fn queue_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) 
     if !state.locked {
         return false;
     }
-    *owner.pending.lock().expect("app lock pending entry") = Some(Entry {
+    if !Entry::offer(
+        &mut owner.pending.lock().expect("app lock pending entry"),
         kind,
-        action: Box::new(action),
-    });
+        Box::new(action),
+    ) {
+        return true; // Still gated; the caller may foreground and offer unlock.
+    }
+    // A foreground-only Action must also preserve navigation that was already
+    // waiting in the Workbench queue before locking.
+    if kind == EntryKind::Action {
+        return true;
+    }
     // A newer locked entry supersedes an earlier navigation/update that was
     // still waiting for a Workbench before the app locked.
     if let Some(links) = app.try_state::<Mutex<avibe_runtime_host::deep_link::DeepLinks>>() {
@@ -700,7 +699,7 @@ impl LockView {
         let key = pending_kind.and_then(|kind| match kind {
             EntryKind::Content => Some("pendingContent"),
             EntryKind::Navigation => Some("pendingLink"),
-            EntryKind::Action => None,
+            EntryKind::Action | EntryKind::Command => None,
         });
         f.pending
             .setStringValue(&NSString::from_str(&key.map(catalog).unwrap_or_default()));

@@ -165,7 +165,7 @@ test('closed-lid biometry keeps its Touch ID type but the native button offers t
 
 test('one memory-only pending entry survives cancellation and only the latest executes', async () => {
   await peer.send('reset', { policy: 'immediately' });
-  await peer.send('entry', { value: 'avibe://session/old-fixture' });
+  await peer.send('entry', { kind: 'navigation', value: 'avibe://session/old-fixture' });
   const queued = await peer.send('entry', { value: 'ASK VIBEY PRIVATE SELECTION' });
   expect(queued.executed).toEqual([]);
   expect(queued.pending).toBe(true);
@@ -175,6 +175,22 @@ test('one memory-only pending entry survives cancellation and only the latest ex
   await peer.send('outcome', { value: 'success' });
   const unlocked = await peer.send('unlock');
   expect(unlocked.executed).toEqual(['ASK VIBEY PRIVATE SELECTION']);
+  expect(unlocked.pending).toBe(false);
+});
+
+test('E28 foreground-only Dock and tray requests preserve pending navigation', async () => {
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: null });
+  await peer.send('entry', { kind: 'navigation', value: 'old navigation' });
+  await peer.send('entry', { kind: 'navigation', value: 'new navigation' });
+  for (const value of ['dock', 'tray']) {
+    const waiting = await peer.send('source', { value });
+    expect(waiting.locked).toBe(true);
+    expect(waiting.executed).toEqual([]);
+    expect(waiting.windows.every((window) => window.pendingLabel.includes('link'))).toBe(true);
+  }
+  const unlocked = await peer.send('outcome', { value: 'success' });
+  expect(unlocked.executed).toEqual(['new navigation']);
   expect(unlocked.pending).toBe(false);
 });
 
@@ -467,6 +483,14 @@ test('E30 Ask Vibey defers its real queue and file reads, then delivers through 
   expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted, queued: 0 });
   expect((await peer.send<Observed>('composeRead')).lines).toEqual([]);
   await peer.send('outcome', { value: 'cancelled' });
+  // A foreground-only Dock click after cancellation must not discard the
+  // selected content or replace its generic pending copy.
+  const dock = await peer.send('source', { value: 'dock' });
+  expect(dock.locked).toBe(true);
+  expect(dock.pending).toBe(true);
+  expect(dock.windows.every((window) => window.pendingLabel.includes('Vibey'))).toBe(true);
+  expect(dock.authCalls).toBe(pending.authCalls);
+  expect((await peer.send('source', { value: 'tray' })).windows.every((window) => window.pendingLabel.includes('Vibey'))).toBe(true);
   await peer.send('unlock');
   expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted, queued: 0 });
   await peer.send('outcome', { value: 'success' });

@@ -2906,7 +2906,12 @@ fn request_private_runtime_removal(app: AppHandle) {
 fn handle_menu(app: &AppHandle, id: &str) {
     if id != QUIT_MENU_ID {
         let pending = id.to_owned();
-        if app_lock::defer(app, move |app| handle_menu(app, &pending)) {
+        let kind = if id == OPEN_MENU_ID {
+            app_lock::EntryKind::Action
+        } else {
+            app_lock::EntryKind::Command
+        };
+        if app_lock::defer_kind(app, kind, move |app| handle_menu(app, &pending)) {
             return;
         }
     }

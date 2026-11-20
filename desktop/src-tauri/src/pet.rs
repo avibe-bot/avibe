@@ -528,7 +528,7 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutStat
     if crate::app_lock::is_locked(app) {
         if event == ShortcutState::Pressed {
             let shortcut = *shortcut;
-            crate::app_lock::defer(app, move |app| {
+            crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Command, move |app| {
                 handle_shortcut(app, &shortcut, ShortcutState::Pressed);
                 handle_shortcut(app, &shortcut, ShortcutState::Released);
             });
