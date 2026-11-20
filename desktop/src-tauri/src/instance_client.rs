@@ -805,7 +805,8 @@ pub(crate) fn is_current_runtime<R: tauri::Runtime>(view: &Webview<R>) -> bool {
 }
 /// The shown Workbench document and the Runtime origin it must have, while it
 /// is the current Runtime (no account page, not staging or committing) and its
-/// URL is at that origin. Ask Vibey delivers into nothing else.
+/// URL is at that origin. Ask Vibey (macOS Services) delivers into nothing else.
+#[cfg(target_os = "macos")]
 pub(crate) fn current_workbench(app: &AppHandle) -> Option<(Webview, Url)> {
     let view = runtime_webview(app)?;
     if !is_current_runtime(&view) {

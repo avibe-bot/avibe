@@ -121,7 +121,8 @@ export function createReceiver(deps: ReceiverDeps): Receiver {
       else files.push(new File(parts[index] as BlobPart[], file.name, { type: file.type }));
     });
     if (share.kind === 'unreadable') refusals.add('unreadable');
-    if (files.length) (vibey() ?? ready).addFiles(files);
+    // A share is text or files, never both, so a refusal here adds nothing.
+    if (files.length && !await until(() => vibey()?.addFiles(files), READY_TIMEOUT)) return 'unavailable';
     for (const refusal of refusals) deps.toast(REFUSAL_COPY[refusal]);
     return 'done';
   }

@@ -544,6 +544,10 @@ export interface ComposerHandle {
   /** Stage + upload files from outside the composer — e.g. a chat-page-wide
    *  drag-and-drop that drops onto the transcript rather than the input row. */
   addFiles: (files: File[]) => void;
+  /** `addFiles` for a caller that must know whether the composer took the
+   *  files: false while it refuses them (disabled, a send in flight, voice
+   *  capture owns the draft, no session). Upload failures still toast. */
+  stageFiles: (files: File[]) => boolean;
   /** Insert a `#<session>` reference chip at the cursor (e.g. "reference this
    *  session" from the sidebar). No-op when the mention editor isn't active
    *  (the plain-textarea home composer). */
@@ -1989,6 +1993,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // No deps array keeps every exposed operation on the latest render state.
   useImperativeHandle(ref, () => ({
     addFiles: (files: File[]) => void uploadFiles(files),
+    stageFiles: (files: File[]) => {
+      if (!mediaEnabled || disabledRef.current || pendingRef.current || voiceDraftLocked()) return false;
+      void uploadFiles(files);
+      return true;
+    },
     insertSessionReference: (refSessionId: string, title?: string | null) => {
       if (voiceDraftLocked()) return;
       // Same node a typed `#` pick yields: trigger `#`, label = title||id, data

@@ -631,7 +631,7 @@ export const ChatPage: React.FC = () => {
             composerReady: !showPageActive,
             showChat: () => selectChatView(sessionId, true),
             appendLine: (text: string) => composerRef.current?.appendLine(text) ?? false,
-            addFiles: (files: File[]) => composerRef.current?.addFiles(files),
+            addFiles: (files: File[]) => composerRef.current?.stageFiles(files) ?? false,
           }
         : null,
     [sessionId, sessionLoaded, writable, showPageActive, selectChatView],

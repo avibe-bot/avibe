@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rewritten_or_replaced_file_is_not_unchanged() {
+    fn a_rewritten_file_is_not_unchanged() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("note.txt");
         fs::write(&path, b"selected").unwrap();
@@ -106,8 +106,16 @@ mod tests {
             .set_len(20)
             .unwrap();
         assert!(!unchanged(&selected, &fs::metadata(&path).unwrap()));
+    }
+
+    // Identity (device and inode) is a Unix notion; Services runs on macOS.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_of_the_same_size_is_not_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.txt");
+        fs::write(&path, vec![1; 20]).unwrap();
         let same_size = fs::metadata(&path).unwrap();
-        fs::remove_file(&path).unwrap();
         fs::write(directory.path().join("other.txt"), vec![0; 20]).unwrap();
         fs::rename(directory.path().join("other.txt"), &path).unwrap();
         assert!(!unchanged(&same_size, &fs::metadata(&path).unwrap()));

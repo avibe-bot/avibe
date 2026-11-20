@@ -111,4 +111,30 @@ describe.each([
     act(() => { handle.current!.appendLine('「引用」'); });
     await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith('「引用」'));
   });
+
+  it('stages files only when the composer can take them, and says so', async () => {
+    const handle = createRef<ComposerHandle>();
+    const view = (disabled: boolean) => (
+      <I18nextProvider i18n={i18n}>
+        <ToastProvider>
+          <Composer
+            ref={handle}
+            sessionId="ses_main"
+            onSend={() => undefined}
+            disabled={disabled}
+            onSearchAgents={mentions ? async () => [] : undefined}
+            onSearchSessions={mentions ? async () => [] : undefined}
+          />
+        </ToastProvider>
+      </I18nextProvider>
+    );
+    const rendered = render(view(true));
+    await screen.findByRole('textbox');
+    const file = new File(['synthetic'], 'contract.pdf', { type: 'application/pdf' });
+    expect(handle.current!.stageFiles([file])).toBe(false);
+    rendered.rerender(view(false));
+    let accepted = false;
+    act(() => { accepted = handle.current!.stageFiles([file]); });
+    expect(accepted).toBe(true);
+  });
 });

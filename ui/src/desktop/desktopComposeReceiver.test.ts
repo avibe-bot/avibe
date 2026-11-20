@@ -17,7 +17,7 @@ function vibey(overrides: Partial<ComposeTarget> = {}) {
     composerReady: true,
     showChat: vi.fn(),
     appendLine: vi.fn((text: string) => { lines.push(text); return true; }),
-    addFiles: vi.fn((added: File[]) => { files.push(added); }),
+    addFiles: vi.fn((added: File[]) => { files.push(added); return true; }),
     ...overrides,
   };
   return { target, lines, files };
@@ -156,5 +156,26 @@ describe('Ask Vibey receiver', () => {
     const two = harness(vibey().target).receiver;
     expect(one.document).toMatch(/^[0-9a-f-]{36}$/);
     expect(one.document).not.toBe(two.document);
+  });
+
+  // While the composer refuses files (voice capture owns the draft, a send in
+  // flight), the share waits; it is never reported done with nothing staged.
+  it('waits for the composer to take files and reports unavailable if it never does', async () => {
+    const share = (id: string) => ({ id, kind: 'files', files: [{ name: 'a.txt', type: 'text/plain', size: 1 }] });
+    let refusals = 3;
+    const busy = vibey({ addFiles: vi.fn(() => --refusals < 0) });
+    const late = harness(busy.target);
+    late.receiver.begin(share('a'));
+    late.receiver.chunk('a', 0, b64('x'));
+    late.receiver.commit('a');
+    expect(await late.settle('a')).toBe('done');
+    expect((busy.target.addFiles as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(4);
+
+    const locked = vibey({ addFiles: vi.fn(() => false) });
+    const never = harness(locked.target);
+    never.receiver.begin(share('b'));
+    never.receiver.chunk('b', 0, b64('x'));
+    never.receiver.commit('b');
+    expect(await never.settle('b')).toBe('unavailable');
   });
 });
