@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import random
+import socket
 import threading
 from typing import Any, Dict, Iterator, List, Optional
 from unittest.mock import patch
@@ -24,6 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from modules.im import feishu_ws
+from modules.im.feishu_sdk_ws import SdkLongConnection
 from modules.im.feishu_ws import (
     ConnectionRefused,
     EventPieces,
@@ -150,23 +152,93 @@ def test_an_answer_is_built_as_the_sdk_builds_it(code: int, result: Optional[Dic
         assert ours == reference.SerializeToString()
 
 
-def test_fields_a_newer_server_adds_come_back_unchanged():
-    known = _sdk_frame(SeqID=7, LogID=8, service=9, method=1, headers=[("type", "event")], payload=b"{}")
-    # Field 15 (varint) and field 16 (bytes): not in the schema any SDK ships.
-    wire = known.SerializeToString() + bytes([15 << 3 | 0, 42]) + bytes([0x82, 0x01, 3]) + b"new"
+def _reference(wire: bytes) -> Any:
+    frame = _sdk().Frame()
+    frame.ParseFromString(wire)
+    return frame
+
+
+KNOWN = b"\x08\x07\x10\x08\x18\x09\x20\x01"  # SeqID 7, LogID 8, service 9, method 1
+HEADER = b"\x0a\x04type\x12\x05event"  # key "type", value "event"
+
+
+
+def _tag(number: int, wire: int) -> bytes:
+    """A field's tag, written out by hand: the test must not lean on the codec it tests."""
+    key, out = number << 3 | wire, bytearray()
+    while key > 0x7F:
+        out.append(key & 0x7F | 0x80)
+        key >>= 7
+    out.append(key)
+    return bytes(out)
+
+
+UNUSUAL_FRAMES = {
+    "a varint and a bytes field no schema has": KNOWN + _tag(15, 0) + b"\x2a" + _tag(16, 2) + b"\x03new",
+    "a group no schema has": KNOWN + _tag(20, 3) + _tag(1, 0) + b"\x05" + _tag(20, 4),
+    "a group inside a group": KNOWN + _tag(20, 3) + _tag(21, 3) + b"\x08\x01" + _tag(21, 4) + _tag(20, 4),
+    "a fixed32 and a fixed64 no schema has": KNOWN + _tag(17, 5) + b"\x01\x02\x03\x04" + _tag(18, 1) + bytes(8),
+    "a varint no schema has, written longer than need be": KNOWN + _tag(15, 0) + b"\xaa\x80\x00",
+    "a field no schema has inside a header": KNOWN + b"\x2a" + bytes([len(HEADER) + 2]) + HEADER + b"\x18\x01",
+    "service as minus one in five bytes": b"\x08\x07\x10\x08\x18\xff\xff\xff\xff\x0f\x20\x01",
+    "service as minus one in ten bytes": b"\x08\x07\x10\x08\x18" + b"\xff" * 9 + b"\x01\x20\x01",
+    "method above 32 bits": b"\x08\x07\x10\x08\x18\x09\x20\x81\x80\x80\x80\x10",
+    "a known field twice": KNOWN + b"\x18\x0a",
+    "a known field with the wrong wire type": KNOWN + b"\x1a\x01x",
+    "an empty payload": KNOWN + b"\x42\x00",
+}
+
+
+@pytest.mark.parametrize("name", list(UNUSUAL_FRAMES))
+def test_unusual_frames_are_read_and_written_as_the_sdk_does(name: str):
+    wire = UNUSUAL_FRAMES[name]
+    reference = _reference(wire)
 
     frame = decode_frame(wire)
 
-    assert frame.unknown == [(15, 0, 42), (16, 2, b"new")]
-    assert encode_frame(frame) == wire
+    assert (frame.seq_id, frame.log_id, frame.service, frame.method) == (
+        reference.SeqID,
+        reference.LogID,
+        reference.service,
+        reference.method,
+    )
+    assert frame.headers == [(header.key, header.value) for header in reference.headers]
+    assert encode_frame(frame) == reference.SerializeToString()
 
 
 @pytest.mark.parametrize(
     "wire",
-    [b"\x08", b"\x42\x05ab", b"\x0b\x01", b"\x32\x02\xff\xfe"],
-    ids=["a varint cut short", "a field cut short", "a wire type nobody sends", "text that is not UTF-8"],
+    [b"\x08\x07\x10\x08\x18\x09", b"", KNOWN + b"\x2a\x06\x0a\x04type", KNOWN + b"\x2a\x00"],
+    ids=["no method", "nothing at all", "a header without a value", "an empty header"],
 )
-def test_bytes_that_are_not_a_frame_are_refused(wire: bytes):
+def test_a_frame_without_a_required_field_is_read_and_cannot_be_written_back(wire: bytes):
+    """As with the SDK's class: it parses, and serialising it again is refused."""
+    reference = _reference(wire)
+    with pytest.raises(Exception, match="required"):
+        reference.SerializeToString()
+
+    frame = decode_frame(wire)
+
+    assert frame.headers == [(header.key, header.value) for header in reference.headers]
+    with pytest.raises(FrameError, match="required"):
+        encode_frame(frame)
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [b"\x08", b"\x42\x05ab", b"\x0e\x01", b"\x32\x02\xff\xfe", _tag(20, 3) + b"\x08\x01", _tag(20, 4)],
+    ids=[
+        "a varint cut short",
+        "a field cut short",
+        "a wire type nobody sends",
+        "text that is not UTF-8",
+        "a group that never ends",
+        "the end of a group that never began",
+    ],
+)
+def test_bytes_that_are_not_a_frame_are_refused_by_both(wire: bytes):
+    with pytest.raises(Exception):
+        _reference(wire)
     with pytest.raises(FrameError):
         decode_frame(wire)
 
@@ -471,6 +543,144 @@ def test_the_connection_s_ticket_is_not_logged(fake: FakeFeishu, caplog: pytest.
         assert secret not in caplog.text
 
 
+@pytest.mark.parametrize("mode", BOTH)
+def test_the_number_of_attempts_is_the_one_in_force_when_reconnecting_began(fake: FakeFeishu, mode: str):
+    fake.client_config["ReconnectCount"] = 1
+    with running_adapter(fake, long_connection=mode):
+        # The one attempt allowed is refused at the handshake, after its endpoint said "without limit".
+        fake.client_config["ReconnectCount"] = -1
+        fake.handshake_refusals = [(503, {})]
+        fake.drop_connection()
+        fake.wait_until(lambda: fake.handshakes_refused == 1, what="the refused handshake")
+        threading.Event().wait(0.5)  # ten retry intervals
+
+        assert len(fake.endpoint_requests) == 2
+        assert fake.connections_opened == 1
+
+
+@pytest.mark.parametrize("mode", BOTH)
+def test_the_endpoint_is_asked_for_through_the_environment_s_proxy(
+    fake: FakeFeishu, mode: str, monkeypatch: pytest.MonkeyPatch
+):
+    """A deployment that reaches Feishu's API only through its proxy must still get an endpoint."""
+    # The fake stands in for the proxy: a proxied request names the whole URL, and the fake answers by its path.
+    monkeypatch.setenv("HTTP_PROXY", fake.url)
+    monkeypatch.setenv("http_proxy", fake.url)
+    unreachable = "http://feishu-open-platform.invalid"
+    received: List[bytes] = []
+
+    class Handler:
+        def _do_without_validation(self, payload: bytes) -> None:
+            received.append(payload)
+
+    if mode == "sdk":
+        connection: Any = SdkLongConnection(
+            app_id="cli_app", app_secret="socket-secret", domain=unreachable, event_handler=Handler()
+        )
+        connection.start()
+    else:
+        connection = FeishuLongConnection(
+            base_url=unreachable, app_id="cli_app", app_secret="socket-secret", handle_event=received.append
+        )
+        connection.start()
+    try:
+        fake.wait_connected()
+        fake.wait_acknowledged(fake.push_event(message_event()))
+    finally:
+        assert connection.stop() is True
+
+    assert len(received) == 1
+
+
+def test_a_stop_just_after_the_socket_opened_still_closes_it(fake: FakeFeishu):
+    """The socket exists and nobody but this coroutine knows it yet: the stop's cancellation must not orphan it."""
+    fake.withhold_close_reply = True
+    opened: List[Any] = []
+    connection = FeishuLongConnection(
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+    )
+    connect = feishu_ws.websockets.connect
+
+    async def connect_then_stop(*args: Any, **kwargs: Any) -> Any:
+        socket = await connect(*args, **kwargs)
+        opened.append(socket)
+        connection.stop(timeout=0)  # from the connection's own thread: asks, and does not wait
+        return socket
+
+    with patch.object(feishu_ws.websockets, "connect", connect_then_stop):
+        connection.start()
+        fake.wait_until(lambda: opened and not connection.is_alive(), timeout=10, what="the connection to end")
+
+    assert connection.stop() is True
+    assert opened[0].transport.is_closing()
+    assert connection._loop.is_closed()
+    assert connection._held is None
+
+
+def test_a_stop_before_or_during_start_is_not_an_error_and_wins(fake: FakeFeishu):
+    before = FeishuLongConnection(
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+    )
+    assert before.stop() is True
+    before.start()
+    assert before.is_alive() is False
+
+    failures: List[BaseException] = []
+
+    def attempt(action: Any) -> None:
+        try:
+            action()
+        except BaseException as exc:
+            failures.append(exc)
+
+    for _ in range(40):
+        racing = FeishuLongConnection(
+            base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+        )
+        threads = [threading.Thread(target=attempt, args=(racing.start,)), threading.Thread(target=attempt, args=(racing.stop,))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert racing.stop() is True
+
+    assert failures == []
+    threading.Event().wait(0.3)
+    assert before.is_alive() is False
+
+
+def test_what_feishu_or_the_network_says_is_logged_without_the_secret_and_the_ticket(
+    fake: FakeFeishu, caplog: pytest.LogCaptureFixture
+):
+    with socket.socket() as placeholder:  # a loopback port with nothing behind it
+        placeholder.bind(("127.0.0.1", 0))
+        closed_port = placeholder.getsockname()[1]
+    fake.endpoint_replies = [
+        (503, {"msg": "bad credentials for socket-secret"}),
+        {"code": 1000040343, "msg": "internal error near socket-secret"},
+        {
+            "code": 0,
+            "data": {"URL": f"ws://127.0.0.1:{closed_port}/ws/v2?device_id=1&service_id=2&ticket=TICKET-MARK&access_key=KEY-MARK"},
+        },
+        {"code": 0, "data": {"URL": "ws://127.0.0.1:1/ws/v2?ticket=TICKET-MARK"}},  # names no device
+    ]
+    connection = FeishuLongConnection(
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+    )
+    connection.config.reconnect_nonce, connection.config.reconnect_interval = 0, 0.02
+
+    with caplog.at_level("DEBUG", logger="modules.im.feishu_ws"):
+        connection.start()
+        try:
+            fake.wait_connected(timeout=10)
+        finally:
+            assert connection.stop() is True
+
+    assert caplog.text.count("connect failed") == 4
+    for marker in ("socket-secret", "TICKET-MARK", "KEY-MARK"):
+        assert marker not in caplog.text
+
+
 # --- the two clients side by side ----------------------------------------------------
 
 
@@ -521,32 +731,106 @@ def test_listening_finds_nothing_to_report_on_the_sdk_s_own_frames(fake: FakeFei
     assert tap.counts.events == 4
 
 
-def test_the_tap_reports_a_frame_this_codec_would_get_wrong(caplog: pytest.LogCaptureFixture):
-    sdk = _sdk()
-    tap = FrameTap(sdk.Frame)
-    received = _sdk_frame(
+def _event_frame(message_id: str, payload: bytes = b'{"private": "text"}') -> Any:
+    return _sdk_frame(
         SeqID=1,
         LogID=2,
         service=3,
         method=1,
-        headers=[("type", "event"), ("message_id", "m1"), ("sum", "1"), ("seq", "0"), ("trace_id", "t")],
-        payload=b'{"private": "text"}',
+        headers=[("type", "event"), ("message_id", message_id), ("sum", "1"), ("seq", "0"), ("trace_id", "t")],
+        payload=payload,
     )
-    tap.received(received.SerializeToString())
-    tap.handled(b'{"private": "text"}')
+
+
+def _sdk_answer(received: Any, payload: bytes, timing: Optional[str] = "3") -> bytes:
+    if timing is not None:
+        header = received.headers.add()
+        header.key, header.value = "biz_rt", timing
+    received.payload = payload
+    return received.SerializeToString()
+
+
+def test_the_tap_holds_the_other_client_to_what_this_codec_would_do(caplog: pytest.LogCaptureFixture):
+    tap = FrameTap(_sdk().Frame)
+
+    # As this module would: received, handed on, handled, answered with the same bytes.
+    first = _event_frame("m1")
+    tap.received(first.SerializeToString())
+    tap.handled(b'{"private": "text"}', None, False)
+    tap.sent(_sdk_answer(first, b'{"code": 200}'))
+    card = _event_frame("m2")
+    tap.received(card.SerializeToString())
+    tap.handled(b'{"private": "text"}', {}, False)
+    tap.sent(_sdk_answer(card, b'{"code": 200, "data": "e30="}'))
+    failed = _event_frame("m3")
+    tap.received(failed.SerializeToString())
+    tap.handled(b'{"private": "text"}', None, True)
+    tap.sent(_sdk_answer(failed, b'{"code": 500}', timing=None))
     assert tap.counts.mismatches == 0
 
-    # The other client answers in a way this module would not have: compact JSON.
-    header = received.headers.add()
-    header.key, header.value = "biz_rt", "3"
-    received.payload = b'{"code":200}'
-    tap.sent(received.SerializeToString())
-    # And hands on an event this module never saw arrive.
-    tap.handled(b'{"other": 1}')
+    # Not as this module would.
+    compact = _event_frame("m4")
+    tap.received(compact.SerializeToString())
+    tap.handled(b'{"private": "text"}', None, False)
+    tap.sent(_sdk_answer(compact, b'{"code":200}'))  # another spelling of the same answer
+    wrong_outcome = _event_frame("m5")
+    tap.received(wrong_outcome.SerializeToString())
+    tap.handled(b'{"private": "text"}', None, True)
+    tap.sent(_sdk_answer(wrong_outcome, b'{"code": 200}'))  # the dispatcher failed; the answer says handled
+    tap.handled(b'{"other": 1}', None, False)  # an event this module never saw arrive
+    unasked = _event_frame("m6")
+    tap.sent(_sdk_answer(unasked, b'{"code": 200}'))  # an answer to nothing
+
+    assert tap.counts.mismatches == 4
+    assert "an answer is built differently (message_id: m4)" in caplog.text
+    assert "an answer is built differently (message_id: m5)" in caplog.text
+    assert "an event was handed on that this codec did not join" in caplog.text
+    assert "an answer to an event this codec would not have handed on (message_id: m6)" in caplog.text
+    assert "private" not in caplog.text and "other" not in caplog.text
+
+
+def test_the_tap_counts_what_the_other_client_owed_and_never_did(caplog: pytest.LogCaptureFixture):
+    tap = FrameTap(_sdk().Frame)
+    with patch.object(feishu_ws, "_TAP_PENDING_SECONDS", 0.0):
+        tap.received(_event_frame("m_dropped").SerializeToString())  # joined here, never handed on there
+        unanswered = _event_frame("m_unanswered", b"{}")
+        tap.received(unanswered.SerializeToString())
+        tap.handled(b"{}", None, False)  # handed on and handled, never answered
+        tap.received(_sdk_frame(SeqID=0, LogID=0, service=3, method=0, headers=[("type", "pong")]).SerializeToString())
 
     assert tap.counts.mismatches == 2
-    assert "an answer is built differently (message_id: m1)" in caplog.text
-    assert "private" not in caplog.text and "other" not in caplog.text
+    assert "an event this codec joined was not handed on (message_id: m_dropped)" in caplog.text
+    assert "an event that was handled was not answered (message_id: m_unanswered)" in caplog.text
+
+
+def test_a_failure_inside_the_tap_does_not_reach_the_sdk_s_client(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("the tap broke")
+
+    with patch.multiple(FrameTap, received=broken, handled=broken, sent=broken):
+        with running_adapter(fake, long_connection="listen") as adapter:
+            acknowledged = fake.wait_acknowledged(fake.push_event(message_event()))
+            clicked = fake.wait_acknowledged(fake.push_event(card_action_event()))
+
+    assert (len(adapter.messages), len(adapter.clicks)) == (1, 1)
+    assert acknowledged.json() == {"code": 200}
+    assert clicked.json() == {"code": 200, "data": "e30="}
+    assert "Feishu long connection tap failed; the SDK's client is not affected" in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["sdk", "own", "listen"])
+def test_an_event_frame_without_its_trace_id_is_neither_handled_nor_answered(fake: FakeFeishu, mode: str):
+    """The SDK's client reads five headers before it does anything with a data frame; so does ours."""
+    with running_adapter(fake, long_connection=mode) as adapter:
+        fake.push_frames(fake.event_frames(message_event(event_id="e_bare"), message_id="m_bare", without_header="trace_id"))
+        after = fake.wait_acknowledged(fake.push_event(message_event(event_id="e_after")))
+        tap = adapter.bot._frame_tap
+
+    assert after.json() == {"code": 200}
+    assert fake.acknowledgements("m_bare") == []
+    assert len(adapter.messages) == 1
+    if mode == "listen":
+        assert tap.counts.mismatches == 0  # both would leave it; that is agreement
 
 
 def test_an_unknown_long_connection_value_means_the_sdk_s(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
@@ -646,6 +930,7 @@ async def test_a_chat_whose_history_may_not_be_read_is_left_out_and_said_once(
         counts = bot._history_check.counts
         assert (counts.chats_not_readable, counts.missing) == (1, 0)
         assert caplog.text.count("chat oc_closed is not readable (code=230027") == 1
+        assert len(fake.history_requests) == 1  # and not asked again
 
 
 async def test_history_longer_than_one_reading_is_continued_not_skipped(fake: FakeFeishu, clock: _Clock):
@@ -694,7 +979,6 @@ def test_no_history_is_read_while_the_sdk_s_client_is_the_only_one(fake: FakeFei
 
 def test_on_our_own_connection_the_process_never_imports_the_sdk():
     """The SDK's package imports every generated API (about 10,600 modules, 180 MiB); ``own`` must not touch it."""
-    import socket
     import subprocess
     import sys
     from pathlib import Path
@@ -768,3 +1052,30 @@ def test_the_switch_survives_a_save_that_does_not_mention_it_and_an_older_file_m
 
     # A value nobody defined is kept as written and does not stop the config from loading.
     assert api.save_config({"lark": {"long_connection": "sideways"}}).lark.long_connection == "sideways"
+
+
+def test_an_adapter_that_sets_nothing_loads_and_logs_what_it_did_before(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = """
+import sys
+from config.v2_config import LarkConfig
+from modules.im.feishu import FeishuBot
+FeishuBot(LarkConfig(app_id="cli_app", app_secret="socket-secret"))
+print(sorted(name for name in sys.modules if name in ("modules.im.feishu_ws", "modules.im.feishu_history_check", "websockets")))
+"""
+    done = subprocess.run(
+        [sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=120
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().splitlines()[-1] == "[]"
+
+    with caplog.at_level("INFO", logger="modules.im.feishu"):
+        with running_adapter(fake) as adapter:
+            fake.wait_acknowledged(fake.push_event(message_event()))
+
+    assert "Starting Feishu/Lark bot with WebSocket..." in caplog.text
+    assert "long connection" not in caplog.text
+    assert adapter.bot._own_connection is None and adapter.bot._frame_tap is None

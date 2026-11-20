@@ -257,7 +257,9 @@ class FakeFeishu:
         self.push_frames(self.event_frames(body, pieces=pieces, message_id=message_id), connection=connection)
         return message_id
 
-    def event_frames(self, body: Dict[str, Any], *, pieces: int = 1, message_id: str) -> List[bytes]:
+    def event_frames(
+        self, body: Dict[str, Any], *, pieces: int = 1, message_id: str, without_header: Optional[str] = None
+    ) -> List[bytes]:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         size = max(1, -(-len(payload) // pieces))
         chunks = [payload[start : start + size] for start in range(0, len(payload), size)] or [b""]
@@ -275,6 +277,8 @@ class FakeFeishu:
                 ("seq", str(seq)),
                 ("trace_id", f"trace-{message_id}"),
             ):
+                if key == without_header:
+                    continue
                 header = frame.headers.add()
                 header.key = key
                 header.value = value

@@ -71,7 +71,7 @@ class FeishuHistoryCheck:
 
     async def run_once(self, direct_chats: Iterable[str]) -> None:
         end = int(time.time()) - _SETTLE_SECONDS
-        for chat_id in sorted(set(direct_chats)):
+        for chat_id in sorted(set(direct_chats) - self._not_readable):
             start = self._checked_until.get(chat_id, self._started_at)
             if end <= start:
                 continue

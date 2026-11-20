@@ -15,7 +15,7 @@ import os
 import threading
 import time
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -36,9 +36,7 @@ from .message_facts import (
 from .download_target import open_download_target
 from .feishu_api import FeishuApi
 from .feishu_events import FeishuEventDispatcher
-from .feishu_history_check import FeishuHistoryCheck
 from .feishu_sdk_ws import SdkLongConnection
-from .feishu_ws import FeishuLongConnection, FrameTap
 from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
@@ -46,6 +44,11 @@ from vibe.i18n import get_supported_languages, t as i18n_t
 from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RoutingModalData, route_option_label
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
 from modules.agents.native_sessions.types import NativeResumeSession
+
+if TYPE_CHECKING:
+    # Imported where they are used: an adapter on the SDK's connection alone loads neither.
+    from .feishu_history_check import FeishuHistoryCheck
+    from .feishu_ws import FeishuLongConnection, FrameTap
 
 logger = logging.getLogger(__name__)
 
@@ -148,14 +151,14 @@ class FeishuBot(BaseIMClient):
         self._api = FeishuApi(config.api_base_url, self._tenant_token)
         # The long connection that delivers events: lark-oapi's client, ours, or both
         self._sdk_connection: Optional[SdkLongConnection] = None
-        self._own_connection: Optional[FeishuLongConnection] = None
+        self._own_connection: Optional["FeishuLongConnection"] = None
         # Set by stop(), which may come at any point of the start.
         self._stop_requested = threading.Event()
         self._connection_mode = _SDK
-        self._frame_tap: Optional[FrameTap] = None
+        self._frame_tap: Optional["FrameTap"] = None
         # Events seen per connection ("sdk", "own") while the two are compared.
         self._connection_events: Dict[str, Dict[str, int]] = {}
-        self._history_check: Optional[FeishuHistoryCheck] = None
+        self._history_check: Optional["FeishuHistoryCheck"] = None
         # Event handler
         self._event_handler = None
         # Bot open_id (populated on startup)
@@ -2930,6 +2933,9 @@ class FeishuBot(BaseIMClient):
         def on_card_action(event_id: Optional[str], event: Dict[str, Any]) -> None:
             """card.action.trigger; the dispatcher answers Feishu within its 3-second window."""
             try:
+                # Not looked up by its id: Feishu does not send a callback again, and whether its
+                # ids are one per click is not yet known from real traffic. The id is on record
+                # (outside sdk mode); a repeat is caught by what was pressed, as before.
                 self._note_event(source, "card.action.trigger", event_id, False)
                 self._handle_card_action(event)
             except Exception as exc:
@@ -3004,7 +3010,10 @@ class FeishuBot(BaseIMClient):
             mode = _SDK
         self._connection_mode = mode
 
-        logger.info("Starting Feishu/Lark bot with WebSocket (long connection: %s)...", mode)
+        if mode == _SDK:
+            logger.info("Starting Feishu/Lark bot with WebSocket...")
+        else:
+            logger.info("Starting Feishu/Lark bot with WebSocket (long connection: %s)...", mode)
 
         self._warn_proxy_bypassed()
 
@@ -3021,6 +3030,8 @@ class FeishuBot(BaseIMClient):
             self._populate_dm_chat_ids()
 
             if mode != _SDK:
+                from .feishu_history_check import FeishuHistoryCheck
+
                 self._history_check = FeishuHistoryCheck(self._api.list_messages)
 
             # The long connection(s), each on a thread of its own. They are
@@ -3041,6 +3052,8 @@ class FeishuBot(BaseIMClient):
                     ),
                 )
             if mode in (_PARALLEL, _OWN):
+                from .feishu_ws import FeishuLongConnection
+
                 self._own_connection = FeishuLongConnection(
                     base_url=self.config.api_base_url,
                     app_id=self.config.app_id,
@@ -3063,15 +3076,17 @@ class FeishuBot(BaseIMClient):
                 except Exception as exc:
                     logger.error("on_ready callback failed: %s", exc, exc_info=True)
 
-            # Wait until stop is requested, reporting on a comparison meanwhile
+            # Wait until stop is requested
+            if mode == _SDK:
+                await self._stop_event.wait()
+                return
+            # ... reporting on the comparison meanwhile
             while not self._stop_event.is_set():
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), _CONNECTION_REPORT_SECONDS)
                 except asyncio.TimeoutError:
-                    if mode != _SDK:
-                        await self._report_unless_stopped()
-            if mode != _SDK:
-                await self._report_connections(check_history=False)
+                    await self._report_unless_stopped()
+            await self._report_connections(check_history=False)
 
         try:
             asyncio.run(start())
@@ -3085,22 +3100,36 @@ class FeishuBot(BaseIMClient):
         """Put a ``FrameTap`` on the three points where lark-oapi's client takes in, hands on and sends a frame.
 
         The tap only looks: each wrapper calls the client's own method with the
-        same argument whatever the tap makes of it.
+        same argument, and gives back or raises what it gave back or raised,
+        whatever the tap makes of it and whatever happens inside the tap.
         """
+        from .feishu_ws import FrameTap
+
         tap = FrameTap(sdk_ws.Frame)
         handle_message, write_message, handle_event = client._handle_message, client._write_message, dispatcher.handle
 
+        def look(observe: Callable[..., None], *seen: Any) -> None:
+            try:
+                observe(*seen)
+            except Exception:
+                logger.exception("Feishu long connection tap failed; the SDK's client is not affected")
+
         async def tapped_handle_message(message: bytes) -> None:
-            tap.received(message)
+            look(tap.received, message)
             await handle_message(message)
 
         async def tapped_write_message(data: bytes) -> None:
-            tap.sent(data)
+            look(tap.sent, data)
             await write_message(data)
 
         def tapped_handle_event(payload: bytes) -> Optional[Dict[str, Any]]:
-            tap.handled(payload)
-            return handle_event(payload)
+            try:
+                result = handle_event(payload)
+            except Exception:
+                look(tap.handled, payload, None, True)
+                raise
+            look(tap.handled, payload, result, False)
+            return result
 
         client._handle_message = tapped_handle_message
         client._write_message = tapped_write_message
