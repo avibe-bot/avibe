@@ -11,7 +11,7 @@ import { Input } from '../ui/input';
 import { errorMessage } from '@/lib/errorMessage';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 
-interface NewProjectDialogProps {
+export interface NewProjectDialogProps {
   initialPath?: string;
   onClose: () => void;
   /** The project is already in the shared tree by the time this fires — the

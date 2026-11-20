@@ -48,7 +48,7 @@ import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { NewProjectDialog } from './NewProjectDialog';
+import { LazyNewProjectDialog } from './LazyNewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
@@ -1020,7 +1020,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
       </div>
 
       {showNewProject && canCreateProject && (
-        <NewProjectDialog
+        <LazyNewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={() => {
             setShowNewProject(false);

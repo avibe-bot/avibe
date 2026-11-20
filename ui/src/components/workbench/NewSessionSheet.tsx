@@ -6,7 +6,7 @@ import { useNewSession } from '../../lib/useNewSession';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { Dialog, DialogContent, DialogTitle } from '../ui/dialog';
 import { Composer } from './Composer';
-import { NewProjectDialog } from './NewProjectDialog';
+import { LazyNewProjectDialog } from './LazyNewProjectDialog';
 import { ProjectPicker } from './ProjectPicker';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
@@ -189,7 +189,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
           so the parent modal's focus trap can't make the folder picker / confirm
           step unreachable on mobile. */}
       {newProjectOpen && (
-        <NewProjectDialog
+        <LazyNewProjectDialog
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project) => {
             setNewProjectOpen(false);
