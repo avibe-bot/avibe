@@ -77,7 +77,7 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 | | `404`, `400`, `409 activity_conflict`: end `.immediate` | `failed` |
 | | `503` or no answer: keep it, unregistered | `{ok: true}` |
 
-After `start`, each local activity is in exactly one state, persisted on the device across launches:
+After `start`, each local activity is in exactly one state, persisted on the device across launches together with its `requested_at` (the Unix second of its `Activity.request`, sent on every PUT):
 - **registered:** the instance holds its current token, because the last PUT was answered `200`;
 - **unregistered:** it has no PUT answered `200` since its last token.
 
@@ -97,7 +97,7 @@ This table is the whole lifecycle. Every event has one row; "end" removes the ac
 - **R(PUT):**
   - `200`: registered; apply the returned state.
   - `409 turn_not_active`: end with the returned terminal state.
-  - `403`, `404`, `400`, `409 activity_conflict`: end `.immediate`.
+  - `403`, `404`, `400`, `409 activity_conflict`, `409 activity_expired`, or `200` with `status: stopped`: end `.immediate`.
   - `503` or no answer: stay unregistered. The local `staleDate` marks the card out of date until a later row registers it.
 - **R(GET):**
   - `status: tracking` with a live phase: update.
@@ -196,7 +196,7 @@ Unix seconds are JSON integers in [1600000000, 4102444800]. The token must match
 | Request | Result |
 | --- | --- |
 | `GET /api/web-push/live-activities/turn?session_id=` | `200 {ok, session_id, turn: {turn_id, phase, started_at, confirmed_at}}`, `409 no_active_turn`, or `404 session_not_found` (also when the caller cannot read the session) |
-| `PUT /api/web-push/live-activities/<activity_id>` with `{session_id, turn_id, push_registration_id, activity_token}` | `200 {ok, activity}`, `409 turn_not_active` with the ended `activity`, `409 activity_conflict` (same id, different session/turn/registration), `403 registration_not_owned` (the registration is not a native relay subscription of this caller), `400 invalid_request`, or `404 session_not_found` |
+| `PUT /api/web-push/live-activities/<activity_id>` with `{session_id, turn_id, push_registration_id, activity_token, requested_at}` | `200 {ok, activity}`, `409 turn_not_active` with the ended `activity`, `409 activity_expired`, `409 activity_conflict` (same id, different session/turn/registration/`requested_at`), `403 registration_not_owned` (the registration is not a native relay subscription of this caller), `400 invalid_request`, or `404 session_not_found` |
 | `GET /api/web-push/live-activities/<activity_id>` | `200 {ok, activity}` or `404 not_found` |
 | `DELETE /api/web-push/live-activities/<activity_id>` with `{reason}` | `200 {ok, stopped}`. Idempotent. `reason ∈ user_stopped, dismissed, system_ended, replaced, logout, account_switch, instance_switch, disabled` |
 
@@ -204,11 +204,12 @@ Unix seconds are JSON integers in [1600000000, 4102444800]. The token must match
 - Every route above can also answer `503 service_unavailable` when the controller is unreachable, as other controller-backed routes already do. What the App does with it depends on the call, and §2.3 defines that per call: `start` fails on a `503` from `GET …/turn`; a `503` on PUT keeps the activity unregistered and retries it; a registered activity's GET changes nothing; a DELETE is not retried.
 - **Serialization:** the controller process is the single owner of tracking rows and sends. The four routes reach it over the existing internal IPC; ui_server does not write the table itself. Registration, token replacement, DELETE, and every send for one `activity_id` are serialized there, so no send uses a token or state that a later PUT or DELETE has already replaced.
 - `activity_id` is ActivityKit's `Activity.id`: 1–64 characters of `[A-Za-z0-9-]`.
-- The PUT is an upsert. The same activity with a new token replaces the token. A new activity on the same `push_registration_id` stops the previous tracking with reason `replaced`.
+- `requested_at` is the Unix second at which the App called `Activity.request`. It is a JSON integer no more than 300 s in the future by the instance clock, and it is fixed for the activity: every PUT for one `activity_id` carries the same value. It anchors the eight-hour limit: `expires_at = requested_at + 28800`, and a PUT at or after that answers `409 activity_expired`.
+- What a PUT does to an existing row is defined in §4.4.
 
 ### 4.2 Tracking row (SQLite, new table `live_activity_trackings`)
 
-Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`, `push_registration_id`, `activity_token`, `status`, `stop_reason`, `last_phase`, `last_timestamp`, `confirmed_at`, `pending_state` (the undelivered state, or null), `created_at`, `updated_at`, `expires_at`. The lane may add internal columns. The migration revision number is allocated by the Runtime lane at rebase time (pr-delivery-loop §0). No title or Agent name is stored.
+Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`, `push_registration_id`, `activity_token`, `status`, `stop_reason`, `last_phase`, `last_timestamp`, `confirmed_at`, `pending_state` (the undelivered state, or null), `requested_at`, `created_at`, `updated_at`, `expires_at` (`requested_at + 28800`). The lane may add internal columns. The migration revision number is allocated by the Runtime lane at rebase time (pr-delivery-loop §0). No title or Agent name is stored.
 
 ### 4.3 Publisher (controller process)
 
@@ -225,15 +226,32 @@ Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`,
 - **Delivery:** the publisher keeps one pending state per activity: the latest state it has not yet delivered. A later change replaces it, and an end is never replaced. A send settles in one of three ways:
   - accepted (`201`): the pending state is cleared;
   - retryable (`429`, `503`, a timeout, or no answer): retried at most 3 times right away, honoring `Retry-After`. If it is still not accepted, it stays pending and is sent again on every following heartbeat tick (900 s), with a fresh `timestamp` and `confirmed_at`, until it is accepted or a stop rule applies. This holds for an end too; until the end is accepted, the row keeps `status: tracking` with its terminal phase, and GET returns that terminal state, so the App ends the activity locally on its next foreground. Meanwhile the card goes stale at its `stale_at`, so it never shows a confirmed running state for long;
-  - rejected (`410` any code): stop. Any other `4xx` or a `502`: also stop, with `stop_reason: relay_rejected`, and log it; the App's foreground GET then ends the card locally.
+  - rejected: `410 activity_token_gone` stops with `stop_reason: token_gone`. Any other `410` stops with `registration_gone`. Any other `4xx`, or a `502`, stops with `relay_rejected` and is logged. In every case the App's foreground GET then ends the card locally, except as §4.4 allows a new token to revive a `token_gone` row.
 - **Stop** (status `ended` or `stopped`; never sends again):
   - after the end push is accepted;
   - on any rejection as defined above;
   - on DELETE;
-  - at `expires_at = created_at + 28800`, the system's eight-hour limit, without a push.
+  - at `expires_at = requested_at + 28800`, the system's eight-hour limit, without a push.
 - **Restart:** tracking resumes from the table. A pending state is sent, and otherwise a send happens only if the phase differs from `last_phase`; the pending state is part of the row, so it survives a restart.
 - Sending reuses the VAPID signing of `send_badge_update` and posts the body of §3.2 exactly.
 - The Web entry and its zh/en copy are part of this lane (`ui/src/i18n`).
+
+### 4.4 Tracking row lifecycle
+
+A row is `tracking`, `ended`, or `stopped`. This table is the whole row lifecycle; every event has one row, and "turn live" means the row's Turn has not reached `terminal`.
+
+| Event | no row | `tracking` | `ended` | `stopped` |
+| --- | --- | --- | --- | --- |
+| PUT whose `session_id`, `turn_id`, `push_registration_id`, or `requested_at` differs from the row's | — | `409 activity_conflict` | same | same |
+| PUT at or after `requested_at + 28800` | `409 activity_expired` | becomes `stopped` (`expired`); `409 activity_expired` | `409 activity_expired` | same |
+| PUT, turn live | create `tracking`; `200` | store the token, keep `pending_state`; `200` | — | `stop_reason: token_gone` and a token different from the row's: back to `tracking` with the new token, keeping `pending_state`; `200`. Any other: `200` with `status: stopped`, unchanged |
+| PUT, turn terminal | create `ended`; `409 turn_not_active` | becomes `ended` (no end push is owed: the App ends the card from this answer); `409 turn_not_active` | `409 turn_not_active` | `200` with `status: stopped`, unchanged |
+| a new `activity_id` PUT on the same `push_registration_id` | — | becomes `stopped` (`replaced`) | — | — |
+| the publisher's send | — | §4.3 | — | — |
+| `now ≥ expires_at` | — | becomes `stopped` (`expired`), no push | — | — |
+| DELETE | `200 {stopped: false}` | becomes `stopped` (the DELETE reason); `200 {stopped: true}` | `200 {stopped: false}` | same |
+
+`stop_reason` is one of the DELETE reasons, `replaced`, `expired`, `token_gone`, `registration_gone`, or `relay_rejected`. Only `token_gone` can be revived, and only by a new token: an ActivityKit token rotation can race a send to the old token, and the App's PUT of the new token must not lose a live activity. The App sends that PUT on every rotation (§2.3).
 
 ## 5. Invariants every lane tests
 

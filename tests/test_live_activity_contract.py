@@ -201,6 +201,8 @@ def test_runtime_examples_match_the_relay_and_ios_shapes(vectors):
     assert set(activity) == {
         "activity_id", "session_id", "turn_id", "phase", "started_at", "ended_at", "confirmed_at", "status",
     }
+    assert set(api["put_request"]) == {"session_id", "turn_id", "push_registration_id", "activity_token", "requested_at"}
+    assert type(api["put_request"]["requested_at"]) is int
     assert api["put_request"]["session_id"] == activity["session_id"] == vectors["bridge"]["start"]["sessionId"]
     assert api["put_request"]["activity_token"] == vectors["relay_cases"][0]["request"]["activity_token"]
     ended = api["turn_not_active"]["activity"]

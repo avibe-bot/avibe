@@ -625,7 +625,8 @@
       "session_id": "ses_会话一",
       "turn_id": "turn_01",
       "push_registration_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839"
+      "activity_token": "801f2e3d4c5b6a79880a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233343536373839",
+      "requested_at": 1795000031
     },
     "put_response": {
       "ok": true,
@@ -660,6 +661,10 @@
     "delete_response": {
       "ok": true,
       "stopped": true
+    },
+    "activity_expired": {
+      "ok": false,
+      "error": "activity_expired"
     }
   },
   "bridge": {
