@@ -179,6 +179,7 @@ class DirectAccessLifecycle:
         self._config_read_task: asyncio.Task | None = None
         self._binary_task: asyncio.Task | None = None
         self._install_task: asyncio.Task | None = None
+        self._opt_in_generation = 0
         self._install_at = 0.0
         self._install_delay = INSTALL_RETRY_INITIAL_SECONDS
         self._install_failed = False
@@ -274,6 +275,10 @@ class DirectAccessLifecycle:
         self._next_binary_check = 0.0
         self._clear_binary()
         self._invalidate()
+        if signature[0] and not (previous and previous[0]):
+            self._opt_in_generation = self._generation
+            self._install_at = 0.0
+            self._install_delay = INSTALL_RETRY_INITIAL_SECONDS
         with self._state_lock:
             self._config = config
             self._signature = signature
@@ -401,26 +406,29 @@ class DirectAccessLifecycle:
                     self._config_read_task = None
             await asyncio.sleep(CONFIG_POLL_INTERVAL_SECONDS)
 
-    def _install_pin(self, generation: int, signature: tuple[Any, ...]) -> tuple[int, bool]:
+    def _install_pin(self, generation: int, signature: tuple[Any, ...]) -> tuple[int, bool | None]:
         from core.direct_transport_runtime import DirectTransportRuntimeManager
+        from core.managed_runtime import omit_managed_runtime_log_details
 
         try:
-            persisted = self._config_loader()
-            if _config_signature(persisted) != signature:
-                return generation, False
-            with self._state_lock:
-                if self._shutdown or generation != self._generation:
-                    return generation, False
-            # Admission is not cancellation: an already admitted download may
-            # finish after OFF. Its path is never used to start the supervisor.
-            logger.info("Direct transport install started")
-            ok = DirectTransportRuntimeManager().ensure().get("ok") is True
+            if _config_signature(self._config_loader()) != signature:
+                return generation, None
+        except Exception:
+            return generation, None
+        with self._state_lock:
+            if self._shutdown or generation != self._generation:
+                return generation, None
+        # An admitted download may finish after OFF; never use its returned path.
+        logger.info("Direct transport install reason=transport_installing")
+        try:
+            with omit_managed_runtime_log_details():
+                ok = DirectTransportRuntimeManager().ensure().get("ok") is True
         except Exception:
             ok = False
         if ok:
             logger.info("Direct transport install succeeded")
         else:
-            logger.warning("Direct transport install failed")
+            logger.warning("Direct transport install reason=transport_install_failed")
         return generation, ok
 
     def _resolve_binary(self, generation: int, started: float, config: V2Config) -> tuple[int, float, str | None, bool]:
@@ -455,12 +463,14 @@ class DirectAccessLifecycle:
             task, self._install_task = self._install_task, None
             if not task.cancelled():
                 generation, ok = task.result()
-                if generation == self._generation:
-                    self._install_failed = not ok
-                # Backoff belongs to this packaged pin, not a permission grant.
-                self._install_at = self._loop.time() + self._install_delay
-                self._install_delay = min(self._install_delay * 2, INSTALL_RETRY_MAX_SECONDS)
-            self._next_binary_check = 0.0  # Always verify normally after ensure.
+                if ok is False and generation >= self._opt_in_generation:
+                    self._install_failed = True
+                    self._install_at = self._loop.time() + self._install_delay
+                    self._install_delay = min(self._install_delay * 2, INSTALL_RETRY_MAX_SECONDS)
+                # A skipped admission re-observes at ordinary cadence; a new
+                # config generation has already requested an immediate check.
+                if ok is not None:
+                    self._next_binary_check = 0.0
         if self._binary_task is not None and self._binary_task.done():
             task, self._binary_task = self._binary_task, None
             if not task.cancelled():

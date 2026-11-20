@@ -250,6 +250,74 @@ async def test_failed_auto_install_backs_off_without_starting(reports, published
         assert not downloads if bad_pin == "pending" else len(downloads) == 2
 
 
+async def test_auto_failure_logs_hide_manager_details_but_not_other_callers(reports, published, monkeypatch, caplog):
+    from core import managed_runtime
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    entered, release = threading.Event(), threading.Event()
+    def fail_lock(manager):
+        entered.set()
+        assert release.wait(3)
+        raise OSError("/private/path/owner/test-lock")
+    monkeypatch.setattr(DirectTransportRuntimeManager, "_acquire_mutation_lock", fail_lock)
+    caplog.set_level("INFO")
+    async with _owner(_config(), reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, *_):
+        try:
+            await _wait(entered.is_set)
+            managed_runtime.logger.warning("unrelated manager diagnostic")
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == "transport_install_failed")
+    records = [r for r in caplog.records if r.name in (managed_runtime.logger.name, module.logger.name)]
+    assert [r.getMessage() for r in records] == ["Direct transport install reason=transport_installing",
+        "unrelated manager diagnostic", "Direct transport install reason=transport_install_failed"]
+    assert all(not r.exc_info for r in records)
+
+
+async def test_skipped_install_and_prior_failure_do_not_delay_reenable(reports, published, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    config = _config()
+    entered, release = threading.Event(), threading.Event()
+    worker = threading.local()
+    install_pin = DirectAccessLifecycle._install_pin
+    def mark_worker(self, *args):
+        worker.install = True
+        try:
+            return install_pin(self, *args)
+        finally:
+            worker.install = False
+    def load():
+        if getattr(worker, "install", False) and not entered.is_set():
+            entered.set()
+            assert release.wait(3)
+        return config
+    attempts = []
+    ensure = DirectTransportRuntimeManager.ensure
+    def fail_once(manager):
+        attempts.append(1)
+        return {"ok": False} if len(attempts) == 1 else ensure(manager)
+    monkeypatch.setattr(DirectAccessLifecycle, "_install_pin", mark_worker)
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", fail_once)
+    async with _owner(config, reports, config_loader=load, binary_resolver=module.resolve_direct_transport_binary) as (owner, *_):
+        async def toggle(enabled):
+            config.remote_access.vibe_cloud.direct = enabled
+            owner.notify_config_changed(config)
+            await _wait(lambda: owner.status().enabled == enabled)
+        try:
+            await _wait(entered.is_set)
+            await toggle(False)
+            await toggle(True)
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == "transport_install_failed")
+        assert attempts == [1] and owner._install_delay == 2 * module.INSTALL_RETRY_INITIAL_SECONDS
+        await toggle(False)
+        await toggle(True)
+        await _wait(lambda: owner.status().state == "waiting-permission")
+        assert attempts == [1, 1]
+
+
 async def test_auto_install_once_only_when_enabled(reports, published, monkeypatch):
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
