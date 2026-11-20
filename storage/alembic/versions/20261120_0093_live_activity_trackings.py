@@ -41,7 +41,7 @@ def upgrade() -> None:
         ],
         sa.Column("ended_at", sa.Integer()),
         sa.Column("authorization_json", sa.Text()),
-        sa.Column("retry_phase", sa.String()),
+        sa.Column("pending_state", sa.Text()),
         sa.Column("retry_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("retry_at", sa.Integer(), nullable=False, server_default="0"),
         sa.CheckConstraint("status in ('tracking', 'ended', 'stopped')", name="ck_live_activity_status"),

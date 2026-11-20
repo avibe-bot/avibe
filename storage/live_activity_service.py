@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import re
 
 from sqlalchemy import func, or_, select
@@ -28,7 +29,7 @@ def get(conn, activity_id: str):
 
 
 def activity(row):
-    return {
+    result = {
         "activity_id": row["activity_id"],
         "session_id": row["session_id"],
         "turn_id": row["turn_id"],
@@ -38,6 +39,10 @@ def activity(row):
         "confirmed_at": row["confirmed_at"],
         "status": row["status"],
     }
+    if row["pending_state"]:
+        pending = json.loads(row["pending_state"])
+        result.update({key: pending[key] for key in ("phase", "started_at", "ended_at")})
+    return result
 
 
 def subscription(conn, owner: str, registration: str):
@@ -94,7 +99,7 @@ def stop(conn, activity_id: str, reason: str, now: int):
             tracks.c.activity_id == activity_id,
             tracks.c.status == "tracking",
         )
-        .values(status="stopped", stop_reason=reason, updated_at=now)
+        .values(status="stopped", stop_reason=reason, confirmed_at=now, pending_state=None, updated_at=now)
     )
     return bool(result.rowcount)
 
@@ -128,13 +133,13 @@ def handle(conn, operation: str, owner: str, activity_id: str, payload: dict, no
         if row["status"] == "tracking":
             if now >= row["expires_at"]:
                 stop(conn, activity_id, "expired", now)
-                result["status"] = "stopped"
-            else:
+                result = activity(get(conn, activity_id))
+            elif result["ended_at"] is None:
                 state = snapshot(conn, row["session_id"], now, pending_question, row["turn_id"])
                 if state:
                     result.update({key: state[key] for key in ("phase", "started_at", "ended_at", "confirmed_at")})
-                    if state["ended_at"] is not None:
-                        result["status"] = "ended"
+
+        result["confirmed_at"] = max(result["confirmed_at"], now)
         return response(activity=result)
     if operation != "put" or set(payload) != {"session_id", "turn_id", "push_registration_id", "activity_token"}:
         return response(400, error="invalid_request")
@@ -177,7 +182,7 @@ def handle(conn, operation: str, owner: str, activity_id: str, payload: dict, no
                 tracks.c.push_registration_id == payload["push_registration_id"],
                 tracks.c.status == "tracking",
             )
-            .values(status="stopped", stop_reason="replaced", updated_at=now)
+            .values(status="stopped", stop_reason="replaced", confirmed_at=now, pending_state=None, updated_at=now)
         )
         conn.execute(
             tracks.insert().values(

@@ -1733,7 +1733,7 @@ live_activity_trackings = Table(
     )],
     Column("ended_at", Integer),
     Column("authorization_json", Text),
-    Column("retry_phase", String),
+    Column("pending_state", Text),
     Column("retry_count", Integer, nullable=False, server_default="0"),
     Column("retry_at", Integer, nullable=False, server_default="0"),
     CheckConstraint("status in ('tracking', 'ended', 'stopped')", name="ck_live_activity_status"),

@@ -34,6 +34,7 @@ class LiveActivityService:
         self.engine = engine or create_sqlite_engine()
         self._owns_engine = engine is None
         self.clock = clock
+        self._started_at = int(clock())
         self.sender = sender
         self.pending_question = pending_question or (lambda _sid: False)
         self._lock = asyncio.Lock()
@@ -145,35 +146,41 @@ class LiveActivityService:
                     store.stop(conn, activity_id, "session_unavailable", now)
                     return None
             state = store.snapshot(conn, row["session_id"], now, pending, row["turn_id"])
-            if state is None:
+            queued = json.loads(row["pending_state"]) if row["pending_state"] else None
+            if state is None and not (queued and queued["ended_at"] is not None):
                 store.stop(conn, activity_id, "turn_unavailable", now)
                 return None
-            changed = state["phase"] != row["last_phase"]
-            if changed and row["retry_phase"] == state["phase"] and (row["retry_count"] >= 4 or now < row["retry_at"]):
+            replace = state is not None and (
+                (queued is not None and queued["ended_at"] is None and queued["phase"] != state["phase"])
+                or (queued is None and row["last_phase"] != state["phase"])
+            )
+            heartbeat_due = now - max(row["last_timestamp"], self._started_at) >= 900
+            if replace or (queued is None and heartbeat_due):
+                queued = {**state, "priority": 10 if replace else 5}
+                store.update(conn, activity_id, pending_state=json.dumps(queued), retry_count=0, retry_at=0)
+                row["retry_at"] = 0
+            if queued is None or now < row["retry_at"]:
                 return None
-            if not changed and row["retry_phase"] is not None:
-                store.update(conn, activity_id, retry_phase=None, retry_count=0, retry_at=0)
-            if not changed and now - row["last_timestamp"] < 900:
-                return None
-            terminal = state["ended_at"] is not None
+            terminal = queued["ended_at"] is not None
             stamp = max(now, row["last_timestamp"] + 1)
+            confirmed_at = max(now, queued["started_at"])
             body = {
                 "activity_token": row["activity_token"],
                 "event": "end" if terminal else "update",
                 "timestamp": stamp,
-                "priority": 10 if changed else 5,
-                "phase": state["phase"],
-                "started_at": state["started_at"],
-                "confirmed_at": state["confirmed_at"],
+                "priority": queued["priority"],
+                "phase": queued["phase"],
+                "started_at": queued["started_at"],
+                "confirmed_at": confirmed_at,
             }
             if terminal:
-                body.update(ended_at=state["ended_at"], dismiss_at=state["ended_at"] + 3600)
+                body.update(ended_at=queued["ended_at"], dismiss_at=queued["ended_at"] + 3600)
             else:
-                body["stale_at"] = state["confirmed_at"] + 2400
-                if changed and state["phase"] == "needsYou":
+                body["stale_at"] = confirmed_at + 2400
+                if queued["priority"] == 10 and queued["phase"] == "needsYou":
                     body["alert"] = "needsYou"
-            # Reserve before IO, including rejected sends, so a restarted worker never
-            # reuses a timestamp. A failed heartbeat is not retried.
+            # Persist the pending state and reserve a strictly increasing timestamp before
+            # IO. An unanswered send can then survive a process restart without being lost.
             store.update(conn, activity_id, last_timestamp=stamp, updated_at=now)
             return body, subscription
 
@@ -187,17 +194,16 @@ class LiveActivityService:
             with self.engine.begin() as conn:
                 if status == 410:
                     store.stop(conn, activity_id, "relay_gone", now)
-                elif body["priority"] == 10:
+                elif status == 502 or (status is not None and 400 <= status < 500 and status != 429):
+                    store.stop(conn, activity_id, "relay_rejected", now)
+                else:
                     row = store.get(conn, activity_id)
-                    count = row["retry_count"] + 1 if row["retry_phase"] == body["phase"] else 1
-                    store.update(
-                        conn,
-                        activity_id,
-                        retry_phase=body["phase"],
-                        retry_count=count if status in {429, 503} else 4,
-                        retry_at=now + retry_after(response, now),
-                        updated_at=now,
-                    )
+                    count = min(4, row["retry_count"] + 1)
+                    # Unknown server/protocol failures retain the latest state too, but
+                    # only the contracted transient errors get the three rapid retries.
+                    rapid = status in {None, 429, 503} and count < 4
+                    delay = retry_after(response, now) if rapid else max(900, retry_after(response, now))
+                    store.update(conn, activity_id, retry_count=count, retry_at=now + delay, updated_at=now)
             # HTTP exception repr contains the registration URL. Do not log it or tokens.
             logger.warning("Live Activity delivery failed status=%s", status)
             return
@@ -209,7 +215,7 @@ class LiveActivityService:
                 confirmed_at=body["confirmed_at"],
                 ended_at=body.get("ended_at"),
                 status="ended" if body["event"] == "end" else "tracking",
-                retry_phase=None,
+                pending_state=None,
                 retry_count=0,
                 retry_at=0,
                 updated_at=now,

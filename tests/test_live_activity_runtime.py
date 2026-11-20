@@ -277,7 +277,7 @@ async def test_phase_retry_is_bounded_and_honors_retry_after_across_restart(stat
 
 
 @pytest.mark.asyncio
-async def test_failed_heartbeat_is_not_retried(state):
+async def test_failed_heartbeat_is_pending_and_retried_at_low_priority(state):
     import httpx
 
     service, now, _ = service_for(state)
@@ -294,7 +294,7 @@ async def test_failed_heartbeat_is_not_retried(state):
     await service.tick()
     now[0] += 30
     await service.tick()
-    assert len(sent) == 1 and sent[0]["priority"] == 5
+    assert len(sent) == 2 and all(body["priority"] == 5 and "alert" not in body for body in sent)
 
 
 @pytest.mark.asyncio
@@ -501,3 +501,126 @@ def test_public_http_session_access_is_404_for_a_viewer_outside_the_project(stat
     headers = csrf_headers(client)
     assert client.get(f"/api/web-push/live-activities/turn?session_id={SESSION}").status_code == 404
     assert client.put("/api/web-push/live-activities/activity-1", json=BODY, headers=headers).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_outage_keeps_one_pending_end_until_a_later_heartbeat_accepts_it(state):
+    import httpx
+    from storage import live_activity_service as tracking_store
+
+    service, now, sent = service_for(state)
+    await service.handle("put", "local", "activity-1", BODY)
+    with state.begin() as conn:
+        message_deliveries.terminalize_turn(
+            conn, TURN, outcome="completed", settled_by="terminal_result", evidence_kind="test"
+        )
+
+    def unavailable(**kwargs):
+        sent.append(kwargs["body"])
+        raise httpx.ReadTimeout("no answer")
+
+    service.sender = unavailable
+    for _ in range(4):
+        await service.tick()
+        now[0] += 5
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["pending_state"] is not None
+        assert row["status"] == "tracking"
+    assert len(sent) == 4
+    await service.tick()
+    assert len(sent) == 4
+    now[0] += 900
+    service.sender = lambda **kwargs: sent.append(kwargs["body"])
+    await service.tick()
+    assert len(sent) == 5
+    assert all(body["event"] == "end" for body in sent)
+    assert sent[-1]["confirmed_at"] == now[0]
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["pending_state"] is None
+        assert row["status"] == "ended"
+    await service.tick()
+    assert len(sent) == 5
+
+
+@pytest.mark.asyncio
+async def test_a_new_phase_replaces_pending_work_and_terminal_pending_survives_restart(state, monkeypatch):
+    import httpx
+    import json
+    from storage import live_activity_service as tracking_store
+
+    service, now, sent = service_for(state)
+    await service.handle("put", "local", "activity-1", BODY)
+
+    def unavailable(**kwargs):
+        sent.append(kwargs["body"])
+        raise httpx.ReadTimeout("no answer")
+
+    service.sender = unavailable
+    service.pending_question = lambda sid: True
+    await service.tick()
+    service.pending_question = lambda sid: False
+    await service.tick()
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert json.loads(row["pending_state"])["phase"] == "working"
+    with state.begin() as conn:
+        message_deliveries.terminalize_turn(
+            conn, TURN, outcome="completed", settled_by="terminal_result", evidence_kind="test"
+        )
+    await service.tick()
+    result = await service.handle("get", "local", "activity-1", {})
+    assert result["body"]["activity"]["phase"] == "done"
+    assert result["body"]["activity"]["status"] == "tracking"
+    saved_end = dict(sent[-1])
+    restarted, _, _ = service_for(state)
+    restarted.clock = service.clock
+    restarted.sender = lambda **kwargs: sent.append(kwargs["body"])
+    now[0] += 5
+    # The durable pending end remains authoritative even if the source Turn is gone.
+    monkeypatch.setattr(tracking_store, "snapshot", lambda *args: None)
+    await restarted.tick()
+    assert sent[-1]["event"] == "end"
+    assert sent[-1]["ended_at"] == saved_end["ended_at"]
+    assert sent[-1]["timestamp"] > saved_end["timestamp"]
+    assert (await restarted.handle("get", "local", "activity-1", {}))["body"]["activity"]["status"] == "ended"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 413, 502])
+async def test_relay_rejection_stops_tracking_without_affecting_device_notifications(state, status):
+    import httpx
+    from storage import live_activity_service as tracking_store
+
+    service, now, _ = service_for(state)
+    await service.handle("put", "local", "activity-1", BODY)
+
+    def rejected(**kwargs):
+        response = httpx.Response(status, request=httpx.Request("POST", "https://avibe.bot"))
+        raise httpx.HTTPStatusError("rejected", request=response.request, response=response)
+
+    service.sender = rejected
+    service.pending_question = lambda sid: True
+    await service.tick()
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["status"] == "stopped"
+        assert row["stop_reason"] == "relay_rejected"
+        assert row["pending_state"] is None
+        assert conn.execute(select(web_push_subscriptions.c.enabled)).scalar_one() == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_without_pending_state_waits_for_a_new_heartbeat_period(state):
+    service, now, sent = service_for(state)
+    await service.handle("put", "local", "activity-1", BODY)
+    now[0] += 1800
+    from core.live_activities import LiveActivityService
+
+    restarted = LiveActivityService(engine=state, clock=service.clock, sender=service.sender)
+    await restarted.tick()
+    assert sent == []
+    now[0] += 900
+    await restarted.tick()
+    assert len(sent) == 1 and sent[0]["priority"] == 5
