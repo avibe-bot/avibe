@@ -62,7 +62,10 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 - **start:** refuse with `disabled` when activities are off. Use this instance's active relay registration id from `NativePushCoordinator`; if there is none, refuse with `push_unavailable`. Then GET the turn (409 maps to `no_active_turn`), `Activity.request(attributes, content: (state from the turn, staleDate: confirmedAt + 2400), pushType: .token)`, wait for the first value of `pushTokenUpdates`, and PUT. Apply the PUT response with `activity.update` locally. A 409 `turn_not_active` ends the activity locally with the returned terminal state. Starting a new activity first ends any other `TurnActivityAttributes` activity (one at a time).
 - Every later value from `pushTokenUpdates` is PUT again with the same body and the new token.
-- **foreground:** for each local activity, GET it and update or end it locally; a 404 ends it `.immediate`.
+- **foreground:** for each local activity, GET it and apply the answer locally:
+  - `status: tracking` with a live phase: update;
+  - a terminal phase: end with that state;
+  - `status: stopped` or a 404: end it `.immediate`.
 - `activityStateUpdates` reporting `.dismissed` or `.ended` that the App did not cause: DELETE with `dismissed`, or `system_ended`. Never re-create an activity for that Turn.
 - **logout, account switch, instance switch, instance removed:** end every `TurnActivityAttributes` activity `.immediate`, then make a best-effort DELETE with `logout`, `account_switch`, or `instance_switch`. Logout also revokes the relay registration, so the instance stops on the relay's 410 even when the DELETE is lost.
 - **tap:** `widgetURL(avibe-app://live-activity/<activityID>)`. The App registers the `avibe-app` scheme in `CFBundleURLTypes` (no entitlement). It resolves the id only against its own `Activity<TurnActivityAttributes>.activities` and opens that account, instance, and `/chat/<sessionID>` through the existing instance-path route. An unknown id opens the App without navigating.
@@ -167,7 +170,7 @@ Unix seconds are JSON integers in [1600000000, 4102444800]. The token must match
 
 ### 4.2 Tracking row (SQLite, new table `live_activity_trackings`)
 
-Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`, `push_registration_id`, `activity_token`, `status`, `stop_reason`, `last_phase`, `last_timestamp`, `confirmed_at`, `created_at`, `updated_at`, `expires_at`. The lane may add internal columns. The migration revision number is allocated by the Runtime lane at rebase time (pr-delivery-loop §0). No title or Agent name is stored.
+Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`, `push_registration_id`, `activity_token`, `status`, `stop_reason`, `last_phase`, `last_timestamp`, `confirmed_at`, `pending_state` (the undelivered state, or null), `created_at`, `updated_at`, `expires_at`. The lane may add internal columns. The migration revision number is allocated by the Runtime lane at rebase time (pr-delivery-loop §0). No title or Agent name is stored.
 
 ### 4.3 Publisher (controller process)
 
@@ -181,13 +184,16 @@ Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`,
   - While the Turn runs, a heartbeat is sent every 900 s at priority 5 with no alert.
   - The PUT response applies the first state locally, so no push is sent at start.
 - **Times:** `stale_at = confirmed_at + 2400`. At the end, `dismiss_at = ended_at + 3600`. `timestamp = max(now, last_timestamp + 1)`, so the order is strict per activity.
+- **Delivery:** the publisher keeps one pending state per activity: the latest state it has not yet delivered. A later change replaces it, and an end is never replaced. A send settles in one of three ways:
+  - accepted (`201`): the pending state is cleared;
+  - retryable (`429`, `503`, a timeout, or no answer): retried at most 3 times right away, honoring `Retry-After`. If it is still not accepted, it stays pending and is sent again on every following heartbeat tick (900 s), with a fresh `timestamp` and `confirmed_at`, until it is accepted or a stop rule applies. This holds for an end too; until the end is accepted, the row keeps `status: tracking` with its terminal phase, and GET returns that terminal state, so the App ends the activity locally on its next foreground. Meanwhile the card goes stale at its `stale_at`, so it never shows a confirmed running state for long;
+  - rejected (`410` any code): stop. Any other `4xx` or a `502`: also stop, with `stop_reason: relay_rejected`, and log it; the App's foreground GET then ends the card locally.
 - **Stop** (status `ended` or `stopped`; never sends again):
   - after the end push is accepted;
-  - on any 410 from the relay;
+  - on any rejection as defined above;
   - on DELETE;
   - at `expires_at = created_at + 28800`, the system's eight-hour limit, without a push.
-- **Retries:** a phase change retries `429` and `503` at most 3 times, honoring `Retry-After`. A heartbeat is not retried.
-- **Restart:** tracking resumes from the table and sends only if the phase differs from `last_phase`.
+- **Restart:** tracking resumes from the table. A pending state is sent, and otherwise a send happens only if the phase differs from `last_phase`; the pending state is part of the row, so it survives a restart.
 - Sending reuses the VAPID signing of `send_badge_update` and posts the body of §3.2 exactly.
 - The Web entry and its zh/en copy are part of this lane (`ui/src/i18n`).
 

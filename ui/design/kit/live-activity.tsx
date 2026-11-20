@@ -241,9 +241,9 @@ export function StartRefusalToast({ code }: { code: StartRefusal }) {
         warning ? 'bg-linear-to-r from-gold/10 to-gold/10 text-gold-ink' : 'bg-linear-to-r from-destructive/10 to-destructive/10 text-destructive-ink',
       )}
     >
-      {warning ? <AlertTriangle size={18} /> : <XCircle size={18} />}
+      {warning ? <AlertTriangle className="size-4.5 shrink-0" /> : <XCircle className="size-4.5 shrink-0" />}
       <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{message}</span>
-      <X size={14} className="ml-2 opacity-60" />
+      <X className="ml-2 size-3.5 shrink-0 opacity-60" />
     </div>
   );
 }
