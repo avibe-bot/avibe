@@ -1274,7 +1274,7 @@ def test_machine_error_field_access_has_one_extractor() -> None:
         if path.name == "migration.py":
             continue  # its ``type`` field is an auth-record kind, not an error code
         tree = _tree(path)
-        # History, declared tools, MCP content blocks and Grok's billing period
+        # History, declared tools, MCP content blocks, billing periods and reset grants
         # discriminate payload items, not error envelopes. Exempt only these functions' type reads;
         # code reads and all other functions still have one extraction owner.
         type_readers = {
@@ -1282,6 +1282,7 @@ def test_machine_error_field_access_has_one_extractor() -> None:
             "fetch_services.py": ("_mcp_payload",),
             "service_diagnostics.py": ("_mcp_crawl_error_tag",),
             "quota.py": ("parse_grok_quota",),
+            "reset_cards.py": ("claude_cards",),
         }
         functions = _functions(tree) if path.name in type_readers else {}
         history_nodes = {
