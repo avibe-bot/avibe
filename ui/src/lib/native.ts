@@ -1,6 +1,7 @@
 export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
+  | 'appLock'
   | 'app'
   | 'badge'
   | 'health'
@@ -1049,4 +1050,14 @@ export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot |
   } catch {
     return null;
   }
+}
+
+/** `appLock.status` (ui/src/lib/appLockContract.ts); the caller parses the payload. */
+export async function nativeAppLockStatus(): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.status');
+}
+
+/** `appLock.setPolicy`; the shell verifies the device owner before it saves. */
+export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.setPolicy', { policy });
 }
