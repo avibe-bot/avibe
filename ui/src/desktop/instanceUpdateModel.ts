@@ -74,6 +74,9 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
   const restarting = pending && (reachable ? age < RESTART_GRACE_MS : followed);
   // Accepted, and nothing changed in that time: it did not finish.
   const lapsed = pending && !restarting;
+  // The shell itself still follows that install until its own limit, and refuses every other action for the
+  // instance meanwhile: the section says it did not finish, and offers nothing the shell would refuse.
+  const held = lapsed && followed;
   // An instance that does not answer, with nothing of ours under way, is a lost connection.
   if (!reachable && !restarting && !reported && sending !== 'install') return { ...none, model: null };
 
@@ -103,9 +106,9 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
   return {
     model,
     target: offered,
-    canUpdate: can && takes('install') && !busy && offered !== null,
-    canSet: { prereleases: can && takes('prereleases'), autoUpdate: can && takes('auto_update') },
-    canCheck: reachable && update.status === 'ready' && can && (!managed || (snapshot.host_actions?.includes('check') ?? false)),
+    canUpdate: can && takes('install') && !busy && !held && offered !== null,
+    canSet: { prereleases: can && !held && takes('prereleases'), autoUpdate: can && !held && takes('auto_update') },
+    canCheck: reachable && update.status === 'ready' && can && !held && (!managed || (snapshot.host_actions?.includes('check') ?? false)),
     busy,
   };
 }

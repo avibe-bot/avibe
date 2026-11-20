@@ -125,6 +125,16 @@ page, a new desktop app can update an old instance.
 Implementation gate: confirm the native client's session passes the instance's
 origin and CSRF checks for these POSTs without weakening them.
 
+## A later shell change worth making
+
+The popup decides whether an install the shell sent is still under way from the
+shell's receipt, the instance's last answer and the time elapsed
+(`ui/src/desktop/instanceUpdateModel.ts`), mirroring the shell's own rule
+(`unsettled` in `instance_update.rs`) from less than the shell knows: it is not
+told the version the install started from. A test walks every combination and
+holds the section to that rule as far as the page can know it. Having the shell
+state it (`request.following: boolean`) would replace the mirror with the fact.
+
 ## Also needed
 
 - A standalone Runtime reports an install or restart in progress in

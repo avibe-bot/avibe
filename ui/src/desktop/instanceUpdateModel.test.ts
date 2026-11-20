@@ -66,7 +66,9 @@ describe('a standalone instance', () => {
     const still = (minutes: number) => instanceSection(state({ request: install('accepted') }), Date.parse(AT) + minutes * 60_000);
     expect(still(4).model?.status).toMatchObject({ kind: 'updated', restarting: true });
     expect(still(6).model?.status).toEqual({ kind: 'update-failed', reason: 'install', retry: true });
-    expect(still(6)).toMatchObject({ canUpdate: true, busy: false });
+    // The shell still follows that install and would refuse another action: none is offered until its limit.
+    expect(still(6)).toMatchObject({ canUpdate: false, canCheck: false, canSet: { prereleases: false, autoUpdate: false }, busy: false });
+    expect(still(31)).toMatchObject({ canUpdate: true, canCheck: true, busy: false });
   });
 
   it('waits for a restart it cannot see only as long as the shell follows the install', () => {
@@ -243,6 +245,15 @@ describe('every combination of what the shell can report', () => {
       if (c.minutes > 30 && c.request?.phase !== 'sending' && !running(c.snapshot)) {
         expect(shown.busy, where).toBe(false);
         if (c.status === 'unreachable') expect(shown.model, where).toBeNull();
+      }
+      // While the shell still follows an accepted install that changed nothing, it refuses every other action
+      // for the instance, so none is offered.
+      const unchanged = c.snapshot.current === '3.2.8rc2' && c.snapshot.latest === '3.2.8rc4' && !running(c.snapshot)
+        && !['failed', 'declined', 'expired'].includes(c.snapshot.remote_request?.phase ?? '');
+      if (c.request?.action === 'install' && c.request.phase === 'accepted' && c.minutes < 30 && unchanged) {
+        expect(shown.canUpdate, where).toBe(false);
+        // The check and the switches wait with it (busy), or are not offered.
+        if (!shown.busy) expect(shown, where).toMatchObject({ canCheck: false, canSet: { prereleases: false, autoUpdate: false } });
       }
       // A member never gets a switch.
       if (!c.can_manage && shown.model) expect(shown.model, where).toMatchObject({ prereleases: null });
