@@ -6,9 +6,10 @@
 // uses the sign-in this device already has. Draft copy, inline in both languages.
 import type { ReactNode } from 'react';
 import {
-  AlarmClock, Bell, ChevronRight, Copy, ExternalLink, Globe, HeartPulse, Laptop, LogOut, Monitor,
-  MonitorCog, RefreshCw, Smartphone,
+  AlarmClock, Bell, ChevronRight, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LogOut, Monitor,
+  MonitorCog, Plus, RefreshCw, Smartphone,
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 
 import { accountInitialFor } from '@/components/AccountAvatar';
 import { SettingsPageShell } from '@/components/settings/SettingsPageShell';
@@ -50,8 +51,6 @@ export type Device = {
   lastActive?: { zh: string; en: string };
   signedIn?: { zh: string; en: string };
   capabilities: Capability[];
-  /** In the Avibe App, on the device itself: its own choice of path (the App keeps it). */
-  pathChoice?: 'auto' | 'tunnel';
   /** Someone else's device on a shared instance. */
   person?: string;
   recent?: Activity[];
@@ -85,7 +84,11 @@ export type DevicesPageProps = {
   confirm?: 'remove' | 'turn-off' | 'remove-others';
   /** The full activity list in place of the page. */
   view?: 'page' | 'activity';
+  /** The 「添加设备」 dialog, on one of its three tabs. */
+  add?: AddKind;
 };
+
+export type AddKind = 'iphone' | 'android' | 'computer';
 
 const pathName = (d: D): Record<PathKind, string> => ({
   tunnel: d('Cloudflare 隧道', 'Cloudflare tunnel'),
@@ -132,6 +135,36 @@ const lead = (d: D) => d(
   'Open this Avibe from your phone and other computers. Your data and Agents stay on this computer.',
 );
 
+/** The claim: the account this App is signed in to, and the name that becomes the domain. Every new
+ *  binding passes through it; no domain is ever assigned at random. The field is prefilled and always
+ *  editable (owner, 2026-11-20): the part of the account's email before the @, cleaned to lowercase
+ *  letters, digits and dashes. When this account's own first Avibe already holds that prefix, the
+ *  prefill is the prefix plus this computer's name (`max-macmini`). When someone else holds the name
+ *  it says 「已被占用」 and the person changes it; a number is never appended for them. The same rule
+ *  on every path: this page, Setup, the avibe.bot screen, the terminal link. */
+export function ClaimFields({ account, name, nameState }: { account: string; name: string; nameState?: 'free' | 'taken' }) {
+  const d = useDraft();
+  return (
+    <div className="grid gap-x-6 gap-y-2 px-5 py-4 md:grid-cols-[72px_minmax(0,1fr)] md:items-center md:gap-y-3">
+      <span className="text-[12px] text-muted">{d('账号', 'Account')}</span>
+      <Account email={account} note={d('这个 App 已登录', 'signed in to this App')} />
+      <span className="text-[12px] text-muted max-md:mt-2">{d('名称', 'Name')}</span>
+      <div className="flex min-w-0 items-center gap-2">
+        <Input className="w-44 text-[13px]" value={name} readOnly aria-label={d('名称', 'Name')} />
+        <span className="truncate font-mono text-[12px] text-muted">-app.avibe.bot</span>
+      </div>
+      <span className="max-md:hidden" />
+      {nameState === 'taken' ? (
+        <span className="text-[11px] text-destructive-ink md:-mt-1.5">{d('已被占用，换一个名称。', 'Taken. Choose another name.')}</span>
+      ) : (
+        <span className="text-[11px] text-muted md:-mt-1.5">
+          {d(`域名是 ${name}-app.avibe.bot，领取后不能更改。`, `The domain is ${name}-app.avibe.bot. It cannot be changed later.`)}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** Layer 1: how this Avibe is reached. Set once, so it is compact once it is on. */
 function ReachCard({ reach }: { reach: Reach }) {
   const d = useDraft();
@@ -142,8 +175,8 @@ function ReachCard({ reach }: { reach: Reach }) {
           <Button variant="brand">{d('开启远程访问', 'Turn on remote access')}</Button>
           <p className="text-[12px] leading-relaxed text-muted">
             {d(
-              '接下来在 avibe.bot 给这台电脑起个名字、领取域名，然后自动回到这里。',
-              'Next, on avibe.bot, you name this computer and get its domain, then come back here by itself.',
+              '只有第一次：去 avibe.bot 起个名字、领取域名，然后自动回到这里。以后开关都不再离开本页。',
+              'Only the first time: name it and get its domain on avibe.bot, then come back here by itself. After that, turning it on or off never leaves this page.',
             )}
           </p>
         </div>
@@ -161,24 +194,8 @@ function ReachCard({ reach }: { reach: Reach }) {
       <SettingsPanel title={d('远程访问', 'Remote access')} description={lead(d)} actions={<Badge variant="secondary">{d('未开启', 'Off')}</Badge>}>
         {signedIn ? (
           <>
-            <div className="grid gap-x-6 gap-y-2 border-b border-border px-5 py-4 md:grid-cols-[72px_minmax(0,1fr)] md:items-center md:gap-y-3">
-              <span className="text-[12px] text-muted">{d('账号', 'Account')}</span>
-              <Account email={reach.account ?? ''} note={d('这个 App 已登录', 'signed in to this App')} />
-              <span className="text-[12px] text-muted max-md:mt-2">{d('名称', 'Name')}</span>
-              <div className="flex min-w-0 items-center gap-2">
-                <Input className="w-44 text-[13px]" value={reach.name} readOnly aria-label={d('名称', 'Name')} />
-                <span className="truncate font-mono text-[12px] text-muted">-app.avibe.bot</span>
-              </div>
-              <span className="max-md:hidden" />
-              {reach.nameState === 'taken' ? (
-                <span className="text-[11px] text-destructive-ink md:-mt-1.5">{d('这个名称已被使用，换一个。', 'That name is taken. Choose another.')}</span>
-              ) : (
-                <span className="text-[11px] text-muted md:-mt-1.5">
-                  {d(`域名是 ${reach.name}-app.avibe.bot，领取后不能更改。`, `The domain is ${reach.name}-app.avibe.bot. It cannot be changed later.`)}
-                </span>
-              )}
-            </div>
-            <div className="px-5 py-4">
+            <ClaimFields account={reach.account ?? ''} name={reach.name} nameState={reach.nameState} />
+            <div className="border-t border-border px-5 py-4">
               <Button variant="brand" disabled={reach.nameState === 'taken'}>{d('开启远程访问', 'Turn on remote access')}</Button>
             </div>
           </>
@@ -256,7 +273,7 @@ function ReachCard({ reach }: { reach: Reach }) {
       </div>
       {on && (
         <div className="flex items-center justify-between border-t border-border px-5 py-2.5 text-[12px] text-muted">
-          <span>{d('连接方式与诊断', 'Connection and diagnostics')}</span>
+          <span>{d('连接方式', 'Connection')}</span>
           <ChevronRight className="size-4" />
         </div>
       )}
@@ -343,20 +360,6 @@ function DeviceDetail({ device, ownerEmail }: { device: Device; ownerEmail?: str
             ))}
           </dl>
         )}
-        {device.pathChoice && (
-          <div className="flex items-center justify-between gap-3 border-t border-border px-6 py-3 max-md:px-5">
-            <span className="text-[12px] text-muted">{d('这台设备走', 'This device uses')}</span>
-            <SegmentedRadio
-              ariaLabel={d('这台设备使用的路径', 'Path for this device')}
-              value={device.pathChoice}
-              onChange={() => undefined}
-              options={[
-                { id: 'auto', label: d('自动', 'Automatic') },
-                { id: 'tunnel', label: d('仅 Cloudflare', 'Cloudflare only') },
-              ]}
-            />
-          </div>
-        )}
         {device.capabilities.length > 0 && (
           <div className="border-t border-border">
             <div className="px-6 pb-1 pt-3.5 text-[11px] font-semibold text-muted max-md:px-5">
@@ -410,6 +413,80 @@ function DeviceDetail({ device, ownerEmail }: { device: Device; ownerEmail?: str
   );
 }
 
+/** 「添加设备」: where each client is really obtained today. The iPhone app is a TestFlight beta, not
+ *  in the App Store; there is no Android app, so an Android phone uses the web page from its home
+ *  screen; the Desktop App is downloaded from avibe.bot for Mac and Windows. One code at a time. */
+function AddDevice({ kind, host, account, inline = false }: { kind: AddKind; host: string; account: string; inline?: boolean }) {
+  const d = useDraft();
+  const steps: Record<AddKind, string[]> = {
+    iphone: [
+      d('用 iPhone 相机扫这个码，在 TestFlight 里安装 Avibe OS。', 'Scan this code with the iPhone camera and install Avibe OS in TestFlight.'),
+      d(`打开 App，用 ${account} 登录。`, `Open the App and sign in as ${account}.`),
+      d('它会出现在这个列表里。', 'It appears in this list.'),
+    ],
+    android: [
+      d('用手机相机扫这个码，在浏览器里打开这个 Avibe。', 'Scan this code with the phone camera to open this Avibe in the browser.'),
+      d(`用 ${account} 登录，它会出现在这个列表里。`, `Sign in as ${account}; it appears in this list.`),
+      d('想像 App 一样用：在浏览器菜单里选「添加到主屏幕」。', 'To use it like an app, choose “Add to Home screen” in the browser menu.'),
+    ],
+    computer: [
+      d('在那台电脑上下载并安装 Avibe Desktop（Mac、Windows）。', 'On that computer, download and install Avibe Desktop (Mac, Windows).'),
+      d(`用 ${account} 登录，在「实例」里选这个 Avibe。`, `Sign in as ${account} and choose this Avibe under Instances.`),
+      d(`不想安装：用浏览器打开 ${host}。`, `Without installing: open ${host} in a browser.`),
+    ],
+  };
+  const note: Record<AddKind, string> = {
+    iphone: d('Avibe App 目前是 TestFlight 测试版；没装过 TestFlight 的话，扫码后会先请你安装它。', 'The Avibe App is a TestFlight beta for now; without TestFlight, the code asks you to install it first.'),
+    android: d('目前没有安卓 App。', 'There is no Android app for now.'),
+    computer: d('Linux 和服务器用浏览器打开即可。', 'On Linux and servers, a browser is enough.'),
+  };
+  const code = kind === 'iphone' ? 'https://testflight.apple.com/join/HXqwMqeX' : `https://${host}`;
+  const body = (
+    <div className={inline ? 'px-5 pb-5 pt-1' : ''}>
+      <SegmentedRadio
+        ariaLabel={d('要添加的设备', 'Device to add')}
+        className="w-fit max-w-full"
+        value={kind}
+        onChange={() => undefined}
+        options={[
+          { id: 'iphone', label: 'iPhone' },
+          { id: 'android', label: d('安卓手机', 'Android phone') },
+          { id: 'computer', label: d('另一台电脑', 'Another computer') },
+        ]}
+      />
+      <div className="mt-4 flex flex-col gap-5 md:flex-row md:items-start">
+        {kind === 'computer' ? (
+          <div className="flex shrink-0 flex-col gap-2 md:w-[132px]">
+            <Button variant="secondary" size="sm"><Download />{d('下载页', 'Downloads')}</Button>
+            <span className="text-center font-mono text-[10px] text-muted">avibe.bot</span>
+          </div>
+        ) : (
+          <div className="shrink-0 rounded-lg border border-edge bg-white p-2.5">
+            <QRCodeSVG value={code} size={112} />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <ol className="flex list-decimal flex-col gap-1.5 pl-4 text-[13px] leading-relaxed text-foreground">
+            {steps[kind].map((step) => <li key={step}>{step}</li>)}
+          </ol>
+          <p className="mt-2.5 text-[11px] leading-relaxed text-muted">{note[kind]}</p>
+        </div>
+      </div>
+    </div>
+  );
+  if (inline) return body;
+  return (
+    <Dialog open onOpenChange={() => undefined}>
+      <DialogContent className="max-w-[520px]" closeLabel={d('关闭', 'Close')}>
+        <DialogHeader>
+          <DialogTitle>{d('添加设备', 'Add a device')}</DialogTitle>
+        </DialogHeader>
+        {body}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function Confirm({ title, body, action }: { title: string; body: string; action: string }) {
   const d = useDraft();
   return (
@@ -428,7 +505,7 @@ function Confirm({ title, body, action }: { title: string; body: string; action:
   );
 }
 
-export function DevicesPage({ reach, devices, activity = [], viewer = 'owner', ownerEmail, detail, confirm, view = 'page' }: DevicesPageProps) {
+export function DevicesPage({ reach, devices, activity = [], viewer = 'owner', ownerEmail, detail, confirm, view = 'page', add }: DevicesPageProps) {
   const d = useDraft();
   const mine = devices.filter((each) => !each.person);
   const others = devices.filter((each) => each.person);
@@ -461,17 +538,22 @@ export function DevicesPage({ reach, devices, activity = [], viewer = 'owner', o
     >
       {viewer === 'owner' && <ReachCard reach={reach} />}
 
-      <SettingsPanel title={d('我的设备', 'My devices')}>
+      <SettingsPanel
+        title={d('我的设备', 'My devices')}
+        actions={viewer === 'owner' && on && mine.length > 1
+          ? <Button variant="text" size="compact"><Plus />{d('添加设备', 'Add a device')}</Button>
+          : undefined}
+      >
         {mine.map((each) => <DeviceRow key={each.id} device={each} />)}
         {viewer === 'owner' && !on && reach.state !== 'starting' && mine.length === 1 && (
           <p className="px-5 py-3 text-[12px] text-muted">
             {d('开启远程访问后，登录的手机和电脑会出现在这里。', 'Once remote access is on, the phones and computers you sign in on appear here.')}
           </p>
         )}
-        {viewer === 'owner' && on && mine.length === 1 && reach.state === 'on' && (
-          <div className="flex flex-col gap-1 px-5 py-3.5 text-[12px] leading-relaxed text-muted">
-            <span>{d(`在 iPhone 上安装 Avibe App，用 ${reach.account} 登录，它就会出现在这里。`, `Install the Avibe App on your iPhone and sign in as ${reach.account}; it appears here.`)}</span>
-            <span>{d(`在别的电脑上，用浏览器打开 ${reach.host}。`, `On another computer, open ${reach.host} in a browser.`)}</span>
+        {viewer === 'owner' && mine.length === 1 && reach.state === 'on' && (
+          <div>
+            <div className="px-5 pb-2 pt-4 text-[13px] font-semibold text-foreground">{d('添加设备', 'Add a device')}</div>
+            <AddDevice inline kind={add ?? 'iphone'} host={reach.host} account={reach.account} />
           </div>
         )}
         {signedIn > 1 && (
@@ -497,6 +579,7 @@ export function DevicesPage({ reach, devices, activity = [], viewer = 'owner', o
         </SettingsPanel>
       )}
 
+      {add && mine.length > 1 && reach.state === 'on' && <AddDevice kind={add} host={reach.host} account={reach.account} />}
       {opened && !confirm && <DeviceDetail device={opened} ownerEmail={ownerEmail} />}
       {opened && confirm === 'remove' && (
         <Confirm
