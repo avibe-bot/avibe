@@ -9,6 +9,22 @@ import WebKit
 @MainActor
 enum VoiceCaptureLoadGate {
     static var provider: ((WebOrigin, UUID) -> DirectLoadGate)?
+
+    /// The gate for a take's load to `origin` on `store`. On the model's
+    /// current store it is the direct path's answer for that host
+    /// (`DirectPathController.loadGate(forInstanceURL:)`): a host that was
+    /// routed stays routed, so this holds whatever instance is shown now,
+    /// or none. Any other store (an account or store change since the take
+    /// began) has no route of ours: open.
+    static func gate(
+        for origin: WebOrigin,
+        store: UUID,
+        currentStore: UUID,
+        direct: (URL) -> DirectLoadGate
+    ) -> DirectLoadGate {
+        guard store == currentStore else { return .open }
+        return direct(origin.url)
+    }
 }
 
 /// Where a background voice take goes: the selected instance, through the
