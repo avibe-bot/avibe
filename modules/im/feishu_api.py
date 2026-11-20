@@ -3,15 +3,15 @@
 Five IM v1 endpoints: create, reply, patch and delete a message, and add a
 reaction. Each request is the one ``lark-oapi`` produced for the same call
 (method, path, query and JSON body), and a reply is read the way that SDK read
-it: the body is parsed as JSON whatever the HTTP status, and ``code == 0``
-means success. ``tests/test_feishu_api.py`` holds the two against each other on
-the wire.
+it: the body is parsed as JSON whatever the HTTP status or content type, and
+``code == 0`` means success. A redirect is not followed. ``tests/test_feishu_api.py``
+holds the two against each other on the wire.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import quote, urlencode
 
@@ -22,13 +22,20 @@ from yarl import URL
 REQUEST_TIMEOUT_SECONDS = 30.0
 
 
+class FeishuApiError(Exception):
+    """A reply that is JSON but not the envelope Feishu answers with."""
+
+
 @dataclass
 class FeishuApiResponse:
-    """The ``code``/``msg``/``data`` envelope every OpenAPI reply carries."""
+    """The ``code``/``msg``/``data`` envelope every OpenAPI reply carries.
+
+    ``data`` is ``None`` when the reply has none, as it is on most refusals.
+    """
 
     code: Optional[int] = None
     msg: Optional[str] = None
-    data: Dict[str, Any] = field(default_factory=dict)
+    data: Optional[Dict[str, Any]] = None
 
     def success(self) -> bool:
         return self.code is not None and self.code == 0
@@ -59,6 +66,7 @@ class FeishuApi:
             "/open-apis/im/v1/messages",
             params={"receive_id_type": receive_id_type},
             body={"receive_id": receive_id, "msg_type": msg_type, "content": content},
+            data_is_read=True,
         )
 
     async def reply_message(
@@ -68,6 +76,7 @@ class FeishuApi:
             "POST",
             f"/open-apis/im/v1/messages/{_segment(message_id)}/reply",
             body={"content": content, "msg_type": msg_type, "reply_in_thread": reply_in_thread},
+            data_is_read=True,
         )
 
     async def patch_message(self, message_id: str, content: str) -> FeishuApiResponse:
@@ -85,6 +94,7 @@ class FeishuApi:
             "POST",
             f"/open-apis/im/v1/messages/{_segment(message_id)}/reactions",
             body={"reaction_type": {"emoji_type": emoji_type}},
+            data_is_read=True,
         )
 
     async def _request(
@@ -94,31 +104,44 @@ class FeishuApi:
         *,
         params: Optional[Dict[str, str]] = None,
         body: Optional[Dict[str, Any]] = None,
+        data_is_read: bool = False,
     ) -> FeishuApiResponse:
         token = await self._tenant_token()
         headers = {"Authorization": f"Bearer {token}"}
         data: Optional[bytes] = None
         if body is not None:
             headers["Content-Type"] = "application/json"
-            data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            data = json.dumps(_without_nulls(body), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         target = self._base_url + path
         if params:
             target += "?" + urlencode(params)
         timeout = aiohttp.ClientTimeout(total=self._timeout)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             # ``encoded=True``: the path goes out as written, so an encoded
-            # character in an id is not decoded back on the way.
-            async with session.request(method, URL(target, encoded=True), data=data, headers=headers) as reply:
+            # character in an id is not decoded back on the way. A redirect is
+            # answered as it stands, never by sending the message a second time.
+            async with session.request(
+                method, URL(target, encoded=True), data=data, headers=headers, allow_redirects=False
+            ) as reply:
                 raw = await reply.read()
         payload = json.loads(raw.decode("utf-8"))
-        if not isinstance(payload, dict):
+        if payload is None:
             return FeishuApiResponse()
-        data_field = payload.get("data")
-        return FeishuApiResponse(
-            code=payload.get("code"),
-            msg=payload.get("msg"),
-            data=data_field if isinstance(data_field, dict) else {},
-        )
+        if not isinstance(payload, dict):
+            raise FeishuApiError(f"Feishu answered {method} {path} with JSON that is not an object")
+        reply_data = payload.get("data")
+        if not data_is_read:
+            reply_data = None
+        elif reply_data is not None and not isinstance(reply_data, dict):
+            raise FeishuApiError(f"Feishu answered {method} {path} with data that is not an object")
+        return FeishuApiResponse(code=payload.get("code"), msg=payload.get("msg"), data=reply_data)
+
+
+def _without_nulls(value: Any) -> Any:
+    """Leave out fields that have no value, rather than sending them as ``null``."""
+    if isinstance(value, dict):
+        return {key: _without_nulls(item) for key, item in value.items() if item is not None}
+    return value
 
 
 def _segment(value: str) -> str:

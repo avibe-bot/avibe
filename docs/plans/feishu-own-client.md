@@ -105,6 +105,12 @@ nothing by default.
 - A transport failure (timeout, connection refused) now raises aiohttp's
   exception where it raised httpx's. Feishu's own refusals keep their `code` and
   `msg`, and the token refusal keeps the SDK's wording.
+- A reply that is JSON but not an envelope raises `FeishuApiError` where the
+  SDK raised from inside its models. A send that Feishu calls a success but
+  answers without a data object still fails at the call site, as it did.
+- Requests carry aiohttp's `User-Agent`, not the SDK's.
+- Calls that miss the token cache together share one token request; the SDK
+  got the same effect by blocking the loop while it fetched.
 - The configured `proxy_url` is still not applied to Feishu traffic.
 
 ## Todo

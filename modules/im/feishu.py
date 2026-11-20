@@ -155,11 +155,14 @@ class FeishuBot(BaseIMClient):
         self._stop_event: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws_thread: Optional[threading.Thread] = None
-        # Event id (or card-click key) -> the time it may be forgotten.
+        # Event id (or card-click key) -> the time it may be forgotten. Read and
+        # written from the long connection's thread and from the adapter's loop.
         self._recent_event_ids: Dict[str, float] = {}
         self._event_ids_swept_at = 0.0
+        self._event_ids_lock = threading.Lock()
         self._cached_token: Optional[str] = None
         self._token_expires_at: Optional[float] = None
+        self._token_fetches: Dict[asyncio.AbstractEventLoop, "asyncio.Task[str]"] = {}
         self._user_info_cache: Dict[str, Dict[str, Any]] = {}
         self._dm_chat_ids: set = set()
         self._message_text_cache: Dict[str, str] = {}
@@ -288,24 +291,51 @@ class FeishuBot(BaseIMClient):
 
     async def _tenant_token(self) -> str:
         """Return a valid tenant access token, or raise with Feishu's refusal."""
-        # Return cached token if still valid (expires after ~2h, refresh at 1h50m)
         if self._cached_token and self._token_expires_at and time.time() < self._token_expires_at:
             return self._cached_token
+        # Calls that miss the cache together share one fetch. The adapter is
+        # called on more than one loop, and a task belongs to its loop.
+        loop = asyncio.get_running_loop()
+        fetch = self._token_fetches.get(loop)
+        if fetch is None:
+            fetch = loop.create_task(self._fetch_tenant_token())
+            self._token_fetches[loop] = fetch
+            fetch.add_done_callback(lambda done: self._token_fetch_done(loop, done))
+        return await asyncio.shield(fetch)
+
+    def _token_fetch_done(self, loop: asyncio.AbstractEventLoop, fetch: "asyncio.Task[str]") -> None:
+        if self._token_fetches.get(loop) is fetch:
+            del self._token_fetches[loop]
+        if not fetch.cancelled():
+            # Read here too: every caller waiting for it may have been cancelled.
+            fetch.exception()
+
+    async def _fetch_tenant_token(self) -> str:
         url = f"{self.config.api_base_url}/open-apis/auth/v3/tenant_access_token/internal"
         payload = json.dumps({"app_id": self.config.app_id, "app_secret": self.config.app_secret})
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, data=payload, headers={"Content-Type": "application/json"}) as resp:
-                result = await resp.json()
+            async with session.post(
+                url, data=payload, headers={"Content-Type": "application/json"}, allow_redirects=False
+            ) as resp:
+                raw = await resp.read()
+        # Parsed whatever the content type says: a gateway can relabel Feishu's answer.
+        result = json.loads(raw.decode("utf-8"))
+        if not isinstance(result, dict):
+            raise RuntimeError("obtain self tenant access token failed: the reply is not a JSON object")
         token = result.get("tenant_access_token")
         if result.get("code") != 0 or not token:
-            raise RuntimeError(
-                f"obtain self tenant access token failed, code: {result.get('code')}, msg: {result.get('msg')}"
-            )
-        expire = result.get("expire", 7200)
+            # Feishu's own words, minus the secret should a reply ever quote it back.
+            reason = f"code: {result.get('code')}, msg: {result.get('msg')}"
+            if self.config.app_secret:
+                reason = reason.replace(self.config.app_secret, "***")
+            raise RuntimeError(f"obtain self tenant access token failed, {reason}")
+        # Used until 10 minutes before it expires, and never past the lifetime
+        # Feishu gave it; a reply without a lifetime is used for this call only.
+        expire = result.get("expire")
+        lifetime = expire if isinstance(expire, (int, float)) and not isinstance(expire, bool) else 0
         self._cached_token = token
-        # Refresh 10 minutes before expiry
-        self._token_expires_at = time.time() + max(expire - 600, 60)
+        self._token_expires_at = time.time() + max(lifetime - 600, 0)
         return token
 
     async def _get_tenant_token(self) -> Optional[str]:
@@ -342,17 +372,18 @@ class FeishuBot(BaseIMClient):
         if not event_id:
             return False
         now = time.time()
-        if now >= self._event_ids_swept_at + _EVENT_ID_SWEEP_SECONDS:
-            self._event_ids_swept_at = now
-            for key, forget_at in list(self._recent_event_ids.items()):
-                if forget_at <= now:
-                    self._recent_event_ids.pop(key, None)
-        forget_at = self._recent_event_ids.get(event_id)
-        if forget_at is not None and forget_at > now:
+        with self._event_ids_lock:
+            if now >= self._event_ids_swept_at + _EVENT_ID_SWEEP_SECONDS:
+                self._event_ids_swept_at = now
+                for key in [key for key, forget_at in self._recent_event_ids.items() if forget_at <= now]:
+                    del self._recent_event_ids[key]
+            forget_at = self._recent_event_ids.get(event_id)
+            duplicate = forget_at is not None and forget_at > now
+            if not duplicate:
+                self._recent_event_ids[event_id] = now + memory_seconds
+        if duplicate:
             logger.debug("Ignoring duplicate Feishu event_id %s", event_id)
-            return True
-        self._recent_event_ids[event_id] = now + memory_seconds
-        return False
+        return duplicate
 
     # ------------------------------------------------------------------
     # Channel authorisation
@@ -416,7 +447,7 @@ class FeishuBot(BaseIMClient):
                 return None
             message_id = response.data.get("message_id")
             self._remember_message_text(message_id, text)
-            chat_id = response.data.get("chat_id") or response.data.get("open_chat_id")
+            chat_id = response.data.get("chat_id")
             if chat_id:
                 self._dm_chat_ids.add(chat_id)
             return message_id
