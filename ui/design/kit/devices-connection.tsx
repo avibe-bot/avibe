@@ -15,6 +15,7 @@ import { SettingsPanel, ToggleSwitch } from '@/components/settings/SettingsPrimi
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { useDraft } from './draft';
 
@@ -41,6 +42,12 @@ export type ConnectionPageProps = {
   trial?: { what: { zh: string; en: string }; back: { zh: string; en: string }; seconds: number };
   /** A trial ended without this device coming back: the old value is in place again. */
   reverted?: { what: { zh: string; en: string }; back: { zh: string; en: string } };
+  /** This Avibe's domain, for the owner: the last row of the page, and the way to change it. */
+  host?: string;
+  /** Changing the domain (owner, 2026-11-20: a plain rename, the consequences are the user's):
+   *  `form` says what will happen and takes the new name, `confirm` asks a second time,
+   *  `done` is this page afterwards, at the computer itself. */
+  rename?: { step: 'form' | 'confirm' | 'done'; name: string; taken?: boolean; from?: string; holdDays: number };
 };
 
 const directWord = (d: D): Record<DirectState, string> => ({
@@ -87,7 +94,7 @@ function Setting({ title, hint, children }: { title: string; hint?: string; chil
   );
 }
 
-export function ConnectionPage({ viewer, tunnel, direct, relay, path, choice = 'auto', trial, reverted }: ConnectionPageProps) {
+export function ConnectionPage({ viewer, tunnel, direct, relay, path, choice = 'auto', trial, reverted, host, rename }: ConnectionPageProps) {
   const d = useDraft();
   const pick = (text: { zh: string; en: string }) => d(text.zh, text.en);
   const remote = viewer !== 'local';
@@ -114,6 +121,12 @@ export function ConnectionPage({ viewer, tunnel, direct, relay, path, choice = '
       activeTab="remote-access"
       breadcrumb={<span>{d('设备 / 连接方式', 'Devices / Connection')}</span>}
     >
+      {rename?.step === 'done' && (
+        <div className="rounded-xl border border-mint/40 bg-mint-soft px-5 py-3 text-[12px] leading-relaxed text-foreground">
+          {d(`域名已改为 ${host}。所有设备都已退出，要在新地址重新登录；${rename.from} 已作废。`,
+            `The domain is now ${host}. Every device was signed out and signs in again at the new address; ${rename.from} is void.`)}
+        </div>
+      )}
       {reverted && (
         <div className="rounded-xl border border-gold/40 bg-gold/10 px-5 py-3 text-[12px] leading-relaxed text-foreground">
           {d(`把${pick(reverted.what)}之后，这台设备没有连回来，已自动改回${pick(reverted.back)}。`,
@@ -246,6 +259,68 @@ export function ConnectionPage({ viewer, tunnel, direct, relay, path, choice = '
           <ChevronRight className="size-4 text-muted" />
         </div>
       </SettingsPanel>
+
+      {host && viewer !== 'app' && (
+        <SettingsPanel>
+          <div className="flex items-center gap-3 px-5 py-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-[13px] font-medium text-foreground">{d('域名', 'Domain')}</div>
+              <div className="mt-0.5 truncate font-mono text-[11px] text-muted">{host}</div>
+            </div>
+            <Button variant="ghost" size="compact" className="text-destructive-ink">{d('更改域名', 'Change the domain')}</Button>
+          </div>
+        </SettingsPanel>
+      )}
+
+      {rename?.step === 'form' && host && (
+        <Dialog open onOpenChange={() => undefined}>
+          <DialogContent className="max-w-[480px]" closeLabel={d('关闭', 'Close')}>
+            <DialogHeader>
+              <DialogTitle>{d('更改域名', 'Change the domain')}</DialogTitle>
+              <DialogDescription>{d(`现在是 ${host}。`, `It is ${host} now.`)}</DialogDescription>
+            </DialogHeader>
+            <div className="flex flex-col gap-1.5">
+              <div className="flex min-w-0 items-center gap-2">
+                <Input className="w-48 text-[13px]" value={rename.name} readOnly aria-label={d('新名称', 'New name')} aria-invalid={rename.taken} />
+                <span className="truncate font-mono text-[12px] text-muted">-app.avibe.bot</span>
+              </div>
+              {rename.taken && <span className="text-[11px] text-destructive-ink">{d('已被占用，换一个名称。', 'Taken. Choose another name.')}</span>}
+            </div>
+            <div className="rounded-lg bg-field px-4 py-3">
+              <div className="text-[12px] font-semibold text-foreground">{d('更改后', 'After the change')}</div>
+              <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-[12px] leading-relaxed text-muted">
+                <li>{d(`${host} 立即作废，${rename.holdDays} 天后别人可以领取，不会还给你。`, `${host} is void at once; after ${rename.holdDays} days someone else may claim it. You do not get it back.`)}</li>
+                <li>{d('所有设备都会退出，要在新地址重新登录。', 'Every device is signed out and signs in again at the new address.')}</li>
+                <li>{d('已经发出去的链接（展示页、文件）全部失效。', 'Every link already sent (Show Pages, files) stops working.')}</li>
+                <li>{d('主屏幕 App 要删掉重新添加；手机通知和健康要重新连接。', 'A home-screen app must be removed and added again; phone notifications and Health must be connected again.')}</li>
+                <li>{d('直连要等新证书，这期间走 Cloudflare 隧道。', 'Direct waits for a new certificate; until then everything uses the Cloudflare tunnel.')}</li>
+              </ul>
+            </div>
+            <DialogFooter>
+              <Button variant="ghost">{d('取消', 'Cancel')}</Button>
+              <Button variant="default" disabled={rename.taken}>{d('继续', 'Continue')}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {rename?.step === 'confirm' && host && (
+        <Dialog open onOpenChange={() => undefined}>
+          <DialogContent className="max-w-md" closeLabel={d('关闭', 'Close')}>
+            <DialogHeader>
+              <DialogTitle>{d(`改成 ${rename.name}-app.avibe.bot？`, `Change to ${rename.name}-app.avibe.bot?`)}</DialogTitle>
+              <DialogDescription>
+                {d(`这不能撤销。${host} 立即作废，所有设备都会退出，包括你现在用的这一台。`,
+                  `This cannot be undone. ${host} is void at once and every device is signed out, this one included.`)}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="ghost">{d('取消', 'Cancel')}</Button>
+              <Button variant="destructive" disabled>{d('更改域名（3）', 'Change the domain (3)')}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
 
       {trial && (
         <Dialog open onOpenChange={() => undefined}>

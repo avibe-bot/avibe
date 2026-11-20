@@ -30,7 +30,7 @@ function frame(
   };
 }
 
-const WIDE = { width: 1440, height: 1120 };
+const WIDE = { width: 1440, height: 1200 };
 
 export default frames([
   frame('browser', '连接方式 · 从别的电脑的浏览器看：这个 Avibe 提供的路径、隧道设置', WIDE, base, ['light', 'dark']),
@@ -44,4 +44,15 @@ export default frames([
     { ...base, tunnel: { ...tunnel, protocol: 'http2', active: 'HTTP/2' }, trial: { what: t('传输协议已改为 HTTP/2', 'The transport protocol is now HTTP/2'), back: t('「自动」', 'Automatic'), seconds: 24 } }),
   frame('reverted', '连接方式 · 没有连回来：已自动改回，回来时说明', WIDE,
     { ...base, reverted: { what: t('传输协议固定为 HTTP/2', 'fixing the transport protocol to HTTP/2'), back: t('「自动」', 'Automatic') } }),
+  // Changing the domain: a plain rename. The old prefix is void at once and is freed for others
+  // after a waiting period (one number; 30 here, the owner has not fixed it yet).
+  frame('domain', '连接方式 · 页面最下面一行：域名，和「更改域名」', WIDE, { ...base, viewer: 'local', host: 'max-app.avibe.bot' }),
+  frame('rename', '更改域名 · 第一步：新名称，和会发生什么', WIDE,
+    { ...base, viewer: 'local', host: 'max-app.avibe.bot', rename: { step: 'form', name: 'maxwell', holdDays: 30 } }),
+  frame('rename-taken', '更改域名 · 名称已被占用', WIDE,
+    { ...base, viewer: 'local', host: 'max-app.avibe.bot', rename: { step: 'form', name: 'alex', taken: true, holdDays: 30 } }),
+  frame('rename-confirm', '更改域名 · 第二次确认：按钮先停 3 秒', WIDE,
+    { ...base, viewer: 'local', host: 'max-app.avibe.bot', rename: { step: 'confirm', name: 'maxwell', holdDays: 30 } }),
+  frame('renamed', '更改域名 · 之后（在这台电脑上看）', WIDE,
+    { ...base, viewer: 'local', host: 'maxwell-app.avibe.bot', rename: { step: 'done', name: 'maxwell', from: 'max-app.avibe.bot', holdDays: 30 } }),
 ]);
