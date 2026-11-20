@@ -24,6 +24,16 @@
       }
     }
   },
+  "liveActivity": {
+    "offer": "Show on Lock Screen",
+    "tracking": "Showing on the Lock Screen",
+    "stop": "Stop",
+    "systemOff": "Live Activities are off in Settings",
+    "settings": "Settings",
+    "no_active_turn": "This turn has ended.",
+    "push_unavailable": "Turn on notifications to show this on the Lock Screen.",
+    "failed": "Couldn't update the Lock Screen. Try again."
+  },
   "desktopBootstrap": {
     "askVibey": {
       "kept": "Kept on this Mac. It will go into Vibey's message box once you're connected.",
