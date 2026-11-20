@@ -342,6 +342,9 @@ final class AppModel: ObservableObject {
     /// path controller: no `direct` capability, no listener, no route write,
     /// no event, and runtimes open exactly as they did before.
     private let directTransport: DirectTransporting?
+    /// The direct path's own bounds; tests on a slow host give the first
+    /// bind more time.
+    private let directPathTiming: DirectPathTiming
     private let directFaultMarker: DirectFaultMarkerStoring
     /// A runtime whose open is held because its host has a route and the
     /// listener does not serve yet. One slot, not a queue: a newer open, a
@@ -470,6 +473,7 @@ final class AppModel: ObservableObject {
                 isCurrentRuntime: { [weak self] runtime in
                     self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
                 },
+                timing: directPathTiming,
                 onStatusChanged: { [weak self] in
                     self?.deliverDirectStatus()
                 },
@@ -484,6 +488,12 @@ final class AppModel: ObservableObject {
 
     var mobileSessionCoordinator: MobileSessionCoordinator {
         sessionCoordinator
+    }
+
+    /// The port of the direct path's local listener while one serves. For
+    /// tests that reach the listener; nothing in the App reads it.
+    var directListenerPort: UInt16? {
+        directPathController?.listenerPort
     }
 
     /// Answers `direct.status` for the runtime's WebViews; `nil` without a
@@ -530,6 +540,7 @@ final class AppModel: ObservableObject {
             MobileControlPlaneConfiguration(),
         directTransport: DirectTransporting? = nil,
         directFaultMarker: DirectFaultMarkerStoring? = nil,
+        directPathTiming: DirectPathTiming = .standard,
         pushKeychain: PushKeychainStoring = PushKeychainStore(),
         pushGenerationStore: PushGenerationStoring =
             SharedPushGenerationStore(),
@@ -554,6 +565,7 @@ final class AppModel: ObservableObject {
         let directFaultMarker = directFaultMarker
             ?? UserDefaultsDirectFaultMarker(defaults: defaults)
         self.directFaultMarker = directFaultMarker
+        self.directPathTiming = directPathTiming
         // A launch after a listener fault uses no listener at all, decided
         // here, before any route or first load: the user was asked to
         // reopen the App, and this launch must work. It clears the marker,

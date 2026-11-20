@@ -169,17 +169,13 @@ final class DirectPathAppTests: XCTestCase {
         let marker = FaultMarkerSpy(marked: false)
         let timing = RuntimeOpenManualTiming()
         let transport = StandInDirectTransport()
-        var listening: Set<ListeningSocket> = []
         let app = try await makeApp(
             directTransport: transport,
             directFaultMarker: marker,
             runtimeOpenTiming: timing
-        ) {
-            listening = try listeningSockets()
-        }
+        )
         let first = try await select("instance-1", in: app)
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app)
         XCTAssertFalse(app.directFaultCovers(first))
         var shownWhileMarking: [Bool] = []
         // The App owns this spy; its observer must not retain the App back.
@@ -203,7 +199,7 @@ final class DirectPathAppTests: XCTestCase {
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -427,20 +423,16 @@ final class DirectPathAppTests: XCTestCase {
     func testAHeldOpenEndsAsTheReopenMessageWhenTheReBindFails() async throws {
         let marker = FaultMarkerSpy(marked: false)
         let transport = StandInDirectTransport()
-        var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(directTransport: transport, directFaultMarker: marker) {
-            listening = try listeningSockets()
-        }
+        let app = try await makeApp(directTransport: transport, directFaultMarker: marker)
         _ = try await select("instance-1", in: app)
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app)
 
         enterBackground()
         try await eventually { await !LoopbackClient.canConnect(to: port) }
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -466,23 +458,19 @@ final class DirectPathAppTests: XCTestCase {
     func testListenerRebindFailureDoesNotFailAnUnroutedRuntimeAttempt() async throws {
         let marker = FaultMarkerSpy(marked: false)
         let transport = StandInDirectTransport()
-        var listening: Set<ListeningSocket> = []
         let app = try await makeApp(
             directTransport: transport,
             directFaultMarker: marker
-        ) {
-            listening = try listeningSockets()
-        }
+        )
         _ = try await select("instance-1", in: app)
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app)
 
         enterBackground()
         try await eventually { await !LoopbackClient.canConnect(to: port) }
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -4565,13 +4553,10 @@ final class DirectPathAppTests: XCTestCase {
         try await requireAHostWithoutNotificationPermission()
         try assertSocketScanSeesListeners()
         let notifications = try NotificationsOn()
-        var listening: Set<ListeningSocket> = []
         let app = try await makeApp(
             directTransport: StandInDirectTransport(),
             notifications: notifications
-        ) {
-            listening = try listeningSockets()
-        }
+        )
         let defaults = try XCTUnwrap(appDefaults)
         let first = try await openWithNotificationsOn(
             "instance-1",
@@ -4585,14 +4570,13 @@ final class DirectPathAppTests: XCTestCase {
 
         // The App's port is taken while it is in the background: the return
         // cannot bind it again, which is the listener fault.
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app)
         enterBackground()
         try await eventually { await !LoopbackClient.canConnect(to: port) }
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -6509,6 +6493,45 @@ final class DirectPathAppTests: XCTestCase {
         return answer
     }
 
+    /// The port the App's direct listener serves on, from the App itself.
+    /// A scan of this process's sockets cannot tell the App's listener from
+    /// one an earlier test left behind on a port the system then gave out
+    /// again, and finds nothing at all when the App served no route.
+    @MainActor
+    private func directListenerPort(
+        of app: AppModel,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> NWEndpoint.Port {
+        let value = try XCTUnwrap(
+            app.directListenerPort,
+            "No direct listener serves: the host got no route (a first bind slower than the listener wait leaves it on the public path).",
+            file: file,
+            line: line
+        )
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: value), file: file, line: line)
+        // The listener is on the loopback address, where WebKit is routed.
+        XCTAssertTrue(
+            try listeningSockets().contains(ListeningSocket(address: "127.0.0.1", port: value)),
+            "The App's listener on port \(value) is not listening on 127.0.0.1.",
+            file: file,
+            line: line
+        )
+        return port
+    }
+
+    /// The direct path's bounds, with the first load's wait for the
+    /// listener as long as the foreground watchdog allows (5 s) instead of
+    /// 1 s. A first bind and its ownership check that take longer than 1 s
+    /// on a loaded simulator leave the host unrouted and the listener
+    /// stopped: the App's designed fallback to the public path, which made
+    /// tests that reach the listener fail with no listener to find. Every
+    /// other bound is the App's own.
+    static let launchTolerantDirectPathTiming = DirectPathTiming(
+        listenerWaitSeconds: 5,
+        rebindSeconds: DirectPathTiming.standard.rebindSeconds
+    )
+
     /// Bounds no test of the iroh transport should reach, so that a slow
     /// simulator does not turn a stand-in that answers at once into a
     /// timeout.
@@ -6548,10 +6571,7 @@ final class DirectPathAppTests: XCTestCase {
             notificationCenter: transportNotifications,
             isInBackground: false
         )
-        var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(directTransport: transport) {
-            listening = try listeningSockets()
-        }
+        let app = try await makeApp(directTransport: transport)
         source.appModel = app
         // The probe's stream, then the relay's.
         let connection = DirectIrohFakeConnection(
@@ -6576,8 +6596,7 @@ final class DirectPathAppTests: XCTestCase {
             return self.directStatus(app, self.instance)?.preferred == .direct
         }
 
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app)
         let client = LoopbackClient(port: port)
         try await client.send(
             "CONNECT instance-one.example:443 HTTP/1.1\r\nHost: instance-one.example:443\r\n\r\n"
@@ -6621,6 +6640,7 @@ final class DirectPathAppTests: XCTestCase {
     private func makeApp(
         directTransport: DirectTransporting?,
         directFaultMarker: DirectFaultMarkerStoring? = nil,
+        directPathTiming: DirectPathTiming = DirectPathAppTests.launchTolerantDirectPathTiming,
         pushHolds: [PushHold] = [],
         sessionResponse: (@Sendable () -> LocalHTTPResponse?)? = nil,
         pushKeychain: InMemoryPushKeychainStore? = nil,
@@ -6751,6 +6771,7 @@ final class DirectPathAppTests: XCTestCase {
                 controlPlane: controlPlane,
                 directTransport: directTransport,
                 directFaultMarker: directFaultMarker,
+                directPathTiming: directPathTiming,
                 pushKeychain: notifications?.keychain
                     ?? pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: notifications?.generationStore
@@ -6770,6 +6791,7 @@ final class DirectPathAppTests: XCTestCase {
                 defaults: defaults,
                 controlPlane: controlPlane,
                 directTransport: directTransport,
+                directPathTiming: directPathTiming,
                 pushKeychain: notifications?.keychain
                     ?? pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: notifications?.generationStore
