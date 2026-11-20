@@ -231,7 +231,11 @@ export const SourceDetailPanel: React.FC<{
   const { t, i18n } = useTranslation();
   const [refreshingQuota, setRefreshingQuota] = React.useState(false);
   const refreshingQuotaAlive = React.useRef(true);
-  React.useEffect(() => () => { refreshingQuotaAlive.current = false; }, []);
+  React.useEffect(() => {
+    // Set on every setup: StrictMode replays the cleanup on mount.
+    refreshingQuotaAlive.current = true;
+    return () => { refreshingQuotaAlive.current = false; };
+  }, []);
   const { showToast } = useToast();
   const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);

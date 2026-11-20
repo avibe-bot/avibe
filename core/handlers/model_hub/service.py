@@ -9185,11 +9185,13 @@ class ModelHubService:
                     # The live deadline is already retired; the policy remembers
                     # which saved pause must not be read back.
                     logger.warning("Could not persist Model Hub resumed state")
-            for source in resumed:
-                self._record_event(
-                    agent="system", kind="recover", model_id=None, reason="recovery",
-                    to_source=source.id, to_label=source.display_name, now=now,
-                )
+        for source in resumed:
+            # The event log is read and rewritten on disk: off the loop, outside the lock.
+            await asyncio.to_thread(
+                self._record_event,
+                agent="system", kind="recover", model_id=None, reason="recovery",
+                to_source=source.id, to_label=source.display_name, now=now,
+            )
 
     def _quota_values(self, sources: list[dict[str, Any]]) -> dict[str, Any]:
         config = self.store.load()
