@@ -1228,35 +1228,66 @@ async def test_what_arrived_is_not_forgotten_with_time(fake: FakeFeishu, clock: 
         fake.history["oc_late"] = [("om_old", "user", base + 1800), ("om_recent", "user", int(clock.now) - 180)]
         await bot._report_connections()
 
-        assert (counts.matched, counts.missing, counts.not_checkable) == (1, 2, 0)
+        assert (counts.matched, counts.missing, counts.ended) == (1, 2, False)
 
 
-async def test_only_a_message_older_than_a_forgotten_event_is_not_checkable(fake: FakeFeishu, clock: _Clock):
-    """More events than are remembered: what was sent before the newest forgotten one arrived gets no verdict."""
-    remember_two = patch("modules.im.feishu_history_check._REMEMBERED_EVENTS", 2)
-    with remember_two, running_adapter(fake, long_connection="own") as adapter:
+@pytest.mark.parametrize("full", ["of events", "of verdicts"])
+async def test_a_check_that_holds_as_much_as_it_may_is_over_and_says_so(
+    fake: FakeFeishu, clock: _Clock, caplog: pytest.LogCaptureFixture, full: str
+):
+    """Nothing is forgotten to make room: at its limit the check ends, with the counts up to then."""
+    hold_two = patch("modules.im.feishu_history_check._LIMIT", 2)
+    with hold_two, running_adapter(fake, long_connection="own") as adapter:
         bot = adapter.bot
         bot._dm_chat_ids.add("oc_dm")
         base = int(clock.now) + 60
-        clock.now = base + 100
-        for number in (1, 2, 3):
-            fake.wait_acknowledged(fake.push_event(message_event(event_id=f"e{number}", message_id=f"om_{number}")))
-            clock.now += 1000
-        # om_1 arrived at base + 100 and is forgotten. In the history: om_1 itself, one sent just
-        # after it and never delivered, and one sent much later and never delivered.
-        fake.history = {
-            "oc_dm": [
-                ("om_1", "user", base + 90),
-                ("om_near", "user", base + 200),
-                ("om_2", "user", base + 1090),
-                ("om_lost", "user", base + 1500),
-            ]
-        }
+        events = ("om_1", "om_1", "om_2") if full == "of verdicts" else ("om_1", "om_1", "om_2", "om_3")
+        for number, message_id in enumerate(events):  # one sent twice takes one place
+            fake.wait_acknowledged(fake.push_event(message_event(event_id=f"e{number}", message_id=message_id)))
+        fake.history = {"oc_dm": [(f"om_{number}", "user", base + number) for number in (1, 2, 9)]}
+        clock.now += 600
         await bot._report_connections()
 
         counts = bot._history_check.counts
-        assert (counts.matched, counts.not_checkable, counts.missing) == (1, 2, 1)
-        assert "om_lost" in bot._history_check._missing
+        # Full of events: over before anything was read. Full of verdicts: two given, the third not.
+        assert (counts.people_messages, counts.matched, counts.missing, counts.ended) == (
+            (2, 2, 0, True) if full == "of verdicts" else (0, 0, 0, True)
+        )
+        assert caplog.text.count("Feishu history check: over after") == 1
+
+        # And it stays over: no reading, no verdict, nothing held.
+        asked = len(fake.history_requests)
+        fake.wait_acknowledged(fake.push_event(message_event(event_id="e_later", message_id="om_later")))
+        clock.now += 600
+        with caplog.at_level("INFO"):
+            await bot._report_connections()
+        assert len(fake.history_requests) == asked
+        assert not bot._history_check._event_at and not bot._history_check._missing
+        assert "'ended': True" in caplog.text
+
+
+async def test_an_interval_begun_again_gives_each_verdict_once(fake: FakeFeishu, clock: _Clock):
+    """A page that fails after verdicts were given: the interval starts over, the verdicts stand."""
+    with running_adapter(fake, long_connection="own") as adapter:
+        bot = adapter.bot
+        bot._dm_chat_ids.add("oc_dm")
+        base = int(clock.now) + 60
+        fake.history = {"oc_dm": [(f"om_{number}", "user", base + number) for number in range(4)]}
+        clock.now += 600
+        with patch("modules.im.feishu_history_check._PAGE_LIMIT", 1):
+            await bot._report_connections()  # the first page of two: two verdicts
+            fake.history_replies = [(200, {"code": 1, "msg": "system busy"})]
+            clock.now += 600
+            await bot._report_connections()  # the second page fails
+            for _ in range(3):
+                clock.now += 600
+                await bot._report_connections()  # from the start again, a page at a time
+
+        counts = bot._history_check.counts
+        assert (counts.people_messages, counts.missing) == (4, 4)
+        for number in range(4):
+            fake.wait_acknowledged(fake.push_event(message_event(event_id=f"e{number}", message_id=f"om_{number}")))
+        assert (counts.missing, counts.arrived_late) == (0, 4)
 
 
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):
