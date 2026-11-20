@@ -546,7 +546,10 @@ class LocalJobHost:
                 await self.kill(job_id, reason=STOP_TIMEOUT)
                 if cancelled:
                     raise asyncio.CancelledError
-                return (await _off_loop(_PROBE_IO, self.status, job_id))[0]
+                final, cancelled = await _off_loop(_PROBE_IO, self.status, job_id)
+                if cancelled:
+                    raise asyncio.CancelledError
+                return final
             if cancelled:
                 raise asyncio.CancelledError
             if current.state != "running":

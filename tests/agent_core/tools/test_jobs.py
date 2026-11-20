@@ -837,3 +837,33 @@ async def test_a_cancel_during_an_overdue_probe_still_kills_and_a_queued_poll_is
         block.set()
         for future in busy:
             future.result(5)
+
+
+async def test_a_cancel_during_the_final_status_read_after_a_timeout_kill_propagates(tmp_path, monkeypatch):
+    import threading
+
+    from core.agent_core.tools.base import JobStatus
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    entered, release = threading.Event(), threading.Event()
+    killed: list[str] = []
+
+    async def kill(job_id, *, reason):
+        killed.append(reason)
+
+    def status(_job_id):
+        entered.set()
+        assert release.wait(5)
+        return JobStatus("exited", 0)
+
+    monkeypatch.setattr(host, "_probe", lambda _job_id: (True, None))
+    monkeypatch.setattr(host, "kill", kill)
+    monkeypatch.setattr(host, "status", status)
+    waiting = asyncio.ensure_future(host.wait("job", deadline_s=5))
+    assert await asyncio.to_thread(entered.wait, 5)
+    waiting.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert killed == [jobs_module.STOP_TIMEOUT]
