@@ -916,7 +916,10 @@ export const SettingsModelsPage: React.FC = () => {
   const refreshQuotaAndSources = React.useCallback(async (announceFailure = false, sourceId: string | null = null) => {
     const read = await refreshQuotaNow(sourceId);
     if (!aliveRef.current) return;
-    if (read?.kind === 'ready') settleResetCardRefresh(sourceId);
+    const landed = read === null ? null : foldRegionRead<QuotaSummary, QuotaSummary | null>(read, {
+      loading: () => null, ready: (data) => data, unread: () => null, degraded: () => null,
+    });
+    if (landed) settleResetCardRefresh(sourceId, landed);
     if (announceFailure && read !== null && regionFailed(read)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }

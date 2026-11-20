@@ -3029,10 +3029,23 @@ describe('SettingsModelsPage reset cards', () => {
       expect(cardUseButton('Full').disabled).toBe(true);
       expect(redeem).toHaveBeenCalledTimes(3 + index);
 
+      // A refresh that is not yet this account's own reading (still being read, or its cards
+      // unread) leaves the doubt in place.
+      const stillReading = { ...quotaWith(), pending: ['src_claude'] };
+      const cardsUnread = quotaWith();
+      cardsUnread.sources[0] = { ...cardsUnread.sources[0], reset_cards: { state: 'unread', lock: null, cards: [] } };
+      for (const early of [stillReading, cardsUnread]) {
+        force.mockResolvedValueOnce(early);
+        await user.click(refreshButton('Claude Max'));
+        await waitFor(() => expect(refreshButton('Claude Max').disabled).toBe(false));
+        expect(within(account()).getByRole('alert').textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
+      }
+      expect(force).toHaveBeenCalledTimes(2 + 3 * index);
+
       force.mockResolvedValueOnce(quotaWith({ fable: 2, used: 0 }));
       await user.click(refreshButton('Claude Max'));
       await waitFor(() => expect(within(account()).queryByRole('alert')).toBeNull());
-      expect(force).toHaveBeenCalledTimes(1 + index);
+      expect(force).toHaveBeenCalledTimes(3 + 3 * index);
       expect(within(account()).getByText('×2')).toBeTruthy();
       expect(cardUseButton('Fable').disabled).toBe(false);
     }

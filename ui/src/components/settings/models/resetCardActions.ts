@@ -100,14 +100,20 @@ export function useResetCardActions({ land, reread, afterUse }: {
   }, [phases, set, use]);
 
   /**
-   * A refresh landed with a current reading: what it shows replaces this page's
-   * last outcome for the account (every account when `sourceId` is null). A step
-   * the user is in, or a use still in flight, stays.
+   * A refresh landed: what it shows replaces this page's last outcome for the account
+   * (every account when `sourceId` is null). A step the user is in, or a use still in
+   * flight, stays. A possibly spent card stays in doubt until the reading is this
+   * account's own: not still being read (`pending`) and with its cards read (`ok`).
    */
-  const settleRefresh = React.useCallback((sourceId: string | null) => {
+  const settleRefresh = React.useCallback((sourceId: string | null, summary: QuotaSummary) => {
     if (!alive.current) return;
+    const pending = new Set(summary.pending ?? []);
+    const read = new Set(summary.sources
+      .filter((source) => source.reset_cards?.state === 'ok')
+      .map((source) => source.source_id));
     setPhases((previous) => Object.fromEntries(Object.entries(previous).filter(([id, phase]) => (
       (sourceId !== null && id !== sourceId) || phase.phase === 'confirm' || phase.phase === 'using'
+      || (phase.phase === 'unconfirmed' && (pending.has(id) || !read.has(id)))
     ))));
   }, []);
 
