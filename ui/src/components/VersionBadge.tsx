@@ -28,6 +28,9 @@ import { lazyPage } from '../lib/lazyPage';
 import type { UpdatePanelModel } from './update/updatePanelModel';
 import { normalizeVersion, remoteRequestSettled } from './update/versions';
 import { useAcceptedInstall } from './update/useAcceptedInstall';
+import { useFollowInstall, useReadOnReturn } from './update/useFollowedVersion';
+import { useDesktopClientProjection, usePresentDesktopClient } from '../desktop/useDesktopClient';
+import { InstanceVersionChip } from '../desktop/InstanceVersionChip';
 
 
 // Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
@@ -51,7 +54,16 @@ const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
 // A check or setting change the host has not answered by then is reported from its receipt as it stands.
 const CONTROL_REQUEST_TIMEOUT_MS = 2 * 60_000;
 
+function ShownInstanceVersion({ name, appUpdate }: { name: string; appUpdate: boolean }) {
+  const present = usePresentDesktopClient();
+  return <InstanceVersionChip name={name} appUpdate={appUpdate} onPresent={() => present('updates')} />;
+}
+
+/** The version of the Avibe this page belongs to, and its update panel. Inside the desktop app on another
+ *  computer's instance the page shows that instance's version and leaves the panel to the shell, which draws
+ *  it for the instance and for this computer's app together (ui/design: update/instance-and-app). */
 export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
+  const client = useDesktopClientProjection();
   const { t } = useTranslation();
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
@@ -611,6 +623,16 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
+  // A standalone Runtime's install this page did not start (another page, the CLI, the automatic update):
+  // shown as running, and followed to its end.
+  const followingInstall = useFollowInstall(versionInfo, setVersionInfo, !isDesktopManaged && !upgrading && !restarting);
+  // An install may have started since this page last read the version: it reads again, quietly, when its
+  // window comes back to the front.
+  const standalone = Boolean(versionInfo) && !isDesktopManaged;
+  useReadOnReturn(standalone && !upgrading && !restarting, React.useCallback(() => {
+    void api.getVersion({ cache: false, background: true }).then(setVersionInfo).catch(() => undefined);
+  }, [api]));
+
   const requestSettled = remoteRequestSettled(remoteRequest, versionInfo?.current ?? '');
   const remoteRequestId = remoteDesktopWeb && !requestSettled ? remoteRequest?.request_id : undefined;
   React.useEffect(() => {
@@ -730,9 +752,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   };
   const manager = capabilities.can_manage_instance;
   const settingsBusy = savingPrereleases || savingAutoUpdate || checking || upgrading || restarting
-    || Boolean(followedControlId);
+    || followingInstall || Boolean(followedControlId);
   const panelActions: UpdatePanelActions = { close: () => setIsPopupOpen(false), settingsBusy };
-  const checkDisabled = checking || restarting || refreshBlockedByRemoteRequest || Boolean(followedControlId);
+  const checkDisabled = checking || restarting || followingInstall || refreshBlockedByRemoteRequest || Boolean(followedControlId);
   if (nativeModel) {
     // The desktop app's own updater, over its IPC.
     const actions = desktopUpdateState.hostActions;
@@ -769,10 +791,15 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     // A standalone Runtime checks live and keeps both settings in its own config.
     panelActions.check = { run: refresh, disabled: checkDisabled };
     if (manager && !isSourceBuild) {
-      panelActions.update = { run: () => void handleUpgrade(), disabled: upgrading };
+      panelActions.update = { run: () => void handleUpgrade(), disabled: upgrading || followingInstall };
       if (prereleases !== null) panelActions.setPrereleases = (enabled) => void handlePrereleasesToggle(enabled);
       if (autoUpdate !== null) panelActions.setAutoUpdate = (enabled) => void handleAutoUpdateToggle(enabled);
     }
+  }
+
+  // On another computer's instance the shell owns the panel; this page keeps no popover and no updater IPC.
+  if (client?.connection.committed.kind === 'remote') {
+    return <ShownInstanceVersion name={client.connection.committed.name} appUpdate={client.desktop.update.phase === 'available'} />;
   }
 
   return (

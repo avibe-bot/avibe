@@ -13,7 +13,8 @@ import { AccountDetailsView } from './AccountDetailsView';
 import { AddInstanceView } from './AddInstanceView';
 import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
-import { UpdatePanel } from '../components/update/UpdatePanel';
+import { UpdatePanel, UpdateSubjectsPanel } from '../components/update/UpdatePanel';
+import { instanceSection } from './instanceUpdateModel';
 import { modelFromDesktopState } from '../components/update/updatePanelModel';
 import { useAcceptedInstall } from '../components/update/useAcceptedInstall';
 
@@ -97,6 +98,55 @@ export function DesktopUpdatePanel({ state, act, busy, install, close }: {
       settingsBusy: busy,
       close,
     }}
+  />;
+}
+
+/** The panel while the app shows an instance on another computer (ui/design: update/instance-and-app): that
+ *  instance first, then this computer's desktop app, each with its own state and button. The shell reads and
+ *  updates the instance itself, with the app's sign-in; this page only asks it to. On this computer's own
+ *  instance there is one thing to update, and the panel is the single one. */
+export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>[0]) {
+  const { state, act, busy, install, close } = props;
+  const committed = state.connection.committed;
+  const instance = state.instance_update;
+  if (committed.kind !== 'remote' || !instance) return <DesktopUpdatePanel {...props} />;
+  const shown = instanceSection(instance);
+  const update = state.desktop.update;
+  const appTarget = update.latest;
+  const accepts = (action: string) => update.hostActions?.includes(action) ?? false;
+  const appChecking = ['checking', 'downloading', 'installing'].includes(update.phase);
+  return <UpdateSubjectsPanel
+    instanceName={committed.name}
+    instance={{
+      model: shown.model,
+      unavailable: shown.unavailable,
+      actions: {
+        ...(shown.canUpdate && shown.target ? {
+          update: { run: () => void act({ type: 'instance_update_install', target_version: shown.target! }), disabled: busy },
+        } : {}),
+        ...(shown.canSet.prereleases ? { setPrereleases: (enabled: boolean) => void act({ type: 'instance_update_set_prereleases', enabled }) } : {}),
+        ...(shown.canSet.autoUpdate ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'instance_update_set_auto_update', enabled }) } : {}),
+        settingsBusy: busy || shown.busy,
+      },
+    }}
+    app={{
+      model: modelFromDesktopState(update, { current: state.desktop.version, installFailed: install.failed }),
+      actions: {
+        ...(update.phase === 'available' && appTarget ? {
+          // Only an accepted request can fail as an install; a rejected one installed nothing.
+          update: { run: () => void act({ type: 'update_install', target_version: appTarget }).then((ok) => { if (ok) install.accept(); }), disabled: busy },
+        } : {}),
+        ...(accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void act({ type: 'update_set_prereleases', enabled }) } : {}),
+        ...(accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'update_set_auto_update', enabled }) } : {}),
+        settingsBusy: busy,
+      },
+    }}
+    // One check asks both updaters: this computer's, then the instance's.
+    check={{
+      run: () => void act({ type: 'update_check' }).then(() => act({ type: 'instance_update_check' })),
+      disabled: busy || appChecking || shown.busy,
+    }}
+    close={close}
   />;
 }
 
@@ -258,7 +308,7 @@ export function AccountApp() {
     // Nothing is drawn until the state arrives; a failure to get it is still shown.
     return <UpdatePopover label={t('dashboard.versionAndUpdate')}>
       {(state || failure) && <>
-        {state && <DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />}
+        {state && <DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />}
         {failure && <div className={state ? 'p-4 pt-0' : 'p-4'}>{failure}</div>}
       </>}
     </UpdatePopover>;
@@ -269,7 +319,9 @@ export function AccountApp() {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
   } else if (view === 'updates') {
     // ui/design: update/panel/trusted-view
-    content = <div className="mx-auto w-full max-w-md pt-12"><Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading><div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
+    // With the instance's section beside the app's, the panel says whose each is; the heading only names the page.
+    const both = state.connection.committed.kind === 'remote' && Boolean(state.instance_update);
+    content = <div className="mx-auto w-full max-w-md pt-12">{both ? <Heading title={t('dashboard.versionAndUpdate')} /> : <Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading>}<div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
   } else if (view === 'sign-out') {
     content = <AccountSignOutView signingOut={!!signOutIntent} errorMessage={errorMessage} onRetry={() => leave('sign_out')} onBack={() => leave('cancel')} />;
   } else if (view === 'setup-complete') {

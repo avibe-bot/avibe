@@ -7628,7 +7628,7 @@
     "auxiliaryIncomplete": "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them.",
     "signOut": "Sign out on this device",
     "signOutBody": "Sign out on this Desktop and return to this Mac. Registration, remote access preferences and running tasks are kept.",
-    "localVersion": "Local Desktop version {{version}}",
+    "instanceVersion": "{{name}} is on {{version}}",
     "continueLocal": "Continue on this Mac",
     "loading": "Loading…",
     "setupReady": "This Mac is ready",
@@ -7772,6 +7772,9 @@
       "current": "You're up to date",
       "available": "A new version is ready to install",
       "availableDetail": "Avibe restarts to finish. Your sessions and settings are kept.",
+      "availableInstanceDetail": "{{name}} restarts to finish, usually within a minute or two. Work in progress may be interrupted.",
+      "availableAppDetail": "Avibe on this computer restarts to finish. {{name}} is not affected.",
+      "instanceUnauthorized": "Can't read {{name}}'s update status here.",
       "notChecked": "Not checked for updates yet",
       "disabled": "This version can't update itself",
       "disabledDetail": "Download and install a newer version to update.",
@@ -7787,7 +7790,9 @@
       "restartingHost": "The computer running Avibe is restarting it. Reconnecting automatically…",
       "verifying": "Confirming the new version…",
       "updated": "Update installed",
-      "updatedTo": "Updated to {{version}}"
+      "updatedTo": "Updated to {{version}}",
+      "updatedNamed": "{{name}} updated",
+      "updatedNamedTo": "{{name}} updated to {{version}}"
     },
     "failure": {
       "failed": {
@@ -7843,13 +7848,18 @@
       "update": "Update",
       "retry": "Try again",
       "check": "Check for updates",
-      "refreshBuild": "Refresh build information"
+      "refreshBuild": "Refresh build information",
+      "updateNamed": "Update {{name}}",
+      "updateApp": "Update this app"
     },
     "setting": {
       "prereleases": "Get pre-release updates",
       "prereleasesHint": "Also offer release candidates early",
       "autoUpdate": "Update automatically",
       "autoUpdateHint": "Install new versions when Avibe is idle, without asking"
+    },
+    "subject": {
+      "app": "This computer's app"
     },
     "legacyHost": "The desktop app on the computer running Avibe is too old to check for updates or change these settings from here. Update it to the latest version first.",
     "trustedView": {
