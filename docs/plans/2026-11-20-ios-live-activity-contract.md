@@ -60,7 +60,21 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 ### 2.3 Lifecycle owned by the App
 
-- **start:** refuse with `disabled` when activities are off. Use this instance's active relay registration id from `NativePushCoordinator`; if there is none, refuse with `push_unavailable`. Then GET the turn (409 maps to `no_active_turn`), `Activity.request(attributes, content: (state from the turn, staleDate: confirmedAt + 2400), pushType: .token)`, wait for the first value of `pushTokenUpdates`, and PUT. Apply the PUT response with `activity.update` locally. A 409 `turn_not_active` ends the activity locally with the returned terminal state. Starting a new activity first ends any other `TurnActivityAttributes` activity (one at a time).
+- **start:** one activity at a time, so starting first ends any other `TurnActivityAttributes` activity. Every step has a defined outcome, and `start` answers with the first refusal it meets:
+
+| Step | Outcome | `start` answers |
+| --- | --- | --- |
+| Live Activities are off | stop | `disabled` |
+| no active relay registration for this instance in `NativePushCoordinator` | stop | `push_unavailable` |
+| `GET …/turn` | `200`: continue. `409 no_active_turn` or `404`: stop. `503` or no answer: stop | `no_active_turn`, `no_active_turn`, `failed` |
+| `Activity.request(attributes, content: (state from the turn, staleDate: confirmedAt + 2400), pushType: .token)` | throws: stop | `failed` |
+| first value of `pushTokenUpdates` | none within 10 s: end `.immediate` | `failed` |
+| `PUT` | `200`: registered; apply the state | `{ok: true}` |
+| | `409 turn_not_active`: end with the returned terminal state | `no_active_turn` |
+| | `403 registration_not_owned`: end `.immediate` | `push_unavailable` |
+| | `404`, `400`, `409 activity_conflict`: end `.immediate` | `failed` |
+| | `503` or no answer: keep it, unregistered (below) | `{ok: true}` |
+
 - Every later value from `pushTokenUpdates` is PUT again with the same body and the new token.
 - **Registration state:** the App records on the device, persisted across launches, which activities have had a PUT answered `200`. An activity without one is *unregistered*.
 - **foreground, unregistered activity:** PUT again with its current token. The answers:
@@ -74,6 +88,8 @@ The Web passes the title it already shows in the conversation header; for a Bot'
   - a terminal phase: end with that state;
   - `status: stopped` or a 404: end it `.immediate`.
 - `activityStateUpdates` reporting `.dismissed` or `.ended` that the App did not cause: DELETE with `dismissed`, or `system_ended`. Never re-create an activity for that Turn.
+- **GET for a registered activity answers `503` or nothing:** change nothing; the next foreground asks again.
+- **A DELETE (any reason) that fails:** it is not retried. The row stops by itself, either on the relay's `410` once the token is dead or at `expires_at`. Until then, pushes reach an activity that no longer exists, and the system ignores them.
 - **logout, account switch, instance switch, instance removed:** end every `TurnActivityAttributes` activity `.immediate`, then make a best-effort DELETE with `logout`, `account_switch`, or `instance_switch`. Logout also revokes the relay registration, so the instance stops on the relay's 410 even when the DELETE is lost.
 - **tap:** `widgetURL(avibe-app://live-activity/<activityID>)`. The App registers the `avibe-app` scheme in `CFBundleURLTypes` (no entitlement). It resolves the id only against its own `Activity<TurnActivityAttributes>.activities` and opens that account, instance, and `/chat/<sessionID>` through the existing instance-path route. An unknown id opens the App without navigating.
 - The voice capture cleanup stays scoped to `Activity<VoiceCaptureAttributes>`.
