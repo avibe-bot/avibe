@@ -1994,6 +1994,33 @@ final class VoiceCaptureTests: XCTestCase {
     // (39.1, 00:44Z: its load was issued right after Avibe came forward,
     // while the App's local listener was closed or being bound again)
 
+    /// The gate is asked for the take's own host, whatever instance is
+    /// shown now: a take kept for an instance that is no longer the
+    /// selected one still loads through the listener that host is routed
+    /// to. A take on another store (an account or store change since it
+    /// began) has no route of ours, and the direct path is not asked.
+    func testTheGateIsAskedForTheTakesOwnHostOnTheCurrentStore() throws {
+        let origin = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.example"))
+        let store = UUID()
+        var asked: [URL] = []
+        for answer in [DirectLoadGate.open, .held, .fault] {
+            let gate = VoiceCaptureLoadGate.gate(for: origin, store: store, currentStore: store) { url in
+                asked.append(url)
+                return answer
+            }
+            XCTAssertEqual(gate, answer)
+        }
+        XCTAssertEqual(asked, [origin.url, origin.url, origin.url], "by the host, with no runtime")
+
+        asked = []
+        let other = VoiceCaptureLoadGate.gate(for: origin, store: store, currentStore: UUID()) { url in
+            asked.append(url)
+            return .fault
+        }
+        XCTAssertEqual(other, .open)
+        XCTAssertTrue(asked.isEmpty, "another store: the direct path is not asked")
+    }
+
     func testInFrontAHeldGateIsWaitedForBeforeTheLoad() async {
         typealias Client = VoiceCaptureInstanceClient
         // Held for three reads, then open: the load goes once it opens.

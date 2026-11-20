@@ -279,15 +279,7 @@ final class AppModel: ObservableObject {
         case invalid
     }
 
-    @Published private(set) var route: AppRoute = .loading {
-        didSet {
-            if let runtime = route.runtime { lastRoutedRuntime = runtime }
-        }
-    }
-    /// The last runtime the root kept alive. The store's route for its
-    /// host outlives the runtime (the instance list, Account), so the voice
-    /// take's load gate is still asked for it then.
-    private var lastRoutedRuntime: MobileRuntimeContext?
+    @Published private(set) var route: AppRoute = .loading
     /// Chosen once when the one runtime-preserving sheet opens. Repeated
     /// presentation requests never replace its document or change its mode.
     @Published private(set) var accountSheetStartScreen: MobileOnboardingStartScreen = .sheet
@@ -611,19 +603,18 @@ final class AppModel: ObservableObject {
         // The Action Button's hidden WebView loads through the same local
         // listener as the page, so it asks the same gate before its load.
         VoiceCaptureLoadGate.provider = { [weak self] origin, storeIdentifier in
-            // The gate answers for the model's current store: a take on
-            // another one (an account or store change since it began) has
-            // no route of ours.
-            guard let self, let controller = self.directPathController,
-                  storeIdentifier == self.websiteDataStore.identifier,
-                  let runtime = [self.route.runtime, self.deferredOpen?.runtime, self.lastRoutedRuntime]
-                      .compactMap({ $0 })
-                      .first(where: { WebOrigin(url: $0.instance.url) == origin })
-            else {
+            guard let self, let controller = self.directPathController else {
                 return .open
             }
-            controller.settleRecordedFault()
-            return controller.loadGate(for: runtime)
+            // Asked by the take's own host, with no runtime: a take kept
+            // for an instance that is no longer the one shown still goes
+            // through the listener its host is routed to.
+            return VoiceCaptureLoadGate.gate(
+                for: origin, store: storeIdentifier, currentStore: self.websiteDataStore.identifier
+            ) { url in
+                controller.settleRecordedFault()
+                return controller.loadGate(forInstanceURL: url)
+            }
         }
         runtimeOpenLifecycleObservers = [
             runtimeOpenNotificationCenter.addObserver(
