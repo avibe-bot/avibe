@@ -51,7 +51,7 @@ optimistic button state recognize the empty marker. Shared answer-kind vectors
 drive Python receipts and TypeScript pet consumption.
 
 Legacy requests preserve older unanswered groups and existing session/access
-errors. Native requests keep revision/freshness checks and durable replay. The
+errors. Unmatched targets/options fall through to the original ordinary dispatch and response, without reserving an answer operation. Three real HTTP regressions failed on the previous head (404/400/400 instead of dispatch success) and pass after restoring this fallback. Native requests keep revision/freshness checks and durable replay. The
 crash window after controller acceptance but before acknowledgement is an
 explicit limitation: ownership prevents duplicate dispatch, while chosen/SSE
 completion waits for the original operation to replay.
@@ -59,3 +59,5 @@ completion waits for the original operation to replay.
 Migration 0092 remains unreleased and additive; its new-table index now includes
 the Delivery key. This uses the guard's supported additive index form rather than
 extending migration-policy syntax. Existing tables and compatibility epoch are unchanged.
+
+Independent review follow-up: kinds come from the Runtime-served page, so existing I3 iPhone bridges adopt filtering on Runtime update. Two real-storage cases prove unsupported-by-current-device requests remain pending through 299 seconds, can be claimed by a capable device, or expire at the default 300 seconds. No global capability registry or early unsupported inference is added. App-only rollback documentation explicitly records the empty text-answer marker being treated as unanswered by older Runtime code.

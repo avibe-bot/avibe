@@ -91,7 +91,7 @@ def _key(session_id: str, principal: str, answer: Answer):
 
 
 def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | None:
-    """Return a refusal/replay; None reserves permission to create a Delivery now."""
+    """Return refusal/replay or legacy passthrough; None reserves an answer Delivery."""
     existing = conn.execute(select(operations).where(_key(session_id, principal, answer))).mappings().first()
     if existing:
         if existing["fingerprint"] != answer.fingerprint:
@@ -128,8 +128,6 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
                     receipt_json=json.dumps(receipt),
                 )
             )
-        if answer.legacy and outcome == "not_found":
-            return {"status": status, "body": {"error": {"code": "message_not_found"}}}
         return {
             "status": 200 if answer.legacy and outcome == "already_handled" else status,
             "body": {"answer": receipt, **({"already_answered": True} if outcome == "already_handled" else {})},
@@ -140,6 +138,8 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
         .where(messages.c.id == answer.request_id, messages.c.session_id == session_id)
     ).mappings().first()
     if target is None or target.get("author") != "agent":
+        if answer.legacy:
+            return {"legacy_passthrough": True}
         return refuse("not_found", 404)
     content = json.loads(target["content_json"] or "{}")
     chosen = content.get("quick_reply_chosen")
@@ -169,11 +169,13 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
     options = content.get("quick_replies")
     if not isinstance(options, list) or not options:
         if answer.legacy:
-            return {"status": 400, "body": {"error": {"code": "invalid_answer"}}}
+            return {"legacy_passthrough": True}
         return refuse("stale", 409)
     if answer.revision is not None and answer.revision != revision(options):
         return refuse("stale", 409)
     if answer.quick and answer.choice not in options:
+        if answer.legacy:
+            return {"legacy_passthrough": True}
         return {"status": 400, "body": {"error": {"code": "invalid_answer"}}}
     if answer.legacy:
         return None

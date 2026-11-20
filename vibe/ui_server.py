@@ -14146,6 +14146,8 @@ async def sessions_messages_create(session_id: str):
 
     def _persist_user_row() -> dict | None:
         """Atomically persist one unaccepted submission as a Delivery."""
+        nonlocal answer
+
         from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
         from storage import message_deliveries
         from storage.agent_session_rows import is_bot_session, reserve_write_lock
@@ -14163,7 +14165,10 @@ async def sessions_messages_create(session_id: str):
                 if authorization is not None and not _session_can_chat(conn, authorization, session_id):
                     raise PermissionError("session chat access denied")
                 refused = message_answers.prepare(conn, session_id, web_push_user_key, answer)
-                if refused is not None:
+                if refused is not None and refused.get("legacy_passthrough"):
+                    # Released clients dispatch unmatched targets/options as ordinary input.
+                    answer = None
+                elif refused is not None:
                     # Return after the transaction commits the immutable refusal receipt.
                     return {"_answer_result": refused}
             delivery_id = message_deliveries.new_delivery_id()

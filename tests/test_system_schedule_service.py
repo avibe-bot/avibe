@@ -943,6 +943,29 @@ def test_claim_rejects_invalid_kinds(isolated_state, kinds):
     assert caught.value.code == "invalid_kinds"
 
 
+@pytest.mark.parametrize("capable_device_returns", [False, True])
+def test_filtered_kind_waits_for_another_device_until_default_expiry(isolated_state, capable_device_returns):
+    create_operation(
+        session_id="ses-schedule", instance_id="instance-a", operation_id="waiting",
+        kind="reminder", title="Reminder", fire_at=FIRE_AT,
+        time_zone="America/Los_Angeles", now=NOW,
+    )
+    assert claim_next(instance_id="instance-a", device_id="ios26", kinds=["alarm"], now=NOW) is None
+    waiting = _get("waiting", now=NOW + timedelta(seconds=299))
+    assert waiting["state"] == "pending"
+    assert waiting["expires_at"] == "2026-11-16T15:05:00.000Z"
+    # The current device cannot establish that no other device supports reminders.
+    if capable_device_returns:
+        claim = claim_next(
+            instance_id="instance-a", device_id="desktop", kinds=["reminder"],
+            now=NOW + timedelta(seconds=299),
+        )
+        assert claim["request"]["operationId"] == "waiting"
+        assert _get("waiting", now=NOW + timedelta(seconds=300))["state"] == "awaiting_device"
+    else:
+        assert _get("waiting", now=NOW + timedelta(seconds=300))["state"] == "expired"
+
+
 def test_kind_claim_checks_only_pending_candidates_by_operation_key(isolated_state):
     from sqlalchemy.engine import Engine
     from storage.models import system_schedule_operations

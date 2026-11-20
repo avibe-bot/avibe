@@ -165,7 +165,10 @@ The user can cancel or create the item. Submission remains visibly in progress w
 
 The Runtime claim endpoint accepts optional `kinds` from `systemSchedule.capabilities.supportedKinds`.
 Only unbound new creates are filtered; device-bound recovery and cancellation remain reachable even
-with `kinds: []`. Omission preserves the released protocol, so an old iOS package can still claim both
-kinds. Filtering on the phone takes effect with a new TestFlight package carrying the updated bridge
-forwarder. See [D2 Runtime contract](desktop-d2-runtime-contract.md) and the shared fixture
+with `kinds: []`. Clients omitting kinds retain unrestricted legacy claims. The forwarder is served
+by Runtime, and the native capabilities bridge already shipped in #3930: existing iPhones with that
+bridge begin filtering when Runtime is updated, without a new TestFlight package. Missing/malformed
+capabilities allow only bound recovery/cancel. Without an authoritative all-device capability registry,
+an unsupported kind waits for another device until expiry (default 300 seconds); previously an
+incapable device could claim it and immediately return unsupported. See [D2 Runtime contract](desktop-d2-runtime-contract.md) and the shared fixture
 `tests/fixtures/system_schedule_contract_vectors.json`.

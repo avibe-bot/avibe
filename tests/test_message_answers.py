@@ -366,6 +366,28 @@ def test_legacy_archived_response_preserves_existing_error_code(answer_route):
     assert r["dispatches"] == []
 
 
+@pytest.mark.parametrize("cause", ["missing", "no_options", "non_option"])
+def test_legacy_unmatched_quick_reply_keeps_original_dispatch_response(answer_route, cause):
+    from storage.models import messages, message_answer_operations
+
+    r = answer_route
+    with r["engine"].begin() as conn:
+        if cause == "missing":
+            conn.execute(messages.delete().where(messages.c.id == r["question"]["id"]))
+        if cause == "no_options":
+            conn.execute(messages.update().where(messages.c.id == r["question"]["id"]).values(content_json="{}"))
+    response = r["post"](legacy=True, text="Other input" if cause == "non_option" else "继续 ✅")
+    assert response.status_code in (201, 202)
+    assert "answer" not in response.get_json()
+    assert len(r["dispatches"]) == 1
+    assert r["dispatches"][0]["message_kind"] == "quick_reply"
+    assert r["dispatches"][0]["metadata"]["quick_reply_for"] == r["question"]["id"]
+    with r["engine"].connect() as conn:
+        assert conn.execute(select(message_answer_operations)).first() is None
+        target = messages_service.get_message(conn, r["question"]["id"], session_id=r["session"])
+    assert target is None or "quick_reply_chosen" not in target["content"]
+
+
 def test_winner_lookup_excludes_refusal_history_and_legacy_refusals_are_not_saved(answer_route):
     from sqlalchemy import event
     from sqlalchemy.engine import Engine
