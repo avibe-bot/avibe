@@ -24,6 +24,16 @@
       }
     }
   },
+  "liveActivity": {
+    "offer": "在锁屏上显示进度",
+    "tracking": "已在锁屏上显示",
+    "stop": "停止显示",
+    "systemOff": "实时活动在系统设置里关着",
+    "settings": "去设置",
+    "no_active_turn": "这一轮已结束。",
+    "push_unavailable": "开启通知后才能在锁屏上显示。",
+    "failed": "未能更新锁屏显示，请重试。"
+  },
   "desktopBootstrap": {
     "askVibey": {
       "kept": "内容已留在本机，连上实例后会放进 Vibey 的输入框。",
