@@ -846,7 +846,16 @@ already communicate activity. Keep the upper-right red unread badge.
     the pointer's offset in the strip and, on every 16ms poll of the button,
     sets the window's origin to follow the pointer; the drop is then placed by
     the rule below. Press-and-hold for voice is unchanged (the page decides
-    hold vs drag). Windows keeps the platform drag.
+    hold vs drag). Windows keeps the platform drag. The page sends where the
+    press was (`pet_drag {x, y}`) and the shell keeps that point of Vibey
+    under the pointer, however far the pointer moved before the call landed.
+  - **Hold or drag (2026-11-21).** A freshly shown pet window (hidden and
+    shown again with the toggle) can deliver the press to the page but none
+    of the moves after it, so a drag was taken for a hold and started voice.
+    Before the hold timer (320ms) acts, the page asks the shell
+    (`pet_pointer`): a pointer 4px or more from the press with the button
+    down starts the drag; a released button does nothing; otherwise it is a
+    hold, as before.
   - The shell says it can drag the pet before any page script runs: an
     initialization script defines `window.__AVIBE_PET_DRAG__`. Shells without
     the marker keep the page's old `start_dragging` path. The shell drags
