@@ -46,6 +46,8 @@ export function useResetCardActions({ land, reread, afterUse }: {
 }) {
   const [phases, setPhases] = React.useState<Phases>({});
   const inFlight = React.useRef(new Set<string>());
+  /** Accounts whose requested refresh was still being read when it answered. */
+  const awaiting = React.useRef(new Set<string>());
   const alive = React.useRef(true);
   React.useEffect(() => {
     alive.current = true;
@@ -104,6 +106,7 @@ export function useResetCardActions({ land, reread, afterUse }: {
    * (every account when `sourceId` is null). A step the user is in, or a use still in
    * flight, stays. A possibly spent card stays in doubt until the reading is this
    * account's own: not still being read (`pending`) and with its cards read (`ok`).
+   * A refresh still being read is awaited: the reading that completes it settles it.
    */
   const settleRefresh = React.useCallback((sourceId: string | null, summary: QuotaSummary) => {
     if (!alive.current) return;
@@ -111,24 +114,43 @@ export function useResetCardActions({ land, reread, afterUse }: {
     const read = new Set(summary.sources
       .filter((source) => source.reset_cards?.state === 'ok')
       .map((source) => source.source_id));
-    setPhases((previous) => Object.fromEntries(Object.entries(previous).filter(([id, phase]) => (
-      (sourceId !== null && id !== sourceId) || phase.phase === 'confirm' || phase.phase === 'using'
-      || (phase.phase === 'unconfirmed' && (pending.has(id) || !read.has(id)))
-    ))));
+    setPhases((previous) => Object.fromEntries(Object.entries(previous).filter(([id, phase]) => {
+      if (sourceId !== null && id !== sourceId) return true;
+      if (phase.phase === 'confirm' || phase.phase === 'using') return true;
+      if (phase.phase !== 'unconfirmed') return false;
+      awaiting.current.delete(id);
+      if (pending.has(id)) {
+        awaiting.current.add(id);
+        return true;
+      }
+      return !read.has(id);
+    })));
   }, []);
 
   /**
    * A reading landed (a use's answer, a refresh, a poll): a confirm step whose card it no
    * longer lists as usable, at the count confirmed on, or whose account it shows locked,
-   * is dropped, so a later reading never brings back a stale question.
+   * is dropped, so a later reading never brings back a stale question. A refresh that was
+   * still being read settles here once its account's reading lands.
    */
   const settleReading = React.useCallback((summary: QuotaSummary) => {
     if (!alive.current) return;
     const bySource = new Map(summary.sources.map((source) => [source.source_id, source.reset_cards]));
+    const pending = new Set(summary.pending ?? []);
+    const settled = new Map<string, boolean>();
+    for (const id of awaiting.current) {
+      if (pending.has(id)) continue;
+      awaiting.current.delete(id);
+      settled.set(id, bySource.get(id)?.state === 'ok');
+    }
     setPhases((previous) => {
       let changed = false;
       const next: Record<string, ResetCardPhase> = { ...previous };
       for (const [sourceId, phase] of Object.entries(previous)) {
+        if (phase.phase === 'unconfirmed' && settled.get(sourceId)) {
+          delete next[sourceId];
+          changed = true;
+        }
         if (phase.phase !== 'confirm') continue;
         const cards = bySource.get(sourceId);
         const card = cards?.cards.find((row) => row.kind === phase.kind);

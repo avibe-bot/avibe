@@ -3050,6 +3050,23 @@ describe('SettingsModelsPage reset cards', () => {
       expect(cardUseButton('Fable').disabled).toBe(false);
     }
     expect(redeem).toHaveBeenCalledTimes(4);
+
+    // A refresh still being read when it answers is settled by the reading that completes it.
+    const timeouts = vi.spyOn(window, 'setTimeout');
+    redeem.mockRejectedValueOnce(new ApiCallError('bad_response', 'Request deadline exceeded', false));
+    await use();
+    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
+    force.mockResolvedValueOnce({ ...quotaWith(), pending: ['src_claude'] });
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(refreshButton('Claude Max').disabled).toBe(false));
+    expect(within(account()).getByRole('alert')).toBeTruthy();
+    const reread = () => timeouts.mock.calls.filter(([, delay]) => delay === QUOTA_PENDING_REREAD_MS).at(-1);
+    await waitFor(() => expect(reread()).toBeTruthy());
+    vi.mocked(modelsApi.getQuota).mockResolvedValue(quotaWith({ fable: 4 }));
+    await act(async () => { (reread()![0] as () => void)(); });
+    await waitFor(() => expect(within(account()).queryByRole('alert')).toBeNull());
+    expect(within(account()).getByText('×4')).toBeTruthy();
+    expect(cardUseButton('Fable').disabled).toBe(false);
   });
 
   it('MH-QUOTA-090: a count that changed since it was shown is refused and redrawn from the server\'s reading, with no second request', async () => {
