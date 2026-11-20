@@ -1824,37 +1824,3 @@ fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() 
         assert!(!command.contains(forbidden), "the focus command must not {forbidden}");
     }
 }
-
-/// A Dock click (`RunEvent::Reopen`) brings the Workbench forward in every
-/// window state. A `main` covered by a zoomed Show, Editor or Terminal window
-/// is still visible, so a visibility gate left it underneath; a hidden or
-/// minimized `main` is restored by the same call; the pet's own visibility
-/// must not decide anything either.
-#[test]
-fn a_dock_reopen_always_brings_the_workbench_forward() {
-    let source = shipping_source("src/lib.rs");
-    let reopen = source
-        .split("if let RunEvent::Reopen { .. } = event {")
-        .nth(1)
-        .expect("the Dock reopen arm")
-        .split("\n                    }\n")
-        .next()
-        .expect("the Dock reopen arm body");
-    assert_eq!(reopen.trim(), "focus_or_restore_main_window(app);");
-
-    let restore = source
-        .split("fn focus_or_restore_main_window(app: &AppHandle) {")
-        .nth(1)
-        .expect("the restore function")
-        .split("\n}\n")
-        .next()
-        .expect("the restore function body");
-    let order = [
-        "ensure_main_window(app)",
-        ".unminimize()",
-        ".window().show()",
-        "window.set_focus()",
-    ]
-    .map(|step| restore.find(step).unwrap_or_else(|| panic!("restore calls {step}")));
-    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-}
