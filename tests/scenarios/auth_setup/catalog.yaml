@@ -1426,14 +1426,18 @@ scenarios:
       boundary's own Accept and Origin, asks the system sheet for a
       discoverable credential (no allow-list), keeps the binding cookie in the
       native jar, cancels the flow when the sheet closes, and then discovers
-      the session. It is offered, and runs, only where this system can: macOS
+      the session. A verify avibe.bot accepted whose session read failed is
+      kept in that jar, so trying again reads it without a second sheet or
+      verify; a 401 there, or any other first factor, ends it (backend 884a13c
+      §6, as on the iPhone). It is offered, and runs, only where this system can: macOS
       13 with the running signature's webcredentials:avibe.bot association
       (the Developer ID build), Windows with webauthn.dll's API version 1, no
       other platform; elsewhere native refuses before any request, and the
       second factor offers no passkey step (no challenge is requested). Rust tests
       (tests/instance_sign_in.rs, and the macOS rule in the shell's
-      instance_passkeys) own the wire, each ending's code, the refusal, and a
-      late assertion dropped after an abort. An older macOS, Windows itself
+      instance_passkeys) own the wire, each ending's code, the refusal, a
+      late assertion dropped after an abort, and the accepted session read
+      again. An older macOS, Windows itself
       and a signed build were not run. Whether
       production enables primary passkeys for all accounts, and a real
       authenticator on a signed build, remain acceptance checks.

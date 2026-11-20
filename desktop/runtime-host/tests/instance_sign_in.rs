@@ -625,6 +625,118 @@ async fn passkey_sign_in_maps_each_ending() {
     );
 }
 
+fn primary_verified() -> Response {
+    reply(
+        200,
+        json!({"ok":true,"next":"/"}),
+        Some("avibe_session=s; Path=/; Secure; HttpOnly"),
+    )
+}
+
+/// AUTH-SETUP-184: avibe.bot accepted the passkey but reading its session
+/// failed. The next attempt reads that session again from the same jar, with
+/// no second sheet and no second verify (backend passkey-sign-in §6).
+#[tokio::test]
+async fn an_accepted_passkey_whose_session_read_failed_is_read_again() {
+    let keys = passkeys(Ok(json!({"id":"cred","rawId":"cred","type":"public-key"})));
+    let f = fixture(
+        vec![
+            ("/api/passkey-primary/options", primary_options()),
+            ("/api/passkey-primary/verify", primary_verified()),
+            ("/api/mobile/session", reply(503, json!({"error":"unavailable"}), None)),
+            ("/api/mobile/session", reply(200, signed_in(), None)),
+        ],
+        None,
+        keys.clone(),
+    );
+    let failed = act(&f.client, ClientAction::SignInWithPasskey).await;
+    assert!(!failed.ok);
+    assert_eq!(failed.state.account.status, AccountStatus::SignedOut);
+    let again = act(&f.client, ClientAction::SignInWithPasskey).await;
+    assert!(again.ok, "{:?}", again.error);
+    assert_eq!(again.state.account.status, AccountStatus::SignedIn);
+    assert_eq!(keys.options.lock().unwrap().len(), 1, "one system sheet");
+    let seen = f.http.seen.lock().unwrap().clone();
+    let paths: Vec<_> = seen.iter().map(|request| request.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/api/passkey-primary/options",
+            "/api/passkey-primary/verify",
+            "/api/mobile/session",
+            "/api/mobile/session"
+        ]
+    );
+    assert!(seen[3]
+        .headers
+        .get("cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("avibe_session=s"));
+}
+
+/// A `401` on that read answers it: the attempt after runs the whole passkey
+/// sign-in again. So does any other first factor in between.
+#[tokio::test]
+async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
+    let keys = passkeys(Ok(json!({"id":"cred","rawId":"cred","type":"public-key"})));
+    let f = fixture(
+        vec![
+            ("/api/passkey-primary/options", primary_options()),
+            ("/api/passkey-primary/verify", primary_verified()),
+            ("/api/mobile/session", reply(503, json!({"error":"unavailable"}), None)),
+            ("/api/mobile/session", reply(401, json!({"error":"signed_out"}), None)),
+            ("/api/passkey-primary/options", primary_options()),
+            ("/api/passkey-primary/verify", primary_verified()),
+            ("/api/mobile/session", reply(200, signed_in(), None)),
+        ],
+        None,
+        keys.clone(),
+    );
+    assert!(!act(&f.client, ClientAction::SignInWithPasskey).await.ok);
+    assert_eq!(
+        act(&f.client, ClientAction::SignInWithPasskey)
+            .await
+            .error
+            .unwrap()
+            .code,
+        "signed_out"
+    );
+    let outcome = act(&f.client, ClientAction::SignInWithPasskey).await;
+    assert!(outcome.ok, "{:?}", outcome.error);
+    assert_eq!(keys.options.lock().unwrap().len(), 2);
+
+    let keys = passkeys(Ok(json!({"id":"cred","rawId":"cred","type":"public-key"})));
+    let f = fixture(
+        vec![
+            ("/api/passkey-primary/options", primary_options()),
+            ("/api/passkey-primary/verify", primary_verified()),
+            ("/api/mobile/session", reply(503, json!({"error":"unavailable"}), None)),
+            ("/api/config/auth", config(true)),
+            (
+                "/auth/v1/token",
+                reply(400, json!({"error_code":"invalid_credentials"}), None),
+            ),
+            ("/api/passkey-primary/options", primary_options()),
+            ("/api/passkey-primary/verify", primary_verified()),
+            ("/api/mobile/session", reply(200, signed_in(), None)),
+        ],
+        None,
+        keys.clone(),
+    );
+    assert!(!act(&f.client, ClientAction::SignInWithPasskey).await.ok);
+    let password: ClientAction =
+        serde_json::from_value(json!({"type":"sign_in_password","email":"max@example.test","password":"nope"}))
+            .unwrap();
+    assert_eq!(
+        act(&f.client, password).await.error.unwrap().code,
+        "invalid_credentials"
+    );
+    assert!(act(&f.client, ClientAction::SignInWithPasskey).await.ok);
+    assert_eq!(keys.options.lock().unwrap().len(), 2);
+}
+
 /// An account change while the system sheet is up drops its late assertion.
 #[tokio::test]
 async fn abort_while_the_passkey_sheet_is_up_drops_its_late_assertion() {

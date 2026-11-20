@@ -85,6 +85,12 @@ pub struct AccountFlow {
     /// unfinished sign-in (a second factor still owed); a new first factor
     /// clears it.
     pub resumes: Option<String>,
+    /// avibe.bot accepted a passkey sign-in's verify and its session cookie is
+    /// in this jar, but reading that session failed: the next passkey sign-in
+    /// reads it again rather than asking for another passkey (backend
+    /// passkey-sign-in §6, as the iPhone does). A new first factor replaces
+    /// the jar and drops it; so does an answer to the read.
+    accepted_passkey: bool,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +117,7 @@ impl AccountFlow {
             transport,
             passkey_sheet,
             resumes: None,
+            accepted_passkey: false,
         }
     }
 
@@ -134,6 +141,7 @@ impl AccountFlow {
         }
         self.clear_transient();
         self.resumes = None;
+        self.accepted_passkey = false;
         // A replacement attempt cannot carry the previous email's verifier or
         // MFA cookie. Failure leaves a usable signed-out state on reload.
         self.session = NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), self.transport.clone());
@@ -291,6 +299,12 @@ impl AccountFlow {
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
+        if self.accepted_passkey {
+            if state.account.status == AccountStatus::SignedIn {
+                return Err(ClientError::new("invalid_action"));
+            }
+            return self.read_accepted_passkey(state).await;
+        }
         self.begin_first_factor(epoch.clone(), state)?;
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -345,7 +359,19 @@ impl AccountFlow {
         if !response.success() {
             return Err(primary_passkey_error(&response));
         }
-        self.discover(state).await
+        self.accepted_passkey = true;
+        self.read_accepted_passkey(state).await
+    }
+
+    /// Reads the session an accepted passkey verify left in this jar. An
+    /// answer ends that (signed in, a second factor owed, or `401`); a failed
+    /// read keeps it for the next attempt.
+    async fn read_accepted_passkey(&mut self, state: &mut ClientState) -> Result<(), ClientError> {
+        let read = self.discover(state).await;
+        if read.as_ref().map_or_else(|error| error.code == "signed_out", |_| true) {
+            self.accepted_passkey = false;
+        }
+        read
     }
 
     pub async fn sign_in_password(
