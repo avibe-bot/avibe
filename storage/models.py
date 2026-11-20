@@ -1736,7 +1736,6 @@ live_activity_trackings = Table(
     Column("pending_state", Text),
     Column("retry_count", Integer, nullable=False, server_default="0"),
     Column("retry_at", Integer, nullable=False, server_default="0"),
-    CheckConstraint("status in ('tracking', 'ended', 'stopped')", name="ck_live_activity_status"),
     Index("ix_live_activity_status", "status", "expires_at"),
     Index("ix_live_activity_registration", "push_registration_id", "status"),
 )

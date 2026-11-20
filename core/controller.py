@@ -1358,10 +1358,13 @@ class Controller:
         except Exception as e:
             logger.error("Failed to start the storage notice delivery: %s", e, exc_info=True)
 
-        if current_process_owns_service_instance():
-            from core.live_activities import controller_service
+        try:
+            if current_process_owns_service_instance():
+                from core.live_activities import controller_service
 
-            controller_service(self).start()
+                controller_service(self).start()
+        except Exception as e:
+            logger.error("Failed to start Live Activity publishing: %s", e, exc_info=True)
 
         try:
             if self.cleanup_task is None or self.cleanup_task.done():
