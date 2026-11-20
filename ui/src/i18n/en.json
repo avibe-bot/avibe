@@ -1925,6 +1925,55 @@
             "team": "Team",
             "enterprise": "Enterprise"
           }
+        },
+        "refreshThisAccount": "Refresh this account",
+        "resetCards": {
+          "title": "Limit resets",
+          "kind": {
+            "all": "Full reset",
+            "fable": "Fable reset",
+            "session": "5-hour reset",
+            "weekly": "Weekly reset",
+            "account": "Limit reset"
+          },
+          "effect": {
+            "all": "The 5-hour and weekly limits go back to full",
+            "fable": "Gives back the weekly usage spent on Fable, not on other models; the 5-hour limit is fully refilled",
+            "session": "The 5-hour limit goes back to full",
+            "weekly": "The weekly limit goes back to full"
+          },
+          "count": "×{{number}}",
+          "expires": "First expires {{date}}",
+          "use": "Use",
+          "useNamed": "Use {{name}}",
+          "confirm": "Use it",
+          "cancel": "Cancel",
+          "confirmNote": "Spends 1. It can’t be undone.",
+          "using": "Using…",
+          "used": "1 used.",
+          "usedDone": "1 used. {{done}}.",
+          "done": {
+            "all": "The 5-hour and weekly limits are back to full",
+            "fable": "The weekly usage spent on Fable is given back; the 5-hour limit is refilled",
+            "session": "The 5-hour limit is back to full",
+            "weekly": "The weekly limit is back to full"
+          },
+          "notUsed": {
+            "not_limited": "Not used: this account isn’t at a limit now.",
+            "cooldown": "Not used: one was used recently, and the next has to wait.",
+            "refused": "Not used: the provider refused the request.",
+            "unavailable": "Not used: the provider isn’t allowing this card now.",
+            "held": "Not used: this account can’t use this kind of card right now.",
+            "other": "Not used."
+          },
+          "recounted": "The count changed; refreshed.",
+          "unconfirmed": "The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; wait at least a minute, then refresh this account and check the count.",
+          "blocked": {
+            "needs_limit": "Usable once a limit is reached",
+            "cooldown": "Usable in {{duration}}",
+            "cooldownUnknown": "Usable after a short wait",
+            "unavailable": "Not allowed by the provider now"
+          }
         }
       },
       "usage": {

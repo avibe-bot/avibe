@@ -38,6 +38,7 @@ import {
 } from './suspendedRouteAttempts';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import { QuotaTab } from './QuotaTab';
+import { useResetCardActions } from './resetCardActions';
 import { ToolsTab } from './ToolsTab';
 import { UsageTab } from './UsageTab';
 import { useHostedTools } from './useHostedTools';
@@ -410,6 +411,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [usageWindow, setUsageWindow] = React.useState<UsageWindowKey>(USAGE_DEFAULT_WINDOW);
   const [quotaRead, setQuotaRead] = React.useState<RegionRead<QuotaSummary>>(loadingRegion);
   const [refreshingQuota, setRefreshingQuota] = React.useState(false);
+  /** The account whose own refresh is running, beside `refreshingQuota`. */
+  const [refreshingQuotaSource, setRefreshingQuotaSource] = React.useState<string | null>(null);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
   const [migrationOpen, setMigrationOpen] = React.useState(false);
@@ -776,7 +779,14 @@ export const SettingsModelsPage: React.FC = () => {
    */
   const quotaPendingKey = foldRegionRead<QuotaSummary, string | null>(quotaRead, {
     loading: () => null,
-    ready: (data) => [...(data.pending ?? []), ...(data.value?.pending ? ['\u0001pricing'] : [])].join('\u0000'),
+    ready: (data) => [
+      ...(data.pending ?? []),
+      ...(data.value?.pending ? ['\u0001pricing'] : []),
+      // A reset card in use (from this page or another) settles on the server; read its answer soon.
+      ...data.sources
+        .filter((source) => source.reset_cards?.lock?.reason === 'in_flight')
+        .map((source) => `\u0002${source.source_id}`),
+    ].join('\u0000'),
     unread: () => null,
     degraded: () => null,
   });
@@ -798,13 +808,17 @@ export const SettingsModelsPage: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [tab, readQuota, resetQuotaRereads]);
 
-  const refreshQuotaNow = React.useCallback(async () => {
+  const refreshQuotaNow = React.useCallback(async (sourceId: string | null = null) => {
     resetQuotaRereads();
     setRefreshingQuota(true);
+    setRefreshingQuotaSource(sourceId);
     try {
       return await readQuota(true);
     } finally {
-      if (aliveRef.current) setRefreshingQuota(false);
+      if (aliveRef.current) {
+        setRefreshingQuota(false);
+        setRefreshingQuotaSource(null);
+      }
     }
   }, [readQuota, resetQuotaRereads]);
 
@@ -873,18 +887,44 @@ export const SettingsModelsPage: React.FC = () => {
     return landing;
   }, [agentCollectionReads, refreshAffectedChains, refreshAuthority, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
 
+  // A reset card's answer carries the account's fresh reading; it lands as the newest quota read.
+  const landResetCardQuota = React.useCallback(async (quota: QuotaSummary) => {
+    await quotaReadAuthority.run(async () => readyRegion(quota));
+  }, [quotaReadAuthority]);
+  const rereadAfterResetCard = React.useCallback(async () => { await readQuota(false); }, [readQuota]);
+  const afterResetCard = React.useCallback(() => { void refresh(); }, [refresh]);
+  const {
+    phases: resetCardPhases,
+    onIntent: onResetCardIntent,
+    settleRefresh: settleResetCardRefresh,
+    settleReading: settleResetCardReading,
+  } = useResetCardActions({ land: landResetCardQuota, reread: rereadAfterResetCard, afterUse: afterResetCard });
+  // Every reading that lands (a use's answer, a refresh, a poll) can retire a stale confirm step.
+  const shownQuota = foldRegionRead<QuotaSummary, QuotaSummary | null>(quotaRead, {
+    loading: () => null, ready: (data) => data, unread: () => null, degraded: (staleData) => staleData,
+  });
+  React.useEffect(() => {
+    if (shownQuota) settleResetCardReading(shownQuota);
+  }, [settleResetCardReading, shownQuota]);
+
   // The forced quota read resumes an account the vendor reports quota for, so
-  // the Sources and routes it changed are read with it.
+  // the Sources and routes it changed are read with it. An account's own refresh is
+  // this same read of every account (there is no per-Source read); only the pressed
+  // account's control shows it running.
   // The quota tab draws a failed read itself. A press from a provider's detail
   // has that tab hidden behind it, so there the failure is said in a toast.
-  const refreshQuotaAndSources = React.useCallback(async (announceFailure = false) => {
-    const read = await refreshQuotaNow();
+  const refreshQuotaAndSources = React.useCallback(async (announceFailure = false, sourceId: string | null = null) => {
+    const read = await refreshQuotaNow(sourceId);
     if (!aliveRef.current) return;
+    const landed = read === null ? null : foldRegionRead<QuotaSummary, QuotaSummary | null>(read, {
+      loading: () => null, ready: (data) => data, unread: () => null, degraded: () => null,
+    });
+    if (landed) settleResetCardRefresh(sourceId, landed);
     if (announceFailure && read !== null && regionFailed(read)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
     await refresh();
-  }, [refresh, refreshQuotaNow, showToast, t]);
+  }, [refresh, refreshQuotaNow, settleResetCardRefresh, showToast, t]);
 
   const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
     let result!: T;
@@ -1627,6 +1667,11 @@ export const SettingsModelsPage: React.FC = () => {
                       quota={quotaRead}
                       refreshing={refreshingQuota}
                       onRefresh={() => refreshQuotaAndSources()}
+                      refreshingSourceId={refreshingQuotaSource}
+                      onRefreshAccount={(sourceId) => void refreshQuotaAndSources(false, sourceId)}
+                      resetCardPhases={resetCardPhases}
+                      onResetCardIntent={onResetCardIntent}
+                      canUseResetCards={capabilities.can_use_model_hub_reset_cards}
                       onRetry={retryQuota}
                       onRequestReauth={(sourceId) => {
                         const target = sources.find((source) => source.id === sourceId);
