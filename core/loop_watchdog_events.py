@@ -2,17 +2,21 @@
 
 ``parse_watchdog_event(line)`` accepts one application-logger-formatted warning
 and returns only a validated v1 stall event, or None. It reads no logs and does
-not discover logs or start observation; to accept an Avibe-owned label it parses
-that shipped Avibe source file (cached) to confirm the name exists there. Legacy warnings/recoveries and slow-GC
+not discover logs or start observation; to accept an Avibe-owned label it consults
+the exact vocabulary of the installed avibe-os build (RECORD-listed, hash-checked
+source, parsed once and cached). Legacy warnings/recoveries and slow-GC
 numeric lines remain separate; callers can keep their existing numeric parser.
 """
 from __future__ import annotations
 
 import ast
+import base64
 import functools
+import hashlib
 import json
 import math
 import re
+from importlib import metadata
 from pathlib import Path
 
 # Fixed labels, NOT strings obtained from a frame, function, module or filename.
@@ -44,49 +48,77 @@ SAFE_CODE_LABELS = frozenset(
 )
 REDACTED_LABEL = ("<redacted>", "<redacted>")
 # Avibe's own packages. A label for their code is (path from the package root,
-# qualified name), and is valid only if that name is defined in the shipped source
-# file at that path: an exact vocabulary read from the installation itself, so a
-# label can never carry a name that is not Avibe source.
+# qualified name). The vocabulary is exact and comes from the build: only files
+# listed in the installed avibe-os distribution's RECORD whose bytes still match
+# the recorded hash, and only names those files define (by AST, with the line the
+# code starts on). A source checkout or an untracked/modified file has no
+# vocabulary, so its frames stay redacted.
 OWN_PACKAGES = ("vibe", "config", "core", "modules", "storage")
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 _OWN_FILE = re.compile(r"(?:vibe|config|core|modules|storage)(?:/[a-z_][a-z0-9_]{0,63}){0,6}\.py")
 _COMPREHENSIONS = {ast.GeneratorExp: "<genexpr>", ast.ListComp: "<listcomp>", ast.SetComp: "<setcomp>", ast.DictComp: "<dictcomp>"}
 
 
-@functools.lru_cache(maxsize=512)
-def shipped_qualnames(path: str) -> frozenset[str]:
-    """Qualified names defined in the shipped Avibe source at ``path``; empty if absent."""
-    if type(path) is not str or _OWN_FILE.fullmatch(path) is None:
-        return frozenset()
+@functools.lru_cache(maxsize=1)
+def _shipped_hashes() -> dict[str, str]:
+    """RECORD sha256 of each own-package source file of the distribution installed here."""
     try:
-        tree = ast.parse((PACKAGE_ROOT / path).read_bytes())
+        dist = metadata.distribution("avibe-os")
+        if Path(dist.locate_file("")).resolve() != PACKAGE_ROOT:
+            return {}
+        return {
+            str(entry): entry.hash.value
+            for entry in dist.files or ()
+            if entry.hash is not None and entry.hash.mode == "sha256" and _OWN_FILE.fullmatch(str(entry))
+        }
+    except Exception:
+        return {}
+
+
+@functools.lru_cache(maxsize=512)
+def shipped_vocabulary(path: str) -> dict[str, frozenset[int]]:
+    """Qualified names defined in shipped source ``path``, each with its possible first lines."""
+    expected = _shipped_hashes().get(path) if type(path) is str else None
+    if expected is None:
+        return {}
+    try:
+        data = (PACKAGE_ROOT / path).read_bytes()
+        if base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode() != expected:
+            return {}
+        tree = ast.parse(data)
     except (OSError, SyntaxError, ValueError, RecursionError):
-        return frozenset()
-    names: set[str] = set()
+        return {}
+    names: dict[str, set[int]] = {}
+
+    def add(qualname: str, node: ast.AST) -> None:
+        lines = names.setdefault(qualname, set())
+        lines.add(node.lineno)
+        for decorator in getattr(node, "decorator_list", ()):
+            lines.add(decorator.lineno)
 
     def visit(node: ast.AST, prefix: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                names.add(prefix + child.name)
+                add(prefix + child.name, child)
                 visit(child, f"{prefix}{child.name}.<locals>.")
             elif isinstance(child, ast.ClassDef):
-                names.add(prefix + child.name)
                 visit(child, f"{prefix}{child.name}.")
             elif isinstance(child, ast.Lambda):
-                names.add(prefix + "<lambda>")
+                add(prefix + "<lambda>", child)
                 visit(child, f"{prefix}<lambda>.<locals>.")
             elif type(child) in _COMPREHENSIONS:
-                names.add(prefix + _COMPREHENSIONS[type(child)])
+                add(prefix + _COMPREHENSIONS[type(child)], child)
                 visit(child, f"{prefix}{_COMPREHENSIONS[type(child)]}.<locals>.")
             else:
                 visit(child, prefix)
 
     visit(tree, "")
-    return frozenset(names)
+    return {name: frozenset(lines) for name, lines in names.items()}
 
 
-def own_code_label(file: object, function: object) -> bool:
-    return type(function) is str and function in shipped_qualnames(file)
+def own_code_label(file: object, function: object, first_line: int | None = None) -> bool:
+    lines = shipped_vocabulary(file).get(function) if type(function) is str else None
+    return lines is not None and (first_line is None or first_line in lines)
 
 
 MAX_STACK_FRAMES = 30

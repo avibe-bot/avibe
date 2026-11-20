@@ -45,10 +45,10 @@ from core.loop_watchdog_events import (
     MAX_STACK_FRAMES,
     OWN_PACKAGES,
     PACKAGE_ROOT,
-    SAFE_CODE_LABELS,
     REDACTED_LABEL,
     _CODE_TARGETS,
     own_code_label,
+    shipped_vocabulary,
 )
 
 logger = logging.getLogger(__name__)
@@ -316,7 +316,8 @@ class EventLoopWatchdog:
         functions, methods of classes it defines, code nested in those), only when
         the module's file is the shipped file for its name and the code was compiled
         from that file. Names are the namespace path, not a frame's strings; each is
-        checked against the shipped source when it is reported. Paced to one module
+        kept only if the installed build's shipped source defines that name on the
+code's first line (hash-checked RECORD file, parsed here, never at a stall). Paced to one module
         per poll and skipped while the loop is late, so it never delays a stall sample.
         """
         if not self._own_queue:
@@ -364,9 +365,14 @@ class EventLoopWatchdog:
                 attrs = type.__dict__["__dict__"].__get__(owner)
                 if attrs.get("__module__") == name:
                     owners.extend((value, f"{qualname}.{key}") for key, value in list(attrs.items()) if type(key) is str)
+        if not shipped_vocabulary(path):
+            return  # not a file of the installed build, or modified since
         while codes and len(self._code_labels) < _MAX_OWN_CODES:
             code, qualname = codes.pop()
-            if id(code) not in self._code_labels:  # fixed labels keep precedence
+            # Fixed labels keep precedence. The name must be defined in the shipped
+            # file, starting on this code's first line: a generated replacement
+            # bound under a real name does not match.
+            if id(code) not in self._code_labels and own_code_label(path, qualname, code.co_firstlineno):
                 self._code_labels[id(code)] = (code, (path, qualname))
             codes.extend(
                 (const, f"{qualname}.<locals>.{const.co_name}")
@@ -413,12 +419,6 @@ class EventLoopWatchdog:
         sampled_at_unix = time.time()
         gc_active = self._gc_started_at is not None
         frames, status, truncated = self._loop_stack(loop_thread)
-        # After capture, so this never shifts the sample: an Avibe label survives
-        # only if the shipped source at its path defines that name.
-        for frame in frames:
-            label = (frame["file"], frame["function"])
-            if label != REDACTED_LABEL and label not in SAFE_CODE_LABELS and not own_code_label(*label):
-                frame["file"], frame["function"] = REDACTED_LABEL
         event = {
             "version": 1, "kind": "loop_stall", "loop_id": id(self._loop),
             "loop_thread_id": loop_thread, "watchdog_thread_id": threading.get_ident(),
